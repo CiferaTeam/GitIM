@@ -3,6 +3,7 @@ use crate::types::meta::{UserMeta, ChannelMeta};
 use crate::types::config::Config;
 
 pub mod compliance;
+pub mod read_check;
 
 #[derive(Error, Debug)]
 pub enum ValidationError {
