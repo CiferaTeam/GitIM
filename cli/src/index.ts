@@ -6,6 +6,7 @@ import { sendCommand } from './commands/send.js';
 import { readCommand } from './commands/read.js';
 import { channelsCommand } from './commands/channels.js';
 import { usersCommand } from './commands/users.js';
+import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
 
 const program = new Command();
 
@@ -47,5 +48,24 @@ program
   .command('users')
   .description('List users')
   .action(() => usersCommand());
+
+const dm = program.command('dm').description('Direct messages');
+
+dm.command('send <handler> <body>')
+  .description('Send a DM')
+  .requiredOption('-a, --author <handler>', 'Your handler')
+  .option('-r, --reply-to <line>', 'Reply to line number')
+  .action((handler, body, options) => dmSendCommand(handler, body, options));
+
+dm.command('read <handler>')
+  .description('Read DM conversation')
+  .requiredOption('-a, --author <handler>', 'Your handler')
+  .option('-l, --limit <n>', 'Limit messages')
+  .option('-s, --since <line>', 'Since line number')
+  .action((handler, options) => dmReadCommand(handler, options));
+
+dm.command('list')
+  .description('List DM conversations')
+  .action(() => dmListCommand());
 
 program.parse();
