@@ -1,0 +1,10 @@
+[package]
+name = "gitim-sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gitim-core = { path = "../gitim-core" }
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
