@@ -3,19 +3,51 @@ mod error;
 mod http;
 mod lifecycle;
 mod server;
+mod state;
 
-use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let repo_root = PathBuf::from(".");
+    let repo_root = std::env::current_dir()?;
     let lifecycle = lifecycle::DaemonLifecycle::new(&repo_root);
 
     if let Some(pid) = lifecycle.is_running() {
         eprintln!("daemon already running (pid: {})", pid);
         std::process::exit(1);
+    }
+
+    // Load config
+    let config_path = repo_root.join(".gitim").join("config.yaml");
+    let config_str = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("failed to read config: {}", e))?;
+    let config = gitim_core::validator::validate_config(&config_str)
+        .map_err(|e| format!("invalid config: {}", e))?;
+
+    // Scan users
+    let users_dir = repo_root.join("users");
+    let mut users = Vec::new();
+    if users_dir.exists() {
+        for entry in std::fs::read_dir(&users_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".meta.json") {
+                let handler = name.trim_end_matches(".meta.json").to_string();
+                users.push(handler);
+            }
+        }
+    }
+
+    let debug_http = config.daemon.debug_http;
+    let debug_port = config.daemon.debug_port;
+
+    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config));
+    {
+        let mut u = app_state.users.write().await;
+        *u = users;
     }
 
     lifecycle.ensure_run_dir()?;
@@ -28,8 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(0);
     });
 
-    // TODO: Start HTTP debug server when config.daemon.debug_http is true
-    // Will be wired in Task I.1 when config loading is implemented
+    // Start HTTP debug server if enabled
+    if debug_http {
+        let router = http::create_router();
+        let addr = format!("0.0.0.0:{}", debug_port);
+        info!("HTTP debug server on {}", addr);
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        lifecycle::DaemonLifecycle::new(&repo_root).write_port(debug_port)?;
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+    }
 
     let socket_path = lifecycle.socket_path();
     server::start_unix_socket(&socket_path).await?;
