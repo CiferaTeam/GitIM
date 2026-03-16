@@ -4,28 +4,29 @@
 
 ## 关键文件
 
-- `README.md` — 项目概述、动机、快速开始
-- `docs/design.md` — v1 协议设计文档
-- `spec/message-format.md` — 消息格式规范
-- `spec/directory-config.md` — 目录结构与配置规范
+- `docs/superpowers/specs/2026-03-16-gitim-v1-design.md` — v1 协议设计文档
+- `legacy/` — 废案参考文档（design.md, message-format.md, directory-config.md）
 
 ## 架构
 
-- 消息是 `.thread` 文件中的行，带方括号分隔的前缀：`[L<行号>][P<父行>][<作者>][<时间戳>] <正文>`
-- 通过 `P`（指向）字段实现线程链 — 无需 thread_id
-- 作者字段为变长（非固定 8 字符）
-- 续行使用 `[..L<行号>]` 前缀
+- 消息是 `.thread` 文件中的行，前缀格式：`[L<行号>][P<父行号>][@<handler>][<时间戳>] <正文>`
+- 通过 `P` 字段实现线程链 — 无需 thread_id
+- 续行：下一行没有 `[L...]` 开头即为当前消息的续行
+- 身份：`identities/<handler>.meta.json`，handler = GitHub handle（小写）
+- 技术栈：Rust daemon（核心引擎）+ TypeScript CLI（薄客户端）
+- 通信：Unix socket（默认）+ HTTP（调试模式）
 - Git 负责持久化、同步和审计追踪
-- 无后端 — 本地优先、去中心化
 
 ## v1 范围
 
-- 消息格式：发送、回复、续行、特殊类型（@join/@leave/@topic/@pin/@react/@quote/@file/@edit/@delete）
-- 目录：.gitim/（config.yaml、agents.yaml、cursors/）、channels/、dm/
+- 三个模块：身份（identities）、频道（channels）、私信（dm）
+- 消息格式：普通消息 + 回复，无特殊消息类型
+- 行号：最少 6 位零填充，可无限增长
 - 并发：乐观锁 + 冲突时 git pull --rebase
-- 延后：归档、GUI 前端、Discord 桥接、Mem0 集成
+- 延后：特殊消息类型、MCP Server、归档、GUI、桥接
 
 ## 约定
 
 - 所有文档使用中文
-- Agent ID：大写 A-Z 0-9，1-32 字符，`SYSTEM` 为保留字
+- Handler：小写 a-z 0-9 连字符，1-39 字符，`system` 为保留字
+- DM 文件名：两个 handler 按字母序排列，`--` 连接
