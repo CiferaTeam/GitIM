@@ -1,5 +1,6 @@
 mod api;
 mod error;
+mod handlers;
 mod http;
 mod lifecycle;
 mod server;
@@ -62,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start HTTP debug server if enabled
     if debug_http {
-        let router = http::create_router();
+        let router = http::create_router(app_state.clone());
         let addr = format!("0.0.0.0:{}", debug_port);
         info!("HTTP debug server on {}", addr);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -73,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let socket_path = lifecycle.socket_path();
-    server::start_unix_socket(&socket_path).await?;
+    server::start_unix_socket(&socket_path, app_state).await?;
 
     Ok(())
 }

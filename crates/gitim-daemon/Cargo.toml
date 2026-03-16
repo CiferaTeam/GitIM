@@ -18,3 +18,4 @@ tower = "0.5"
 hyper = "1"
 hyper-util = "0.1"
 tokio-stream = "0.1"
+chrono.workspace = true

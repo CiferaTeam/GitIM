@@ -3,8 +3,12 @@ use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error};
 use crate::api::{Request, Response};
+use crate::state::SharedState;
 
-pub async fn start_unix_socket(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_unix_socket(
+    socket_path: &Path,
+    state: SharedState,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path)?;
@@ -12,6 +16,7 @@ pub async fn start_unix_socket(socket_path: &Path) -> Result<(), Box<dyn std::er
 
     loop {
         let (stream, _) = listener.accept().await?;
+        let state = state.clone();
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
@@ -19,7 +24,7 @@ pub async fn start_unix_socket(socket_path: &Path) -> Result<(), Box<dyn std::er
 
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let response = match serde_json::from_str::<Request>(&line) {
-                    Ok(req) => handle_request(req).await,
+                    Ok(req) => crate::handlers::handle_request(req, state.clone()).await,
                     Err(e) => Response::error(format!("invalid request: {}", e)),
                 };
 
@@ -32,15 +37,5 @@ pub async fn start_unix_socket(socket_path: &Path) -> Result<(), Box<dyn std::er
                 line.clear();
             }
         });
-    }
-}
-
-async fn handle_request(req: Request) -> Response {
-    match req {
-        Request::Status => Response::success(serde_json::json!({
-            "version": "0.1.0",
-            "status": "running",
-        })),
-        _ => Response::error("not implemented yet"),
     }
 }
