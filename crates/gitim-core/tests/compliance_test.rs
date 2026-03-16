@@ -1,0 +1,61 @@
+use gitim_core::validator::compliance::{validate_append, AppendValidation};
+
+fn make_existing() -> &'static str {
+    "[L000001][P000000][@nexus][20250316T120000Z] first message\n[L000002][P000001][@lewis][20250316T120500Z] reply\n"
+}
+
+#[test]
+fn test_valid_append() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] another reply\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_append_wrong_line_number() {
+    let existing = make_existing();
+    let new_lines = "[L000005][P000001][@nexus][20250316T121000Z] skipped 4\n";
+    let users = vec!["nexus"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_append_unknown_author() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@unknown][20250316T121000Z] who am i\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_append_invalid_p_reference() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000099][@nexus][20250316T121000Z] bad ref\n";
+    let users = vec!["nexus"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_append_p_references_within_batch() {
+    let existing = make_existing();
+    let new_lines = "\
+[L000003][P000000][@nexus][20250316T121000Z] new topic
+[L000004][P000003][@lewis][20250316T121500Z] reply to new topic
+";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_append_to_empty_file() {
+    let new_lines = "[L000001][P000000][@nexus][20250316T121000Z] first\n";
+    let users = vec!["nexus"];
+    let result = validate_append("", new_lines, &users);
+    assert!(result.is_ok());
+}
