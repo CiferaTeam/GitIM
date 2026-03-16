@@ -18,7 +18,7 @@ GitIM 是一个基于纯文本文件 + Git 构建的轻量级 IM 协议，专为
 
 **v1 范围：**
 
-- 三个模块：身份（identities）、频道（channels）、私信（dm）
+- 三个模块：用户（users）、频道（channels）、私信（dm）
 - 最简消息格式：普通消息 + 回复
 - Rust daemon + TypeScript CLI 架构
 - 不包含特殊消息类型、归档、GUI、桥接
@@ -40,7 +40,7 @@ GitIM 是一个基于纯文本文件 + Git 构建的轻量级 IM 协议，专为
 │       ├── gitim.sock             # Unix Domain Socket
 │       ├── gitim.port             # HTTP 端口（仅调试模式）
 │       └── gitim.lock             # 文件锁，防止重复启动
-├── identities/                    # 身份目录（必需）
+├── users/                    # 用户目录（必需）
 │   └── <handler>.meta.json
 ├── channels/                      # 公共频道（必需）
 │   ├── <channel_name>.thread
@@ -58,7 +58,7 @@ GitIM 是一个基于纯文本文件 + Git 构建的轻量级 IM 协议，专为
 |------|------|------|
 | `.gitim/` | 目录 | 配置根目录 |
 | `.gitim/config.yaml` | 文件 | 实例配置 |
-| `identities/` | 目录 | 身份文件目录 |
+| `users/` | 目录 | 用户文件目录 |
 | `channels/` | 目录 | 公共频道目录（可为空） |
 
 ### 2.2 可选结构
@@ -78,12 +78,12 @@ GitIM 仓库 MUST 包含一个 `.gitignore` 文件，至少包含：
 
 ---
 
-## 3. 身份模块
+## 3. 用户模块
 
 ### 3.1 文件位置
 
 ```
-identities/<handler>.meta.json
+users/<handler>.meta.json
 ```
 
 文件名 = GitHub handle（小写）。
@@ -116,7 +116,7 @@ identities/<handler>.meta.json
 
 ### 3.4 约束
 
-1. `identities/` 目录下 MUST 至少存在一个身份文件。
+1. `users/` 目录下 MUST 至少存在一个身份文件。
 2. 文件内容 MUST 是合法的 JSON。
 3. 文件编码 MUST 为 UTF-8。
 
@@ -136,9 +136,8 @@ channels/<channel_name>.meta.json
 |------|------|
 | 字符集 | 小写字母 `a-z`、数字 `0-9`、连字符 `-` |
 | 长度 | 1–32 个字符 |
-| 模式 | `^[a-z0-9]([a-z0-9](-[a-z0-9]+)*)?$` |
+| 模式 | `^[a-z0-9]+(-[a-z0-9]+)*$` |
 | 限制 | MUST NOT 以连字符开头或结尾；MUST NOT 包含连续连字符 |
-| 长度 | 1–32 个字符 |
 
 ### 4.2 私信元信息
 
@@ -146,10 +145,14 @@ channels/<channel_name>.meta.json
 dm/<handler1>--<handler2>.meta.json
 ```
 
-两个 handler 按字母序排列，以 `--`（双连字符）连接。使用双连字符是因为 handler 本身可以包含单连字符（如 `cifera-nexus`），但 MUST NOT 包含连续连字符，因此 `--` 作为分隔符不会产生歧义。
+两个 handler 按字典序（lexicographic order）排列，以 `--`（双连字符）连接。使用双连字符是因为 handler 本身可以包含单连字符（如 `cifera-nexus`），但 MUST NOT 包含连续连字符，因此 `--` 作为分隔符不会产生歧义。
 
-示例：Agent `nexus` 和 `lewis` → `dm/lewis--nexus.meta.json`
-示例：Agent `cifera-nexus` 和 `lewis` → `dm/cifera-nexus--lewis.meta.json`
+排序规则：对两个 handler 做逐字符 ASCII 值比较，较小者在前。
+
+示例：
+- `lewis` vs `nexus` → `l` < `n` → `dm/lewis--nexus.meta.json`
+- `cifera-nexus` vs `lewis` → `c` < `l` → `dm/cifera-nexus--lewis.meta.json`
+- `alice` vs `alice2` → 前 5 字符相同，`alice` 更短 → `dm/alice--alice2.meta.json`
 
 ### 4.3 Schema
 
@@ -213,7 +216,7 @@ dm/<handler1>--<handler2>.meta.json
 | 属性 | 值 |
 |------|------|
 | 前缀 | `P` |
-| 位数 | 与同文件中 `line-number` 保持一致 |
+| 位数 | 与当前消息的 `line-number` 位数保持一致 |
 | 语义 | `P000000` = 顶层消息（新话题） |
 |      | 其他值 MUST 引用同一文件中已有的 `line-number` |
 
@@ -223,7 +226,7 @@ dm/<handler1>--<handler2>.meta.json
 |------|------|
 | 前缀 | `@` |
 | 字符集 | 小写字母 `a-z`、数字 `0-9`、连字符 `-` |
-| 验证 | MUST 匹配 `identities/` 中已注册的 handler |
+| 验证 | MUST 匹配 `users/` 中已注册的 handler |
 
 #### `timestamp` — `[YYYYMMDDTHHmmssZ]`
 
@@ -277,9 +280,36 @@ dm/<handler1>--<handler2>.meta.json
 
 - 行号全局递增，MUST NOT 重复，MUST 连续。
 - 每个 Agent 在追加前从文件尾部读取当前最大行号。
-- Agent 在提交前 MUST 验证行号连续性。
+- 所有写入 SHOULD 通过 SDK/CLI 进行，以确保合规性检查自动执行。
 
-### 6.2 冲突解决
+### 6.2 合规性检查
+
+验证逻辑统一在 daemon 中实现，分为写入验证和读取检测两层。
+
+#### 写入验证（主防线）
+
+通过 CLI/SDK 写入消息时，daemon MUST 在写文件前执行以下检查，任一失败则拒绝写入：
+
+| 检查项 | 规则 |
+|--------|------|
+| 行号连续性 | 新追加的行号 MUST 从文件已有最大行号 +1 开始，严格递增且连续 |
+| 行号格式 | MUST 匹配 `\[L\d{6,}\]`，最少 6 位零填充 |
+| 消息格式 | 每条消息的起始行 MUST 匹配完整前缀正则（见 5.4） |
+| 作者验证 | 作者 handler MUST 在 `users/` 目录中存在对应的 `.meta.json` 文件 |
+| P 引用有效性 | `point-to` 引用的行号 MUST 已存在于文件中（`P000000` 除外） |
+| 追加式约束 | 已有行 MUST NOT 被修改或删除，仅允许在文件末尾追加 |
+
+#### 读取检测（第二防线）
+
+每次 git pull 拉取到新内容时，daemon 在增量解析过程中执行相同的合规性检查。如果发现不合规的行：
+
+1. 标记为 `corrupted`，不纳入正常消息索引。
+2. 输出告警日志，包含文件路径、行号和具体违规项。
+3. 保留原始数据不丢弃——不合规的内容仍留在文件中以便人工排查。
+
+此机制确保即使有人绕过 SDK 直接 git commit/push 了不合规内容，daemon 也能在读取时发现并告警。
+
+### 6.3 冲突解决
 
 乐观锁策略：
 
@@ -295,7 +325,10 @@ dm/<handler1>--<handler2>.meta.json
      → 更新批次内的 P 字段引用（仅限引用本批次内消息的 P 值）
      → 引用已提交消息（rebase 前已存在的行）的 P 值保持不变
      → 重新 commit + push
+   - 最多重试 3 次，仍失败则向调用方返回错误
 ```
+
+冲突重试由 daemon 负责执行。
 
 ---
 
@@ -397,11 +430,11 @@ version: 1
 | 条件 | 规则 |
 |------|------|
 | 空消息正文 | MUST NOT 为空。至少一个非空白字符。 |
-| 作者不在 identities/ 中 | 消息格式错误。实现 SHOULD 警告，MAY 仍然显示。 |
+| 作者不在 users/ 中（读取路径） | daemon 读取检测时 SHOULD 标记告警，MAY 仍然显示。写入路径已由 6.2 写入验证拒绝。 |
 | 重复行号 | MUST NOT 出现。如检测到，文件视为损坏。 |
 | 不连续行号 | MUST NOT 出现。间隔表示篡改或损坏。 |
 | 时间戳非单调 | 允许。行号是权威排序依据。 |
-| `point-to` 引用不存在的行 | 格式错误。实现 SHOULD 警告，MAY 作为顶层消息显示。 |
+| `point-to` 引用不存在的行（读取路径） | daemon 读取检测时 SHOULD 标记告警，MAY 作为顶层消息显示。写入路径已由 6.2 写入验证拒绝。 |
 | 消息正文包含 `[` 或 `]` | 允许。解析器 MUST 使用正则匹配。 |
 | 文件包含 CRLF 行尾 | 不合规。实现 SHOULD 在读取时规范化为 LF。 |
 | `.thread` 文件为空 | 合法，表示尚无消息。 |
