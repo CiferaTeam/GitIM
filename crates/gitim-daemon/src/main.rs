@@ -73,6 +73,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Start sync loop
+    let sync_interval = app_state.config.daemon.sync_interval;
+    let sync_root = repo_root.clone();
+    tokio::spawn(async move {
+        gitim_sync::sync_loop::start_sync_loop(&sync_root, sync_interval).await;
+    });
+
+    // Start file watcher
+    let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel(100);
+    gitim_sync::watcher::watch_repo(&repo_root, watcher_tx).await.ok();
+
+    // Process watcher events - invalidate cache
+    let watcher_state = app_state.clone();
+    tokio::spawn(async move {
+        while let Some(event) = watcher_rx.recv().await {
+            match event {
+                gitim_sync::watcher::FileEvent::ThreadModified(name) => {
+                    tracing::debug!("thread modified: {}", name);
+                    watcher_state.thread_cache.write().await.remove(&name);
+                }
+                gitim_sync::watcher::FileEvent::MetaModified(name) => {
+                    tracing::debug!("meta modified: {}", name);
+                    // Could trigger user list refresh here
+                }
+            }
+        }
+    });
+
     let socket_path = lifecycle.socket_path();
     server::start_unix_socket(&socket_path, app_state).await?;
 
