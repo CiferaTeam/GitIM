@@ -16,7 +16,7 @@
 - 技术栈：Rust daemon（核心引擎）+ TypeScript CLI（薄客户端）
 - 通信：Unix socket（默认）+ HTTP（调试模式）
 - Git 负责持久化、同步和审计追踪
-- 合规性：daemon 写入验证（主防线）+ 读取检测（第二防线），不依赖 git hooks
+- 合规性：daemon 写入验证（主防线）+ 读取检测（第二防线）
 
 ## v1 范围
 
