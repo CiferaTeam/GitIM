@@ -1,1 +1,3 @@
-.claude.worktrees/
+.claude/
+.worktrees/
+target/
