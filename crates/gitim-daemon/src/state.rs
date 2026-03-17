@@ -7,6 +7,12 @@ use crate::api::Event;
 
 pub type SharedState = Arc<AppState>;
 
+#[derive(Clone, Debug)]
+pub struct PendingMessage {
+    pub channel: String,
+    pub line_number: u64,
+}
+
 pub struct AppState {
     pub repo_root: PathBuf,
     pub config: Config,
@@ -14,6 +20,7 @@ pub struct AppState {
     pub users: RwLock<Vec<String>>,
     pub event_tx: broadcast::Sender<Event>,
     pub current_user: Option<String>,
+    pub pending_push: std::sync::RwLock<Vec<PendingMessage>>,
 }
 
 impl AppState {
@@ -25,6 +32,7 @@ impl AppState {
             users: RwLock::new(Vec::new()),
             event_tx,
             current_user,
+            pending_push: std::sync::RwLock::new(Vec::new()),
         }
     }
 }

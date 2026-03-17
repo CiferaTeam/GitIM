@@ -90,8 +90,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start sync loop
     let sync_interval = app_state.config.daemon.sync_interval;
     let sync_root = repo_root.clone();
+    let push_state = app_state.clone();
+    let renum_state = app_state.clone();
     tokio::spawn(async move {
-        gitim_sync::sync_loop::start_sync_loop(&sync_root, sync_interval).await;
+        gitim_sync::sync_loop::start_sync_loop(
+            &sync_root,
+            sync_interval,
+            move || {
+                // on_pushed: clear pending_push and broadcast MessagesPushed events
+                let mut pending = push_state.pending_push.write().unwrap();
+                let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
+                    std::collections::HashMap::new();
+                for msg in pending.drain(..) {
+                    by_channel.entry(msg.channel).or_default().push(msg.line_number);
+                }
+                for (channel, line_numbers) in by_channel {
+                    let _ = push_state.event_tx.send(api::Event::MessagesPushed {
+                        channel,
+                        line_numbers,
+                    });
+                }
+            },
+            move |file, old_line, new_line| {
+                // on_renumbered: broadcast MessageRenumbered and update pending_push
+                // Extract channel name from file path (e.g. "channels/general.thread" -> "general")
+                let channel_name = file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut pending = renum_state.pending_push.write().unwrap();
+                for msg in pending.iter_mut() {
+                    if msg.channel == channel_name && msg.line_number == old_line {
+                        let _ = renum_state.event_tx.send(api::Event::MessageRenumbered {
+                            channel: msg.channel.clone(),
+                            old_line,
+                            new_line,
+                        });
+                        msg.line_number = new_line;
+                    }
+                }
+            },
+        )
+        .await;
     });
 
     // Start file watcher
@@ -109,8 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Safe: handler/channel names MUST NOT contain "--" (spec §3.2, §4.1)
                     // so "--" only appears in DM filenames as the separator
                     let kind = if name.contains("--") { "dm" } else { "channel" };
-                    let _ = watcher_state.event_tx.send(gitim_daemon::api::Event {
-                        event: "thread_changed".to_string(),
+                    let _ = watcher_state.event_tx.send(gitim_daemon::api::Event::ThreadChanged {
                         channel: name,
                         kind: kind.to_string(),
                     });
