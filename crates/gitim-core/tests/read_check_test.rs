@@ -37,3 +37,27 @@ fn test_detect_invalid_p_ref() {
     let issues = check_thread_integrity(input, &users);
     assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::InvalidPointTo(_))));
 }
+
+#[test]
+fn test_detect_unknown_mention() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] hey <@ghost>\n";
+    let users = vec!["nexus"];
+    let issues = check_thread_integrity(input, &users);
+    assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::UnknownMention { handler, .. } if handler == "ghost")));
+}
+
+#[test]
+fn test_valid_mention_no_issue() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] hey <@lewis>\n";
+    let users = vec!["nexus", "lewis"];
+    let issues = check_thread_integrity(input, &users);
+    assert!(issues.is_empty());
+}
+
+#[test]
+fn test_bare_at_no_issue() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] hey @ghost\n";
+    let users = vec!["nexus"];
+    let issues = check_thread_integrity(input, &users);
+    assert!(issues.is_empty());
+}
