@@ -8,6 +8,7 @@ pub struct Message {
     pub author: Handler,
     pub timestamp: String,
     pub body: String,
+    pub mentions: Vec<Handler>,
 }
 
 /// A line in a .thread file — either a message start or a continuation.

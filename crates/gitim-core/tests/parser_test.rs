@@ -80,3 +80,36 @@ fn test_parse_large_line_numbers() {
     let result = parse_thread(input).unwrap();
     assert_eq!(result.messages[0].line_number, 1000000);
 }
+
+#[test]
+fn test_parse_extracts_mentions_from_body() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] hey <@lewis> check this\n";
+    let result = parse_thread(input).unwrap();
+    assert_eq!(result.messages[0].mentions.len(), 1);
+    assert_eq!(result.messages[0].mentions[0].as_str(), "lewis");
+}
+
+#[test]
+fn test_parse_extracts_mentions_from_continuation() {
+    let input = "\
+[L000001][P000000][@nexus][20250316T120000Z] first line
+need <@coder> to review
+";
+    let result = parse_thread(input).unwrap();
+    assert_eq!(result.messages[0].mentions.len(), 1);
+    assert_eq!(result.messages[0].mentions[0].as_str(), "coder");
+}
+
+#[test]
+fn test_parse_no_mentions() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] plain message\n";
+    let result = parse_thread(input).unwrap();
+    assert!(result.messages[0].mentions.is_empty());
+}
+
+#[test]
+fn test_parse_bare_at_not_extracted() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] cc @lewis 看看\n";
+    let result = parse_thread(input).unwrap();
+    assert!(result.messages[0].mentions.is_empty());
+}
