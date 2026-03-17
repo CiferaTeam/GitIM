@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensureDaemon } from '../daemon.js';
@@ -13,7 +13,7 @@ interface InferredIdentity {
 function inferIdentity(endpoint: string, endpointUrl: string): InferredIdentity {
   if (endpoint === 'github') {
     try {
-      const result = execSync('gh api /user', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const result = execFileSync('gh', ['api', '/user'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
       const user = JSON.parse(result);
       return {
         handler: user.login.toLowerCase(),
@@ -33,10 +33,11 @@ function inferIdentity(endpoint: string, endpointUrl: string): InferredIdentity 
       process.exit(1);
     }
     try {
-      const result = execSync(
-        `curl -sf -H "Authorization: token ${token}" ${endpointUrl}/api/v1/user`,
-        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-      );
+      const result = execFileSync('curl', [
+        '-sf',
+        '-H', `Authorization: token ${token}`,
+        `${endpointUrl}/api/v1/user`,
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
       const user = JSON.parse(result);
       return {
         handler: user.login.toLowerCase(),
@@ -106,10 +107,10 @@ function initGitimRepo(
   fs.writeFileSync(path.join(repoDir, 'channels', 'general.thread'), '');
 
   // Git commit + push
-  execSync('git add -A', { cwd: repoDir, stdio: 'ignore' });
-  execSync(`git commit -m "feat: initialize GitIM repo by @${identity.handler}"`, { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['add', '-A'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', `feat: initialize GitIM repo by @${identity.handler}`], { cwd: repoDir, stdio: 'ignore' });
   try {
-    execSync('git push -u origin HEAD', { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'HEAD'], { cwd: repoDir, stdio: 'ignore' });
   } catch {
     // Push may fail if no remote, that's ok for local testing
   }
@@ -137,12 +138,25 @@ export async function onboardCommand(
   // --refresh mode: re-infer identity in current repo
   if (options.refresh) {
     const cwd = process.cwd();
-    if (!fs.existsSync(path.join(cwd, '.gitim', 'config.yaml'))) {
+    const configPath = path.join(cwd, '.gitim', 'config.yaml');
+    if (!fs.existsSync(configPath)) {
       console.error('不在 GitIM 仓库中，无法 --refresh');
       process.exit(1);
     }
-    const identity = inferIdentity(endpoint, endpointUrl);
-    writeMeJson(cwd, identity, endpoint);
+    // Read endpoint from existing config if not explicitly overridden
+    let refreshEndpoint = endpoint;
+    let refreshEndpointUrl = endpointUrl;
+    if (!options.endpoint || options.endpoint === 'github') {
+      try {
+        const configContent = fs.readFileSync(configPath, 'utf-8');
+        const epMatch = configContent.match(/^endpoint:\s*(\S+)/m);
+        const urlMatch = configContent.match(/^endpoint_url:\s*"?([^"\n]*)"?/m);
+        if (epMatch) refreshEndpoint = epMatch[1];
+        if (urlMatch && urlMatch[1]) refreshEndpointUrl = urlMatch[1];
+      } catch { /* use defaults */ }
+    }
+    const identity = inferIdentity(refreshEndpoint, refreshEndpointUrl);
+    writeMeJson(cwd, identity, refreshEndpoint);
     console.log(`身份已刷新：@${identity.handler}`);
     return;
   }
@@ -158,7 +172,7 @@ export async function onboardCommand(
 
   // 2. Validate git is available
   try {
-    execSync('git --version', { stdio: 'ignore' });
+    execFileSync('git', ['--version'], { stdio: 'ignore' });
   } catch {
     console.error('Error: Git 命令不可用');
     console.error('  → 请安装 Git: https://git-scm.com/');
@@ -178,7 +192,7 @@ export async function onboardCommand(
   let cloneSucceeded = false;
 
   try {
-    execSync(`git clone ${repoUrl} ${targetDir}`, { stdio: 'ignore' });
+    execFileSync('git', ['clone', repoUrl, targetDir], { stdio: 'ignore' });
     cloneSucceeded = true;
   } catch {
     cloneSucceeded = false;
@@ -206,7 +220,7 @@ export async function onboardCommand(
     if (endpoint === 'github') {
       const ghRepo = org ? `${org}/${repoName}` : repoName;
       try {
-        execSync(`gh repo create ${ghRepo} --private --clone`, {
+        execFileSync('gh', ['repo', 'create', ghRepo, '--private', '--clone'], {
           cwd: path.dirname(targetDir),
           stdio: 'ignore',
         });
@@ -222,11 +236,14 @@ export async function onboardCommand(
         ? `${endpointUrl}/api/v1/orgs/${org}/repos`
         : `${endpointUrl}/api/v1/user/repos`;
       try {
-        execSync(
-          `curl -sf -X POST -H "Authorization: token ${token}" -H "Content-Type: application/json" -d '{"name":"${repoName}","private":true}' ${createUrl}`,
-          { stdio: 'ignore' },
-        );
-        execSync(`git clone ${repoUrl} ${targetDir}`, { stdio: 'ignore' });
+        execFileSync('curl', [
+          '-sf', '-X', 'POST',
+          '-H', `Authorization: token ${token}`,
+          '-H', 'Content-Type: application/json',
+          '-d', JSON.stringify({ name: repoName, private: true }),
+          createUrl,
+        ], { stdio: 'ignore' });
+        execFileSync('git', ['clone', repoUrl, targetDir], { stdio: 'ignore' });
       } catch {
         console.error(`Error: 无法创建 Gitea 仓库 ${repoName}`);
         process.exit(1);

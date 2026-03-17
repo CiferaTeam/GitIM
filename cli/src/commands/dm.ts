@@ -24,7 +24,8 @@ export async function dmSendCommand(handler: string, body: string, options: { au
   const author = resolveAuthor(repoRoot, options.author);
   await ensureDaemon(repoRoot);
   const client = new GitimClient(repoRoot);
-  const channel = `dm:${author},${handler}`;
+  const [h1, h2] = [author, handler].sort();
+  const channel = `dm:${h1},${h2}`;
   const replyTo = options.replyTo ? parseInt(options.replyTo, 10) : undefined;
   const res = await client.send(channel, body, author, replyTo);
 
@@ -45,7 +46,8 @@ export async function dmReadCommand(handler: string, options: { author?: string;
   const author = resolveAuthor(repoRoot, options.author);
   await ensureDaemon(repoRoot);
   const client = new GitimClient(repoRoot);
-  const channel = `dm:${author},${handler}`;
+  const [h1, h2] = [author, handler].sort();
+  const channel = `dm:${h1},${h2}`;
   const limit = options.limit ? parseInt(options.limit, 10) : undefined;
   const since = options.since ? parseInt(options.since, 10) : undefined;
   const res = await client.read(channel, limit, since);

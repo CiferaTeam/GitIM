@@ -210,7 +210,9 @@ async fn handle_register_user(
         return Response::error(format!("invalid handler: {}", e));
     }
 
-    let meta_path = state.repo_root.join("users").join(format!("{}.meta.json", handler));
+    let users_dir = state.repo_root.join("users");
+    std::fs::create_dir_all(&users_dir).ok();
+    let meta_path = users_dir.join(format!("{}.meta.json", handler));
 
     // If already exists, return success with exists=true
     if meta_path.exists() {
