@@ -14,8 +14,10 @@ pub enum Request {
     Send {
         channel: String,
         body: String,
+        #[serde(default)]
         reply_to: Option<u64>,
-        author: String,
+        #[serde(default)]
+        author: Option<String>,
     },
     #[serde(rename = "read")]
     Read {
@@ -36,6 +38,25 @@ pub enum Request {
     Status,
     #[serde(rename = "subscribe")]
     Subscribe,
+    #[serde(rename = "stop")]
+    Stop,
+    #[serde(rename = "register_user")]
+    RegisterUser {
+        handler: String,
+        display_name: String,
+        #[serde(default = "default_role")]
+        role: String,
+        #[serde(default = "default_introduction")]
+        introduction: String,
+    },
+}
+
+fn default_role() -> String {
+    "member".to_string()
+}
+
+fn default_introduction() -> String {
+    "GitIM user".to_string()
 }
 
 #[derive(Debug, Serialize)]

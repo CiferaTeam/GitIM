@@ -44,8 +44,8 @@ export class GitimClient {
     return this.request('status');
   }
 
-  async send(channel: string, body: string, author: string, replyTo?: number): Promise<ApiResponse> {
-    return this.request('send', { channel, body, author, reply_to: replyTo ?? null });
+  async send(channel: string, body: string, author?: string, replyTo?: number): Promise<ApiResponse> {
+    return this.request('send', { channel, body, author: author ?? null, reply_to: replyTo ?? null });
   }
 
   async read(channel: string, limit?: number, since?: number): Promise<ApiResponse> {
@@ -62,5 +62,18 @@ export class GitimClient {
 
   async getThread(channel: string, lineNumber: number): Promise<ApiResponse> {
     return this.request('thread', { channel, line_number: lineNumber });
+  }
+
+  async registerUser(handler: string, displayName: string, role?: string, introduction?: string): Promise<ApiResponse> {
+    return this.request('register_user', {
+      handler,
+      display_name: displayName,
+      role: role ?? 'member',
+      introduction: introduction ?? 'GitIM user',
+    });
+  }
+
+  async stop(): Promise<ApiResponse> {
+    return this.request('stop');
   }
 }

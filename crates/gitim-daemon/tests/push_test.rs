@@ -25,7 +25,7 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
     ).unwrap();
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(root, make_config(), event_tx));
+    let state = Arc::new(AppState::new(root, make_config(), event_tx, Some("alice".to_string())));
 
     {
         let mut users = state.users.write().await;
@@ -81,7 +81,7 @@ async fn handle_send_broadcasts_channel_event() {
         channel: "general".to_string(),
         body: "hello".to_string(),
         reply_to: None,
-        author: "alice".to_string(),
+        author: Some("alice".to_string()),
     };
     let resp = handle_request(req, state).await;
     assert!(resp.ok);
@@ -113,7 +113,7 @@ async fn handle_send_broadcasts_dm_event() {
         channel: "dm:alice,bob".to_string(),
         body: "hey".to_string(),
         reply_to: None,
-        author: "alice".to_string(),
+        author: Some("alice".to_string()),
     };
     let resp = handle_request(req, state).await;
     assert!(resp.ok);

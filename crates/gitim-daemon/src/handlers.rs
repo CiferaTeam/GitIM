@@ -14,7 +14,15 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             "status": "running",
         })),
         Request::Send { channel, body, reply_to, author } => {
-            handle_send(state, channel, body, reply_to, author).await
+            // Resolve author: explicit > current_user > error
+            let resolved_author = match author {
+                Some(a) if !a.is_empty() => a,
+                _ => match &state.current_user {
+                    Some(u) => u.clone(),
+                    None => return Response::error("no author specified and no identity configured".to_string()),
+                },
+            };
+            handle_send(state, channel, body, reply_to, resolved_author).await
         }
         Request::Read { channel, limit, since } => {
             handle_read(state, channel, limit, since).await
@@ -27,6 +35,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::Subscribe => {
             Response::success(serde_json::json!({"subscribed": true}))
         }
+        Request::RegisterUser { handler, display_name, role, introduction } => {
+            handle_register_user(state, handler, display_name, role, introduction).await
+        }
+        Request::Stop => handle_stop(state).await,
     }
 }
 
@@ -197,6 +209,68 @@ async fn handle_read(
     }))
 }
 
+async fn handle_register_user(
+    state: SharedState,
+    handler: String,
+    display_name: String,
+    role: String,
+    introduction: String,
+) -> Response {
+    // Validate handler format
+    if let Err(e) = Handler::new(&handler) {
+        return Response::error(format!("invalid handler: {}", e));
+    }
+
+    let users_dir = state.repo_root.join("users");
+    std::fs::create_dir_all(&users_dir).ok();
+    let meta_path = users_dir.join(format!("{}.meta.json", handler));
+
+    // If already exists, return success with exists=true
+    if meta_path.exists() {
+        return Response::success(serde_json::json!({
+            "handler": handler,
+            "exists": true
+        }));
+    }
+
+    // Create meta file
+    let meta = serde_json::json!({
+        "display_name": display_name,
+        "role": role,
+        "introduction": introduction
+    });
+    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+
+    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
+        return Response::error(format!("failed to write user meta: {}", e));
+    }
+
+    // Add to users list
+    {
+        let mut users = state.users.write().await;
+        if !users.contains(&handler) {
+            users.push(handler.clone());
+            users.sort();
+        }
+    }
+
+    // Git add + commit (best effort)
+    let repo = &state.repo_root;
+    let _ = std::process::Command::new("git")
+        .args(["add", &format!("users/{}.meta.json", handler)])
+        .current_dir(repo)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", &format!("feat: register user @{}", handler)])
+        .current_dir(repo)
+        .output();
+
+    Response::success(serde_json::json!({
+        "handler": handler,
+        "exists": false
+    }))
+}
+
 async fn handle_list_channels(state: SharedState) -> Response {
     let ch_dir = state.repo_root.join("channels");
     let mut channels = Vec::new();
@@ -277,4 +351,18 @@ async fn handle_get_thread(
         "root_line": line_number,
         "messages": thread_msgs,
     }))
+}
+
+async fn handle_stop(state: SharedState) -> Response {
+    let lifecycle = crate::lifecycle::DaemonLifecycle::new(&state.repo_root);
+    lifecycle.cleanup();
+    tracing::info!("daemon stopping via API request");
+
+    // Spawn a delayed exit so the response can be sent first
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::process::exit(0);
+    });
+
+    Response::success(serde_json::json!({ "status": "stopping" }))
 }

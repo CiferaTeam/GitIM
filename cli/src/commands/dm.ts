@@ -1,18 +1,33 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { findRepoRoot, ensureDaemon } from '../daemon.js';
 import { GitimClient } from '../client.js';
 
-export async function dmSendCommand(handler: string, body: string, options: { author: string; replyTo?: string }): Promise<void> {
+function resolveAuthor(repoRoot: string, explicit?: string): string {
+  if (explicit) return explicit;
+  const mePath = path.join(repoRoot, '.gitim', 'me.json');
+  if (fs.existsSync(mePath)) {
+    const me = JSON.parse(fs.readFileSync(mePath, 'utf-8'));
+    return me.handler;
+  }
+  console.error('Error: 未配置身份，请先运行 gitim onboard');
+  process.exit(1);
+}
+
+export async function dmSendCommand(handler: string, body: string, options: { author?: string; replyTo?: string }): Promise<void> {
   const repoRoot = findRepoRoot();
   if (!repoRoot) {
     console.error('Not in a GitIM repository');
     process.exit(1);
   }
 
+  const author = resolveAuthor(repoRoot, options.author);
   await ensureDaemon(repoRoot);
   const client = new GitimClient(repoRoot);
-  const channel = `dm:${options.author},${handler}`;
+  const [h1, h2] = [author, handler].sort();
+  const channel = `dm:${h1},${h2}`;
   const replyTo = options.replyTo ? parseInt(options.replyTo, 10) : undefined;
-  const res = await client.send(channel, body, options.author, replyTo);
+  const res = await client.send(channel, body, author, replyTo);
 
   if (res.ok) {
     console.log('DM sent.');
@@ -21,16 +36,18 @@ export async function dmSendCommand(handler: string, body: string, options: { au
   }
 }
 
-export async function dmReadCommand(handler: string, options: { author: string; limit?: string; since?: string }): Promise<void> {
+export async function dmReadCommand(handler: string, options: { author?: string; limit?: string; since?: string }): Promise<void> {
   const repoRoot = findRepoRoot();
   if (!repoRoot) {
     console.error('Not in a GitIM repository');
     process.exit(1);
   }
 
+  const author = resolveAuthor(repoRoot, options.author);
   await ensureDaemon(repoRoot);
   const client = new GitimClient(repoRoot);
-  const channel = `dm:${options.author},${handler}`;
+  const [h1, h2] = [author, handler].sort();
+  const channel = `dm:${h1},${h2}`;
   const limit = options.limit ? parseInt(options.limit, 10) : undefined;
   const since = options.since ? parseInt(options.since, 10) : undefined;
   const res = await client.read(channel, limit, since);

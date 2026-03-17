@@ -31,7 +31,21 @@ export function isDaemonRunning(repoRoot: string): boolean {
 }
 
 export async function ensureDaemon(repoRoot: string): Promise<void> {
-  if (isDaemonRunning(repoRoot)) return;
+  const sockPath = path.join(repoRoot, '.gitim', 'run', 'gitim.sock');
+
+  if (isDaemonRunning(repoRoot)) {
+    // Daemon process exists — wait for socket if not ready yet (startup race)
+    if (fs.existsSync(sockPath)) return;
+    const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(sockPath)) return;
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    throw new Error('daemon is running but socket not ready');
+  }
+
+  // Clean up stale runtime files before spawning
+  cleanStaleFiles(repoRoot);
 
   const child = spawn('gitim-daemon', [], {
     cwd: repoRoot,
@@ -40,7 +54,6 @@ export async function ensureDaemon(repoRoot: string): Promise<void> {
   });
   child.unref();
 
-  const sockPath = path.join(repoRoot, '.gitim', 'run', 'gitim.sock');
   const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
@@ -49,4 +62,13 @@ export async function ensureDaemon(repoRoot: string): Promise<void> {
   }
 
   throw new Error('daemon failed to start within timeout');
+}
+
+function cleanStaleFiles(repoRoot: string): void {
+  const runDir = path.join(repoRoot, '.gitim', 'run');
+  const files = ['gitim.pid', 'gitim.sock', 'gitim.port', 'gitim.lock'];
+  for (const f of files) {
+    const p = path.join(runDir, f);
+    try { fs.unlinkSync(p); } catch { /* ignore */ }
+  }
 }

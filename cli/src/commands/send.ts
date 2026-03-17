@@ -1,7 +1,7 @@
 import { findRepoRoot, ensureDaemon } from '../daemon.js';
 import { GitimClient } from '../client.js';
 
-export async function sendCommand(channel: string, body: string, options: { author: string; replyTo?: string }): Promise<void> {
+export async function sendCommand(channel: string, body: string, options: { author?: string; replyTo?: string }): Promise<void> {
   const repoRoot = findRepoRoot();
   if (!repoRoot) {
     console.error('Not in a GitIM repository');
