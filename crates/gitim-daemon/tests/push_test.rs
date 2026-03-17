@@ -218,3 +218,54 @@ async fn unix_socket_without_subscribe_no_push() {
 
     assert!(result.is_err(), "should timeout - no push events without subscribe");
 }
+
+#[tokio::test]
+async fn http_sse_receives_push_events() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    let router = gitim_daemon::http::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect to SSE endpoint
+    let client = reqwest::Client::new();
+    let mut resp = client
+        .get(format!("http://{}/api/events", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Send a message to trigger broadcast
+    let send_req = serde_json::json!({
+        "method": "send",
+        "channel": "general",
+        "body": "hello from sse test",
+        "reply_to": null,
+        "author": "alice"
+    });
+    let send_resp = client
+        .post(format!("http://{}/api", addr))
+        .json(&send_req)
+        .send()
+        .await
+        .unwrap();
+    assert!(send_resp.status().is_success());
+
+    // Read SSE event
+    let chunk = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        resp.chunk(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+
+    let chunk_str = String::from_utf8(chunk.to_vec()).unwrap();
+    assert!(chunk_str.contains("thread_changed"), "SSE should contain event data: {}", chunk_str);
+    assert!(chunk_str.contains("general"), "SSE should contain channel name: {}", chunk_str);
+}
