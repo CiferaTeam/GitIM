@@ -7,8 +7,10 @@ pub enum Request {
     Send {
         channel: String,
         body: String,
+        #[serde(default)]
         reply_to: Option<u64>,
-        author: String,
+        #[serde(default)]
+        author: Option<String>,
     },
     #[serde(rename = "read")]
     Read {

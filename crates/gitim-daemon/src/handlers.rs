@@ -14,7 +14,15 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             "status": "running",
         })),
         Request::Send { channel, body, reply_to, author } => {
-            handle_send(state, channel, body, reply_to, author).await
+            // Resolve author: explicit > current_user > error
+            let resolved_author = match author {
+                Some(a) if !a.is_empty() => a,
+                _ => match &state.current_user {
+                    Some(u) => u.clone(),
+                    None => return Response::error("no author specified and no identity configured".to_string()),
+                },
+            };
+            handle_send(state, channel, body, reply_to, resolved_author).await
         }
         Request::Read { channel, limit, since } => {
             handle_read(state, channel, limit, since).await
