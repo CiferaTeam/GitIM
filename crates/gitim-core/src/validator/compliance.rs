@@ -14,8 +14,11 @@ pub enum ComplianceError {
     InvalidPointTo(u64),
     #[error("message L{0:06} has empty body")]
     EmptyBody(u64),
+    #[error("unknown mention '<@{handler}>' in message L{line_number:06}")]
+    UnknownMention { handler: String, line_number: u64 },
 }
 
+#[derive(Debug)]
 pub struct AppendValidation;
 
 pub fn validate_append(
@@ -56,6 +59,15 @@ pub fn validate_append(
 
         if msg.point_to != 0 && !known_lines.contains(&msg.point_to) {
             return Err(ComplianceError::InvalidPointTo(msg.point_to));
+        }
+
+        for mention in &msg.mentions {
+            if !user_set.contains(mention.as_str()) {
+                return Err(ComplianceError::UnknownMention {
+                    handler: mention.to_string(),
+                    line_number: msg.line_number,
+                });
+            }
         }
 
         if msg.body.trim().is_empty() {

@@ -59,3 +59,52 @@ fn test_append_to_empty_file() {
     let result = validate_append("", new_lines, &users);
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_append_with_valid_mention() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] hey <@lewis> check this\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_append_with_unknown_mention_rejected() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] hey <@ghost> check this\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("ghost"));
+}
+
+#[test]
+fn test_append_bare_at_not_validated() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] cc @ghost 不验证\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_append_mention_in_continuation() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] first line\ncc <@unknown> 看看\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_append_multiple_mentions_one_unknown() {
+    let existing = make_existing();
+    let new_lines = "[L000003][P000001][@nexus][20250316T121000Z] hey <@lewis> and <@ghost>\n";
+    let users = vec!["nexus", "lewis"];
+    let result = validate_append(existing, new_lines, &users);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("ghost"));
+}
