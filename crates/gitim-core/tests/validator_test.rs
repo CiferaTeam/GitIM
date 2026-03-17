@@ -79,3 +79,27 @@ fn test_invalid_config_version() {
 fn test_config_missing_version() {
     assert!(validate_config("daemon:\n  sync_interval: 30").is_err());
 }
+
+#[test]
+fn test_config_with_endpoint() {
+    let yaml = "version: 1\nendpoint: github\n";
+    let config = validate_config(yaml).unwrap();
+    assert_eq!(config.endpoint, "github");
+    assert_eq!(config.endpoint_url, "");
+}
+
+#[test]
+fn test_config_with_gitea_endpoint() {
+    let yaml = "version: 1\nendpoint: gitea\nendpoint_url: https://gitea.example.com\n";
+    let config = validate_config(yaml).unwrap();
+    assert_eq!(config.endpoint, "gitea");
+    assert_eq!(config.endpoint_url, "https://gitea.example.com");
+}
+
+#[test]
+fn test_config_endpoint_defaults() {
+    let yaml = "version: 1\n";
+    let config = validate_config(yaml).unwrap();
+    assert_eq!(config.endpoint, "github");
+    assert_eq!(config.endpoint_url, "");
+}

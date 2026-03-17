@@ -3,8 +3,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub version: u32,
+    #[serde(default = "default_endpoint")]
+    pub endpoint: String,
+    #[serde(default)]
+    pub endpoint_url: String,
     #[serde(default)]
     pub daemon: DaemonConfig,
+}
+
+fn default_endpoint() -> String {
+    "github".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
