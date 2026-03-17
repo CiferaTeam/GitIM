@@ -1,10 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Event {
-    pub event: String,
-    pub channel: String,
-    pub kind: String,
+#[serde(tag = "event")]
+pub enum Event {
+    #[serde(rename = "thread_changed")]
+    ThreadChanged { channel: String, kind: String },
+
+    #[serde(rename = "messages_pushed")]
+    MessagesPushed { channel: String, line_numbers: Vec<u64> },
+
+    #[serde(rename = "message_renumbered")]
+    MessageRenumbered { channel: String, old_line: u64, new_line: u64 },
 }
 
 #[derive(Debug, Deserialize)]
