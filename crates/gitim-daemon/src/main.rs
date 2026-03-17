@@ -1,16 +1,11 @@
 #![deny(warnings)]
 #![allow(dead_code)]
 
-mod api;
-mod error;
-mod handlers;
-mod http;
-mod lifecycle;
-mod server;
-mod state;
-
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
+
+use gitim_daemon::{api, http, lifecycle, server, state};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,7 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debug_http = config.daemon.debug_http;
     let debug_port = config.daemon.debug_port;
 
-    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config));
+    let (event_tx, _) = broadcast::channel::<api::Event>(256);
+    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config, event_tx));
     {
         let mut u = app_state.users.write().await;
         *u = users;
@@ -95,6 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gitim_sync::watcher::FileEvent::ThreadModified(name) => {
                     tracing::debug!("thread modified: {}", name);
                     watcher_state.thread_cache.write().await.remove(&name);
+                    // Safe: handler/channel names MUST NOT contain "--" (spec §3.2, §4.1)
+                    // so "--" only appears in DM filenames as the separator
+                    let kind = if name.contains("--") { "dm" } else { "channel" };
+                    let _ = watcher_state.event_tx.send(gitim_daemon::api::Event {
+                        event: "thread_changed".to_string(),
+                        channel: name,
+                        kind: kind.to_string(),
+                    });
                 }
                 gitim_sync::watcher::FileEvent::MetaModified(name) => {
                     tracing::debug!("meta modified: {}", name);

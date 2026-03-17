@@ -1,4 +1,4 @@
-use crate::api::{Request, Response};
+use crate::api::{Event, Request, Response};
 use crate::state::SharedState;
 use gitim_core::dm::dm_filename;
 use gitim_core::formatter::format_message;
@@ -23,6 +23,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::ListUsers => handle_list_users(state).await,
         Request::GetThread { channel, line_number } => {
             handle_get_thread(state, channel, line_number).await
+        }
+        Request::Subscribe => {
+            Response::success(serde_json::json!({"subscribed": true}))
         }
     }
 }
@@ -128,6 +131,14 @@ async fn handle_send(
 
     // Invalidate cache
     state.thread_cache.write().await.remove(&thread_name);
+
+    // Broadcast event
+    let kind = if channel.starts_with("dm:") { "dm" } else { "channel" };
+    let _ = state.event_tx.send(Event {
+        event: "thread_changed".to_string(),
+        channel: thread_name.clone(),
+        kind: kind.to_string(),
+    });
 
     info!(
         "message sent to {} by @{} at L{:06}",

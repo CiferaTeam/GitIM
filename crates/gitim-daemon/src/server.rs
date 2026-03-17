@@ -1,7 +1,7 @@
 use std::path::Path;
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{info, error};
+use tracing::{info, error, debug};
 use crate::api::{Request, Response};
 use crate::state::SharedState;
 
@@ -22,8 +22,12 @@ pub async fn start_unix_socket(
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
 
+            // Request-response mode until subscribe
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                let response = match serde_json::from_str::<Request>(&line) {
+                let parsed = serde_json::from_str::<Request>(&line);
+                let is_subscribe = matches!(&parsed, Ok(Request::Subscribe));
+
+                let response = match parsed {
                     Ok(req) => crate::handlers::handle_request(req, state.clone()).await,
                     Err(e) => Response::error(format!("invalid request: {}", e)),
                 };
@@ -32,10 +36,73 @@ pub async fn start_unix_socket(
                 resp_json.push('\n');
                 if let Err(e) = writer.write_all(resp_json.as_bytes()).await {
                     error!("write error: {}", e);
-                    break;
+                    return;
                 }
                 line.clear();
+
+                if is_subscribe {
+                    // Enter push mode
+                    debug!("client entered subscribe mode");
+                    handle_subscribed(&mut reader, &mut writer, &state).await;
+                    return;
+                }
             }
         });
+    }
+}
+
+async fn handle_subscribed(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    state: &SharedState,
+) {
+    let mut rx = state.event_tx.subscribe();
+    let mut line = String::new();
+
+    loop {
+        tokio::select! {
+            // Client sends a request
+            result = reader.read_line(&mut line) => {
+                match result {
+                    Ok(0) | Err(_) => return, // Client disconnected
+                    Ok(_) => {
+                        let response = match serde_json::from_str::<Request>(&line) {
+                            Ok(req) => crate::handlers::handle_request(req, state.clone()).await,
+                            Err(e) => Response::error(format!("invalid request: {}", e)),
+                        };
+                        let mut resp_json = serde_json::to_string(&response).unwrap();
+                        resp_json.push('\n');
+                        if let Err(e) = writer.write_all(resp_json.as_bytes()).await {
+                            error!("write error: {}", e);
+                            return;
+                        }
+                        line.clear();
+                    }
+                }
+            }
+            // Broadcast event received
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let mut event_json = serde_json::to_string(&event).unwrap();
+                        event_json.push('\n');
+                        if let Err(e) = writer.write_all(event_json.as_bytes()).await {
+                            error!("push write error: {}", e);
+                            return;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("push flush error: {}", e);
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("subscriber lagged by {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
