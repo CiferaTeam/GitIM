@@ -1,11 +1,12 @@
 use crate::api::{Event, Request, Response};
-use crate::state::SharedState;
+use crate::state::{PendingMessage, SharedState};
 use gitim_core::dm::dm_filename;
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::Handler;
 use gitim_core::validator::compliance::validate_append;
-use tracing::info;
+use gitim_sync::git::GitRepo;
+use tracing::{info, warn};
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
@@ -141,13 +142,41 @@ async fn handle_send(
         Err(e) => return Response::error(format!("open failed: {}", e)),
     }
 
+    // Git add + commit (best effort — message was already written)
+    let commit_status = match thread_path.strip_prefix(&state.repo_root) {
+        Ok(rel) => {
+            let rel_str = rel.to_string_lossy().to_string();
+            let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
+            let repo = GitRepo::new(&state.repo_root);
+            match repo.add_and_commit(&[&rel_str], &commit_msg) {
+                Ok(()) => "committed",
+                Err(e) => {
+                    warn!("git commit failed for L{:06} in {}: {}", next_line, thread_name, e);
+                    "written"
+                }
+            }
+        }
+        Err(e) => {
+            warn!("failed to compute relative path for git add: {}", e);
+            "written"
+        }
+    };
+
+    // Record in pending_push
+    {
+        let mut pending = state.pending_push.write().await;
+        pending.push(PendingMessage {
+            channel: thread_name.clone(),
+            line_number: next_line,
+        });
+    }
+
     // Invalidate cache
     state.thread_cache.write().await.remove(&thread_name);
 
     // Broadcast event
     let kind = if channel.starts_with("dm:") { "dm" } else { "channel" };
-    let _ = state.event_tx.send(Event {
-        event: "thread_changed".to_string(),
+    let _ = state.event_tx.send(Event::ThreadChanged {
         channel: thread_name.clone(),
         kind: kind.to_string(),
     });
@@ -159,6 +188,7 @@ async fn handle_send(
     Response::success(serde_json::json!({
         "line_number": next_line,
         "channel": thread_name,
+        "status": commit_status,
     }))
 }
 
@@ -255,15 +285,11 @@ async fn handle_register_user(
     }
 
     // Git add + commit (best effort)
-    let repo = &state.repo_root;
-    let _ = std::process::Command::new("git")
-        .args(["add", &format!("users/{}.meta.json", handler)])
-        .current_dir(repo)
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["commit", "-m", &format!("feat: register user @{}", handler)])
-        .current_dir(repo)
-        .output();
+    let git_repo = GitRepo::new(&state.repo_root);
+    let _ = git_repo.add_and_commit(
+        &[&format!("users/{}.meta.json", handler)],
+        &format!("msg: register @{}", handler),
+    );
 
     Response::success(serde_json::json!({
         "handler": handler,
