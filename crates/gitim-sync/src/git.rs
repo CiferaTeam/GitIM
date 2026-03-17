@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
@@ -19,6 +20,10 @@ pub struct GitRepo {
 impl GitRepo {
     pub fn new(root: &Path) -> Self {
         Self { root: root.to_path_buf() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn pull_rebase(&self) -> Result<(), GitError> {
@@ -92,5 +97,91 @@ impl GitRepo {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    pub fn fetch(&self) -> Result<(), GitError> {
+        let output = Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn has_unpushed_commits(&self) -> Result<bool, GitError> {
+        let output = Command::new("git")
+            .args(["rev-list", "--count", "origin/main..HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let count: u64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        Ok(count > 0)
+    }
+
+    pub fn diff_unpushed_thread_additions(&self) -> Result<HashMap<PathBuf, String>, GitError> {
+        let output = Command::new("git")
+            .args(["diff", "origin/main..HEAD", "--", "*.thread"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut result: HashMap<PathBuf, String> = HashMap::new();
+        let mut current_path: Option<PathBuf> = None;
+
+        for line in stdout.lines() {
+            if let Some(path_str) = line.strip_prefix("+++ b/") {
+                current_path = Some(PathBuf::from(path_str));
+            } else if line.starts_with("+") && !line.starts_with("+++") {
+                if let Some(ref path) = current_path {
+                    let added_line = &line[1..]; // strip leading '+'
+                    let entry = result.entry(path.clone()).or_default();
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(added_line);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub fn rebase_abort(&self) -> Result<(), GitError> {
+        let output = Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&self.root)
+            .output()?;
+        // Best-effort: ignore errors if no rebase in progress
+        let _ = output;
+        Ok(())
+    }
+
+    pub fn reset_hard_origin(&self) -> Result<(), GitError> {
+        let output = Command::new("git")
+            .args(["reset", "--hard", "origin/main"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(())
     }
 }
