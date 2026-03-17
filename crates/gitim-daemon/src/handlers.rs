@@ -164,7 +164,7 @@ async fn handle_send(
 
     // Record in pending_push
     {
-        let mut pending = state.pending_push.write().await;
+        let mut pending = state.pending_push.write().unwrap();
         pending.push(PendingMessage {
             channel: thread_name.clone(),
             line_number: next_line,

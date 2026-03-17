@@ -98,38 +98,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sync_interval,
             move || {
                 // on_pushed: clear pending_push and broadcast MessagesPushed events
-                let state = push_state.clone();
-                tokio::spawn(async move {
-                    let mut pending = state.pending_push.write().await;
-                    let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
-                        std::collections::HashMap::new();
-                    for msg in pending.drain(..) {
-                        by_channel.entry(msg.channel).or_default().push(msg.line_number);
-                    }
-                    for (channel, line_numbers) in by_channel {
-                        let _ = state.event_tx.send(api::Event::MessagesPushed {
-                            channel,
-                            line_numbers,
-                        });
-                    }
-                });
+                let mut pending = push_state.pending_push.write().unwrap();
+                let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
+                    std::collections::HashMap::new();
+                for msg in pending.drain(..) {
+                    by_channel.entry(msg.channel).or_default().push(msg.line_number);
+                }
+                for (channel, line_numbers) in by_channel {
+                    let _ = push_state.event_tx.send(api::Event::MessagesPushed {
+                        channel,
+                        line_numbers,
+                    });
+                }
             },
-            move |_file, old_line, new_line| {
+            move |file, old_line, new_line| {
                 // on_renumbered: broadcast MessageRenumbered and update pending_push
-                let state = renum_state.clone();
-                tokio::spawn(async move {
-                    let mut pending = state.pending_push.write().await;
-                    for msg in pending.iter_mut() {
-                        if msg.line_number == old_line {
-                            let _ = state.event_tx.send(api::Event::MessageRenumbered {
-                                channel: msg.channel.clone(),
-                                old_line,
-                                new_line,
-                            });
-                            msg.line_number = new_line;
-                        }
+                // Extract channel name from file path (e.g. "channels/general.thread" -> "general")
+                let channel_name = file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut pending = renum_state.pending_push.write().unwrap();
+                for msg in pending.iter_mut() {
+                    if msg.channel == channel_name && msg.line_number == old_line {
+                        let _ = renum_state.event_tx.send(api::Event::MessageRenumbered {
+                            channel: msg.channel.clone(),
+                            old_line,
+                            new_line,
+                        });
+                        msg.line_number = new_line;
                     }
-                });
+                }
             },
         )
         .await;

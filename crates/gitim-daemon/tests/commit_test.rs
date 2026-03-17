@@ -116,7 +116,7 @@ async fn test_handle_send_creates_git_commit() {
     );
 
     // Verify pending_push was recorded
-    let pending = state.pending_push.read().await;
+    let pending = state.pending_push.read().unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].channel, "general");
     assert_eq!(pending[0].line_number, 1);

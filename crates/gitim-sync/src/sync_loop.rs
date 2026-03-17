@@ -71,75 +71,92 @@ where
 }
 
 /// Push-first strategy: try push, fallback to fetch+rebase, then conflict resolution.
+/// Retries up to 3 times if push fails after conflict resolution.
+const MAX_SYNC_RETRIES: usize = 3;
+
 fn sync_with_push<F1, F2>(repo: &GitRepo, on_pushed: &F1, on_renumbered: &F2)
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
 {
-    // Fast path: try push directly
-    match repo.push() {
-        Ok(()) => {
-            on_pushed();
-            info!("sync: push complete");
-            return;
-        }
-        Err(_) => {
-            // Push rejected — remote has new commits, need to sync
-        }
-    }
-
-    // Fetch remote changes
-    if let Err(e) = repo.fetch() {
-        warn!("sync: fetch failed: {}", e);
-        return;
-    }
-
-    // Capture local additions BEFORE attempting rebase
-    let local_additions = match repo.diff_unpushed_thread_additions() {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("sync: failed to diff unpushed additions: {}", e);
-            return;
-        }
-    };
-
-    // Try rebase
-    match repo.pull_rebase() {
-        Ok(()) => {
-            // Rebase succeeded (no .thread conflicts), push again
-            match repo.push() {
-                Ok(()) => {
-                    on_pushed();
-                    info!("sync: push complete after rebase");
-                }
-                Err(e) => warn!("sync: push failed after rebase: {}", e),
+    for attempt in 1..=MAX_SYNC_RETRIES {
+        // Try push directly
+        match repo.push() {
+            Ok(()) => {
+                on_pushed();
+                info!("sync: push complete (attempt {})", attempt);
+                return;
+            }
+            Err(_) => {
+                // Push rejected — remote has new commits, need to sync
             }
         }
-        Err(_) => {
-            // Rebase failed (conflict), use thread-aware resolution
-            if !local_additions.is_empty() {
-                match conflict::resolve_thread_conflicts(repo, &local_additions) {
-                    Ok(mappings) => {
-                        for m in &mappings {
-                            on_renumbered(m.file.clone(), m.old_line, m.new_line);
+
+        // Fetch remote changes
+        if let Err(e) = repo.fetch() {
+            warn!("sync: fetch failed: {}", e);
+            return;
+        }
+
+        // Capture local additions BEFORE attempting rebase
+        let local_additions = match repo.diff_unpushed_thread_additions() {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("sync: failed to diff unpushed additions: {}", e);
+                return;
+            }
+        };
+
+        // Try rebase
+        match repo.pull_rebase() {
+            Ok(()) => {
+                // Rebase succeeded (no .thread conflicts), push again
+                match repo.push() {
+                    Ok(()) => {
+                        on_pushed();
+                        info!("sync: push complete after rebase (attempt {})", attempt);
+                        return;
+                    }
+                    Err(_) => {
+                        warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
+                        continue;
+                    }
+                }
+            }
+            Err(_) => {
+                // Rebase failed (conflict), use thread-aware resolution
+                if !local_additions.is_empty() {
+                    match conflict::resolve_thread_conflicts(repo, &local_additions) {
+                        Ok(mappings) => {
+                            for m in &mappings {
+                                on_renumbered(m.file.clone(), m.old_line, m.new_line);
+                            }
+                            match repo.push() {
+                                Ok(()) => {
+                                    on_pushed();
+                                    info!("sync: push complete after conflict resolution (attempt {})", attempt);
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                                    continue;
+                                }
+                            }
                         }
-                        match repo.push() {
-                            Ok(()) => {
-                                on_pushed();
-                                info!("sync: push complete after conflict resolution");
-                            }
-                            Err(e) => {
-                                warn!("sync: push failed after conflict resolution: {}", e);
-                            }
+                        Err(e) => {
+                            warn!("sync: conflict resolution failed: {}", e);
+                            return;
                         }
                     }
-                    Err(e) => warn!("sync: conflict resolution failed: {}", e),
+                } else {
+                    // Non-thread conflict (shouldn't happen normally)
+                    let _ = repo.rebase_abort();
+                    warn!("sync: non-thread rebase conflict, aborted");
+                    return;
                 }
-            } else {
-                // Non-thread conflict (shouldn't happen normally)
-                let _ = repo.rebase_abort();
-                warn!("sync: non-thread rebase conflict, aborted");
             }
         }
     }
+
+    warn!("sync: push failed after {} retries, giving up", MAX_SYNC_RETRIES);
 }
