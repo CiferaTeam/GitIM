@@ -27,6 +27,23 @@ pub enum Request {
     },
     #[serde(rename = "status")]
     Status,
+    #[serde(rename = "register_user")]
+    RegisterUser {
+        handler: String,
+        display_name: String,
+        #[serde(default = "default_role")]
+        role: String,
+        #[serde(default = "default_introduction")]
+        introduction: String,
+    },
+}
+
+fn default_role() -> String {
+    "member".to_string()
+}
+
+fn default_introduction() -> String {
+    "GitIM user".to_string()
 }
 
 #[derive(Debug, Serialize)]
