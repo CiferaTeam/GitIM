@@ -27,6 +27,8 @@ pub enum Request {
     },
     #[serde(rename = "status")]
     Status,
+    #[serde(rename = "stop")]
+    Stop,
     #[serde(rename = "register_user")]
     RegisterUser {
         handler: String,

@@ -27,6 +27,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::RegisterUser { handler, display_name, role, introduction } => {
             handle_register_user(state, handler, display_name, role, introduction).await
         }
+        Request::Stop => handle_stop(state).await,
     }
 }
 
@@ -189,6 +190,66 @@ async fn handle_read(
     }))
 }
 
+async fn handle_register_user(
+    state: SharedState,
+    handler: String,
+    display_name: String,
+    role: String,
+    introduction: String,
+) -> Response {
+    // Validate handler format
+    if let Err(e) = Handler::new(&handler) {
+        return Response::error(format!("invalid handler: {}", e));
+    }
+
+    let meta_path = state.repo_root.join("users").join(format!("{}.meta.json", handler));
+
+    // If already exists, return success with exists=true
+    if meta_path.exists() {
+        return Response::success(serde_json::json!({
+            "handler": handler,
+            "exists": true
+        }));
+    }
+
+    // Create meta file
+    let meta = serde_json::json!({
+        "display_name": display_name,
+        "role": role,
+        "introduction": introduction
+    });
+    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+
+    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
+        return Response::error(format!("failed to write user meta: {}", e));
+    }
+
+    // Add to users list
+    {
+        let mut users = state.users.write().await;
+        if !users.contains(&handler) {
+            users.push(handler.clone());
+            users.sort();
+        }
+    }
+
+    // Git add + commit (best effort)
+    let repo = &state.repo_root;
+    let _ = std::process::Command::new("git")
+        .args(["add", &format!("users/{}.meta.json", handler)])
+        .current_dir(repo)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", &format!("feat: register user @{}", handler)])
+        .current_dir(repo)
+        .output();
+
+    Response::success(serde_json::json!({
+        "handler": handler,
+        "exists": false
+    }))
+}
+
 async fn handle_list_channels(state: SharedState) -> Response {
     let ch_dir = state.repo_root.join("channels");
     let mut channels = Vec::new();
@@ -271,62 +332,16 @@ async fn handle_get_thread(
     }))
 }
 
-async fn handle_register_user(
-    state: SharedState,
-    handler: String,
-    display_name: String,
-    role: String,
-    introduction: String,
-) -> Response {
-    // Validate handler format
-    if let Err(e) = Handler::new(&handler) {
-        return Response::error(format!("invalid handler: {}", e));
-    }
+async fn handle_stop(state: SharedState) -> Response {
+    let lifecycle = crate::lifecycle::DaemonLifecycle::new(&state.repo_root);
+    lifecycle.cleanup();
+    tracing::info!("daemon stopping via API request");
 
-    let meta_path = state.repo_root.join("users").join(format!("{}.meta.json", handler));
-
-    // If already exists, return success with exists=true
-    if meta_path.exists() {
-        return Response::success(serde_json::json!({
-            "handler": handler,
-            "exists": true
-        }));
-    }
-
-    // Create meta file
-    let meta = serde_json::json!({
-        "display_name": display_name,
-        "role": role,
-        "introduction": introduction
+    // Spawn a delayed exit so the response can be sent first
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::process::exit(0);
     });
-    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
 
-    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
-        return Response::error(format!("failed to write user meta: {}", e));
-    }
-
-    // Add to users list
-    {
-        let mut users = state.users.write().await;
-        if !users.contains(&handler) {
-            users.push(handler.clone());
-            users.sort();
-        }
-    }
-
-    // Git add + commit (best effort, sync loop will push)
-    let repo = &state.repo_root;
-    let _ = std::process::Command::new("git")
-        .args(["add", &format!("users/{}.meta.json", handler)])
-        .current_dir(repo)
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["commit", "-m", &format!("feat: register user @{}", handler)])
-        .current_dir(repo)
-        .output();
-
-    Response::success(serde_json::json!({
-        "handler": handler,
-        "exists": false
-    }))
+    Response::success(serde_json::json!({ "status": "stopping" }))
 }
