@@ -24,12 +24,10 @@ pub async fn start_unix_socket(
 
             // Request-response mode until subscribe
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                let is_subscribe = matches!(
-                    serde_json::from_str::<Request>(&line),
-                    Ok(Request::Subscribe)
-                );
+                let parsed = serde_json::from_str::<Request>(&line);
+                let is_subscribe = matches!(&parsed, Ok(Request::Subscribe));
 
-                let response = match serde_json::from_str::<Request>(&line) {
+                let response = match parsed {
                     Ok(req) => crate::handlers::handle_request(req, state.clone()).await,
                     Err(e) => Response::error(format!("invalid request: {}", e)),
                 };
@@ -90,6 +88,10 @@ async fn handle_subscribed(
                         event_json.push('\n');
                         if let Err(e) = writer.write_all(event_json.as_bytes()).await {
                             error!("push write error: {}", e);
+                            return;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("push flush error: {}", e);
                             return;
                         }
                     }
