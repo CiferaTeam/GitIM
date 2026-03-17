@@ -88,6 +88,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gitim_sync::watcher::FileEvent::ThreadModified(name) => {
                     tracing::debug!("thread modified: {}", name);
                     watcher_state.thread_cache.write().await.remove(&name);
+                    let kind = if name.contains("--") { "dm" } else { "channel" };
+                    let _ = watcher_state.event_tx.send(gitim_daemon::api::Event {
+                        event: "thread_changed".to_string(),
+                        channel: name,
+                        kind: kind.to_string(),
+                    });
                 }
                 gitim_sync::watcher::FileEvent::MetaModified(name) => {
                     tracing::debug!("meta modified: {}", name);
