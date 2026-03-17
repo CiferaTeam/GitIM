@@ -1,6 +1,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
+use crate::mention::extract_mentions;
 use crate::types::{Handler, Message, ThreadFile};
 
 #[derive(Error, Debug)]
@@ -32,6 +33,7 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
         if let Some(caps) = MSG_RE.captures(line) {
             if let (Some(body), Some(msg)) = (current_body.take(), messages.last_mut()) {
                 msg.body = body;
+                msg.mentions = extract_mentions(&msg.body);
             }
 
             let line_number: u64 = caps[1].parse().unwrap();
@@ -49,6 +51,7 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
                 author,
                 timestamp,
                 body: String::new(),
+                mentions: Vec::new(),
             });
             current_body = Some(body_first_line);
             first_content_line = false;
@@ -71,6 +74,7 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
 
     if let (Some(body), Some(msg)) = (current_body, messages.last_mut()) {
         msg.body = body;
+        msg.mentions = extract_mentions(&msg.body);
     }
 
     Ok(ThreadFile { messages })

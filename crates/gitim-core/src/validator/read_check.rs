@@ -7,6 +7,7 @@ pub enum IntegrityIssue {
     UnknownAuthor(String),
     InvalidPointTo(u64),
     EmptyBody(u64),
+    UnknownMention { handler: String, line_number: u64 },
     ParseError(String),
 }
 
@@ -43,6 +44,15 @@ pub fn check_thread_integrity(input: &str, registered_users: &[&str]) -> Vec<Int
 
         if msg.body.trim().is_empty() {
             issues.push(IntegrityIssue::EmptyBody(msg.line_number));
+        }
+
+        for mention in &msg.mentions {
+            if !user_set.contains(mention.as_str()) {
+                issues.push(IntegrityIssue::UnknownMention {
+                    handler: mention.to_string(),
+                    line_number: msg.line_number,
+                });
+            }
         }
 
         known_lines.insert(msg.line_number);
