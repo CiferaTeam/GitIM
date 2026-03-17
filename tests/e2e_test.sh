@@ -1,66 +1,112 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-TESTDIR=$(mktemp -d)
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DAEMON_BIN="$SCRIPT_DIR/target/debug/gitim-daemon"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DAEMON_BIN="$REPO_ROOT/target/debug/gitim-daemon"
 
-echo "=== E2E Test ==="
-echo "Test dir: $TESTDIR"
-echo "Daemon: $DAEMON_BIN"
+# Build daemon
+echo "=== Building daemon ==="
+cargo build --bin gitim-daemon --manifest-path "$REPO_ROOT/Cargo.toml"
 
-cd "$TESTDIR"
+# Create temp repo
+TMPDIR=$(mktemp -d)
+trap 'kill $(cat "$TMPDIR/.gitim/run/gitim.pid" 2>/dev/null) 2>/dev/null || true; rm -rf "$TMPDIR"' EXIT
 
-# Initialize git repo
+cd "$TMPDIR"
 git init
 git config user.email "test@test.com"
 git config user.name "Test"
 
-# Create GitIM structure
+# Setup GitIM structure
 mkdir -p .gitim users channels
-echo 'version: 1' > .gitim/config.yaml
-echo '.gitim/run/' > .gitignore
-echo '{"display_name":"Tester","role":"dev","introduction":"hi"}' > users/tester.meta.json
-echo '{"display_name":"General","created_by":"tester","created_at":"20250316T120000Z","introduction":"General channel"}' > channels/general.meta.json
+echo "version: 1" > .gitim/config.yaml
 
-git add -A && git commit -m "init"
+# Write me.json (simulating onboard)
+cat > .gitim/me.json <<'MEJSON'
+{"handler":"tester","endpoint":"github","inferred_from":"test","inferred_at":"20260317T120000Z"}
+MEJSON
+
+# Create user
+cat > users/tester.meta.json <<'USERMETA'
+{"display_name":"Tester","role":"dev","introduction":"hi"}
+USERMETA
+
+# Create channel
+cat > channels/general.meta.json <<'CHANMETA'
+{"display_name":"General","created_by":"tester","created_at":"20260317T120000Z","introduction":"test channel"}
+CHANMETA
+touch channels/general.thread
+
+# .gitignore
+echo -e ".gitim/run/\n.gitim/me.json" > .gitignore
+
+git add -A && git commit -m "init" --quiet
 
 # Start daemon
-echo "Starting daemon..."
-"$DAEMON_BIN" &
+echo "=== Starting daemon ==="
+PATH="$(dirname "$DAEMON_BIN"):$PATH"
+gitim-daemon &
 DAEMON_PID=$!
-sleep 2
 
-# Check daemon is running
-if ! kill -0 $DAEMON_PID 2>/dev/null; then
-    echo "FAIL: daemon did not start"
-    rm -rf "$TESTDIR"
-    exit 1
-fi
-echo "Daemon running (pid: $DAEMON_PID)"
+# Wait for socket
+SOCK="$TMPDIR/.gitim/run/gitim.sock"
+for i in $(seq 1 50); do
+  [ -S "$SOCK" ] && break
+  sleep 0.1
+done
+[ -S "$SOCK" ] || { echo "FAIL: daemon socket not ready"; exit 1; }
 
-# Test status via socket
-echo '{"method":"status"}' | socat - UNIX-CONNECT:"$TESTDIR/.gitim/run/gitim.sock" | grep -q '"ok":true' && echo "PASS: status" || echo "FAIL: status"
+echo "=== Running tests ==="
 
-# Test send
-SEND_RESULT=$(echo '{"method":"send","channel":"general","body":"hello world","author":"tester"}' | socat - UNIX-CONNECT:"$TESTDIR/.gitim/run/gitim.sock")
-echo "$SEND_RESULT" | grep -q '"ok":true' && echo "PASS: send" || echo "FAIL: send ($SEND_RESULT)"
+# Test: status
+RES=$(echo '{"method":"status"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: status"; exit 1; }
+echo "PASS: status"
 
-# Test read
-READ_RESULT=$(echo '{"method":"read","channel":"general"}' | socat - UNIX-CONNECT:"$TESTDIR/.gitim/run/gitim.sock")
-echo "$READ_RESULT" | grep -q 'hello world' && echo "PASS: read" || echo "FAIL: read ($READ_RESULT)"
+# Test: send WITHOUT author (should use me.json identity)
+RES=$(echo '{"method":"send","channel":"general","body":"hello no author"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: send without author ($RES)"; exit 1; }
+echo "PASS: send without author"
 
-# Test list channels
-CH_RESULT=$(echo '{"method":"channels"}' | socat - UNIX-CONNECT:"$TESTDIR/.gitim/run/gitim.sock")
-echo "$CH_RESULT" | grep -q 'general' && echo "PASS: channels" || echo "FAIL: channels ($CH_RESULT)"
+# Test: send WITH explicit author
+RES=$(echo '{"method":"send","channel":"general","body":"hello with author","author":"tester"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: send with author ($RES)"; exit 1; }
+echo "PASS: send with author"
 
-# Test list users
-USR_RESULT=$(echo '{"method":"users"}' | socat - UNIX-CONNECT:"$TESTDIR/.gitim/run/gitim.sock")
-echo "$USR_RESULT" | grep -q 'tester' && echo "PASS: users" || echo "FAIL: users ($USR_RESULT)"
+# Test: read — verify both messages have @tester
+RES=$(echo '{"method":"read","channel":"general"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: read ($RES)"; exit 1; }
+echo "$RES" | grep -q '"author":"tester"' || { echo "FAIL: read author check ($RES)"; exit 1; }
+echo "PASS: read with identity"
 
-# Cleanup
-kill $DAEMON_PID 2>/dev/null || true
-wait $DAEMON_PID 2>/dev/null || true
-rm -rf "$TESTDIR"
+# Test: list channels
+RES=$(echo '{"method":"channels"}' | nc -U "$SOCK")
+echo "$RES" | grep -q 'general' || { echo "FAIL: channels ($RES)"; exit 1; }
+echo "PASS: channels"
 
-echo "=== E2E Test Complete ==="
+# Test: list users
+RES=$(echo '{"method":"users"}' | nc -U "$SOCK")
+echo "$RES" | grep -q 'tester' || { echo "FAIL: users ($RES)"; exit 1; }
+echo "PASS: users"
+
+# Test: register_user (new user)
+RES=$(echo '{"method":"register_user","handler":"newbie","display_name":"New User"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: register_user ($RES)"; exit 1; }
+[ -f "$TMPDIR/users/newbie.meta.json" ] || { echo "FAIL: newbie meta not created"; exit 1; }
+echo "PASS: register_user"
+
+# Test: register_user (existing user, should succeed with exists=true)
+RES=$(echo '{"method":"register_user","handler":"tester","display_name":"Tester"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"exists":true' || { echo "FAIL: register_user existing ($RES)"; exit 1; }
+echo "PASS: register_user existing"
+
+# Test: stop
+RES=$(echo '{"method":"stop"}' | nc -U "$SOCK")
+echo "$RES" | grep -q '"stopping"' || { echo "FAIL: stop ($RES)"; exit 1; }
+sleep 0.5
+kill -0 $DAEMON_PID 2>/dev/null && { echo "FAIL: daemon still running after stop"; exit 1; }
+echo "PASS: stop"
+
+echo ""
+echo "=== All tests passed ==="
