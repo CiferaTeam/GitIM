@@ -1,6 +1,7 @@
 use serde_json;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 
 use gitim_daemon::api::{Event, Request};
@@ -120,4 +121,100 @@ async fn handle_send_broadcasts_dm_event() {
     let event = rx.try_recv().unwrap();
     assert_eq!(event.event, "thread_changed");
     assert_eq!(event.kind, "dm");
+}
+
+#[tokio::test]
+async fn unix_socket_subscribe_receives_push_events() {
+    let (_tmp, state) = setup_test_repo().await;
+    let socket_path = _tmp.path().join("test.sock");
+
+    // Start socket server
+    let server_state = state.clone();
+    let server_path = socket_path.clone();
+    tokio::spawn(async move {
+        gitim_daemon::server::start_unix_socket(&server_path, server_state)
+            .await
+            .unwrap();
+    });
+
+    // Wait for socket to be ready
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Connect subscriber client
+    let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Send subscribe request
+    writer.write_all(b"{\"method\":\"subscribe\"}\n").await.unwrap();
+
+    // Read subscribe response
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["data"]["subscribed"], true);
+    line.clear();
+
+    // Send a message via another connection to trigger broadcast
+    let stream2 = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+    let (reader2, mut writer2) = stream2.into_split();
+    let mut reader2 = BufReader::new(reader2);
+    writer2.write_all(b"{\"method\":\"send\",\"channel\":\"general\",\"body\":\"hello\",\"reply_to\":null,\"author\":\"alice\"}\n").await.unwrap();
+    let mut line2 = String::new();
+    reader2.read_line(&mut line2).await.unwrap(); // consume send response
+
+    // Subscriber should receive push event
+    let event_line = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            let mut l = String::new();
+            reader.read_line(&mut l).await.unwrap();
+            l
+        }
+    ).await.unwrap();
+
+    let event: serde_json::Value = serde_json::from_str(&event_line).unwrap();
+    assert_eq!(event["event"], "thread_changed");
+    assert_eq!(event["channel"], "general");
+    assert_eq!(event["kind"], "channel");
+}
+
+#[tokio::test]
+async fn unix_socket_without_subscribe_no_push() {
+    let (_tmp, state) = setup_test_repo().await;
+    let socket_path = _tmp.path().join("test2.sock");
+
+    let server_state = state.clone();
+    let server_path = socket_path.clone();
+    tokio::spawn(async move {
+        gitim_daemon::server::start_unix_socket(&server_path, server_state)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Connect WITHOUT subscribing, just send a message
+    let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    writer.write_all(b"{\"method\":\"send\",\"channel\":\"general\",\"body\":\"hello\",\"reply_to\":null,\"author\":\"alice\"}\n").await.unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["ok"], true);
+
+    // Try to read more - should timeout (no push events)
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        async {
+            let mut l = String::new();
+            reader.read_line(&mut l).await.unwrap();
+            l
+        }
+    ).await;
+
+    assert!(result.is_err(), "should timeout - no push events without subscribe");
 }
