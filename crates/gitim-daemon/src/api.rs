@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize)]
+pub struct Event {
+    pub event: String,
+    pub channel: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method")]
 pub enum Request {
@@ -27,6 +34,8 @@ pub enum Request {
     },
     #[serde(rename = "status")]
     Status,
+    #[serde(rename = "subscribe")]
+    Subscribe,
 }
 
 #[derive(Debug, Serialize)]

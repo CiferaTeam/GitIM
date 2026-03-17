@@ -1,13 +1,7 @@
-mod api;
-mod error;
-mod handlers;
-mod http;
-mod lifecycle;
-mod server;
-mod state;
-
 use std::sync::Arc;
 use tracing::info;
+
+use gitim_daemon::{http, lifecycle, server, state};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
