@@ -19,3 +19,7 @@ hyper = "1"
 hyper-util = "0.1"
 tokio-stream = "0.1"
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serde_yaml = "0.9"
