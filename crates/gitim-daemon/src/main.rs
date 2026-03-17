@@ -1,3 +1,6 @@
+#![deny(warnings)]
+#![allow(dead_code)]
+
 mod api;
 mod error;
 mod handlers;

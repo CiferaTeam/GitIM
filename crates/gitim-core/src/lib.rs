@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 pub mod types;
 pub mod parser;
 pub mod validator;

@@ -1,4 +1,4 @@
-use gitim_core::validator::compliance::{validate_append, AppendValidation};
+use gitim_core::validator::compliance::validate_append;
 
 fn make_existing() -> &'static str {
     "[L000001][P000000][@nexus][20250316T120000Z] first message\n[L000002][P000001][@lewis][20250316T120500Z] reply\n"

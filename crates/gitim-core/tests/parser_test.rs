@@ -1,5 +1,4 @@
 use gitim_core::parser::parse_thread;
-use gitim_core::types::Message;
 
 #[test]
 fn test_parse_single_message() {

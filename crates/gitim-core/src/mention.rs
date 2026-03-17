@@ -6,6 +6,7 @@ static MENTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>").unwrap()
 });
 
+/// 从消息 body 中提取协议级 mention，去重，按首次出现顺序返回。
 pub fn extract_mentions(body: &str) -> Vec<Handler> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
