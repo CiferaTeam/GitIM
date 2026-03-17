@@ -107,8 +107,8 @@ where
             }
         };
 
-        // Try rebase
-        match repo.pull_rebase() {
+        // Rebase onto fetched origin (no redundant fetch)
+        match repo.rebase_onto_origin() {
             Ok(()) => {
                 // Rebase succeeded (no .thread conflicts), push again
                 match repo.push() {

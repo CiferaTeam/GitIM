@@ -41,7 +41,10 @@ pub fn resolve_thread_conflicts(
     let mut total_messages: usize = 0;
 
     // Step 3: For each file with local additions, renumber and append
-    for (rel_path, local_content) in local_additions {
+    let mut sorted_files: Vec<_> = local_additions.keys().collect();
+    sorted_files.sort();
+    for rel_path in sorted_files {
+        let local_content = &local_additions[rel_path];
         let abs_path = repo.root().join(rel_path);
 
         // Read the current (remote) file content
@@ -100,6 +103,9 @@ pub fn resolve_thread_conflicts(
 
         // Append renumbered content to the file
         let mut final_content = remote_content;
+        if !final_content.is_empty() && !final_content.ends_with('\n') {
+            final_content.push('\n');
+        }
         final_content.push_str(&renumbered);
         std::fs::write(&abs_path, &final_content)?;
 

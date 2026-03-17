@@ -143,11 +143,20 @@ impl GitRepo {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut result: HashMap<PathBuf, String> = HashMap::new();
         let mut current_path: Option<PathBuf> = None;
+        let mut prev_was_minus_header = false;
 
         for line in stdout.lines() {
+            if line.starts_with("--- a/") || line == "--- /dev/null" {
+                prev_was_minus_header = true;
+                continue;
+            }
             if let Some(path_str) = line.strip_prefix("+++ b/") {
-                current_path = Some(PathBuf::from(path_str));
+                if prev_was_minus_header {
+                    current_path = Some(PathBuf::from(path_str));
+                }
+                prev_was_minus_header = false;
             } else if line.starts_with("+") && !line.starts_with("+++") {
+                prev_was_minus_header = false;
                 if let Some(ref path) = current_path {
                     let added_line = &line[1..]; // strip leading '+'
                     let entry = result.entry(path.clone()).or_default();
@@ -156,10 +165,25 @@ impl GitRepo {
                     }
                     entry.push_str(added_line);
                 }
+            } else {
+                prev_was_minus_header = false;
             }
         }
 
         Ok(result)
+    }
+
+    pub fn rebase_onto_origin(&self) -> Result<(), GitError> {
+        let output = Command::new("git")
+            .args(["rebase", "origin/main"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn rebase_abort(&self) -> Result<(), GitError> {
