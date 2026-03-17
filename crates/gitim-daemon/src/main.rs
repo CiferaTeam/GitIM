@@ -42,10 +42,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Read identity from .gitim/me.json (written by CLI onboard)
+    let me_path = repo_root.join(".gitim").join("me.json");
+    let current_user: Option<String> = if me_path.exists() {
+        let me_content = std::fs::read_to_string(&me_path)?;
+        let me_json: serde_json::Value = serde_json::from_str(&me_content)?;
+        me_json.get("handler").and_then(|v| v.as_str()).map(|s| s.to_string())
+    } else {
+        tracing::warn!("no .gitim/me.json found, running without identity");
+        None
+    };
+
+    if let Some(ref user) = current_user {
+        tracing::info!("daemon identity: @{}", user);
+    }
+
     let debug_http = config.daemon.debug_http;
     let debug_port = config.daemon.debug_port;
 
-    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config));
+    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config, current_user));
     {
         let mut u = app_state.users.write().await;
         *u = users;

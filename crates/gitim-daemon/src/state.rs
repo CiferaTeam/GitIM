@@ -11,15 +11,17 @@ pub struct AppState {
     pub config: Config,
     pub thread_cache: RwLock<HashMap<String, ThreadFile>>,
     pub users: RwLock<Vec<String>>,
+    pub current_user: Option<String>,
 }
 
 impl AppState {
-    pub fn new(repo_root: PathBuf, config: Config) -> Self {
+    pub fn new(repo_root: PathBuf, config: Config, current_user: Option<String>) -> Self {
         Self {
             repo_root,
             config,
             thread_cache: RwLock::new(HashMap::new()),
             users: RwLock::new(Vec::new()),
+            current_user,
         }
     }
 }
