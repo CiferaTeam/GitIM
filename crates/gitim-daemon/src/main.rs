@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
 
-use gitim_daemon::{http, lifecycle, server, state};
+use gitim_daemon::{api, http, lifecycle, server, state};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debug_http = config.daemon.debug_http;
     let debug_port = config.daemon.debug_port;
 
-    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config));
+    let (event_tx, _) = broadcast::channel::<api::Event>(256);
+    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config, event_tx));
     {
         let mut u = app_state.users.write().await;
         *u = users;
