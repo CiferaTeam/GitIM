@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { initRepo } from './commands/init.js';
 import { statusCommand } from './commands/status.js';
 import { sendCommand } from './commands/send.js';
 import { readCommand } from './commands/read.js';
 import { channelsCommand } from './commands/channels.js';
 import { usersCommand } from './commands/users.js';
 import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
+import { onboardCommand } from './commands/onboard.js';
+import { stopCommand } from './commands/stop.js';
 
 const program = new Command();
 
@@ -16,9 +17,14 @@ program
   .version('0.1.0');
 
 program
-  .command('init')
-  .description('Initialize a GitIM repository')
-  .action(() => initRepo());
+  .command('onboard [repo_name] [org]')
+  .description('加入或创建 GitIM 仓库')
+  .option('-e, --endpoint <type>', 'endpoint 类型: github 或 gitea', 'github')
+  .option('-u, --url <url>', 'Gitea 服务地址')
+  .option('--refresh', '重新推断身份')
+  .action(async (repoName, org, options) => {
+    await onboardCommand(repoName, org, options);
+  });
 
 program
   .command('status')
@@ -28,7 +34,7 @@ program
 program
   .command('send <channel> <body>')
   .description('Send a message to a channel')
-  .requiredOption('-a, --author <handler>', 'Author handler')
+  .option('-a, --author <handler>', '作者 handler（可选，默认使用 onboard 身份）')
   .option('-r, --reply-to <line>', 'Reply to line number')
   .action((channel, body, options) => sendCommand(channel, body, options));
 
@@ -49,17 +55,24 @@ program
   .description('List users')
   .action(() => usersCommand());
 
+program
+  .command('stop')
+  .description('停止当前仓库的 daemon')
+  .action(async () => {
+    await stopCommand();
+  });
+
 const dm = program.command('dm').description('Direct messages');
 
 dm.command('send <handler> <body>')
   .description('Send a DM')
-  .requiredOption('-a, --author <handler>', 'Your handler')
+  .option('-a, --author <handler>', '作者 handler（可选，默认使用 onboard 身份）')
   .option('-r, --reply-to <line>', 'Reply to line number')
   .action((handler, body, options) => dmSendCommand(handler, body, options));
 
 dm.command('read <handler>')
   .description('Read DM conversation')
-  .requiredOption('-a, --author <handler>', 'Your handler')
+  .option('-a, --author <handler>', '作者 handler（可选，默认使用 onboard 身份）')
   .option('-l, --limit <n>', 'Limit messages')
   .option('-s, --since <line>', 'Since line number')
   .action((handler, options) => dmReadCommand(handler, options));
