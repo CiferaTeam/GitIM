@@ -28,12 +28,12 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            sync_interval: 30,
+            sync_interval: 1,
             debug_http: false,
             debug_port: 3000,
         }
     }
 }
 
-fn default_sync_interval() -> u32 { 30 }
+fn default_sync_interval() -> u32 { 1 }
 fn default_debug_port() -> u16 { 3000 }
