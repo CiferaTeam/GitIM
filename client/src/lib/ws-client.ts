@@ -18,6 +18,7 @@ export class WsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private _connected = false;
+  private disposed = false;
   onConnectionChange?: (connected: boolean) => void;
 
   constructor(url: string) {
@@ -27,12 +28,12 @@ export class WsClient {
   get connected() { return this._connected; }
 
   connect() {
-    if (this.ws) return;
+    if (this.ws || this.disposed) return;
     this.ws = new WebSocket(this.url);
 
     this.ws.onopen = () => {
       this._connected = true;
-      this.reconnectDelay = 1000; // 连接成功后重置退避
+      this.reconnectDelay = 1000;
       this.onConnectionChange?.(true);
     };
 
@@ -40,7 +41,7 @@ export class WsClient {
       this._connected = false;
       this.ws = null;
       this.onConnectionChange?.(false);
-      // 指数退避重连：1s → 2s → 4s → ... → 最大 30s
+      if (this.disposed) return; // disconnect() 后不再重连
       const delay = this.reconnectDelay;
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
       this.reconnectTimer = setTimeout(() => this.connect(), delay);
@@ -67,6 +68,7 @@ export class WsClient {
   }
 
   disconnect() {
+    this.disposed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
     this.ws = null;

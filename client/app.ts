@@ -345,7 +345,7 @@ async function start(): Promise<void> {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: { server: httpServer },
+        hmr: { port: 24678 },  // HMR 独立端口，不与 /ws 冲突
       },
       appType: "spa",
     });
