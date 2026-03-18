@@ -1,0 +1,462 @@
+/* GitIM WebUI 深色主题 */
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --text-primary: #e0e0e0;
+  --text-secondary: #a0a0a0;
+  --text-muted: #666;
+  --accent: #4fc3f7;
+  --border: #2a2a4a;
+  --msg-hover: #1e1e3a;
+  --reply-bg: #252545;
+  --human-border: #4fc3f7;
+  --ai-border: #7c4dff;
+  --success: #66bb6a;
+  --error: #ef5350;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ===== 顶栏 ===== */
+#header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: 48px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.header-left h1 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.header-center {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.connected { background: var(--success); }
+.status-dot.disconnected { background: var(--error); }
+
+/* ===== 主体布局 ===== */
+#main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ===== 侧边栏 ===== */
+#sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.sidebar-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  padding: 8px 16px 4px;
+}
+
+.sidebar-section ul {
+  list-style: none;
+}
+
+.sidebar-section li {
+  padding: 6px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-secondary);
+  transition: background 0.15s;
+}
+
+.sidebar-section li:hover {
+  background: var(--bg-tertiary);
+}
+
+.sidebar-section li.active {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sidebar-section li .unread-badge {
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 8px;
+  font-weight: 700;
+}
+
+.user-online {
+  color: var(--success);
+  margin-right: 4px;
+  font-size: 10px;
+}
+
+/* ===== 内容区 ===== */
+#content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ===== 消息列表 ===== */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.message {
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 2px;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.message:hover {
+  background: var(--msg-hover);
+}
+
+.message:hover .msg-actions {
+  opacity: 1;
+}
+
+.msg-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.msg-author {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.msg-time {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.msg-body {
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 回复引用块 */
+.msg-reply-ref {
+  border-left: 3px solid var(--text-muted);
+  padding: 2px 8px;
+  margin-bottom: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--reply-bg);
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 500px;
+}
+
+.msg-reply-ref:hover {
+  color: var(--text-primary);
+}
+
+/* 消息操作按钮 */
+.msg-actions {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  opacity: 0;
+  display: flex;
+  gap: 4px;
+  transition: opacity 0.15s;
+}
+
+.msg-actions button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.msg-actions button:hover {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+/* ===== 输入区域 ===== */
+#input-area {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  position: relative;
+}
+
+#reply-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--reply-bg);
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+#reply-indicator.hidden { display: none; }
+
+#reply-cancel {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+#reply-cancel:hover {
+  color: var(--text-primary);
+}
+
+#input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+#msg-input {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  min-height: 38px;
+  max-height: 120px;
+  outline: none;
+}
+
+#msg-input:focus {
+  border-color: var(--accent);
+}
+
+#msg-input::placeholder {
+  color: var(--text-muted);
+}
+
+#send-btn {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#send-btn:hover {
+  opacity: 0.9;
+}
+
+#send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* @提及下拉 */
+#mention-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+  min-width: 150px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+}
+
+#mention-popup.hidden { display: none; }
+
+.mention-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.mention-item:hover,
+.mention-item.active {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+}
+
+/* ===== 线程面板 ===== */
+#thread-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 360px;
+  height: 100vh;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s;
+}
+
+#thread-panel.hidden {
+  display: none;
+}
+
+.thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+#thread-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+#thread-close:hover {
+  color: var(--text-primary);
+}
+
+#thread-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.thread-msg {
+  padding: 8px;
+  margin-bottom: 8px;
+  border-left: 3px solid var(--border);
+  border-radius: 0 4px 4px 0;
+}
+
+.thread-msg .msg-author {
+  font-size: 13px;
+}
+
+.thread-msg .msg-time {
+  font-size: 11px;
+}
+
+.thread-msg .msg-body {
+  font-size: 13px;
+}
+
+.thread-msg.root {
+  border-left-color: var(--accent);
+  background: rgba(79, 195, 247, 0.05);
+}
+
+.thread-msg.reply {
+  margin-left: 16px;
+  border-left-color: var(--text-muted);
+}
+
+/* ===== 滚动条 ===== */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ===== 空状态 ===== */
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 15px;
+}
