@@ -3,10 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "tsx app.ts",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "server": "tsx server.ts"
+    "start": "NODE_ENV=production tsx app.ts"
   },
   "dependencies": {
     "react": "^19.0.0",
