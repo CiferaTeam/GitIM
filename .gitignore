@@ -2,3 +2,4 @@
 .worktrees/
 target/
 .vscode/
+node_modules/
