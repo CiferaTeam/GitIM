@@ -46,6 +46,7 @@ interface DaemonResponse {
 
 /** FIFO 队列中的待处理请求 */
 interface PendingRequest {
+  internalId: number;
   clientId: number;
   ws: WebSocket;
   timer: ReturnType<typeof setTimeout>;
@@ -97,6 +98,7 @@ let subscribed = false;
 
 /** FIFO 队列：daemon 不回显 id，按顺序匹配 */
 const pendingQueue: PendingRequest[] = [];
+let nextInternalId = 1;
 
 /** 所有活跃的 WebSocket 客户端 */
 const wsClients = new Set<WebSocket>();
@@ -204,7 +206,11 @@ function broadcastEvent(event: PushEvent): void {
   const msg = JSON.stringify(event);
   for (const ws of wsClients) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
+      try {
+        ws.send(msg);
+      } catch (err) {
+        console.error("[ws] 广播失败:", err instanceof Error ? err.message : err);
+      }
     }
   }
 }
@@ -289,15 +295,16 @@ async function handleClientMessage(
   }
 
   // 入队等待响应
+  const internalId = nextInternalId++;
   const timer = setTimeout(() => {
-    const idx = pendingQueue.findIndex((p) => p.clientId === id && p.ws === ws);
+    const idx = pendingQueue.findIndex((p) => p.internalId === internalId);
     if (idx !== -1) {
       pendingQueue.splice(idx, 1);
       safeSend(ws, { id, ok: false, error: "请求超时" });
     }
   }, REQUEST_TIMEOUT_MS);
 
-  pendingQueue.push({ clientId: id, ws, timer });
+  pendingQueue.push({ internalId, clientId: id, ws, timer });
 }
 
 /** 安全发送 JSON 到 WebSocket */

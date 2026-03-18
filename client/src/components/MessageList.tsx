@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useMemo } from 'react';
 import { useStore } from '../hooks/useStore.js';
 import { MessageItem } from './MessageItem.js';
 import type { Message } from '../lib/types.js';
@@ -30,10 +30,10 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
   }, [currentChannel]);
 
   // 构建行号到消息的映射，用于查找回复目标
-  const msgByLine = new Map<number, Message>();
-  for (const m of messages) {
-    msgByLine.set(m.line_number, m);
-  }
+  const msgByLine = useMemo(
+    () => new Map(messages.map((m) => [m.line_number, m])),
+    [messages],
+  );
 
   if (!currentChannel) {
     return (

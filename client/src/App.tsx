@@ -82,14 +82,6 @@ export function App() {
     [messages, setThreadRoot, setThreadMessages],
   );
 
-  // 从线程中回复
-  const handleReplyInThread = useCallback(
-    (msg: Message) => {
-      setReplyTo(msg);
-    },
-    [setReplyTo],
-  );
-
   return (
     <div className="app-layout">
       <Header />
@@ -99,7 +91,7 @@ export function App() {
           <MessageList onReply={handleReply} onShowThread={handleShowThread} />
           <InputArea onSend={handleSend} />
         </div>
-        <ThreadPanel onReplyInThread={handleReplyInThread} />
+        <ThreadPanel onReplyInThread={handleReply} />
       </div>
     </div>
   );

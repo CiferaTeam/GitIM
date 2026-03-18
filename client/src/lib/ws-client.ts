@@ -16,6 +16,7 @@ export class WsClient {
   }>();
   private pushHandlers: PushHandler[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelay = 1000;
   private _connected = false;
   onConnectionChange?: (connected: boolean) => void;
 
@@ -31,6 +32,7 @@ export class WsClient {
 
     this.ws.onopen = () => {
       this._connected = true;
+      this.reconnectDelay = 1000; // 连接成功后重置退避
       this.onConnectionChange?.(true);
     };
 
@@ -38,8 +40,10 @@ export class WsClient {
       this._connected = false;
       this.ws = null;
       this.onConnectionChange?.(false);
-      // 自动重连
-      this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+      // 指数退避重连：1s → 2s → 4s → ... → 最大 30s
+      const delay = this.reconnectDelay;
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
+      this.reconnectTimer = setTimeout(() => this.connect(), delay);
     };
 
     this.ws.onmessage = (ev) => {

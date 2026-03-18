@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 interface MentionPopupProps {
   users: string[];
@@ -14,6 +14,16 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
     u.toLowerCase().includes(filter.toLowerCase()),
   );
 
+  // 用 ref 追踪最新值，避免 handleKeyDown 频繁重建
+  const filteredRef = useRef(filtered);
+  filteredRef.current = filtered;
+  const activeIndexRef = useRef(activeIndex);
+  activeIndexRef.current = activeIndex;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   // 过滤结果变化时重置选中
   useEffect(() => {
     setActiveIndex(0);
@@ -21,23 +31,25 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      const f = filteredRef.current;
+      const idx = activeIndexRef.current;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setActiveIndex((i) => (i + 1) % filtered.length);
+        setActiveIndex((i) => (i + 1) % f.length);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setActiveIndex((i) => (i - 1 + filtered.length) % filtered.length);
+        setActiveIndex((i) => (i - 1 + f.length) % f.length);
       } else if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault();
-        if (filtered.length > 0) {
-          onSelect(filtered[activeIndex]);
+        if (f.length > 0) {
+          onSelectRef.current(f[idx]);
         }
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
       }
     },
-    [filtered, activeIndex, onSelect, onClose],
+    [],
   );
 
   useEffect(() => {

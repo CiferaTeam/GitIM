@@ -51,7 +51,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     // 检测 @ 触发提及
     const cursorPos = e.target.selectionStart;
     const textBefore = val.slice(0, cursorPos);
-    const atMatch = textBefore.match(/@(\w*)$/);
+    const atMatch = textBefore.match(/@([\w-]*)$/);
 
     if (atMatch) {
       setMentionOpen(true);
