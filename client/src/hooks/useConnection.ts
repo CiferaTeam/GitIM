@@ -58,10 +58,15 @@ export function useConnection() {
             setCurrentUser(meRes.data.handler as string);
           }
 
-          // 获取频道列表
+          // 获取频道列表（daemon 返回 string[]，需要转换为 Channel[]）
           const chRes = await client.request('channels');
           if (chRes.ok && chRes.data) {
-            const channels = (chRes.data.channels as Channel[]) || [];
+            const names = (chRes.data.channels as string[]) || [];
+            const channels: Channel[] = names.map((name) => ({
+              name,
+              kind: name.includes('--') ? 'dm' as const : 'channel' as const,
+              unreadCount: 0,
+            }));
             setChannels(channels);
             // 默认选中第一个频道
             if (channels.length > 0 && !currentChannelRef.current) {
