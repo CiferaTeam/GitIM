@@ -21,7 +21,7 @@ export function App() {
     setThreadMessages,
     messages,
     addPendingMessage,
-    removePendingMessage,
+    markPendingSent,
     markPendingFailed,
   } = useStore();
 
@@ -73,16 +73,16 @@ export function App() {
 
       const res = await request('send', params);
       if (res.ok) {
-        // daemon 接受了，消息将通过 push 事件刷新回来，届时 pending 消息会被替换
-        // 先标记为 sent
-        removePendingMessage(pendingId);
+        // daemon 接受了 — 标记为 sent，记录真实行号
+        // push 事件触发 loadMessages 后，setMessages 会按 line_number 去重移除 pending
+        const lineNumber = (res.data as Record<string, unknown>)?.line_number as number;
+        markPendingSent(pendingId, lineNumber);
       } else {
-        // 发送失败，标记为 failed
         markPendingFailed(pendingId);
       }
       return res;
     },
-    [currentChannel, currentUser, request, addPendingMessage, removePendingMessage, markPendingFailed],
+    [currentChannel, currentUser, request, addPendingMessage, markPendingSent, markPendingFailed],
   );
 
   // 回复消息

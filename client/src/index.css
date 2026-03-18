@@ -253,6 +253,10 @@ body {
   font-style: italic;
 }
 
+.message-sent {
+  opacity: 0.85;
+}
+
 .message-failed {
   opacity: 0.8;
   border-left: 3px solid var(--error);

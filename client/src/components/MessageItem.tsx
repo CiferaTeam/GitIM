@@ -20,12 +20,14 @@ export function MessageItem({
   onReply,
   onShowThread,
 }: MessageItemProps) {
-  const isPending = !!message._pendingId;
+  const isSending = message._status === 'sending';
+  const isSent = message._status === 'sent';
   const isFailed = message._status === 'failed';
+  const isPending = isSending || isSent;
   const statusText = message._status ? STATUS_LABEL[message._status] : null;
 
   return (
-    <div className={`message-item ${isPending ? 'message-pending' : ''} ${isFailed ? 'message-failed' : ''}`}>
+    <div className={`message-item ${isSending ? 'message-pending' : ''} ${isSent ? 'message-sent' : ''} ${isFailed ? 'message-failed' : ''}`}>
       {!isPending && (
         <div className="message-actions">
           <button className="message-action-btn" onClick={() => onReply(message)}>

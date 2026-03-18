@@ -27,6 +27,7 @@ interface Store {
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
   addPendingMessage: (m: Message) => void;
+  markPendingSent: (pendingId: string, lineNumber: number) => void;
   removePendingMessage: (pendingId: string) => void;
   markPendingFailed: (pendingId: string) => void;
 
@@ -71,8 +72,11 @@ export const useStore = create<Store>((set) => ({
   messages: [],
   setMessages: (m) =>
     set((s) => {
-      // 保留 pending 消息（_pendingId 存在的），追加到真实消息后面
-      const pending = s.messages.filter((msg) => msg._pendingId);
+      // 保留尚未匹配到真实消息的 pending 消息
+      const realLineNumbers = new Set(m.map((msg) => msg.line_number));
+      const pending = s.messages.filter(
+        (msg) => msg._pendingId && !realLineNumbers.has(msg.line_number),
+      );
       return { messages: [...m, ...pending] };
     }),
   addMessages: (m) =>
@@ -83,6 +87,14 @@ export const useStore = create<Store>((set) => ({
     }),
   addPendingMessage: (m) =>
     set((s) => ({ messages: [...s.messages, m] })),
+  markPendingSent: (pendingId, lineNumber) =>
+    set((s) => ({
+      messages: s.messages.map((msg) =>
+        msg._pendingId === pendingId
+          ? { ...msg, _status: 'sent' as const, line_number: lineNumber }
+          : msg,
+      ),
+    })),
   removePendingMessage: (pendingId) =>
     set((s) => ({
       messages: s.messages.filter((msg) => msg._pendingId !== pendingId),
