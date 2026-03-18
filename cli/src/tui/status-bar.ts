@@ -13,6 +13,7 @@ export class StatusBar implements Component {
   mode: AppMode = 'normal';
   channel = '';
   replyTarget: number | null = null;
+  error: string | null = null;
 
   invalidate(): void {}
 
@@ -24,14 +25,16 @@ export class StatusBar implements Component {
     const connLabel = this.connected ? chalk.green('●') : chalk.red('●');
 
     let left = ` ${connLabel} @${this.user} | #${this.channel} ${modeLabel}`;
-    if (this.replyTarget) {
+    if (this.error) {
+      left += chalk.red(` ✗ ${this.error}`);
+    } else if (this.replyTarget) {
       left += chalk.dim(` 回复 L${this.replyTarget}`);
     }
 
     const hints = this.mode === 'normal'
       ? 'Ctrl+B:浏览 | Alt+↑↓:切频道 | Ctrl+Q:退出'
       : this.mode === 'browse'
-      ? 'j/k:选择 | r:回复 | Enter:线程 | Esc:返回 | g:跳底'
+      ? 'j/k:选择 | r:回复 | Enter:线程 | Esc:返回 | G:跳底'
       : 'j/k:选择 | r:回复 | Esc:关闭';
 
     const right = ` ${hints} `;

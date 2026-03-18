@@ -38,6 +38,9 @@ export class TuiApp {
   private users: string[] = [];
   private threadOverlay: OverlayHandle | null = null;
   private mentionOverlay: OverlayHandle | null = null;
+  private mentionFilter = '';
+  private loadMessagesInFlight = false;
+  private loadMessagesPending = false;
 
   constructor(options: TuiAppOptions) {
     this.repoRoot = options.repoRoot;
@@ -162,6 +165,38 @@ export class TuiApp {
 
     // 提及弹窗活动时
     if (this.mentionOverlay) {
+      // Esc/Enter/↑↓ 由弹窗处理
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) ||
+          matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+        this.mentionPopup.handleInput(data);
+        this.tui.requestRender();
+        return { consume: true };
+      }
+      // Backspace 更新过滤词
+      if (matchesKey(data, Key.backspace)) {
+        if (this.mentionFilter.length > 0) {
+          this.mentionFilter = this.mentionFilter.slice(0, -1);
+          this.mentionPopup.setFilter(this.mentionFilter);
+        } else {
+          this.closeMention();
+        }
+        this.tui.requestRender();
+        // 不消费，让 editor 也处理 backspace
+        return undefined;
+      }
+      // 普通字符输入 → 更新过滤词，同时让字符进入 editor
+      if (data.length === 1 && data >= ' ') {
+        if (data === ' ') {
+          // 空格关闭弹窗
+          this.closeMention();
+        } else {
+          this.mentionFilter += data;
+          this.mentionPopup.setFilter(this.mentionFilter);
+          this.tui.requestRender();
+        }
+        return undefined; // 让 editor 也收到字符
+      }
+      // 其他键交给弹窗
       this.mentionPopup.handleInput(data);
       this.tui.requestRender();
       return { consume: true };
@@ -236,7 +271,7 @@ export class TuiApp {
       this.tui.requestRender();
       return { consume: true };
     }
-    if (data === 'g') {
+    if (data === 'G') {
       this.messageView.jumpToBottom();
       this.tui.requestRender();
       return { consume: true };
@@ -317,6 +352,7 @@ export class TuiApp {
   }
 
   private async sendMessage(text: string): Promise<void> {
+    this.statusBar.error = null;
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -335,12 +371,17 @@ export class TuiApp {
     }
 
     try {
-      await this.conn.request('send', params);
-      this.editor.setText('');
-      // 立即重新加载消息
-      await this.loadMessages();
-    } catch {
-      // 忽略发送失败
+      const res = await this.conn.request('send', params);
+      if (res.ok) {
+        this.editor.setText('');
+        await this.loadMessages();
+      } else {
+        this.statusBar.error = res.error ?? '发送失败';
+        this.tui.requestRender();
+      }
+    } catch (e: any) {
+      this.statusBar.error = e.message ?? '发送失败';
+      this.tui.requestRender();
     }
   }
 
@@ -371,6 +412,13 @@ export class TuiApp {
     const channel = this.sidebar.currentChannel;
     if (!channel) return;
 
+    // 防止并发请求导致 FIFO 响应错配
+    if (this.loadMessagesInFlight) {
+      this.loadMessagesPending = true;
+      return;
+    }
+
+    this.loadMessagesInFlight = true;
     try {
       const res = await this.conn.request('read', { channel, limit: 50, since: 0 });
       if (res.ok && res.data?.messages) {
@@ -379,6 +427,13 @@ export class TuiApp {
       }
     } catch {
       // 忽略
+    } finally {
+      this.loadMessagesInFlight = false;
+      // 如果有待处理的请求，执行最后一次
+      if (this.loadMessagesPending) {
+        this.loadMessagesPending = false;
+        this.loadMessages();
+      }
     }
   }
 
@@ -428,6 +483,7 @@ export class TuiApp {
   }
 
   private showMention(): void {
+    this.mentionFilter = '';
     this.mentionPopup.setFilter('');
     this.mentionOverlay = this.tui.showOverlay(this.mentionPopup, {
       anchor: 'bottom-left',

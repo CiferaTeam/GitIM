@@ -44,7 +44,9 @@ export class ThreadView implements Component {
     lines.push(truncateToWidth(titleLine, width));
 
     if (this.messages.length === 0) {
-      lines.push(truncateToWidth('│' + chalk.dim(' 无消息').padEnd(innerW) + '│', width));
+      const emptyText = chalk.dim(' 无消息');
+      const emptyPad = Math.max(0, innerW - visibleWidth(emptyText));
+      lines.push(truncateToWidth('│' + emptyText + ' '.repeat(emptyPad) + '│', width));
     } else {
       for (let i = 0; i < this.messages.length; i++) {
         const msg = this.messages[i];
