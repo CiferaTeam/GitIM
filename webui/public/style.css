@@ -134,8 +134,8 @@ body {
   font-weight: 700;
 }
 
-.user-online {
-  color: var(--success);
+.user-status {
+  color: var(--text-muted);
   margin-right: 4px;
   font-size: 10px;
 }
@@ -370,11 +370,14 @@ body {
   flex-direction: column;
   z-index: 100;
   box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
-  transition: transform 0.2s;
+  transform: translateX(0);
+  transition: transform 0.2s, visibility 0.2s;
+  visibility: visible;
 }
 
 #thread-panel.hidden {
-  display: none;
+  transform: translateX(100%);
+  visibility: hidden;
 }
 
 .thread-header {

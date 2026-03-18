@@ -206,6 +206,37 @@ function bindEvents() {
   dom.threadClose.addEventListener('click', () => {
     dom.threadPanel.classList.add('hidden');
   });
+
+  // 消息列表事件委托
+  dom.messages.addEventListener('click', (e) => {
+    const replyBtn = e.target.closest('.btn-reply');
+    if (replyBtn) {
+      setReply(parseInt(replyBtn.dataset.line, 10));
+      return;
+    }
+    const threadBtn = e.target.closest('.btn-thread');
+    if (threadBtn) {
+      showThread(threadBtn.dataset.channel, parseInt(threadBtn.dataset.line, 10));
+      return;
+    }
+    const replyRef = e.target.closest('.msg-reply-ref[data-goto]');
+    if (replyRef) {
+      scrollToMessage(parseInt(replyRef.dataset.goto, 10));
+      return;
+    }
+  });
+
+  // 侧边栏频道事件委托
+  dom.channelList.addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-channel]');
+    if (li) selectChannel(li.dataset.channel);
+  });
+
+  // 提及弹窗事件委托
+  dom.mentionPopup.addEventListener('click', (e) => {
+    const item = e.target.closest('.mention-item[data-user]');
+    if (item) insertMention(item.dataset.user);
+  });
 }
 
 // ===== 频道切换 =====
@@ -264,8 +295,8 @@ function renderMessage(msg, msgMap) {
     const parent = msgMap.get(msg.point_to);
     if (parent) {
       const parentAuthor = escapeHtml(parent.author);
-      const parentBody = escapeHtml(parent.body).slice(0, 60);
-      replyHtml = `<div class="msg-reply-ref" onclick="scrollToMessage(${parent.line_number})" title="跳转到原消息">@${parentAuthor}: ${parentBody}</div>`;
+      const parentBody = escapeHtml(parent.body.slice(0, 60));
+      replyHtml = `<div class="msg-reply-ref" data-goto="${parent.line_number}" title="跳转到原消息">@${parentAuthor}: ${parentBody}</div>`;
     } else {
       replyHtml = `<div class="msg-reply-ref">回复 L${msg.point_to}</div>`;
     }
@@ -280,8 +311,8 @@ function renderMessage(msg, msgMap) {
       ${replyHtml}
       <div class="msg-body">${body}</div>
       <div class="msg-actions">
-        <button onclick="setReply(${lineNum})" title="回复">回复</button>
-        <button onclick="showThread('${state.currentChannel}', ${lineNum})" title="查看引用链">线程</button>
+        <button class="btn-reply" data-line="${lineNum}" title="回复">回复</button>
+        <button class="btn-thread" data-line="${lineNum}" data-channel="${escapeHtml(state.currentChannel)}" title="查看引用链">线程</button>
       </div>
     </div>
   `;
@@ -315,7 +346,7 @@ async function sendMessage(body) {
 }
 
 // ===== 回复 =====
-window.setReply = function (lineNumber) {
+function setReply(lineNumber) {
   const msg = state.messages.find((m) => m.line_number === lineNumber);
   if (!msg) return;
 
@@ -323,7 +354,7 @@ window.setReply = function (lineNumber) {
   dom.replyText.textContent = `回复 @${msg.author}: ${msg.body.slice(0, 50)}${msg.body.length > 50 ? '…' : ''}`;
   dom.replyIndicator.classList.remove('hidden');
   dom.msgInput.focus();
-};
+}
 
 function clearReply() {
   state.replyTo = null;
@@ -331,17 +362,17 @@ function clearReply() {
 }
 
 // ===== 跳转到消息 =====
-window.scrollToMessage = function (lineNumber) {
+function scrollToMessage(lineNumber) {
   const el = document.getElementById(`msg-${lineNumber}`);
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.style.background = 'var(--bg-tertiary)';
     setTimeout(() => { el.style.background = ''; }, 1500);
   }
-};
+}
 
 // ===== 线程链 =====
-window.showThread = async function (channel, lineNumber) {
+async function showThread(channel, lineNumber) {
   dom.threadTitle.textContent = `引用链: L${lineNumber}`;
   dom.threadPanel.classList.remove('hidden');
   dom.threadMessages.innerHTML = '<div class="empty-state">加载中…</div>';
@@ -352,7 +383,7 @@ window.showThread = async function (channel, lineNumber) {
   } else {
     dom.threadMessages.innerHTML = '<div class="empty-state">无法加载线程</div>';
   }
-};
+}
 
 function renderThread(messages, rootLine) {
   if (messages.length === 0) {
@@ -422,7 +453,7 @@ function hideMentionPopup() {
 function renderMentionPopup() {
   dom.mentionPopup.innerHTML = state.mentionFiltered.map((user, i) =>
     `<div class="mention-item ${i === state.mentionIndex ? 'active' : ''}"
-          onclick="insertMentionByName('${escapeHtml(user)}')"
+          data-user="${escapeHtml(user)}"
      >@${escapeHtml(user)}</div>`
   ).join('');
 }
@@ -449,10 +480,6 @@ function insertMention(username) {
   input.focus();
 }
 
-window.insertMentionByName = function (username) {
-  insertMention(username);
-};
-
 // ===== 侧边栏渲染 =====
 function renderSidebar() {
   // 频道列表
@@ -460,19 +487,15 @@ function renderSidebar() {
     const isActive = ch === state.currentChannel ? 'active' : '';
     const unread = state.unreadCounts[ch] || 0;
     const badge = unread > 0 ? `<span class="unread-badge">${unread}</span>` : '';
-    return `<li class="${isActive}" onclick="selectChannelByName('${escapeHtml(ch)}')"># ${escapeHtml(ch)}${badge}</li>`;
+    return `<li class="${isActive}" data-channel="${escapeHtml(ch)}"># ${escapeHtml(ch)}${badge}</li>`;
   }).join('');
 
   // 用户列表
   dom.userList.innerHTML = state.users.map((u) => {
     const isMe = state.currentUser && u === state.currentUser.handler;
-    return `<li><span class="user-online">●</span>${escapeHtml(u)}${isMe ? ' (我)' : ''}</li>`;
+    return `<li><span class="user-status">●</span>${escapeHtml(u)}${isMe ? ' (我)' : ''}</li>`;
   }).join('');
 }
-
-window.selectChannelByName = function (name) {
-  selectChannel(name);
-};
 
 // ===== 连接状态 =====
 function updateConnectionStatus(connected) {

@@ -88,14 +88,29 @@ class DaemonConnection {
     });
   }
 
-  // 发送请求并等待响应
+  // 发送请求并等待响应（10s 超时）
   async request(msg) {
     if (!this.connected) {
       return { ok: false, error: 'daemon 未连接' };
     }
     return new Promise((resolve, reject) => {
-      this.pendingRequests.push({ resolve, reject });
+      const entry = { resolve, reject };
+      this.pendingRequests.push(entry);
       this.socket.write(JSON.stringify(msg) + '\n');
+
+      const timer = setTimeout(() => {
+        const idx = this.pendingRequests.indexOf(entry);
+        if (idx !== -1) {
+          this.pendingRequests.splice(idx, 1);
+          resolve({ ok: false, error: '请求超时' });
+        }
+      }, 10000);
+
+      const origResolve = entry.resolve;
+      entry.resolve = (val) => {
+        clearTimeout(timer);
+        origResolve(val);
+      };
     });
   }
 
@@ -122,7 +137,7 @@ const MIME_TYPES = {
 
 // 提供静态文件
 function serveStatic(req, res) {
-  let filePath = req.url.split('?')[0];
+  let filePath = decodeURIComponent(req.url.split('?')[0]);
   if (filePath === '/') filePath = '/index.html';
   const fullPath = path.join(__dirname, 'public', filePath);
   // 安全检查：防止路径遍历
@@ -142,12 +157,24 @@ function serveStatic(req, res) {
   }
 }
 
-// 读取请求体
+// 读取请求体（限制 1MB）
+const MAX_BODY_SIZE = 1024 * 1024;
+
 function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('请求体过大'));
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => resolve(body));
+    req.on('error', reject);
   });
 }
 
@@ -231,7 +258,7 @@ async function handleApi(req, res) {
 
 // 创建 HTTP 服务器
 const server = http.createServer(async (req, res) => {
-  // CORS 头
+  // CORS 头（仅用于本地开发，生产环境应限制 origin）
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
