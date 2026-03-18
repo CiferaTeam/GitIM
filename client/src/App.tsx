@@ -46,7 +46,7 @@ export function App() {
         author: currentUser,
       };
       if (pointTo > 0) {
-        params.point_to = pointTo;
+        params.reply_to = pointTo;
       }
       return request('send', params);
     },

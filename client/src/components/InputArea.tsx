@@ -20,19 +20,27 @@ export function InputArea({ onSend }: InputAreaProps) {
   const users = useStore((s) => s.users);
   const currentChannel = useStore((s) => s.currentChannel);
 
+  const [sending, setSending] = useState(false);
+
   const handleSend = useCallback(async () => {
     const body = text.trim();
-    if (!body || !currentChannel) return;
+    if (!body || !currentChannel || sending) return;
 
     setError('');
-    const res = await onSend(body, replyTo?.line_number ?? 0);
-    if (res.ok) {
-      setText('');
-      setReplyTo(null);
-    } else {
+    setSending(true);
+    setText(''); // 乐观清空输入框
+    const savedReply = replyTo;
+    setReplyTo(null);
+
+    const res = await onSend(body, savedReply?.line_number ?? 0);
+    setSending(false);
+    if (!res.ok) {
+      // 发送失败，恢复输入内容
+      setText(body);
+      if (savedReply) setReplyTo(savedReply);
       setError(res.error || '发送失败');
     }
-  }, [text, currentChannel, replyTo, onSend, setReplyTo]);
+  }, [text, currentChannel, replyTo, onSend, setReplyTo, sending]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // 提及弹窗打开时不处理 Enter
@@ -113,6 +121,7 @@ export function InputArea({ onSend }: InputAreaProps) {
           rows={1}
         />
       </div>
+      {sending && <div className="input-sending">发送中...</div>}
       {error && <div className="input-error">{error}</div>}
     </div>
   );

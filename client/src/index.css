@@ -338,6 +338,18 @@ body {
   color: var(--text-secondary);
 }
 
+.input-sending {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 4px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
 .input-error {
   color: var(--error);
   font-size: 12px;
