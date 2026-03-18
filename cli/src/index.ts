@@ -8,6 +8,7 @@ import { usersCommand } from './commands/users.js';
 import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
 import { onboardCommand } from './commands/onboard.js';
 import { stopCommand } from './commands/stop.js';
+import { tuiCommand } from './commands/tui.js';
 
 const program = new Command();
 
@@ -80,5 +81,12 @@ dm.command('read <handler>')
 dm.command('list')
   .description('List DM conversations')
   .action(() => dmListCommand());
+
+program
+  .command('tui')
+  .description('启动 TUI 聊天界面')
+  .action(async () => {
+    await tuiCommand();
+  });
 
 program.parse();
