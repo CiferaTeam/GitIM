@@ -26,6 +26,9 @@ interface Store {
   messages: Message[];
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
+  addPendingMessage: (m: Message) => void;
+  removePendingMessage: (pendingId: string) => void;
+  markPendingFailed: (pendingId: string) => void;
 
   // 回复
   replyTo: Message | null;
@@ -66,14 +69,30 @@ export const useStore = create<Store>((set) => ({
     })),
 
   messages: [],
-  setMessages: (m) => set({ messages: m }),
+  setMessages: (m) =>
+    set((s) => {
+      // 保留 pending 消息（_pendingId 存在的），追加到真实消息后面
+      const pending = s.messages.filter((msg) => msg._pendingId);
+      return { messages: [...m, ...pending] };
+    }),
   addMessages: (m) =>
     set((s) => {
-      // 去重合并
       const existing = new Set(s.messages.map((msg) => msg.line_number));
       const newMsgs = m.filter((msg) => !existing.has(msg.line_number));
       return { messages: [...s.messages, ...newMsgs] };
     }),
+  addPendingMessage: (m) =>
+    set((s) => ({ messages: [...s.messages, m] })),
+  removePendingMessage: (pendingId) =>
+    set((s) => ({
+      messages: s.messages.filter((msg) => msg._pendingId !== pendingId),
+    })),
+  markPendingFailed: (pendingId) =>
+    set((s) => ({
+      messages: s.messages.map((msg) =>
+        msg._pendingId === pendingId ? { ...msg, _status: 'failed' as const } : msg,
+      ),
+    })),
 
   replyTo: null,
   setReplyTo: (m) => set({ replyTo: m }),

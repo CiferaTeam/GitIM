@@ -20,6 +20,9 @@ export function App() {
     setThreadRoot,
     setThreadMessages,
     messages,
+    addPendingMessage,
+    removePendingMessage,
+    markPendingFailed,
   } = useStore();
 
   // 切换频道
@@ -34,12 +37,31 @@ export function App() {
     [selectChannel, clearUnread, setMessages, setThreadRoot, loadMessages],
   );
 
-  // 发送消息
+  // 发送消息（乐观 UI）
   const handleSend = useCallback(
     async (body: string, pointTo: number) => {
       if (!currentChannel) {
         return { id: 0, ok: false, error: '未选择频道' };
       }
+
+      // 生成临时 ID 和时间戳
+      const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date();
+      const ts = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '').replace('T', 'T').slice(0, 15) + 'Z';
+
+      // 乐观插入 pending 消息
+      const pendingMsg: Message = {
+        line_number: -1, // 临时行号
+        point_to: pointTo,
+        author: currentUser,
+        timestamp: ts,
+        body,
+        _status: 'sending',
+        _pendingId: pendingId,
+      };
+      addPendingMessage(pendingMsg);
+
+      // 发送请求
       const params: Record<string, unknown> = {
         channel: currentChannel,
         body,
@@ -48,9 +70,19 @@ export function App() {
       if (pointTo > 0) {
         params.reply_to = pointTo;
       }
-      return request('send', params);
+
+      const res = await request('send', params);
+      if (res.ok) {
+        // daemon 接受了，消息将通过 push 事件刷新回来，届时 pending 消息会被替换
+        // 先标记为 sent
+        removePendingMessage(pendingId);
+      } else {
+        // 发送失败，标记为 failed
+        markPendingFailed(pendingId);
+      }
+      return res;
     },
-    [currentChannel, currentUser, request],
+    [currentChannel, currentUser, request, addPendingMessage, removePendingMessage, markPendingFailed],
   );
 
   // 回复消息

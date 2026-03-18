@@ -244,6 +244,38 @@ body {
   word-break: break-word;
 }
 
+/* 消息发送状态 */
+.message-pending {
+  opacity: 0.6;
+}
+
+.message-pending .message-body {
+  font-style: italic;
+}
+
+.message-failed {
+  opacity: 0.8;
+  border-left: 3px solid var(--error);
+}
+
+.message-status {
+  font-size: 11px;
+  margin-left: 8px;
+}
+
+.message-status-sending {
+  color: var(--text-secondary);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.message-status-sent {
+  color: var(--success);
+}
+
+.message-status-failed {
+  color: var(--error);
+}
+
 .message-actions {
   display: none;
   position: absolute;

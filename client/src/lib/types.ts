@@ -1,3 +1,6 @@
+/** 消息发送状态 */
+export type MessageStatus = 'sending' | 'sent' | 'synced' | 'failed';
+
 /** GitIM 消息 */
 export interface Message {
   line_number: number;
@@ -5,6 +8,10 @@ export interface Message {
   author: string;
   timestamp: string; // 20260317T120000Z
   body: string;
+  /** 前端本地状态（daemon 返回的消息无此字段） */
+  _status?: MessageStatus;
+  /** 前端临时 ID（pending 消息用） */
+  _pendingId?: string;
 }
 
 /** 频道信息 */
