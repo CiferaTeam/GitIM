@@ -1,12 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 
-use gitim_sync::git::GitRepo;
+use gitim_sync::git::GitStorage;
 use tempfile::TempDir;
 
-/// Helper: create a bare repo and clone it, returning (bare_dir, clone_dir, GitRepo).
+/// Helper: create a bare repo and clone it, returning (bare_dir, clone_dir, GitStorage).
 /// Both TempDirs are returned so they stay alive for the test's lifetime.
-fn setup_repo_pair() -> (TempDir, TempDir, GitRepo) {
+fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     let bare_dir = TempDir::new().unwrap();
     let clone_dir = TempDir::new().unwrap();
 
@@ -34,7 +34,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitRepo) {
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);
     run_git(clone_dir.path(), &["push", "-u", "origin", "main"]);
 
-    let repo = GitRepo::new(clone_dir.path());
+    let repo = GitStorage::new(clone_dir.path());
     (bare_dir, clone_dir, repo)
 }
 
@@ -100,7 +100,7 @@ fn test_has_unpushed_commits() {
 }
 
 #[test]
-fn test_diff_unpushed_thread_additions() {
+fn test_diff_unpushed() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
     // Create a channels directory and a .thread file
@@ -119,7 +119,7 @@ fn test_diff_unpushed_thread_additions() {
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add reply"]);
 
-    let diff = repo.diff_unpushed_thread_additions().unwrap();
+    let diff = repo.diff_unpushed("*.thread").unwrap();
     assert_eq!(diff.len(), 1);
 
     let key = diff
@@ -136,28 +136,28 @@ fn test_diff_unpushed_thread_additions() {
 }
 
 #[test]
-fn test_diff_unpushed_ignores_non_thread_files() {
+fn test_diff_unpushed_ignores_non_matching_pattern() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
-    // Commit a non-thread file (should not appear in diff)
+    // Commit a non-thread file (should not appear in diff with *.thread pattern)
     std::fs::write(clone_dir.path().join("notes.txt"), "some notes").unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add notes"]);
 
-    let diff = repo.diff_unpushed_thread_additions().unwrap();
+    let diff = repo.diff_unpushed("*.thread").unwrap();
     assert!(diff.is_empty());
 }
 
 #[test]
-fn test_rebase_abort_no_error_without_rebase() {
+fn test_discard_unpushed_no_error_without_changes() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
-    // Calling rebase_abort when no rebase is in progress should not error
-    repo.rebase_abort().expect("rebase_abort should not error");
+    // Calling discard_unpushed when no divergence should not error
+    repo.discard_unpushed().expect("discard_unpushed should not error");
 }
 
 #[test]
-fn test_reset_hard_origin() {
+fn test_discard_unpushed_resets_to_origin() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
     // Create a local commit
@@ -168,8 +168,8 @@ fn test_reset_hard_origin() {
     // Verify the file exists
     assert!(clone_dir.path().join("local.txt").exists());
 
-    // Reset hard to origin/main
-    repo.reset_hard_origin().expect("reset should succeed");
+    // Discard unpushed changes
+    repo.discard_unpushed().expect("discard should succeed");
 
     // The local commit (and its file) should be gone
     assert!(!clone_dir.path().join("local.txt").exists());

@@ -4,8 +4,8 @@ use std::process::Command;
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::Handler;
-use gitim_sync::conflict::resolve_thread_conflicts;
-use gitim_sync::git::GitRepo;
+use gitim_sync::conflict::resolve_content;
+use gitim_sync::git::GitStorage;
 use tempfile::TempDir;
 
 fn run_git(dir: &Path, args: &[&str]) {
@@ -78,7 +78,7 @@ fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
 fn test_sync_pushes_committed_messages() {
     let (_bare_dir, clone_a_dir, _clone_b_dir) = setup_two_clones();
 
-    let repo = GitRepo::new(clone_a_dir.path());
+    let repo = GitStorage::new(clone_a_dir.path());
     let thread_path = clone_a_dir.path().join("channels/general.thread");
 
     // Write a message using format_message
@@ -139,7 +139,7 @@ fn test_sync_resolves_concurrent_writes() {
     a_content.push_str(&format_message(1, 0, &alice, "20260317T100000Z", "alice msg 1"));
     a_content.push_str(&format_message(2, 1, &alice, "20260317T100100Z", "alice msg 2"));
     std::fs::write(&thread_a, &a_content).unwrap();
-    let repo_a = GitRepo::new(clone_a_dir.path());
+    let repo_a = GitStorage::new(clone_a_dir.path());
     repo_a
         .add_and_commit(&["channels/general.thread"], "alice messages")
         .unwrap();
@@ -150,24 +150,24 @@ fn test_sync_resolves_concurrent_writes() {
     b_content.push_str(&format_message(1, 0, &bob, "20260317T100200Z", "bob msg 1"));
     b_content.push_str(&format_message(2, 1, &bob, "20260317T100300Z", "bob msg 2"));
     std::fs::write(&thread_b, &b_content).unwrap();
-    let repo_b = GitRepo::new(clone_b_dir.path());
+    let repo_b = GitStorage::new(clone_b_dir.path());
     repo_b
         .add_and_commit(&["channels/general.thread"], "bob messages")
         .unwrap();
 
-    // Clone B: conflict resolution flow
-    // 1. Fetch to get remote changes
+    // Clone B: conflict resolution flow (mirrors SyncLoop logic)
     repo_b.fetch().unwrap();
-
-    // 2. Capture local additions
-    let local_additions = repo_b.diff_unpushed_thread_additions().unwrap();
+    let local_additions = repo_b.diff_unpushed("*.thread").unwrap();
     assert!(!local_additions.is_empty(), "should have local additions");
 
-    // 3. pull_rebase will fail due to conflict — that's expected
-    // (resolve_thread_conflicts handles this internally via rebase_abort + reset)
-
-    // 4. Resolve conflicts
-    let _mappings = resolve_thread_conflicts(&repo_b, &local_additions).unwrap();
+    // SyncLoop manages git state: discard → resolve → write → commit
+    repo_b.discard_unpushed().unwrap();
+    let (resolved_files, _mappings) = resolve_content(&local_additions, repo_b.root()).unwrap();
+    for resolved in &resolved_files {
+        std::fs::write(repo_b.root().join(&resolved.path), &resolved.content).unwrap();
+    }
+    let paths: Vec<&str> = resolved_files.iter().map(|r| r.path.to_str().unwrap()).collect();
+    repo_b.add_and_commit(&paths, "resolved").unwrap();
 
     // 5. Verify: thread_b has 4 messages with sequential L000001-L000004
     let final_content = std::fs::read_to_string(&thread_b).unwrap();
@@ -208,14 +208,14 @@ fn test_sync_pulls_when_nothing_to_push() {
     // Clone A: add content, commit, push
     let content = format_message(1, 0, &alice, "20260317T100000Z", "hello from alice");
     std::fs::write(&thread_a, &content).unwrap();
-    let repo_a = GitRepo::new(clone_a_dir.path());
+    let repo_a = GitStorage::new(clone_a_dir.path());
     repo_a
         .add_and_commit(&["channels/general.thread"], "alice msg")
         .unwrap();
     repo_a.push().unwrap();
 
     // Clone B: no local changes
-    let repo_b = GitRepo::new(clone_b_dir.path());
+    let repo_b = GitStorage::new(clone_b_dir.path());
     assert!(
         !repo_b.has_unpushed_commits().unwrap(),
         "clone_b should have no unpushed commits"

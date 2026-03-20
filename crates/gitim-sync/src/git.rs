@@ -9,15 +9,15 @@ pub enum GitError {
     CommandFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("push failed after {0} retries")]
-    PushRetriesExhausted(u32),
+    #[error("push rejected: remote has diverged")]
+    PushConflict,
 }
 
-pub struct GitRepo {
-    root: std::path::PathBuf,
+pub struct GitStorage {
+    root: PathBuf,
 }
 
-impl GitRepo {
+impl GitStorage {
     pub fn new(root: &Path) -> Self {
         Self { root: root.to_path_buf() }
     }
@@ -70,24 +70,13 @@ impl GitRepo {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+                return Err(GitError::PushConflict);
+            }
+            return Err(GitError::CommandFailed(stderr));
         }
         Ok(())
-    }
-
-    pub fn push_with_retry(&self, max_retries: u32) -> Result<(), GitError> {
-        for attempt in 0..=max_retries {
-            match self.push() {
-                Ok(()) => return Ok(()),
-                Err(_) if attempt < max_retries => {
-                    self.pull_rebase()?;
-                }
-                Err(_) => return Err(GitError::PushRetriesExhausted(max_retries)),
-            }
-        }
-        Err(GitError::PushRetriesExhausted(max_retries))
     }
 
     pub fn has_remote(&self) -> bool {
@@ -129,9 +118,9 @@ impl GitRepo {
         Ok(count > 0)
     }
 
-    pub fn diff_unpushed_thread_additions(&self) -> Result<HashMap<PathBuf, String>, GitError> {
+    pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "origin/main..HEAD", "--", "*.thread"])
+            .args(["diff", "origin/main..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -186,17 +175,16 @@ impl GitRepo {
         Ok(())
     }
 
-    pub fn rebase_abort(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
+    /// Discard all unpushed local changes, reset to remote state.
+    /// Encapsulates rebase_abort + reset_hard_origin.
+    pub fn discard_unpushed(&self) -> Result<(), GitError> {
+        // Best-effort abort any in-progress rebase
+        let _ = Command::new("git")
             .args(["rebase", "--abort"])
             .current_dir(&self.root)
-            .output()?;
-        // Best-effort: ignore errors if no rebase in progress
-        let _ = output;
-        Ok(())
-    }
+            .output();
 
-    pub fn reset_hard_origin(&self) -> Result<(), GitError> {
+        // Reset to remote state
         let output = Command::new("git")
             .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.root)

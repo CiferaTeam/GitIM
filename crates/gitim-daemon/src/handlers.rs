@@ -5,7 +5,6 @@ use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::Handler;
 use gitim_core::validator::compliance::validate_append;
-use gitim_sync::git::GitRepo;
 use tracing::{info, warn};
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
@@ -147,8 +146,7 @@ async fn handle_send(
         Ok(rel) => {
             let rel_str = rel.to_string_lossy().to_string();
             let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
-            let repo = GitRepo::new(&state.repo_root);
-            match repo.add_and_commit(&[&rel_str], &commit_msg) {
+            match state.git_storage.add_and_commit(&[&rel_str], &commit_msg) {
                 Ok(()) => "committed",
                 Err(e) => {
                     warn!("git commit failed for L{:06} in {}: {}", next_line, thread_name, e);
@@ -285,8 +283,7 @@ async fn handle_register_user(
     }
 
     // Git add + commit (best effort)
-    let git_repo = GitRepo::new(&state.repo_root);
-    let _ = git_repo.add_and_commit(
+    let _ = state.git_storage.add_and_commit(
         &[&format!("users/{}.meta.json", handler)],
         &format!("msg: register @{}", handler),
     );
