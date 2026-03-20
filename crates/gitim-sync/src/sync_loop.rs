@@ -87,8 +87,12 @@ where
                 info!("sync: push complete (attempt {})", attempt);
                 return;
             }
-            Err(_) => {
-                // Push rejected — remote has new commits, need to sync
+            Err(crate::git::GitError::PushConflict) => {
+                // Remote has diverged, need to sync
+            }
+            Err(e) => {
+                warn!("sync: push failed (non-conflict): {}", e);
+                return;
             }
         }
 
