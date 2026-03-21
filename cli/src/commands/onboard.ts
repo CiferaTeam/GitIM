@@ -72,18 +72,16 @@ function cloneOrCreateRepo(
     return targetDir;
   }
 
-  const owner = org || (gitServer === 'github' ? '' : '');
   let repoUrl: string;
   if (gitServer === 'github') {
-    const ghOwner = org || '';
-    repoUrl = ghOwner
-      ? `https://github.com/${ghOwner}/${repoName}.git`
+    repoUrl = org
+      ? `https://github.com/${org}/${repoName}.git`
       : `https://github.com/${repoName}.git`;
   } else {
     // gitea or gitlab
     const baseUrl = options.url!;
-    repoUrl = owner
-      ? `${baseUrl}/${owner}/${repoName}.git`
+    repoUrl = org
+      ? `${baseUrl}/${org}/${repoName}.git`
       : `${baseUrl}/${repoName}.git`;
   }
 
