@@ -100,53 +100,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start sync loop
-    let sync_interval = app_state.config.daemon.sync_interval;
-    let sync_root = repo_root.clone();
-    let push_state = app_state.clone();
-    let renum_state = app_state.clone();
-    tokio::spawn(async move {
-        gitim_sync::sync_loop::start_sync_loop(
-            &sync_root,
-            sync_interval,
-            move || {
-                // on_pushed: clear pending_push and broadcast MessagesPushed events
-                let mut pending = push_state.pending_push.write().unwrap();
-                let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
-                    std::collections::HashMap::new();
-                for msg in pending.drain(..) {
-                    by_channel.entry(msg.channel).or_default().push(msg.line_number);
-                }
-                for (channel, line_numbers) in by_channel {
-                    let _ = push_state.event_tx.send(api::Event::MessagesPushed {
-                        channel,
-                        line_numbers,
-                    });
-                }
-            },
-            move |file, old_line, new_line| {
-                // on_renumbered: broadcast MessageRenumbered and update pending_push
-                // Extract channel name from file path (e.g. "channels/general.thread" -> "general")
-                let channel_name = file
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                let mut pending = renum_state.pending_push.write().unwrap();
-                for msg in pending.iter_mut() {
-                    if msg.channel == channel_name && msg.line_number == old_line {
-                        let _ = renum_state.event_tx.send(api::Event::MessageRenumbered {
-                            channel: msg.channel.clone(),
-                            old_line,
-                            new_line,
-                        });
-                        msg.line_number = new_line;
-                    }
-                }
-            },
-        )
-        .await;
-    });
+    // Start sync loop only if identity is already configured (restart scenario).
+    // On first startup (no me.json), the sync loop is deferred until after onboard.
+    if app_state.current_user.read().await.is_some() {
+        state::AppState::spawn_sync_loop(app_state.clone());
+    } else {
+        info!("no identity configured — sync loop deferred until onboard");
+    }
 
     // Start file watcher
     let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel(100);
