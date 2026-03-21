@@ -21,7 +21,7 @@ pub struct AppState {
     pub thread_cache: RwLock<HashMap<String, ThreadFile>>,
     pub users: RwLock<Vec<String>>,
     pub event_tx: broadcast::Sender<Event>,
-    pub current_user: Option<String>,
+    pub current_user: RwLock<Option<String>>,
     pub pending_push: std::sync::RwLock<Vec<PendingMessage>>,
 }
 
@@ -35,7 +35,7 @@ impl AppState {
             thread_cache: RwLock::new(HashMap::new()),
             users: RwLock::new(Vec::new()),
             event_tx,
-            current_user,
+            current_user: RwLock::new(current_user),
             pending_push: std::sync::RwLock::new(Vec::new()),
         }
     }
