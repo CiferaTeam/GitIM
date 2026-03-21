@@ -73,6 +73,10 @@ export class GitimClient {
     });
   }
 
+  async onboard(gitServer: string, auth: Record<string, string>): Promise<ApiResponse> {
+    return this.request('onboard', { git_server: gitServer, auth });
+  }
+
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
   }

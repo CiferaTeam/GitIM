@@ -19,8 +19,11 @@ program
 program
   .command('onboard [repo_name] [org]')
   .description('加入或创建 GitIM 仓库')
-  .option('-e, --endpoint <type>', 'endpoint 类型: github 或 gitea', 'github')
-  .option('-u, --url <url>', 'Gitea 服务地址')
+  .option('-g, --git-server <type>', 'Git 服务类型: git | github | gitea | gitlab', 'github')
+  .option('-t, --token <token>', 'GitHub/Gitea/GitLab 认证 token')
+  .option('--handler <handler>', 'git 本地模式必填：本地 handler')
+  .option('--display-name <name>', 'git 本地模式必填：显示名称')
+  .option('-u, --url <url>', 'Gitea/GitLab 服务地址')
   .option('--refresh', '重新推断身份')
   .action(async (repoName, org, options) => {
     await onboardCommand(repoName, org, options);
