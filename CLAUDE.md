@@ -27,7 +27,7 @@ CLI 现已完全委托 daemon 处理身份推断和仓库初始化：
 3. **Daemon 阶段**：
    - **身份推断**（Onboard 处理）：根据 git 类型和 token 推断 handler + 信息
    - **用户注册**（RegisterUser 处理）：创建 `users/<handler>.meta.json`
-   - **Repo 初始化**：生成 `.gitim/config.json`、初始化 `me.json`
+   - **Repo 初始化**：生成 `.gitim/config.yaml`、初始化 `me.json`
    - **Git 提交**：各文件变更提交到 git
 
 支持的身份推断渠道：

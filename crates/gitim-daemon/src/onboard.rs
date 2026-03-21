@@ -178,17 +178,19 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
             .add_and_commit(&path_refs, "init: repo structure (.gitignore + general channel)")
             .map_err(|e| Response::error(format!("ensure_repo commit failed: {}", e)))?;
 
-        match state.git_storage.push() {
-            Ok(()) => {}
-            Err(GitError::PushConflict) => {
-                // Someone else already initialized — discard our commit and move on
-                warn!("ensure_repo: push conflict — discarding local init (someone else initialized)");
-                state
-                    .git_storage
-                    .discard_unpushed()
-                    .map_err(|e| Response::error(format!("discard_unpushed failed: {}", e)))?;
+        if state.git_storage.has_remote() {
+            match state.git_storage.push() {
+                Ok(()) => {}
+                Err(GitError::PushConflict) => {
+                    // Someone else already initialized — discard our commit and move on
+                    warn!("ensure_repo: push conflict — discarding local init (someone else initialized)");
+                    state
+                        .git_storage
+                        .discard_unpushed()
+                        .map_err(|e| Response::error(format!("discard_unpushed failed: {}", e)))?;
+                }
+                Err(e) => return Err(Response::error(format!("ensure_repo push failed: {}", e))),
             }
-            Err(e) => return Err(Response::error(format!("ensure_repo push failed: {}", e))),
         }
     }
 
@@ -230,7 +232,11 @@ fn register_user(
         .add_and_commit(&[&rel_path], &commit_msg)
         .map_err(|e| Response::error(format!("register_user commit failed: {}", e)))?;
 
-    // Push with retry on conflict (fetch + rebase + retry, up to MAX_PUSH_RETRIES)
+    // Push with retry on conflict (skip if no remote, e.g. local git mode)
+    if !state.git_storage.has_remote() {
+        return Ok(true);
+    }
+
     for attempt in 1..=MAX_PUSH_RETRIES {
         match state.git_storage.push() {
             Ok(()) => return Ok(true),
@@ -249,13 +255,11 @@ fn register_user(
                         e
                     ))
                 })?;
-                // Loop back and retry push
             }
             Err(e) => return Err(Response::error(format!("register_user push failed: {}", e))),
         }
     }
 
-    // Exhausted retries
     Err(Response::error(format!(
         "register_user: push still conflicting after {} retries",
         MAX_PUSH_RETRIES

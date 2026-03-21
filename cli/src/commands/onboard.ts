@@ -72,49 +72,59 @@ function cloneOrCreateRepo(
     return targetDir;
   }
 
-  let repoUrl: string;
-  if (gitServer === 'github') {
-    repoUrl = org
-      ? `https://github.com/${org}/${repoName}.git`
-      : `https://github.com/${repoName}.git`;
-  } else {
-    // gitea or gitlab
-    const baseUrl = options.url!;
-    repoUrl = org
-      ? `${baseUrl}/${org}/${repoName}.git`
-      : `${baseUrl}/${repoName}.git`;
-  }
-
-  // Try clone first
+  // Try clone first, then create if needed
   let cloneSucceeded = false;
-  try {
-    execFileSync('git', ['clone', repoUrl, targetDir], { stdio: 'ignore' });
-    cloneSucceeded = true;
-  } catch {
-    cloneSucceeded = false;
-  }
 
-  if (!cloneSucceeded) {
-    // Repo doesn't exist yet — create it
-    if (gitServer === 'github') {
-      const ghRepo = org ? `${org}/${repoName}` : repoName;
+  if (gitServer === 'github') {
+    // GitHub: use gh CLI which resolves owner automatically
+    const ghTarget = org ? `${org}/${repoName}` : repoName;
+    try {
+      execFileSync('gh', ['repo', 'clone', ghTarget, targetDir], { stdio: 'ignore' });
+      cloneSucceeded = true;
+    } catch {
+      cloneSucceeded = false;
+    }
+
+    if (!cloneSucceeded) {
       try {
-        execFileSync('gh', ['repo', 'create', ghRepo, '--private', '--clone'], {
+        execFileSync('gh', ['repo', 'create', ghTarget, '--private', '--clone'], {
           cwd: path.dirname(targetDir),
           stdio: 'ignore',
         });
       } catch {
-        console.error(`Error: 无法创建仓库 ${ghRepo}`);
-        console.error('  → 请确认 Token 有仓库创建权限');
+        console.error(`Error: 无法创建仓库 ${ghTarget}`);
+        console.error('  → 请确认 gh 已认证且 Token 有仓库创建权限');
         process.exit(1);
       }
-    } else {
-      // gitea / gitlab: create via API then clone
+    }
+  } else {
+    // Gitea / GitLab: org is required for URL construction
+    if (!org) {
+      console.error(`Error: ${gitServer} 模式需要指定 org（作为 URL 中的 owner）`);
+      console.error('  → 用法: gitim onboard <repo> <org> --git-server gitea --url ...');
+      process.exit(1);
+    }
+
+    const baseUrl = options.url!;
+    const repoUrl = `${baseUrl}/${org}/${repoName}.git`;
+
+    try {
+      execFileSync('git', ['clone', repoUrl, targetDir], { stdio: 'ignore' });
+      cloneSucceeded = true;
+    } catch {
+      cloneSucceeded = false;
+    }
+
+    if (!cloneSucceeded) {
+      if (gitServer === 'gitlab') {
+        console.error('Error: GitLab 不支持自动创建仓库，请先在 GitLab 上手动创建');
+        console.error(`  → 创建后再运行: gitim onboard ${repoName} ${org} --git-server gitlab --url ${baseUrl} --token ...`);
+        process.exit(1);
+      }
+
+      // Gitea: create via API then clone
       const token = options.token!;
-      const baseUrl = options.url!;
-      const createUrl = org
-        ? `${baseUrl}/api/v1/orgs/${org}/repos`
-        : `${baseUrl}/api/v1/user/repos`;
+      const createUrl = `${baseUrl}/api/v1/orgs/${org}/repos`;
       try {
         execFileSync('curl', [
           '-sf', '-X', 'POST',
@@ -125,7 +135,7 @@ function cloneOrCreateRepo(
         ], { stdio: 'ignore' });
         execFileSync('git', ['clone', repoUrl, targetDir], { stdio: 'ignore' });
       } catch {
-        console.error(`Error: 无法创建 ${gitServer} 仓库 ${repoName}`);
+        console.error(`Error: 无法创建 Gitea 仓库 ${repoName}`);
         process.exit(1);
       }
     }
