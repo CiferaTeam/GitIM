@@ -19,12 +19,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Load config
-    let config_path = repo_root.join(".gitim").join("config.yaml");
-    let config_str = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("failed to read config: {}", e))?;
-    let config = gitim_core::validator::validate_config(&config_str)
-        .map_err(|e| format!("invalid config: {}", e))?;
+    // Load config, creating default if missing
+    let gitim_dir = repo_root.join(".gitim");
+    let config_path = gitim_dir.join("config.yaml");
+    let config = if config_path.exists() {
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("failed to read config: {}", e))?;
+        gitim_core::validator::validate_config(&config_str)
+            .map_err(|e| format!("invalid config: {}", e))?
+    } else {
+        let default_config = gitim_core::types::config::Config::default();
+        let yaml = serde_yaml::to_string(&default_config)
+            .map_err(|e| format!("failed to serialize default config: {}", e))?;
+        std::fs::create_dir_all(&gitim_dir)
+            .map_err(|e| format!("failed to create .gitim dir: {}", e))?;
+        std::fs::write(&config_path, &yaml)
+            .map_err(|e| format!("failed to write default config: {}", e))?;
+        info!("created default config at {}", config_path.display());
+        default_config
+    };
 
     // Scan users
     let users_dir = repo_root.join("users");
