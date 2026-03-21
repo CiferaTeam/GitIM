@@ -465,6 +465,7 @@ version = "0.1.0"
 dependencies = [
  "gitim-core",
  "notify",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
