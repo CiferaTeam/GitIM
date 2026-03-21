@@ -42,6 +42,17 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_register_user(state, handler, display_name, role, introduction).await
         }
         Request::Stop => handle_stop(state).await,
+        Request::Onboard { git_server, auth: _ } => {
+            // TODO(Task 6): implement full onboard logic
+            let known = matches!(git_server.as_str(), "git" | "github" | "gitea" | "gitlab");
+            if !known {
+                return Response::error(format!("unknown git_server: {}", git_server));
+            }
+            Response::success(serde_json::json!({
+                "status": "not_implemented",
+                "git_server": git_server,
+            }))
+        }
     }
 }
 

@@ -55,6 +55,11 @@ pub enum Request {
         #[serde(default = "default_introduction")]
         introduction: String,
     },
+    #[serde(rename = "onboard")]
+    Onboard {
+        git_server: String,
+        auth: serde_json::Value,
+    },
 }
 
 fn default_role() -> String {
