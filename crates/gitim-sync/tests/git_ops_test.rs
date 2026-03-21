@@ -157,6 +157,60 @@ fn test_discard_unpushed_no_error_without_changes() {
 }
 
 #[test]
+fn test_pull_rebase_conflict_leaves_rebase_state_and_discard_recovers() {
+    let (bare_dir, clone_dir, _repo) = setup_repo_pair();
+
+    // Create second clone
+    let clone_b_dir = TempDir::new().unwrap();
+    run_git(
+        clone_b_dir.path().parent().unwrap(),
+        &[
+            "clone",
+            bare_dir.path().to_str().unwrap(),
+            clone_b_dir.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone_b_dir.path(), &["config", "user.email", "b@test.com"]);
+    run_git(clone_b_dir.path(), &["config", "user.name", "B"]);
+
+    // Clone A: modify init.txt and push
+    std::fs::write(clone_dir.path().join("init.txt"), "A's version").unwrap();
+    run_git(clone_dir.path(), &["add", "init.txt"]);
+    run_git(clone_dir.path(), &["commit", "-m", "A change"]);
+    run_git(clone_dir.path(), &["push"]);
+
+    // Clone B: modify init.txt conflictingly, commit locally
+    std::fs::write(clone_b_dir.path().join("init.txt"), "B's version").unwrap();
+    run_git(clone_b_dir.path(), &["add", "init.txt"]);
+    run_git(clone_b_dir.path(), &["commit", "-m", "B change"]);
+
+    let repo_b = GitStorage::new(clone_b_dir.path());
+
+    // pull_rebase fails due to conflict
+    let result = repo_b.pull_rebase();
+    assert!(result.is_err(), "pull_rebase should fail due to conflict");
+
+    // BUG: repo is stuck in rebase state
+    let rebase_merge = clone_b_dir.path().join(".git/rebase-merge");
+    let rebase_apply = clone_b_dir.path().join(".git/rebase-apply");
+    assert!(
+        rebase_merge.exists() || rebase_apply.exists(),
+        "repo should be in rebase state after failed pull_rebase"
+    );
+
+    // FIX: discard_unpushed recovers from the rebase state
+    repo_b
+        .discard_unpushed()
+        .expect("discard should recover from rebase state");
+
+    // Verify: repo is clean
+    assert!(
+        !rebase_merge.exists() && !rebase_apply.exists(),
+        "repo should be clean after discard_unpushed"
+    );
+}
+
+#[test]
 fn test_discard_unpushed_resets_to_origin() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 

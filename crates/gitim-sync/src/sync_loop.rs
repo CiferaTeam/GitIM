@@ -65,7 +65,10 @@ where
         // Nothing local to push, just pull
         match repo.pull_rebase() {
             Ok(()) => info!("sync: pull complete"),
-            Err(e) => warn!("sync: pull failed: {}", e),
+            Err(e) => {
+                warn!("sync: pull failed: {}", e);
+                let _ = repo.discard_unpushed();
+            }
         }
     }
 }
