@@ -46,6 +46,11 @@ pub enum Request {
     Subscribe,
     #[serde(rename = "stop")]
     Stop,
+    #[serde(rename = "poll")]
+    Poll {
+        #[serde(default)]
+        since: Option<String>,
+    },
     #[serde(rename = "register_user")]
     RegisterUser {
         handler: String,
