@@ -134,6 +134,33 @@ impl GitStorage {
         Ok(count > 0)
     }
 
+    pub fn rev_parse(&self, reference: &str) -> Result<String, GitError> {
+        let output = Command::new("git")
+            .args(["rev-parse", reference])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
+        let range = format!("{}..{}", from, to);
+        let output = Command::new("git")
+            .args(["diff", &range])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+    }
+
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
             .args(["diff", "origin/main..HEAD", "--", pattern])
@@ -144,8 +171,10 @@ impl GitStorage {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    fn parse_diff_output(stdout: &str) -> HashMap<PathBuf, String> {
         let mut result: HashMap<PathBuf, String> = HashMap::new();
         let mut current_path: Option<PathBuf> = None;
         let mut prev_was_minus_header = false;
@@ -160,10 +189,10 @@ impl GitStorage {
                     current_path = Some(PathBuf::from(path_str));
                 }
                 prev_was_minus_header = false;
-            } else if line.starts_with("+") && !line.starts_with("+++") {
+            } else if line.starts_with('+') && !line.starts_with("+++") {
                 prev_was_minus_header = false;
                 if let Some(ref path) = current_path {
-                    let added_line = &line[1..]; // strip leading '+'
+                    let added_line = &line[1..];
                     let entry = result.entry(path.clone()).or_default();
                     if !entry.is_empty() {
                         entry.push('\n');
@@ -175,7 +204,7 @@ impl GitStorage {
             }
         }
 
-        Ok(result)
+        result
     }
 
     pub fn rebase_onto_origin(&self) -> Result<(), GitError> {

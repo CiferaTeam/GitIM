@@ -228,3 +228,80 @@ fn test_discard_unpushed_resets_to_origin() {
     // The local commit (and its file) should be gone
     assert!(!clone_dir.path().join("local.txt").exists());
 }
+
+// ── diff_range tests ──────────────────────────────────────────
+
+#[test]
+fn test_diff_range_returns_added_lines() {
+    let (_bare_dir, clone_dir, repo) = setup_repo_pair();
+
+    // Create a .thread file, commit and push
+    let channels = clone_dir.path().join("channels").join("general");
+    std::fs::create_dir_all(&channels).unwrap();
+    let thread_file = channels.join("main.thread");
+    std::fs::write(&thread_file, "[L000001][P000000][@alice][20250316T120000Z] hello\n").unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add thread"]);
+    run_git(clone_dir.path(), &["push"]);
+
+    // Record the commit hash before adding more lines
+    let before = repo.rev_parse("HEAD").unwrap();
+
+    // Append a new line, commit
+    let mut content = std::fs::read_to_string(&thread_file).unwrap();
+    content.push_str("[L000002][P000001][@bob][20250316T120100Z] reply\n");
+    std::fs::write(&thread_file, &content).unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add reply"]);
+
+    let after = repo.rev_parse("HEAD").unwrap();
+
+    let diff = repo.diff_range(&before, &after).unwrap();
+    assert_eq!(diff.len(), 1);
+
+    let key = diff.keys().next().unwrap();
+    assert!(key.to_str().unwrap().ends_with("main.thread"));
+
+    let added = diff.values().next().unwrap();
+    assert!(added.contains("[L000002]"));
+    assert!(added.contains("reply"));
+    // Should NOT contain the original line
+    assert!(!added.contains("[L000001]"));
+}
+
+#[test]
+fn test_diff_range_empty_when_no_changes() {
+    let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
+
+    let head = repo.rev_parse("HEAD").unwrap();
+
+    // Same commit on both sides → empty diff
+    let diff = repo.diff_range(&head, &head).unwrap();
+    assert!(diff.is_empty());
+}
+
+#[test]
+fn test_rev_parse_returns_commit_hash() {
+    let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
+
+    let hash = repo.rev_parse("HEAD").unwrap();
+    assert_eq!(hash.len(), 40, "SHA should be 40 hex chars");
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn test_rev_parse_origin_main() {
+    let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
+
+    let hash = repo.rev_parse("origin/main").unwrap();
+    assert_eq!(hash.len(), 40, "SHA should be 40 hex chars");
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn test_diff_range_invalid_commit() {
+    let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
+
+    let result = repo.diff_range("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD");
+    assert!(result.is_err(), "diff_range with invalid commit should error");
+}
