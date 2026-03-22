@@ -80,4 +80,8 @@ export class GitimClient {
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
   }
+
+  async poll(since?: string): Promise<ApiResponse> {
+    return this.request('poll', { since: since ?? null });
+  }
 }
