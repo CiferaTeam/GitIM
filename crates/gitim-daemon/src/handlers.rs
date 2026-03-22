@@ -41,6 +41,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::RegisterUser { handler, display_name, role, introduction } => {
             handle_register_user(state, handler, display_name, role, introduction).await
         }
+        Request::Poll { since } => handle_poll(state, since).await,
         Request::Stop => handle_stop(state).await,
         Request::Onboard { git_server, auth } => {
             crate::onboard::handle_onboard(state, git_server, auth).await
@@ -395,4 +396,102 @@ async fn handle_stop(state: SharedState) -> Response {
     });
 
     Response::success(serde_json::json!({ "status": "stopping" }))
+}
+
+async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
+    // Determine reference point: origin/main if has remote, else HEAD
+    let ref_name = if state.git_storage.has_remote() {
+        "origin/main"
+    } else {
+        "HEAD"
+    };
+
+    // Get current commit hash
+    let current_commit = match state.git_storage.rev_parse(ref_name) {
+        Ok(hash) => hash,
+        Err(e) => return Response::error(format!("failed to get commit: {}", e)),
+    };
+
+    // No cursor → return sync point
+    let since_commit = match since {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Response::success(serde_json::json!({
+                "commit_id": current_commit,
+                "changes": [],
+            }))
+        }
+    };
+
+    // Same cursor → no changes
+    if since_commit == current_commit {
+        return Response::success(serde_json::json!({
+            "commit_id": current_commit,
+            "changes": [],
+        }));
+    }
+
+    // Compute diff
+    let diff = match state.git_storage.diff_range(&since_commit, ref_name) {
+        Ok(d) => d,
+        Err(e) => {
+            return Response::error(format!("diff failed (commit may not exist): {}", e))
+        }
+    };
+
+    // Parse changed .thread files into messages
+    let mut changes: Vec<serde_json::Value> = Vec::new();
+
+    for (path, added_content) in &diff {
+        let path_str = path.to_string_lossy();
+
+        // Determine channel name and kind from file path
+        let (channel, kind) = if let Some(name) = path_str.strip_prefix("channels/") {
+            let name = name.strip_suffix(".thread").unwrap_or(name);
+            (name.to_string(), "channel")
+        } else if let Some(name) = path_str.strip_prefix("dm/") {
+            let name = name.strip_suffix(".thread").unwrap_or(name);
+            (format!("dm:{}", name.replace("--", ",")), "dm")
+        } else {
+            continue; // Skip non-thread files
+        };
+
+        // Parse added lines as messages
+        let parsed = match parse_thread(added_content) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("poll: failed to parse diff for {}: {}", path_str, e);
+                continue;
+            }
+        };
+
+        if parsed.messages.is_empty() {
+            continue;
+        }
+
+        let messages: Vec<serde_json::Value> = parsed
+            .messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "line": m.line_number,
+                    "author": m.author.as_str(),
+                    "timestamp": m.timestamp,
+                    "body": m.body,
+                    "reply_to": if m.point_to == 0 { None } else { Some(m.point_to) },
+                })
+            })
+            .collect();
+
+        changes.push(serde_json::json!({
+            "channel": channel,
+            "kind": kind,
+            "messages": messages,
+        }));
+    }
+
+    Response::success(serde_json::json!({
+        "commit_id": current_commit,
+        "changes": changes,
+    }))
 }
