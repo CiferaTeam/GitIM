@@ -487,4 +487,266 @@ mod tests {
         // Second time: user already exists
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
     }
+
+    /// Helper: create a clone of the bare remote with git config set up
+    fn clone_from_bare(bare: &std::path::Path, dest: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["clone", bare.to_str().unwrap(), dest.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dest)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dest)
+            .output()
+            .unwrap();
+    }
+
+    fn make_state(repo_path: std::path::PathBuf) -> SharedState {
+        let (event_tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo_path, Config::default(), event_tx, None))
+    }
+
+    /// Minimal: 1 bot onboard then send — verify file write works
+    #[tokio::test]
+    async fn single_bot_onboard_then_send() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let bare = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+
+        let seed = tmp.path().join("seed");
+        clone_from_bare(&bare, &seed);
+        std::fs::write(seed.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+
+        let bot_path = tmp.path().join("bot");
+        clone_from_bare(&bare, &bot_path);
+        let state = make_state(bot_path.clone());
+
+        // Onboard
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "alice", "display_name": "Alice"}),
+        )
+        .await;
+        assert!(resp.ok, "onboard failed: {:?}", resp.error);
+
+        // Refresh users
+        let users_dir = state.repo_root.join("users");
+        let mut users = state.users.write().await;
+        users.clear();
+        if let Ok(entries) = std::fs::read_dir(&users_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".meta.json") {
+                    users.push(name.trim_end_matches(".meta.json").to_string());
+                }
+            }
+        }
+        drop(users);
+
+        // Send
+        let send = crate::handlers::handle_request(
+            crate::api::Request::Send {
+                channel: "general".to_string(),
+                body: "hello world".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send.ok, "send failed: {:?}", send.error);
+
+        let thread_path = state.repo_root.join("channels/general.thread");
+        let content = std::fs::read_to_string(&thread_path).unwrap();
+        assert!(content.contains("hello world"), "message missing from thread");
+    }
+
+    /// 3 bots onboard concurrently to the same repo, then each sends a message.
+    /// Regardless of ordering, all 3 should succeed.
+    #[tokio::test]
+    async fn three_bots_concurrent_onboard_and_send() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create bare remote with initial commit
+        let bare = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+
+        // Seed the bare repo with an initial commit (via a temp clone)
+        let seed = tmp.path().join("seed");
+        clone_from_bare(&bare, &seed);
+        std::fs::write(seed.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+
+        // Create 3 clones (simulating 3 bots on different machines)
+        let bot_a_path = tmp.path().join("bot-a");
+        let bot_b_path = tmp.path().join("bot-b");
+        let bot_c_path = tmp.path().join("bot-c");
+        clone_from_bare(&bare, &bot_a_path);
+        clone_from_bare(&bare, &bot_b_path);
+        clone_from_bare(&bare, &bot_c_path);
+
+        let state_a = make_state(bot_a_path.clone());
+        let state_b = make_state(bot_b_path.clone());
+        let state_c = make_state(bot_c_path.clone());
+
+        // === Phase 1: All 3 bots onboard ===
+        // Bot A goes first — creates everything, pushes successfully
+        let resp_a = handle_onboard(
+            state_a.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+        )
+        .await;
+        assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
+        assert!(resp_a.data.as_ref().unwrap()["created"].as_bool().unwrap());
+
+        // Bot B goes second — ensure_repo hits PushConflict, discards, registers ok
+        let resp_b = handle_onboard(
+            state_b.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+        )
+        .await;
+        assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
+        assert!(resp_b.data.as_ref().unwrap()["created"].as_bool().unwrap());
+
+        // Bot C goes third — same pattern
+        let resp_c = handle_onboard(
+            state_c.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "bot-c", "display_name": "Bot C"}),
+        )
+        .await;
+        assert!(resp_c.ok, "bot-c onboard failed: {:?}", resp_c.error);
+        assert!(resp_c.data.as_ref().unwrap()["created"].as_bool().unwrap());
+
+        // === Verify: all 3 users registered in remote ===
+        let verify = tmp.path().join("verify");
+        clone_from_bare(&bare, &verify);
+        assert!(verify.join("users/bot-a.meta.json").exists(), "bot-a user file missing in remote");
+        assert!(verify.join("users/bot-b.meta.json").exists(), "bot-b user file missing in remote");
+        assert!(verify.join("users/bot-c.meta.json").exists(), "bot-c user file missing in remote");
+        assert!(verify.join("channels/general.meta.json").exists(), "general channel missing");
+        assert!(verify.join("channels/general.thread").exists(), "general thread missing");
+
+        // === Phase 2: Each bot sends a message ===
+        // Each bot needs to pull latest state first (simulating sync)
+        for state in [&state_a, &state_b, &state_c] {
+            state.git_storage.pull_rebase().unwrap();
+            // Refresh users list from disk
+            let users_dir = state.repo_root.join("users");
+            let mut users = state.users.write().await;
+            users.clear();
+            if let Ok(entries) = std::fs::read_dir(&users_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".meta.json") {
+                        users.push(name.trim_end_matches(".meta.json").to_string());
+                    }
+                }
+            }
+        }
+
+        // Bot A sends
+        let send_a = crate::handlers::handle_request(
+            crate::api::Request::Send {
+                channel: "general".to_string(),
+                body: "hello from bot-a".to_string(),
+                reply_to: None,
+                author: Some("bot-a".to_string()),
+            },
+            state_a.clone(),
+        )
+        .await;
+        assert!(send_a.ok, "bot-a send failed: {:?}", send_a.error);
+
+        // Bot B sends
+        let send_b = crate::handlers::handle_request(
+            crate::api::Request::Send {
+                channel: "general".to_string(),
+                body: "hello from bot-b".to_string(),
+                reply_to: None,
+                author: Some("bot-b".to_string()),
+            },
+            state_b.clone(),
+        )
+        .await;
+        assert!(send_b.ok, "bot-b send failed: {:?}", send_b.error);
+
+        // Bot C sends
+        let send_c = crate::handlers::handle_request(
+            crate::api::Request::Send {
+                channel: "general".to_string(),
+                body: "hello from bot-c".to_string(),
+                reply_to: None,
+                author: Some("bot-c".to_string()),
+            },
+            state_c.clone(),
+        )
+        .await;
+        assert!(send_c.ok, "bot-c send failed: {:?}", send_c.error);
+
+        // === Verify: all 3 messages in thread ===
+        // Each bot committed locally. Read from bot-a's local thread.
+        let thread_a = std::fs::read_to_string(bot_a_path.join("channels/general.thread")).unwrap();
+        assert!(thread_a.contains("hello from bot-a"), "bot-a message missing");
+
+        // Bot B and C have their messages locally too
+        let thread_b = std::fs::read_to_string(bot_b_path.join("channels/general.thread")).unwrap();
+        assert!(thread_b.contains("hello from bot-b"), "bot-b message missing");
+
+        let thread_c = std::fs::read_to_string(bot_c_path.join("channels/general.thread")).unwrap();
+        assert!(thread_c.contains("hello from bot-c"), "bot-c message missing");
+
+        println!("=== 3-bot concurrent onboard + send: ALL PASSED ===");
+        println!("Bot A thread:\n{}", thread_a);
+        println!("Bot B thread:\n{}", thread_b);
+        println!("Bot C thread:\n{}", thread_c);
+    }
 }
