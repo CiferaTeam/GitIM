@@ -1,6 +1,6 @@
 use crate::api::{Event, Request, Response};
 use crate::state::{PendingMessage, SharedState};
-use gitim_core::dm::dm_filename;
+use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::Handler;
@@ -455,6 +455,20 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         } else {
             continue; // Skip non-thread files
         };
+
+        // DM visibility filter — skip DMs not involving current user
+        if kind == "dm" {
+            if let Some(stem) = path_str.strip_prefix("dm/").and_then(|s| s.strip_suffix(".thread")) {
+                if let Some((a, b)) = parse_dm_filename(stem) {
+                    let current = state.current_user.read().await;
+                    if let Some(ref me) = *current {
+                        if me != a && me != b {
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
 
         // Parse added lines as messages
         let parsed = match parse_thread(added_content) {
