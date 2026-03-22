@@ -3,3 +3,7 @@
 target/
 .vscode/
 .context/
+node_modules/
+*.db
+*.db-shm
+*.db-wal
