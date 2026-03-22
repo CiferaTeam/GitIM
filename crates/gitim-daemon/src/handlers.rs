@@ -423,6 +423,11 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         }
     };
 
+    // Validate commit hash format
+    if since_commit.len() != 40 || !since_commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Response::error("invalid commit hash: expected 40-character hex string");
+    }
+
     // Same cursor → no changes
     if since_commit == current_commit {
         return Response::success(serde_json::json!({
@@ -442,6 +447,8 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     // Parse changed .thread files into messages
     let mut changes: Vec<serde_json::Value> = Vec::new();
 
+    let current_user_snapshot = state.current_user.read().await.clone();
+
     for (path, added_content) in &diff {
         let path_str = path.to_string_lossy();
 
@@ -460,8 +467,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         if kind == "dm" {
             if let Some(stem) = path_str.strip_prefix("dm/").and_then(|s| s.strip_suffix(".thread")) {
                 if let Some((a, b)) = parse_dm_filename(stem) {
-                    let current = state.current_user.read().await;
-                    match &*current {
+                    match &current_user_snapshot {
                         Some(me) if me == a || me == b => { /* allowed */ }
                         _ => continue, // no identity or not a participant → skip
                     }
