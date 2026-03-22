@@ -40,6 +40,15 @@ impl GitStorage {
     }
 
     pub fn add_and_commit(&self, paths: &[&str], message: &str) -> Result<(), GitError> {
+        self.add_and_commit_as(paths, message, None)
+    }
+
+    pub fn add_and_commit_as(
+        &self,
+        paths: &[&str],
+        message: &str,
+        author: Option<&str>,
+    ) -> Result<(), GitError> {
         let mut args = vec!["add"];
         args.extend(paths);
         let output = Command::new("git")
@@ -52,8 +61,15 @@ impl GitStorage {
             ));
         }
 
+        let mut commit_args = vec!["commit", "-m", message];
+        let author_str;
+        if let Some(handler) = author {
+            author_str = format!("{} <{}@gitim>", handler, handler);
+            commit_args.push("--author");
+            commit_args.push(&author_str);
+        }
         let output = Command::new("git")
-            .args(["commit", "-m", message])
+            .args(&commit_args)
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {

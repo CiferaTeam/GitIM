@@ -152,7 +152,7 @@ async fn handle_send(
         Ok(rel) => {
             let rel_str = rel.to_string_lossy().to_string();
             let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
-            match state.git_storage.add_and_commit(&[&rel_str], &commit_msg) {
+            match state.git_storage.add_and_commit_as(&[&rel_str], &commit_msg, Some(&author)) {
                 Ok(()) => "committed",
                 Err(e) => {
                     warn!("git commit failed for L{:06} in {}: {}", next_line, thread_name, e);
@@ -289,9 +289,10 @@ async fn handle_register_user(
     }
 
     // Git add + commit (best effort)
-    let _ = state.git_storage.add_and_commit(
+    let _ = state.git_storage.add_and_commit_as(
         &[&format!("users/{}.meta.json", handler)],
-        &format!("msg: register @{}", handler),
+        &format!("user: register @{}", handler),
+        Some(&handler),
     );
 
     Response::success(serde_json::json!({

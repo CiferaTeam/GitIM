@@ -229,7 +229,7 @@ fn register_user(
 
     state
         .git_storage
-        .add_and_commit(&[&rel_path], &commit_msg)
+        .add_and_commit_as(&[&rel_path], &commit_msg, Some(handler))
         .map_err(|e| Response::error(format!("register_user commit failed: {}", e)))?;
 
     // Push with retry on conflict (skip if no remote, e.g. local git mode)
