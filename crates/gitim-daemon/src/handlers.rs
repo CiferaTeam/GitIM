@@ -432,7 +432,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     }
 
     // Compute diff
-    let diff = match state.git_storage.diff_range(&since_commit, ref_name) {
+    let diff = match state.git_storage.diff_range(&since_commit, &current_commit) {
         Ok(d) => d,
         Err(e) => {
             return Response::error(format!("diff failed (commit may not exist): {}", e))
@@ -461,10 +461,9 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
             if let Some(stem) = path_str.strip_prefix("dm/").and_then(|s| s.strip_suffix(".thread")) {
                 if let Some((a, b)) = parse_dm_filename(stem) {
                     let current = state.current_user.read().await;
-                    if let Some(ref me) = *current {
-                        if me != a && me != b {
-                            continue;
-                        }
+                    match &*current {
+                        Some(me) if me == a || me == b => { /* allowed */ }
+                        _ => continue, // no identity or not a participant → skip
                     }
                 }
             }

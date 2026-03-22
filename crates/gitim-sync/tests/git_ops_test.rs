@@ -104,9 +104,9 @@ fn test_diff_unpushed() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
     // Create a channels directory and a .thread file
-    let channels = clone_dir.path().join("channels").join("general");
+    let channels = clone_dir.path().join("channels");
     std::fs::create_dir_all(&channels).unwrap();
-    let thread_file = channels.join("main.thread");
+    let thread_file = channels.join("general.thread");
     std::fs::write(&thread_file, "[L000001][P000000][@alice][20250316T120000Z] hello\n").unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add thread"]);
@@ -126,7 +126,7 @@ fn test_diff_unpushed() {
         .keys()
         .next()
         .unwrap();
-    assert!(key.to_str().unwrap().ends_with("main.thread"));
+    assert!(key.to_str().unwrap().ends_with("general.thread"));
 
     let added = diff.values().next().unwrap();
     assert!(added.contains("[L000002]"));
@@ -236,9 +236,9 @@ fn test_diff_range_returns_added_lines() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
     // Create a .thread file, commit and push
-    let channels = clone_dir.path().join("channels").join("general");
+    let channels = clone_dir.path().join("channels");
     std::fs::create_dir_all(&channels).unwrap();
-    let thread_file = channels.join("main.thread");
+    let thread_file = channels.join("general.thread");
     std::fs::write(&thread_file, "[L000001][P000000][@alice][20250316T120000Z] hello\n").unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add thread"]);
@@ -260,7 +260,7 @@ fn test_diff_range_returns_added_lines() {
     assert_eq!(diff.len(), 1);
 
     let key = diff.keys().next().unwrap();
-    assert!(key.to_str().unwrap().ends_with("main.thread"));
+    assert!(key.to_str().unwrap().ends_with("general.thread"));
 
     let added = diff.values().next().unwrap();
     assert!(added.contains("[L000002]"));

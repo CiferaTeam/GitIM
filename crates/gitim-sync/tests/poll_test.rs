@@ -80,9 +80,9 @@ fn test_poll_workflow_detects_new_message() {
     let old_cursor = repo.rev_parse("origin/main").unwrap();
 
     // Create a .thread file, commit and push
-    let channels = clone_dir.path().join("channels").join("general");
+    let channels = clone_dir.path().join("channels");
     std::fs::create_dir_all(&channels).unwrap();
-    let thread_file = channels.join("main.thread");
+    let thread_file = channels.join("general.thread");
     std::fs::write(
         &thread_file,
         "[L000001][P000000][@alice][20260322T100000Z] hello world\n",
@@ -101,7 +101,7 @@ fn test_poll_workflow_detects_new_message() {
 
     let key = diff.keys().next().unwrap();
     assert!(
-        key.to_str().unwrap().ends_with("main.thread"),
+        key.to_str().unwrap().ends_with("general.thread"),
         "diff key should be the thread file path"
     );
     let added = diff.values().next().unwrap();
@@ -125,19 +125,19 @@ fn test_poll_workflow_multiple_channels() {
     let old_cursor = repo.rev_parse("origin/main").unwrap();
 
     // Create a channels/ .thread file
-    let ch_dir = clone_dir.path().join("channels").join("general");
+    let ch_dir = clone_dir.path().join("channels");
     std::fs::create_dir_all(&ch_dir).unwrap();
     std::fs::write(
-        ch_dir.join("main.thread"),
+        ch_dir.join("general.thread"),
         "[L000001][P000000][@alice][20260322T100000Z] channel msg\n",
     )
     .unwrap();
 
     // Create a dm/ .thread file
-    let dm_dir = clone_dir.path().join("dm").join("alice--bob");
+    let dm_dir = clone_dir.path().join("dm");
     std::fs::create_dir_all(&dm_dir).unwrap();
     std::fs::write(
-        dm_dir.join("main.thread"),
+        dm_dir.join("alice--bob.thread"),
         "[L000001][P000000][@alice][20260322T100100Z] dm msg\n",
     )
     .unwrap();
@@ -198,10 +198,10 @@ fn test_poll_no_remote_uses_head() {
     assert!(head.chars().all(|c| c.is_ascii_hexdigit()));
 
     // Create a .thread file and commit
-    let ch_dir = local_dir.path().join("channels").join("dev");
+    let ch_dir = local_dir.path().join("channels");
     std::fs::create_dir_all(&ch_dir).unwrap();
     std::fs::write(
-        ch_dir.join("main.thread"),
+        ch_dir.join("dev.thread"),
         "[L000001][P000000][@alice][20260322T100000Z] local msg\n",
     )
     .unwrap();
@@ -216,7 +216,7 @@ fn test_poll_no_remote_uses_head() {
     assert!(!diff.is_empty(), "diff should detect new .thread file");
 
     let key = diff.keys().next().unwrap();
-    assert!(key.to_str().unwrap().ends_with("main.thread"));
+    assert!(key.to_str().unwrap().ends_with("dev.thread"));
     let added = diff.values().next().unwrap();
     assert!(added.contains("local msg"));
 }
