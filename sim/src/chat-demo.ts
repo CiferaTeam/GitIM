@@ -15,7 +15,7 @@ import { gitimTools, executeTool } from "./tools.js";
 //    LLM_API_KEY     — LLM API key (必须)
 //    LLM_BASE_URL    — API endpoint (可选, 默认 Anthropic 官方)
 //    LLM_MODEL       — 模型名 (可选, 默认 claude-sonnet-4-20250514)
-//    GITIM_DAEMON_URL — mock daemon 地址 (可选, 默认 http://localhost:3000)
+//    GITIM_DAEMON_URL — daemon 地址 (可选, 默认 http://localhost:3000)
 //
 //  用法:
 //    LLM_API_KEY=sk-... LLM_BASE_URL=https://api.minimaxi.com/anthropic LLM_MODEL=MiniMax-M2.7 \
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
   // Check daemon is running
   const statusRes = await callDaemon({ method: "status" }).catch(() => null);
   if (!statusRes?.ok) {
-    console.error("错误: mock daemon 未运行。请先执行: npm run daemon");
+    console.error("错误: gitim-daemon 未运行。请先启动 daemon（debug_http: true）");
     process.exit(1);
   }
 

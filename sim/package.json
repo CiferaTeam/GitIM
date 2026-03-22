@@ -1,18 +1,14 @@
 {
   "name": "gitim-sim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "daemon": "tsx src/server.ts",
-    "chat": "tsx src/chat-demo.ts",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "chat": "tsx src/chat-demo.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
     "@anthropic-ai/sdk": "^0.52.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0"

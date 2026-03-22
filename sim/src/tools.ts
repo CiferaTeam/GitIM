@@ -2,10 +2,10 @@ import type Anthropic from "@anthropic-ai/sdk";
 
 // ── GitIM Tool Schema ───────────────────────────────────────
 //
-//  Agent 通过 Claude tool use 调用这些工具和 mock daemon 通信。
-//  和 gitim-daemon/src/api.rs 的 8 种 Request 对齐。
+//  Agent 通过 Claude tool use 调用这些工具和 gitim-daemon 通信。
+//  和 gitim-daemon/src/api.rs 的 Request 对齐。
 //
-//  Agent → Claude tool use → tools → HTTP POST /api → mock daemon
+//  Agent → Claude tool use → tools → HTTP POST /api → gitim-daemon
 
 const DAEMON_URL = process.env.GITIM_DAEMON_URL ?? "http://localhost:3000";
 
