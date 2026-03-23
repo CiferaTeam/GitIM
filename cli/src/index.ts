@@ -27,6 +27,7 @@ program
   .option('--display-name <name>', 'git 本地模式必填：显示名称')
   .option('-u, --url <url>', 'Gitea/GitLab 服务地址')
   .option('--refresh', '重新推断身份')
+  .option('--debug-http', '开启 HTTP 调试端口')
   .action(async (repoName, org, options) => {
     await onboardCommand(repoName, org, options);
   });

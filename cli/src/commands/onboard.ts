@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureDaemon } from '../daemon.js';
+import { ensureDaemon, isDaemonRunning } from '../daemon.js';
 import { GitimClient } from '../client.js';
 
 type GitServer = 'git' | 'github' | 'gitea' | 'gitlab';
@@ -13,6 +13,7 @@ interface OnboardOptions {
   displayName?: string;
   url?: string;
   refresh?: boolean;
+  debugHttp?: boolean;
 }
 
 function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string, string> {
@@ -27,6 +28,24 @@ function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string
     auth.url = options.url;
   }
   return auth;
+}
+
+function ensureConfigDebugHttp(repoDir: string, enabled: boolean): void {
+  const configPath = path.join(repoDir, '.gitim', 'config.yaml');
+  if (fs.existsSync(configPath)) {
+    let content = fs.readFileSync(configPath, 'utf-8');
+    if (content.includes('debug_http:')) {
+      content = content.replace(/debug_http:\s*(true|false)/, `debug_http: ${enabled}`);
+    } else if (content.includes('daemon:')) {
+      content = content.replace(/daemon:/, `daemon:\n  debug_http: ${enabled}`);
+    } else {
+      content += `\ndaemon:\n  debug_http: ${enabled}\n`;
+    }
+    fs.writeFileSync(configPath, content);
+  } else {
+    fs.mkdirSync(path.join(repoDir, '.gitim'), { recursive: true });
+    fs.writeFileSync(configPath, `version: 1\ndaemon:\n  debug_http: ${enabled}\n`);
+  }
 }
 
 function validateParams(gitServer: GitServer, options: OnboardOptions): void {
@@ -160,6 +179,16 @@ export async function onboardCommand(
       console.error('不在 GitIM 仓库中，无法 --refresh');
       process.exit(1);
     }
+    // If --debug-http is set, update config and restart daemon
+    if (options.debugHttp) {
+      ensureConfigDebugHttp(cwd, true);
+      if (isDaemonRunning(cwd)) {
+        const oldClient = new GitimClient(cwd);
+        await oldClient.stop().catch(() => {});
+        // Wait briefly for daemon to exit
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
     await ensureDaemon(cwd);
     const client = new GitimClient(cwd);
     const auth = buildAuth(gitServer, options);
@@ -185,6 +214,11 @@ export async function onboardCommand(
 
   // 3. Ensure .gitim/ directory exists
   fs.mkdirSync(path.join(repoDir, '.gitim'), { recursive: true });
+
+  // 3.5. Write config with debug_http if requested (before daemon starts)
+  if (options.debugHttp) {
+    ensureConfigDebugHttp(repoDir, true);
+  }
 
   // 4. Start daemon
   await ensureDaemon(repoDir);
