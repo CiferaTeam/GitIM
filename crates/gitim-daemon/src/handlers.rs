@@ -372,8 +372,8 @@ async fn handle_get_thread(
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
-    // Collect the root message and all descendants (messages pointing to it, recursively)
-    let mut thread_msgs = Vec::new();
+    // Collect the root entry and all descendants (entries pointing to it, recursively)
+    let mut thread_entries: Vec<serde_json::Value> = Vec::new();
     let mut stack = vec![line_number];
     let mut visited = std::collections::HashSet::new();
 
@@ -381,37 +381,31 @@ async fn handle_get_thread(
         if !visited.insert(target) {
             continue;
         }
-        for msg in file.messages() {
-            if msg.line_number == target || msg.point_to == target {
-                thread_msgs.push(serde_json::json!({
-                    "line_number": msg.line_number,
-                    "point_to": msg.point_to,
-                    "author": msg.author.as_str(),
-                    "timestamp": msg.timestamp,
-                    "body": msg.body,
-                }));
-                if msg.line_number != target {
-                    stack.push(msg.line_number);
+        for entry in &file.entries {
+            if entry.line_number() == target || entry.point_to() == target {
+                thread_entries.push(entry_to_json(entry));
+                if entry.line_number() != target {
+                    stack.push(entry.line_number());
                 }
             }
         }
     }
 
     // Sort by line number
-    thread_msgs.sort_by(|a, b| {
+    thread_entries.sort_by(|a, b| {
         a["line_number"]
             .as_u64()
             .unwrap()
             .cmp(&b["line_number"].as_u64().unwrap())
     });
 
-    // Deduplicate (a message could match both by line_number and point_to)
-    thread_msgs.dedup_by(|a, b| a["line_number"] == b["line_number"]);
+    // Deduplicate (an entry could match both by line_number and point_to)
+    thread_entries.dedup_by(|a, b| a["line_number"] == b["line_number"]);
 
     Response::success(serde_json::json!({
         "channel": channel,
         "root_line": line_number,
-        "messages": thread_msgs,
+        "entries": thread_entries,
     }))
 }
 
@@ -497,9 +491,13 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 .join(format!("{}.meta.json", ch_name));
             let is_member = if let Ok(content) = std::fs::read_to_string(&meta_path) {
                 if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
-                    current_user_snapshot
-                        .as_ref()
-                        .map_or(false, |me| meta.members.contains(me))
+                    if meta.members.is_empty() {
+                        true // Legacy: no members list = everyone has access
+                    } else {
+                        current_user_snapshot
+                            .as_ref()
+                            .map_or(false, |me| meta.members.contains(me))
+                    }
                 } else {
                     true
                 }
@@ -1076,8 +1074,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
         register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
         create_test_channel(&state, "general", "alice");
         create_test_channel(&state, "random", "alice");
+
+        // Bob joins random so its members list is non-empty (not legacy/open)
+        let bob_join = handle_request(
+            Request::JoinChannel {
+                channel: "random".to_string(),
+                targets: vec![],
+                author: Some("bob".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(bob_join.ok, "bob join random failed: {:?}", bob_join.error);
 
         // Push initial state to origin
         state.git_storage.push().ok();

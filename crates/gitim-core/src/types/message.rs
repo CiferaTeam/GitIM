@@ -47,6 +47,12 @@ impl ThreadEntry {
             ThreadEntry::Event(e) => &e.timestamp,
         }
     }
+    pub fn point_to(&self) -> u64 {
+        match self {
+            ThreadEntry::Message(m) => m.point_to,
+            ThreadEntry::Event(e) => e.point_to,
+        }
+    }
 }
 
 /// A line in a .thread file — either a message start or a continuation.
