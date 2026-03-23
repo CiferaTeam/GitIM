@@ -55,9 +55,9 @@ pub fn build_rebase_commit_msg(
         if let Some(content) = local_additions.get(*file) {
             if let Ok(parsed) = parse_thread(content) {
                 let mut by_author: HashMap<String, Vec<u64>> = HashMap::new();
-                for (msg, new_ln) in parsed.messages.iter().zip(new_lines.iter()) {
+                for (entry, new_ln) in parsed.entries.iter().zip(new_lines.iter()) {
                     by_author
-                        .entry(msg.author.as_str().to_string())
+                        .entry(entry.author().as_str().to_string())
                         .or_default()
                         .push(*new_ln);
                 }
@@ -116,16 +116,16 @@ pub fn resolve_content(
             0
         } else {
             let remote_file = parse_thread(&remote_content)?;
-            remote_file.messages.iter().map(|m| m.line_number).max().unwrap_or(0)
+            remote_file.entries.iter().map(|e| e.line_number()).max().unwrap_or(0)
         };
 
         let local_file = parse_thread(local_content)?;
-        let old_line_numbers: Vec<u64> = local_file.messages.iter().map(|m| m.line_number).collect();
+        let old_line_numbers: Vec<u64> = local_file.entries.iter().map(|e| e.line_number()).collect();
 
         let renumbered = renumber_batch(local_content, max_line)?;
 
         let renumbered_file = parse_thread(&renumbered)?;
-        let new_line_numbers: Vec<u64> = renumbered_file.messages.iter().map(|m| m.line_number).collect();
+        let new_line_numbers: Vec<u64> = renumbered_file.entries.iter().map(|e| e.line_number()).collect();
 
         for (old_ln, new_ln) in old_line_numbers.iter().zip(new_line_numbers.iter()) {
             all_mappings.push(RenumberMapping {

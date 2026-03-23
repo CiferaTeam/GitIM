@@ -117,11 +117,7 @@ async fn handle_send(
         Err(e) => return Response::error(format!("failed to parse thread: {}", e)),
     };
 
-    let next_line = existing_file
-        .messages
-        .last()
-        .map(|m| m.line_number + 1)
-        .unwrap_or(1);
+    let next_line = existing_file.last_line_number() + 1;
     let point_to = reply_to.unwrap_or(0);
 
     // Generate timestamp and format message
@@ -214,7 +210,7 @@ async fn handle_read(
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
-    let mut messages: Vec<&gitim_core::types::Message> = file.messages.iter().collect();
+    let mut messages: Vec<&gitim_core::types::Message> = file.messages().into_iter().collect();
 
     if let Some(since_line) = since {
         messages.retain(|m| m.line_number > since_line);
@@ -350,7 +346,7 @@ async fn handle_get_thread(
         if !visited.insert(target) {
             continue;
         }
-        for msg in &file.messages {
+        for msg in file.messages() {
             if msg.line_number == target || msg.point_to == target {
                 thread_msgs.push(serde_json::json!({
                     "line_number": msg.line_number,
@@ -484,12 +480,12 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
             }
         };
 
-        if parsed.messages.is_empty() {
+        let poll_messages = parsed.messages();
+        if poll_messages.is_empty() {
             continue;
         }
 
-        let messages: Vec<serde_json::Value> = parsed
-            .messages
+        let messages: Vec<serde_json::Value> = poll_messages
             .iter()
             .map(|m| {
                 serde_json::json!({
