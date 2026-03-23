@@ -4,7 +4,7 @@ use crate::types::{Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
 
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([#~!])([^>]+)>").unwrap()
+    Regex::new(r"<([#~!])([^>\n]+)>").unwrap()
 });
 
 static MSG_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -51,6 +51,9 @@ fn parse_user_profile(content: &str) -> Option<LinkKind> {
 fn parse_softlink(content: &str) -> Option<LinkKind> {
     if let Some(pos) = content.find('|') {
         let url = &content[..pos];
+        if url.is_empty() {
+            return None;
+        }
         // Safe: '|' is ASCII (0x7C), so pos + 1 is always a valid UTF-8 boundary
         let title = &content[pos + 1..];
         Some(LinkKind::Softlink { url: url.to_string(), title: Some(title.to_string()) })
@@ -203,5 +206,33 @@ mod tests {
         let links = extract_links("<@alice> see <#general>");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].kind, LinkKind::Channel { name: "general".into() });
+    }
+
+    #[test]
+    fn test_empty_url_softlink_ignored() {
+        // <!|title> has empty URL — should be rejected
+        let links = extract_links("<!|some title>");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_newline_in_link_not_matched() {
+        // Link markers must not span lines
+        let links = extract_links("<!https://x.com\n|pwn>");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_bare_text_softlink_accepted() {
+        // <!not a url> is syntactically valid — no URL validation
+        let links = extract_links("<!not a url>");
+        assert_eq!(links.len(), 1);
+        match &links[0].kind {
+            LinkKind::Softlink { url, title } => {
+                assert_eq!(url, "not a url");
+                assert_eq!(*title, None);
+            }
+            _ => panic!("expected Softlink"),
+        }
     }
 }
