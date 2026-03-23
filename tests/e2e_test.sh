@@ -101,6 +101,81 @@ RES=$(echo '{"method":"register_user","handler":"tester","display_name":"Tester"
 echo "$RES" | grep -q '"exists":true' || { echo "FAIL: register_user existing ($RES)"; exit 1; }
 echo "PASS: register_user existing"
 
+# === Test: Poll (cursor-pull) ===
+echo "=== Test: Poll ==="
+
+# Poll with no cursor — should get commit_id
+POLL1=$(echo '{"method":"poll"}' | nc -U "$SOCK" -w 2)
+echo "Poll (no cursor): $POLL1"
+COMMIT_ID=$(echo "$POLL1" | jq -r '.data.commit_id')
+if [ -z "$COMMIT_ID" ] || [ "$COMMIT_ID" = "null" ]; then
+  echo "FAIL: poll did not return commit_id"
+  exit 1
+fi
+echo "Got cursor: $COMMIT_ID"
+
+# Send a message
+SEND_RESULT=$(echo '{"method":"send","channel":"general","body":"poll test message"}' | nc -U "$SOCK" -w 2)
+echo "Send: $SEND_RESULT"
+
+# Small delay to let commit settle
+sleep 1
+
+# Poll with cursor — should see the new message
+POLL2=$(echo "{\"method\":\"poll\",\"since\":\"$COMMIT_ID\"}" | nc -U "$SOCK" -w 2)
+echo "Poll (with cursor): $POLL2"
+HAS_CHANGES=$(echo "$POLL2" | jq '.data.changes | length')
+NEW_COMMIT=$(echo "$POLL2" | jq -r '.data.commit_id')
+
+if [ "$HAS_CHANGES" -gt 0 ]; then
+  echo "PASS: poll detected $HAS_CHANGES channel(s) with changes"
+else
+  echo "FAIL: poll did not detect changes"
+  exit 1
+fi
+
+# Poll with latest cursor — should be empty
+POLL3=$(echo "{\"method\":\"poll\",\"since\":\"$NEW_COMMIT\"}" | nc -U "$SOCK" -w 2)
+echo "Poll (latest cursor): $POLL3"
+NO_CHANGES=$(echo "$POLL3" | jq '.data.changes | length')
+if [ "$NO_CHANGES" -eq 0 ]; then
+  echo "PASS: poll with latest cursor returns empty changes"
+else
+  echo "FAIL: poll returned unexpected changes with latest cursor"
+  exit 1
+fi
+
+# === Test: Links in messages ===
+echo "=== Test: Links ==="
+
+# Send message with links
+RES=$(echo '{"method":"send","channel":"general","body":"see <#general:L000001> and <!https://example.com|docs> and <~tester>"}' | nc -U "$SOCK" -w 2)
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: send with links ($RES)"; exit 1; }
+echo "PASS: send with links"
+
+# Read and verify links in response
+RES=$(echo '{"method":"read","channel":"general","since":3}' | nc -U "$SOCK" -w 2)
+echo "Read with links: $RES"
+
+# Verify links array exists and has 3 entries
+LINK_COUNT=$(echo "$RES" | jq '[.data.messages[] | select(.links | length > 0)] | .[0].links | length')
+if [ "$LINK_COUNT" -eq 3 ]; then
+  echo "PASS: message has 3 links"
+else
+  echo "FAIL: expected 3 links, got $LINK_COUNT"
+  echo "Full response: $RES"
+  exit 1
+fi
+
+# Verify mentions array also present
+HAS_MENTIONS=$(echo "$RES" | jq '[.data.messages[] | select(has("mentions"))] | length')
+if [ "$HAS_MENTIONS" -gt 0 ]; then
+  echo "PASS: mentions field present in response"
+else
+  echo "FAIL: mentions field missing"
+  exit 1
+fi
+
 # Test: stop
 RES=$(echo '{"method":"stop"}' | nc -U "$SOCK")
 echo "$RES" | grep -q '"stopping"' || { echo "FAIL: stop ($RES)"; exit 1; }

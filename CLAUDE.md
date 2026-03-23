@@ -18,6 +18,23 @@
 - Git 负责持久化、同步和审计追踪
 - 合规性：daemon 写入验证（主防线）+ 读取检测（第二防线）
 
+## Onboard 流程
+
+CLI 现已完全委托 daemon 处理身份推断和仓库初始化：
+
+1. **CLI 阶段**：收集用户参数（git 类型、token 等）
+2. **仓库克隆/初始化**（CLI）：克隆或创建 git 仓库，创建 `.gitim/` 目录（git 忽略）
+3. **Daemon 阶段**：
+   - **身份推断**（Onboard 处理）：根据 git 类型和 token 推断 handler + 信息
+   - **用户注册**（RegisterUser 处理）：创建 `users/<handler>.meta.json`
+   - **Repo 初始化**：生成 `.gitim/config.yaml`、初始化 `me.json`
+   - **Git 提交**：各文件变更提交到 git
+
+支持的身份推断渠道：
+- **git 本地模式**：直接指定 handler + display_name
+- **GitHub**：通过 token 调用 API 获取用户信息
+- **Gitea/GitLab**：通过 token + 自定义 URL 调用对应 API
+
 ## v1 范围
 
 - 三个模块：用户（users）、频道（channels）、私信（dm）

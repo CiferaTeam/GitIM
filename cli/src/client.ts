@@ -73,7 +73,45 @@ export class GitimClient {
     });
   }
 
+  async onboard(gitServer: string, auth: Record<string, string>): Promise<ApiResponse> {
+    return this.request('onboard', { git_server: gitServer, auth });
+  }
+
+  async joinChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+    return this.request('join_channel', { channel, targets: targets ?? [] });
+  }
+
+  async leaveChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+    return this.request('leave_channel', { channel, targets: targets ?? [] });
+  }
+
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
+  }
+
+  async poll(since?: string): Promise<ApiResponse> {
+    return this.request('poll', { since: since ?? null });
+  }
+
+  async search(params: {
+    query?: string;
+    author?: string;
+    channel?: string;
+    channel_type?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ApiResponse> {
+    return this.request('search', {
+      query: params.query ?? null,
+      author: params.author ?? null,
+      channel: params.channel ?? null,
+      channel_type: params.channel_type ?? null,
+      limit: params.limit ?? 50,
+      offset: params.offset ?? 0,
+    });
+  }
+
+  async reindex(): Promise<ApiResponse> {
+    return this.request('reindex');
   }
 }

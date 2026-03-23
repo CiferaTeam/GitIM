@@ -9,6 +9,8 @@ import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
 import { onboardCommand } from './commands/onboard.js';
 import { stopCommand } from './commands/stop.js';
 import { tuiCommand } from './commands/tui.js';
+import { searchCommand } from './commands/search.js';
+import { reindexCommand } from './commands/reindex.js';
 
 const program = new Command();
 
@@ -20,9 +22,13 @@ program
 program
   .command('onboard [repo_name] [org]')
   .description('加入或创建 GitIM 仓库')
-  .option('-e, --endpoint <type>', 'endpoint 类型: github 或 gitea', 'github')
-  .option('-u, --url <url>', 'Gitea 服务地址')
+  .option('-g, --git-server <type>', 'Git 服务类型: git | github | gitea | gitlab', 'github')
+  .option('-t, --token <token>', 'GitHub/Gitea/GitLab 认证 token')
+  .option('--handler <handler>', 'git 本地模式必填：本地 handler')
+  .option('--display-name <name>', 'git 本地模式必填：显示名称')
+  .option('-u, --url <url>', 'Gitea/GitLab 服务地址')
   .option('--refresh', '重新推断身份')
+  .option('--debug-http', '开启 HTTP 调试端口')
   .action(async (repoName, org, options) => {
     await onboardCommand(repoName, org, options);
   });
@@ -62,6 +68,21 @@ program
   .action(async () => {
     await stopCommand();
   });
+
+program
+  .command('search [query]')
+  .description('搜索消息')
+  .option('-a, --author <handler>', '按作者过滤')
+  .option('-c, --channel <name>', '限定频道')
+  .option('-t, --type <type>', '频道类型: channel | dm')
+  .option('-l, --limit <n>', '结果数量限制', '50')
+  .option('--offset <n>', '分页偏移', '0')
+  .action((query, options) => searchCommand(query, options));
+
+program
+  .command('reindex')
+  .description('重建搜索索引')
+  .action(() => reindexCommand());
 
 const dm = program.command('dm').description('Direct messages');
 

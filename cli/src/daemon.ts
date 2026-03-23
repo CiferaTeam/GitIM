@@ -8,7 +8,7 @@ const POLL_INTERVAL_MS = 100;
 export function findRepoRoot(from: string = process.cwd()): string | null {
   let dir = from;
   while (true) {
-    if (fs.existsSync(path.join(dir, '.gitim', 'config.yaml'))) {
+    if (fs.existsSync(path.join(dir, '.gitim'))) {
       return dir;
     }
     const parent = path.dirname(dir);

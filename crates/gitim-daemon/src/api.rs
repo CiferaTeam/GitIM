@@ -11,6 +11,14 @@ pub enum Event {
 
     #[serde(rename = "message_renumbered")]
     MessageRenumbered { channel: String, old_line: u64, new_line: u64 },
+
+    #[serde(rename = "membership_changed")]
+    MembershipChanged {
+        channel: String,
+        event_type: String,
+        author: String,
+        targets: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +54,11 @@ pub enum Request {
     Subscribe,
     #[serde(rename = "stop")]
     Stop,
+    #[serde(rename = "poll")]
+    Poll {
+        #[serde(default)]
+        since: Option<String>,
+    },
     #[serde(rename = "register_user")]
     RegisterUser {
         handler: String,
@@ -55,7 +68,47 @@ pub enum Request {
         #[serde(default = "default_introduction")]
         introduction: String,
     },
+    #[serde(rename = "onboard")]
+    Onboard {
+        git_server: String,
+        auth: serde_json::Value,
+    },
+    #[serde(rename = "join_channel")]
+    JoinChannel {
+        channel: String,
+        #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "leave_channel")]
+    LeaveChannel {
+        channel: String,
+        #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "search")]
+    Search {
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        channel_type: Option<String>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    #[serde(rename = "reindex")]
+    Reindex,
 }
+
+fn default_limit() -> usize { 50 }
 
 fn default_role() -> String {
     "member".to_string()

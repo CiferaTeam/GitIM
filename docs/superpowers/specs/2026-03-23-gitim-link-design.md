@@ -1,0 +1,260 @@
+# GitIM Link 协议扩展设计
+
+> **协议级链接功能：in-system link + softlink**
+> 版本：1.0-draft | 作者：Lewis
+
+---
+
+## 1. 概述
+
+为 GitIM 消息格式增加链接能力，支持两类链接：
+
+- **in-system link**：指向 GitIM 内部实体（频道、消息、用户资料），纯导航，不触发通知。
+- **softlink**：指向外部 URL 的跳转链接。
+
+**与 mention 的区别：**
+
+- `<@handler>` mention — 有通知语义，写入时验证 handler 存在性。
+- `<~handler>` 用户资料链接 — 纯导航，不验证，不触发通知。
+
+**本次范围：**
+
+- 5 种链接语法定义
+- `Link`、`LinkKind` 类型定义
+- `Message` 结构体扩展
+- 解析逻辑（从 body 提取 links）
+
+**不在范围：**
+
+- 写入验证（link 不验证目标存在性）
+- 读取检测（link 目标可能被 archive 或删除，不告警）
+- 前端渲染与交互
+
+---
+
+## 2. 语法
+
+### 2.1 完整语法表
+
+| 类型 | 前缀符号 | 语法 | 示例 |
+|------|---------|------|------|
+| 频道链接 | `#` | `<#channel>` | `<#general>` |
+| 消息链接 | `#` | `<#channel:LNNNNNN>` | `<#general:L000042>` |
+| 用户资料链接 | `~` | `<~handler>` | `<~bob>` |
+| 外部裸链接 | `!` | `<!url>` | `<!https://example.com>` |
+| 外部带标题链接 | `!` | `<!url\|显示文本>` | `<!https://x.com\|点击查看>` |
+
+### 2.2 符号体系总览
+
+与现有 mention 共享 `<符号...>` 体系：
+
+| 符号 | 类型 | 语义 |
+|------|------|------|
+| `@` | mention | 通知 + 验证（已有） |
+| `#` | 频道/消息链接 | 纯导航 |
+| `~` | 用户资料链接 | 纯导航 |
+| `!` | 外部链接 | 纯导航 |
+
+### 2.3 语法规则
+
+| 属性 | 值 |
+|------|------|
+| 格式 | `<` + 符号 + 内容 + `>` |
+| 符号 | `#`、`~`、`!` |
+| 位置 | MAY 出现在 body 的任意位置（首行、续行、行首、行中、行尾） |
+| 数量 | 单条消息 MAY 包含零到多个链接 |
+| 重复 | 不去重，按出现顺序保留所有实例 |
+
+### 2.4 各类型内容规则
+
+**频道链接 `<#channel>`：**
+- channel 遵循频道命名规则：`^[a-z0-9]+(-[a-z0-9]+)*$`，1-32 字符，禁止连续连字符
+
+**消息链接 `<#channel:LNNNNNN>`：**
+- channel 遵循上述频道命名规则
+- `:L` 为固定分隔符
+- 行号为 6 位及以上数字（与 v1 协议一致）
+
+**用户资料链接 `<~handler>`：**
+- handler 遵循现有 Handler 规则：`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`，1-39 字符，禁止连续连字符，`system` 为保留字
+
+**外部链接 `<!url>` / `<!url|文本>`：**
+- URL 必须是 RFC 3986 合法编码
+- URL 中的 `|` 必须编码为 `%7C`，`>` 必须编码为 `%3E`
+- `|` 为 URL 与显示文本的分隔符，取第一个裸 `|`
+- 显示文本为 `|` 之后、`>` 之前的任意 UTF-8 文本
+
+---
+
+## 3. 数据结构
+
+### 3.1 Link 类型
+
+```rust
+pub struct Link {
+    pub kind: LinkKind,
+    pub raw: String,        // 完整匹配文本，含角括号，如 "<#general:L000042>"
+}
+
+pub enum LinkKind {
+    Channel { name: String },
+    Message { channel: String, line_number: u64 },
+    UserProfile { handler: Handler },
+    Softlink { url: String, title: Option<String> },
+}
+```
+
+### 3.2 Message 扩展
+
+`Message` 新增 `links: Vec<Link>` 字段：
+
+```rust
+pub struct Message {
+    pub line_number: u64,
+    pub point_to: u64,
+    pub author: Handler,
+    pub timestamp: String,
+    pub body: String,
+    pub mentions: Vec<Handler>,
+    pub links: Vec<Link>,       // 新增
+}
+```
+
+---
+
+## 4. 解析
+
+### 4.1 提取正则
+
+从完整 body（含续行）中提取所有非 mention 的协议级标记：
+
+```
+<([#~!])([^>]+)>
+```
+
+mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。正则首字符限定 `[#~!]`，天然排除 `@` 前缀。
+
+### 4.2 分发逻辑
+
+按匹配的首字符（capture group 1）分发：
+
+| 首字符 | 解析逻辑 |
+|--------|---------|
+| `#` | 若内容匹配 `^<channel>:L\d{6,}$` → `Message { channel, line_number }`（channel 部分需通过频道命名规则验证），否则 → `Channel { name }`（需通过频道命名规则验证） |
+| `~` | → `UserProfile { handler }`（需通过 `Handler::new()` 格式验证） |
+| `!` | 若内容含裸 `\|` → `Softlink { url, title }`，否则 → `Softlink { url, title: None }` |
+
+### 4.3 解析流程
+
+1. 按现有逻辑解析消息起始行和续行，组装完整 body。
+2. 对完整 body 应用提取正则，收集所有匹配。
+3. 对每个匹配按首字符分发，进行**格式验证**（频道名、handler 格式），构建 `Link` 实例。
+4. 格式不合法的匹配（如 channel 名含非法字符、行号不足 6 位、handler 格式不合法）静默忽略，不中断解析。
+5. 按出现顺序存入 `links` 字段，不去重。
+
+---
+
+## 5. 验证
+
+### 5.1 写入验证
+
+**不验证目标存在性。** Link 目标不要求存在。频道可能被 archive，用户可能离开，外部 URL 可能失效。
+
+注意：解析时仍会验证**格式合法性**（频道命名规则、handler 格式），格式不合法的标记被静默忽略。这与 mention 一致（mention 也先验证 handler 格式，再验证存在性）。
+
+### 5.2 读取检测
+
+**不检测。** Link 不影响消息结构完整性，不输出告警。
+
+---
+
+## 6. API 序列化
+
+### 6.1 JSON 格式
+
+`links` 跟随 message 一起返回，每个 link 平铺序列化：
+
+```json
+{
+  "line_number": 42,
+  "body": "看看 <#general:L000010> 那条，资料在 <!https://example.com|参考文档>",
+  "mentions": [],
+  "links": [
+    { "kind": "message", "channel": "general", "line_number": 10, "raw": "<#general:L000010>" },
+    { "kind": "softlink", "url": "https://example.com", "title": "参考文档", "raw": "<!https://example.com|参考文档>" }
+  ]
+}
+```
+
+### 6.2 kind 值
+
+| LinkKind | JSON kind 值 |
+|----------|-------------|
+| Channel | `"channel"` |
+| Message | `"message"` |
+| UserProfile | `"user_profile"` |
+| Softlink | `"softlink"` |
+
+### 6.3 send 接口
+
+**不变。** 客户端在 body 中直接写入标记语法，daemon 原样追加。
+
+---
+
+## 7. formatter 无变动
+
+`formatter.rs` 接收 body 字符串原样输出。链接标记是 body 的一部分，formatter 不需要感知链接语法。
+
+---
+
+## 8. 边界情况
+
+| 条件 | 规则 |
+|------|------|
+| `<#>` 空频道名 | 正则不匹配（`[^>]+` 要求至少 1 个字符），视为普通文本 |
+| `<~>` 空 handler | 同上 |
+| `<!>` 空 URL | 同上 |
+| `<#GENERAL>` 大写 | channel 名不合法，静默忽略 |
+| `<#a--b>` 连续连字符 | 频道命名规则禁止，静默忽略 |
+| `<#channel:L00042>` 行号不足 6 位 | 不匹配 Message 模式，channel 部分含 `:L00042` 也不合法，静默忽略 |
+| 未闭合 `<#general` | 正则不匹配，视为普通文本 |
+| softlink URL 含裸 `\|` | 协议要求编码为 `%7C`，裸 `\|` 按分隔符处理 |
+| softlink URL 含裸 `>` | 协议要求编码为 `%3E`，裸 `>` 按闭合标记处理 |
+| `<!url\|>` 空显示文本 | `title` 为空字符串（非 None），消费端自行决定渲染方式 |
+| 同一链接出现多次 | 不去重，全部保留 |
+| 单条消息链接数量 | 无上限 |
+| `<@bob>` 和 `<~bob>` 同时出现 | 各自独立：mention 进 `mentions` 字段，link 进 `links` 字段，不跨字段去重 |
+| DM 会话链接 | 本次不支持，未来按需扩展 |
+
+---
+
+## 9. 影响范围
+
+### 9.1 需要改动的文件
+
+| 文件 | 改动 |
+|------|------|
+| `crates/gitim-core/src/types/link.rs` | **新增** — `Link`、`LinkKind` 类型定义 |
+| `crates/gitim-core/src/link.rs` | **新增** — `extract_links()` 提取函数 |
+| `crates/gitim-core/src/types/message.rs` | 加 `links: Vec<Link>` 字段 |
+| `crates/gitim-core/src/types/mod.rs` | 加 `pub mod link;` 导出 |
+| `crates/gitim-core/src/parser.rs` | 构建 Message 时调 `extract_links` |
+| `crates/gitim-core/src/lib.rs` | 加 `pub mod link;` |
+| `crates/gitim-daemon/src/handlers.rs` | 提取 `message_to_json()` 辅助函数，4 处序列化统一加 `mentions` + `links` 字段 |
+
+### 9.2 不需要改动的文件
+
+| 文件 | 原因 |
+|------|------|
+| `formatter.rs` | link 是 body 一部分，格式化不感知 |
+| `validator/compliance.rs` | 不验证 link 目标 |
+| `validator/read_check.rs` | 不检测 link 目标 |
+| `mention.rs` | 保持独立 |
+
+### 9.3 测试
+
+| 层次 | 文件 | 覆盖内容 |
+|------|------|---------|
+| 单元测试 | `crates/gitim-core/src/link.rs` | 6 种语法 + 所有边界 case |
+| 集成测试 | `crates/gitim-core/src/parser.rs` | 解析后 `links` 字段正确填充 |
+| E2E 测试 | `e2e_test.sh` | 发送含 link 的消息，poll/read 验证 JSON 返回的 `links` 字段 |

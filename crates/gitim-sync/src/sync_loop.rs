@@ -3,29 +3,33 @@ use std::time::Duration;
 use tokio::time;
 use tracing::{info, warn};
 
-use crate::conflict;
-use crate::git::GitRepo;
+use crate::conflict::{self, build_rebase_commit_msg};
+use crate::git::GitStorage;
 
 /// Start the sync loop with push-first strategy.
 ///
 /// - `on_pushed`: called after a successful push (all pending messages are now remote)
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
-pub async fn start_sync_loop<F1, F2>(
+/// - `on_synced`: called after every sync cycle completes, with the current HEAD commit hash.
+///   The index layer uses this to decide whether incremental updates are needed.
+pub async fn start_sync_loop<F1, F2, F3>(
     repo_root: &Path,
     interval_secs: u32,
     on_pushed: F1,
     on_renumbered: F2,
+    on_synced: F3,
 ) where
     F1: Fn() + Send + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + 'static,
+    F3: Fn(String) + Send + 'static,
 {
     if interval_secs == 0 {
         info!("sync_interval=0, auto-sync disabled");
         return;
     }
 
-    let repo = GitRepo::new(repo_root);
+    let repo = GitStorage::new(repo_root);
 
     if !repo.has_remote() {
         info!("no remote configured, sync loop disabled");
@@ -41,15 +45,16 @@ pub async fn start_sync_loop<F1, F2>(
 
     loop {
         ticker.tick().await;
-        run_sync_cycle(&repo, &on_pushed, &on_renumbered);
+        run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced);
     }
 }
 
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
-fn run_sync_cycle<F1, F2>(repo: &GitRepo, on_pushed: &F1, on_renumbered: &F2)
+fn run_sync_cycle<F1, F2, F3>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3)
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
+    F3: Fn(String),
 {
     let has_unpushed = match repo.has_unpushed_commits() {
         Ok(v) => v,
@@ -65,8 +70,16 @@ where
         // Nothing local to push, just pull
         match repo.pull_rebase() {
             Ok(()) => info!("sync: pull complete"),
-            Err(e) => warn!("sync: pull failed: {}", e),
+            Err(e) => {
+                warn!("sync: pull failed: {}", e);
+                let _ = repo.discard_unpushed();
+            }
         }
+    }
+
+    match repo.rev_parse("HEAD") {
+        Ok(head) => on_synced(head),
+        Err(e) => warn!("sync: failed to get HEAD for on_synced: {}", e),
     }
 }
 
@@ -74,7 +87,7 @@ where
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
 
-fn sync_with_push<F1, F2>(repo: &GitRepo, on_pushed: &F1, on_renumbered: &F2)
+fn sync_with_push<F1, F2>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2)
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
@@ -87,8 +100,12 @@ where
                 info!("sync: push complete (attempt {})", attempt);
                 return;
             }
-            Err(_) => {
-                // Push rejected — remote has new commits, need to sync
+            Err(crate::git::GitError::PushConflict) => {
+                // Remote has diverged, need to sync
+            }
+            Err(e) => {
+                warn!("sync: push failed (non-conflict): {}", e);
+                return;
             }
         }
 
@@ -99,7 +116,7 @@ where
         }
 
         // Capture local additions BEFORE attempting rebase
-        let local_additions = match repo.diff_unpushed_thread_additions() {
+        let local_additions = match repo.diff_unpushed("*.thread") {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
@@ -107,10 +124,9 @@ where
             }
         };
 
-        // Rebase onto fetched origin (no redundant fetch)
+        // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
-                // Rebase succeeded (no .thread conflicts), push again
                 match repo.push() {
                     Ok(()) => {
                         on_pushed();
@@ -124,35 +140,62 @@ where
                 }
             }
             Err(_) => {
-                // Rebase failed (conflict), use thread-aware resolution
-                if !local_additions.is_empty() {
-                    match conflict::resolve_thread_conflicts(repo, &local_additions) {
-                        Ok(mappings) => {
-                            for m in &mappings {
-                                on_renumbered(m.file.clone(), m.old_line, m.new_line);
-                            }
-                            match repo.push() {
-                                Ok(()) => {
-                                    on_pushed();
-                                    info!("sync: push complete after conflict resolution (attempt {})", attempt);
-                                    return;
-                                }
-                                Err(_) => {
-                                    warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("sync: conflict resolution failed: {}", e);
-                            return;
-                        }
-                    }
-                } else {
-                    // Non-thread conflict (shouldn't happen normally)
-                    let _ = repo.rebase_abort();
+                // Rebase failed — use thread-aware conflict resolution
+                if local_additions.is_empty() {
+                    let _ = repo.discard_unpushed();
                     warn!("sync: non-thread rebase conflict, aborted");
                     return;
+                }
+
+                // SyncLoop manages git state; resolve_content does pure content transform
+                if let Err(e) = repo.discard_unpushed() {
+                    warn!("sync: discard_unpushed failed: {}", e);
+                    return;
+                }
+
+                match conflict::resolve_content(&local_additions, repo.root()) {
+                    Ok((resolved_files, mappings)) => {
+                        // Write resolved content to files
+                        let mut modified_paths: Vec<String> = Vec::new();
+                        for resolved in &resolved_files {
+                            let abs_path = repo.root().join(&resolved.path);
+                            if let Err(e) = std::fs::write(&abs_path, &resolved.content) {
+                                warn!("sync: failed to write resolved file: {}", e);
+                                return;
+                            }
+                            modified_paths.push(resolved.path.to_str().unwrap_or("").to_string());
+                        }
+
+                        // Commit resolved content
+                        if !modified_paths.is_empty() {
+                            let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
+                            let commit_msg = build_rebase_commit_msg(&mappings, &local_additions);
+                            if let Err(e) = repo.add_and_commit(&path_refs, &commit_msg) {
+                                warn!("sync: commit after conflict resolution failed: {}", e);
+                                return;
+                            }
+                        }
+
+                        for m in &mappings {
+                            on_renumbered(m.file.clone(), m.old_line, m.new_line);
+                        }
+
+                        match repo.push() {
+                            Ok(()) => {
+                                on_pushed();
+                                info!("sync: push complete after conflict resolution (attempt {})", attempt);
+                                return;
+                            }
+                            Err(_) => {
+                                warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("sync: conflict resolution failed: {}", e);
+                        return;
+                    }
                 }
             }
         }

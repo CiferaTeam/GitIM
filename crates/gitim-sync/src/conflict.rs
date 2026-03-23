@@ -1,16 +1,13 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gitim_core::parser::{parse_thread, ParseError};
 use thiserror::Error;
 
-use crate::git::GitError;
 use crate::renumber::{renumber_batch, RenumberError};
 
 #[derive(Error, Debug)]
 pub enum ConflictError {
-    #[error("git error: {0}")]
-    Git(#[from] GitError),
     #[error("renumber error: {0}")]
     Renumber(#[from] RenumberError),
     #[error("io error: {0}")]
@@ -26,71 +23,110 @@ pub struct RenumberMapping {
     pub new_line: u64,
 }
 
-pub fn resolve_thread_conflicts(
-    repo: &crate::git::GitRepo,
+/// Result of resolving conflicts for a single file.
+#[derive(Debug, Clone)]
+pub struct ResolvedFile {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+/// Build commit message for rebased messages.
+/// Format: `msg: @author -> channel L000011 L000012 L000013(rebased)`
+pub fn build_rebase_commit_msg(
+    mappings: &[RenumberMapping],
     local_additions: &HashMap<PathBuf, String>,
-) -> Result<Vec<RenumberMapping>, ConflictError> {
-    // Step 1: Abort any in-progress rebase
-    repo.rebase_abort()?;
+) -> String {
+    let mut entries: Vec<(String, String, Vec<u64>)> = Vec::new();
 
-    // Step 2: Reset to remote state
-    repo.reset_hard_origin()?;
+    let mut by_file: HashMap<&PathBuf, Vec<u64>> = HashMap::new();
+    for m in mappings {
+        by_file.entry(&m.file).or_default().push(m.new_line);
+    }
 
+    let mut sorted_by_file: Vec<_> = by_file.into_iter().collect();
+    sorted_by_file.sort_by(|a, b| a.0.cmp(b.0));
+    for (file, new_lines) in &sorted_by_file {
+        let channel = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if let Some(content) = local_additions.get(*file) {
+            if let Ok(parsed) = parse_thread(content) {
+                let mut by_author: HashMap<String, Vec<u64>> = HashMap::new();
+                for (entry, new_ln) in parsed.entries.iter().zip(new_lines.iter()) {
+                    by_author
+                        .entry(entry.author().as_str().to_string())
+                        .or_default()
+                        .push(*new_ln);
+                }
+                let mut authors: Vec<_> = by_author.into_iter().collect();
+                authors.sort_by(|a, b| a.0.cmp(&b.0));
+                for (author, lines) in authors {
+                    entries.push((author, channel.clone(), lines));
+                }
+            } else {
+                entries.push(("unknown".to_string(), channel.clone(), new_lines.clone()));
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return "msg: sync after rebase".to_string();
+    }
+
+    let parts: Vec<String> = entries
+        .iter()
+        .map(|(author, channel, lines)| {
+            let line_parts: Vec<String> = lines.iter().map(|l| format!("L{:06}", l)).collect();
+            format!("msg: @{} -> {} {}(rebased)", author, channel, line_parts.join(" "))
+        })
+        .collect();
+
+    parts.join("\n")
+}
+
+/// Pure content transformation: renumber local additions to fit after remote content.
+/// Does NOT touch git state — only reads files from repo_root and returns resolved content.
+/// The caller is responsible for git operations (discard, write files, commit).
+pub fn resolve_content(
+    local_additions: &HashMap<PathBuf, String>,
+    repo_root: &Path,
+) -> Result<(Vec<ResolvedFile>, Vec<RenumberMapping>), ConflictError> {
     let mut all_mappings: Vec<RenumberMapping> = Vec::new();
-    let mut modified_paths: Vec<String> = Vec::new();
-    let mut total_messages: usize = 0;
+    let mut resolved_files: Vec<ResolvedFile> = Vec::new();
 
-    // Step 3: For each file with local additions, renumber and append
     let mut sorted_files: Vec<_> = local_additions.keys().collect();
     sorted_files.sort();
     for rel_path in sorted_files {
         let local_content = &local_additions[rel_path];
-        let abs_path = repo.root().join(rel_path);
+        let abs_path = repo_root.join(rel_path);
 
-        // Read the current (remote) file content
         let remote_content = if abs_path.exists() {
             std::fs::read_to_string(&abs_path)?
         } else {
-            // File might not exist on remote yet (new channel/dm)
             if let Some(parent) = abs_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             String::new()
         };
 
-        // Parse remote content to find max line number
         let max_line = if remote_content.is_empty() {
             0
         } else {
             let remote_file = parse_thread(&remote_content)?;
-            remote_file
-                .messages
-                .iter()
-                .map(|m| m.line_number)
-                .max()
-                .unwrap_or(0)
+            remote_file.entries.iter().map(|e| e.line_number()).max().unwrap_or(0)
         };
 
-        // Parse the local content to capture old line numbers
         let local_file = parse_thread(local_content)?;
-        let old_line_numbers: Vec<u64> = local_file
-            .messages
-            .iter()
-            .map(|m| m.line_number)
-            .collect();
+        let old_line_numbers: Vec<u64> = local_file.entries.iter().map(|e| e.line_number()).collect();
 
-        // Renumber local additions starting after the max remote line
         let renumbered = renumber_batch(local_content, max_line)?;
 
-        // Parse renumbered content to get new line numbers
         let renumbered_file = parse_thread(&renumbered)?;
-        let new_line_numbers: Vec<u64> = renumbered_file
-            .messages
-            .iter()
-            .map(|m| m.line_number)
-            .collect();
+        let new_line_numbers: Vec<u64> = renumbered_file.entries.iter().map(|e| e.line_number()).collect();
 
-        // Build mappings
         for (old_ln, new_ln) in old_line_numbers.iter().zip(new_line_numbers.iter()) {
             all_mappings.push(RenumberMapping {
                 file: rel_path.clone(),
@@ -99,27 +135,18 @@ pub fn resolve_thread_conflicts(
             });
         }
 
-        total_messages += renumbered_file.messages.len();
-
-        // Append renumbered content to the file
         let mut final_content = remote_content;
         if !final_content.is_empty() && !final_content.ends_with('\n') {
             final_content.push('\n');
         }
         final_content.push_str(&renumbered);
-        std::fs::write(&abs_path, &final_content)?;
 
-        modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
+        resolved_files.push(ResolvedFile {
+            path: rel_path.clone(),
+            content: final_content,
+        });
     }
 
-    if modified_paths.is_empty() {
-        return Ok(all_mappings);
-    }
-
-    // Step 4: Commit all changes
-    let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
-    let commit_msg = format!("msg: sync {} messages after rebase", total_messages);
-    repo.add_and_commit(&path_refs, &commit_msg)?;
-
-    Ok(all_mappings)
+    Ok((resolved_files, all_mappings))
 }
+

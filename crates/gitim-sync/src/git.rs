@@ -9,15 +9,15 @@ pub enum GitError {
     CommandFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("push failed after {0} retries")]
-    PushRetriesExhausted(u32),
+    #[error("push rejected: remote has diverged")]
+    PushConflict,
 }
 
-pub struct GitRepo {
-    root: std::path::PathBuf,
+pub struct GitStorage {
+    root: PathBuf,
 }
 
-impl GitRepo {
+impl GitStorage {
     pub fn new(root: &Path) -> Self {
         Self { root: root.to_path_buf() }
     }
@@ -40,6 +40,15 @@ impl GitRepo {
     }
 
     pub fn add_and_commit(&self, paths: &[&str], message: &str) -> Result<(), GitError> {
+        self.add_and_commit_as(paths, message, None)
+    }
+
+    pub fn add_and_commit_as(
+        &self,
+        paths: &[&str],
+        message: &str,
+        author: Option<&str>,
+    ) -> Result<(), GitError> {
         let mut args = vec!["add"];
         args.extend(paths);
         let output = Command::new("git")
@@ -52,8 +61,15 @@ impl GitRepo {
             ));
         }
 
+        let mut commit_args = vec!["commit", "-m", message];
+        let author_str;
+        if let Some(handler) = author {
+            author_str = format!("{} <{}@gitim>", handler, handler);
+            commit_args.push("--author");
+            commit_args.push(&author_str);
+        }
         let output = Command::new("git")
-            .args(["commit", "-m", message])
+            .args(&commit_args)
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -70,24 +86,13 @@ impl GitRepo {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+                return Err(GitError::PushConflict);
+            }
+            return Err(GitError::CommandFailed(stderr));
         }
         Ok(())
-    }
-
-    pub fn push_with_retry(&self, max_retries: u32) -> Result<(), GitError> {
-        for attempt in 0..=max_retries {
-            match self.push() {
-                Ok(()) => return Ok(()),
-                Err(_) if attempt < max_retries => {
-                    self.pull_rebase()?;
-                }
-                Err(_) => return Err(GitError::PushRetriesExhausted(max_retries)),
-            }
-        }
-        Err(GitError::PushRetriesExhausted(max_retries))
     }
 
     pub fn has_remote(&self) -> bool {
@@ -129,9 +134,9 @@ impl GitRepo {
         Ok(count > 0)
     }
 
-    pub fn diff_unpushed_thread_additions(&self) -> Result<HashMap<PathBuf, String>, GitError> {
+    pub fn rev_parse(&self, reference: &str) -> Result<String, GitError> {
         let output = Command::new("git")
-            .args(["diff", "origin/main..HEAD", "--", "*.thread"])
+            .args(["rev-parse", reference])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -139,8 +144,37 @@ impl GitRepo {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
+        let range = format!("{}..{}", from, to);
+        let output = Command::new("git")
+            .args(["diff", &range])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
+        let output = Command::new("git")
+            .args(["diff", "origin/main..HEAD", "--", pattern])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    fn parse_diff_output(stdout: &str) -> HashMap<PathBuf, String> {
         let mut result: HashMap<PathBuf, String> = HashMap::new();
         let mut current_path: Option<PathBuf> = None;
         let mut prev_was_minus_header = false;
@@ -155,10 +189,10 @@ impl GitRepo {
                     current_path = Some(PathBuf::from(path_str));
                 }
                 prev_was_minus_header = false;
-            } else if line.starts_with("+") && !line.starts_with("+++") {
+            } else if line.starts_with('+') && !line.starts_with("+++") {
                 prev_was_minus_header = false;
                 if let Some(ref path) = current_path {
-                    let added_line = &line[1..]; // strip leading '+'
+                    let added_line = &line[1..];
                     let entry = result.entry(path.clone()).or_default();
                     if !entry.is_empty() {
                         entry.push('\n');
@@ -170,7 +204,7 @@ impl GitRepo {
             }
         }
 
-        Ok(result)
+        result
     }
 
     pub fn rebase_onto_origin(&self) -> Result<(), GitError> {
@@ -186,17 +220,16 @@ impl GitRepo {
         Ok(())
     }
 
-    pub fn rebase_abort(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
+    /// Discard all unpushed local changes, reset to remote state.
+    /// Encapsulates rebase_abort + reset_hard_origin.
+    pub fn discard_unpushed(&self) -> Result<(), GitError> {
+        // Best-effort abort any in-progress rebase
+        let _ = Command::new("git")
             .args(["rebase", "--abort"])
             .current_dir(&self.root)
-            .output()?;
-        // Best-effort: ignore errors if no rebase in progress
-        let _ = output;
-        Ok(())
-    }
+            .output();
 
-    pub fn reset_hard_origin(&self) -> Result<(), GitError> {
+        // Reset to remote state
         let output = Command::new("git")
             .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.root)

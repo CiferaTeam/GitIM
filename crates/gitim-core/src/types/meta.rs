@@ -13,4 +13,6 @@ pub struct ChannelMeta {
     pub created_by: String,
     pub created_at: String,
     pub introduction: String,
+    #[serde(default)]
+    pub members: Vec<String>,
 }

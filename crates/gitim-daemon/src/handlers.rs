@@ -1,12 +1,45 @@
 use crate::api::{Event, Request, Response};
 use crate::state::{PendingMessage, SharedState};
-use gitim_core::dm::dm_filename;
-use gitim_core::formatter::format_message;
+use gitim_core::dm::{dm_filename, parse_dm_filename};
+use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::Handler;
+use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry};
 use gitim_core::validator::compliance::validate_append;
-use gitim_sync::git::GitRepo;
+use gitim_core::validator::im_rules;
+use std::collections::HashMap;
 use tracing::{info, warn};
+
+fn link_to_json(link: &Link) -> serde_json::Value {
+    match &link.kind {
+        LinkKind::Channel { name } => serde_json::json!({
+            "kind": "channel",
+            "name": name,
+            "raw": link.raw,
+        }),
+        LinkKind::Message { channel, line_number } => serde_json::json!({
+            "kind": "message",
+            "channel": channel,
+            "line_number": line_number,
+            "raw": link.raw,
+        }),
+        LinkKind::UserProfile { handler } => serde_json::json!({
+            "kind": "user_profile",
+            "handler": handler.as_str(),
+            "raw": link.raw,
+        }),
+        LinkKind::Softlink { url, title } => {
+            let mut v = serde_json::json!({
+                "kind": "softlink",
+                "url": url,
+                "raw": link.raw,
+            });
+            if let Some(t) = title {
+                v["title"] = serde_json::json!(t);
+            }
+            v
+        }
+    }
+}
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
@@ -15,13 +48,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             "status": "running",
         })),
         Request::Send { channel, body, reply_to, author } => {
-            // Resolve author: explicit > current_user > error
-            let resolved_author = match author {
-                Some(a) if !a.is_empty() => a,
-                _ => match &state.current_user {
-                    Some(u) => u.clone(),
-                    None => return Response::error("no author specified and no identity configured".to_string()),
-                },
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
             };
             handle_send(state, channel, body, reply_to, resolved_author).await
         }
@@ -39,7 +68,29 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::RegisterUser { handler, display_name, role, introduction } => {
             handle_register_user(state, handler, display_name, role, introduction).await
         }
+        Request::Poll { since } => handle_poll(state, since).await,
         Request::Stop => handle_stop(state).await,
+        Request::Onboard { git_server, auth } => {
+            crate::onboard::handle_onboard(state, git_server, auth).await
+        }
+        Request::JoinChannel { channel, targets, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_join_channel(state, channel, targets, resolved_author).await
+        }
+        Request::LeaveChannel { channel, targets, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_leave_channel(state, channel, targets, resolved_author).await
+        }
+        Request::Search { query, author, channel, channel_type, limit, offset } => {
+            handle_search(state, query, author, channel, channel_type, limit, offset).await
+        }
+        Request::Reindex => handle_reindex(state).await,
     }
 }
 
@@ -67,6 +118,42 @@ fn resolve_thread_path(
             .join("channels")
             .join(format!("{}.thread", channel));
         Ok((path, channel.to_string()))
+    }
+}
+
+fn entry_to_json(entry: &ThreadEntry) -> serde_json::Value {
+    match entry {
+        ThreadEntry::Message(m) => serde_json::json!({
+            "type": "message",
+            "line_number": m.line_number,
+            "point_to": m.point_to,
+            "author": m.author.as_str(),
+            "timestamp": m.timestamp,
+            "body": m.body,
+            "mentions": m.mentions.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+            "links": m.links.iter().map(link_to_json).collect::<Vec<_>>(),
+        }),
+        ThreadEntry::Event(ev) => serde_json::json!({
+            "type": "event",
+            "event_type": ev.event_type,
+            "line_number": ev.line_number,
+            "author": ev.author.as_str(),
+            "timestamp": ev.timestamp,
+            "meta": ev.meta,
+        }),
+    }
+}
+
+async fn resolve_author(author: Option<String>, state: &SharedState) -> Result<String, Response> {
+    match author {
+        Some(a) if !a.is_empty() => Ok(a),
+        _ => {
+            let current = state.current_user.read().await;
+            match current.clone() {
+                Some(u) => Ok(u),
+                None => Err(Response::error("no author specified and no identity configured")),
+            }
+        }
     }
 }
 
@@ -111,11 +198,7 @@ async fn handle_send(
         Err(e) => return Response::error(format!("failed to parse thread: {}", e)),
     };
 
-    let next_line = existing_file
-        .messages
-        .last()
-        .map(|m| m.line_number + 1)
-        .unwrap_or(1);
+    let next_line = existing_file.last_line_number() + 1;
     let point_to = reply_to.unwrap_or(0);
 
     // Generate timestamp and format message
@@ -147,8 +230,7 @@ async fn handle_send(
         Ok(rel) => {
             let rel_str = rel.to_string_lossy().to_string();
             let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
-            let repo = GitRepo::new(&state.repo_root);
-            match repo.add_and_commit(&[&rel_str], &commit_msg) {
+            match state.git_storage.add_and_commit_as(&[&rel_str], &commit_msg, Some(&author)) {
                 Ok(()) => "committed",
                 Err(e) => {
                     warn!("git commit failed for L{:06} in {}: {}", next_line, thread_name, e);
@@ -209,33 +291,25 @@ async fn handle_read(
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
-    let mut messages: Vec<&gitim_core::types::Message> = file.messages.iter().collect();
+    let mut entries: Vec<&ThreadEntry> = file.entries.iter().collect();
 
     if let Some(since_line) = since {
-        messages.retain(|m| m.line_number > since_line);
+        entries.retain(|e| e.line_number() > since_line);
     }
 
     if let Some(lim) = limit {
-        let start = messages.len().saturating_sub(lim);
-        messages = messages[start..].to_vec();
+        let start = entries.len().saturating_sub(lim);
+        entries = entries[start..].to_vec();
     }
 
-    let json_msgs: Vec<serde_json::Value> = messages
+    let json_entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|m| {
-            serde_json::json!({
-                "line_number": m.line_number,
-                "point_to": m.point_to,
-                "author": m.author.as_str(),
-                "timestamp": m.timestamp,
-                "body": m.body,
-            })
-        })
+        .map(|entry| entry_to_json(entry))
         .collect();
 
     Response::success(serde_json::json!({
         "channel": channel,
-        "messages": json_msgs,
+        "entries": json_entries,
     }))
 }
 
@@ -285,10 +359,10 @@ async fn handle_register_user(
     }
 
     // Git add + commit (best effort)
-    let git_repo = GitRepo::new(&state.repo_root);
-    let _ = git_repo.add_and_commit(
+    let _ = state.git_storage.add_and_commit_as(
         &[&format!("users/{}.meta.json", handler)],
-        &format!("msg: register @{}", handler),
+        &format!("user: register @{}", handler),
+        Some(&handler),
     );
 
     Response::success(serde_json::json!({
@@ -336,8 +410,8 @@ async fn handle_get_thread(
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
-    // Collect the root message and all descendants (messages pointing to it, recursively)
-    let mut thread_msgs = Vec::new();
+    // Collect the root entry and all descendants (entries pointing to it, recursively)
+    let mut thread_entries: Vec<serde_json::Value> = Vec::new();
     let mut stack = vec![line_number];
     let mut visited = std::collections::HashSet::new();
 
@@ -345,37 +419,31 @@ async fn handle_get_thread(
         if !visited.insert(target) {
             continue;
         }
-        for msg in &file.messages {
-            if msg.line_number == target || msg.point_to == target {
-                thread_msgs.push(serde_json::json!({
-                    "line_number": msg.line_number,
-                    "point_to": msg.point_to,
-                    "author": msg.author.as_str(),
-                    "timestamp": msg.timestamp,
-                    "body": msg.body,
-                }));
-                if msg.line_number != target {
-                    stack.push(msg.line_number);
+        for entry in &file.entries {
+            if entry.line_number() == target || entry.point_to() == target {
+                thread_entries.push(entry_to_json(entry));
+                if entry.line_number() != target {
+                    stack.push(entry.line_number());
                 }
             }
         }
     }
 
     // Sort by line number
-    thread_msgs.sort_by(|a, b| {
+    thread_entries.sort_by(|a, b| {
         a["line_number"]
             .as_u64()
             .unwrap()
             .cmp(&b["line_number"].as_u64().unwrap())
     });
 
-    // Deduplicate (a message could match both by line_number and point_to)
-    thread_msgs.dedup_by(|a, b| a["line_number"] == b["line_number"]);
+    // Deduplicate (an entry could match both by line_number and point_to)
+    thread_entries.dedup_by(|a, b| a["line_number"] == b["line_number"]);
 
     Response::success(serde_json::json!({
         "channel": channel,
         "root_line": line_number,
-        "messages": thread_msgs,
+        "entries": thread_entries,
     }))
 }
 
@@ -391,4 +459,847 @@ async fn handle_stop(state: SharedState) -> Response {
     });
 
     Response::success(serde_json::json!({ "status": "stopping" }))
+}
+
+async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
+    // Determine reference point: origin/main if has remote, else HEAD
+    let ref_name = if state.git_storage.has_remote() {
+        "origin/main"
+    } else {
+        "HEAD"
+    };
+
+    // Get current commit hash
+    let current_commit = match state.git_storage.rev_parse(ref_name) {
+        Ok(hash) => hash,
+        Err(e) => return Response::error(format!("failed to get commit: {}", e)),
+    };
+
+    // No cursor → return sync point
+    let since_commit = match since {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Response::success(serde_json::json!({
+                "commit_id": current_commit,
+                "changes": [],
+            }))
+        }
+    };
+
+    // Validate commit hash format
+    if since_commit.len() != 40 || !since_commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Response::error("invalid commit hash: expected 40-character hex string");
+    }
+
+    // Same cursor → no changes
+    if since_commit == current_commit {
+        return Response::success(serde_json::json!({
+            "commit_id": current_commit,
+            "changes": [],
+        }));
+    }
+
+    // Compute diff
+    let diff = match state.git_storage.diff_range(&since_commit, &current_commit) {
+        Ok(d) => d,
+        Err(e) => {
+            return Response::error(format!("diff failed (commit may not exist): {}", e))
+        }
+    };
+
+    // Parse changed files into entries
+    let mut changes: Vec<serde_json::Value> = Vec::new();
+
+    let current_user_snapshot = state.current_user.read().await.clone();
+
+    // Step 1: Build channel membership cache
+    let mut channel_membership: HashMap<String, bool> = HashMap::new();
+    for (path, _) in &diff {
+        let path_str = path.to_string_lossy();
+        if let Some(ch_name) = path_str
+            .strip_prefix("channels/")
+            .and_then(|s| s.strip_suffix(".thread").or_else(|| s.strip_suffix(".meta.json")))
+        {
+            if channel_membership.contains_key(ch_name) {
+                continue;
+            }
+            let meta_path = state
+                .repo_root
+                .join("channels")
+                .join(format!("{}.meta.json", ch_name));
+            let is_member = if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+                    if meta.members.is_empty() {
+                        true // Legacy: no members list = everyone has access
+                    } else {
+                        current_user_snapshot
+                            .as_ref()
+                            .map_or(false, |me| meta.members.contains(me))
+                    }
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+            channel_membership.insert(ch_name.to_string(), is_member);
+        }
+    }
+
+    // Step 2: Process diff entries with membership filter
+    for (path, added_content) in &diff {
+        let path_str = path.to_string_lossy();
+
+        let (channel, kind) = if let Some(name) = path_str.strip_prefix("channels/") {
+            if let Some(ch_name) = name.strip_suffix(".thread") {
+                (ch_name.to_string(), "channel")
+            } else if let Some(ch_name) = name.strip_suffix(".meta.json") {
+                // Meta change — only push if user is (now) a member
+                if !channel_membership.get(ch_name).copied().unwrap_or(true) {
+                    continue;
+                }
+                changes.push(serde_json::json!({
+                    "channel": ch_name,
+                    "kind": "channel_meta",
+                    "entries": [],
+                }));
+                continue;
+            } else {
+                continue;
+            }
+        } else if let Some(name) = path_str.strip_prefix("dm/") {
+            let name = name.strip_suffix(".thread").unwrap_or(name);
+            (format!("dm:{}", name.replace("--", ",")), "dm")
+        } else {
+            continue;
+        };
+
+        // Channel membership filter
+        if kind == "channel" {
+            if !channel_membership.get(&channel).copied().unwrap_or(true) {
+                continue;
+            }
+        }
+
+        // DM visibility filter — skip DMs not involving current user
+        if kind == "dm" {
+            if let Some(stem) = path_str
+                .strip_prefix("dm/")
+                .and_then(|s| s.strip_suffix(".thread"))
+            {
+                if let Some((a, b)) = parse_dm_filename(stem) {
+                    match &current_user_snapshot {
+                        Some(me) if me == a || me == b => { /* allowed */ }
+                        _ => continue,
+                    }
+                }
+            }
+        }
+
+        // Parse added lines as entries (both messages and events)
+        let parsed = match parse_thread(added_content) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("poll: failed to parse diff for {}: {}", path_str, e);
+                continue;
+            }
+        };
+
+        if parsed.entries.is_empty() {
+            continue;
+        }
+
+        let entries: Vec<serde_json::Value> = parsed
+            .entries
+            .iter()
+            .map(|entry| entry_to_json(entry))
+            .collect();
+
+        changes.push(serde_json::json!({
+            "channel": channel,
+            "kind": kind,
+            "entries": entries,
+        }));
+    }
+
+    Response::success(serde_json::json!({
+        "commit_id": current_commit,
+        "changes": changes,
+    }))
+}
+
+async fn handle_join_channel(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+) -> Response {
+    write_channel_event(state, channel, targets, author, "join").await
+}
+
+async fn handle_leave_channel(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+) -> Response {
+    write_channel_event(state, channel, targets, author, "leave").await
+}
+
+async fn write_channel_event(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+    event_type: &str,
+) -> Response {
+    // Validate author handler format
+    let handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("invalid author: {}", e)),
+    };
+
+    // Check author is registered
+    let user_list: Vec<String> = {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {}", author));
+        }
+        users.clone()
+    };
+    let user_refs: Vec<&str> = user_list.iter().map(|s| s.as_str()).collect();
+
+    // Validate target handler formats
+    for t in &targets {
+        if let Err(e) = Handler::new(t) {
+            return Response::error(format!("invalid target: {}", e));
+        }
+    }
+
+    // Read channel meta.json
+    let meta_path = state.repo_root.join("channels").join(format!("{}.meta.json", channel));
+    let mut channel_meta: ChannelMeta = if meta_path.exists() {
+        match std::fs::read_to_string(&meta_path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(m) => m,
+                Err(e) => return Response::error(format!("failed to parse channel meta: {}", e)),
+            },
+            Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
+        }
+    } else {
+        return Response::error(format!("channel '{}' does not exist", channel));
+    };
+
+    let current_members: Vec<&str> = channel_meta.members.iter().map(|s| s.as_str()).collect();
+    let target_refs: Vec<&str> = targets.iter().map(|s| s.as_str()).collect();
+
+    // Validate join or leave rules
+    match event_type {
+        "join" => {
+            if let Err(e) = im_rules::validate_join(&author, &target_refs, &user_refs, &current_members) {
+                return Response::error(format!("join validation failed: {}", e));
+            }
+        }
+        "leave" => {
+            if let Err(e) = im_rules::validate_leave(&author, &target_refs, &user_refs, &current_members) {
+                return Response::error(format!("leave validation failed: {}", e));
+            }
+        }
+        _ => return Response::error(format!("unknown event type: {}", event_type)),
+    }
+
+    // Read .thread for next line number
+    let thread_path = state.repo_root.join("channels").join(format!("{}.thread", channel));
+    let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
+    let existing_file = match parse_thread(&existing) {
+        Ok(f) => f,
+        Err(e) => return Response::error(format!("failed to parse thread: {}", e)),
+    };
+    let next_line = existing_file.last_line_number() + 1;
+
+    // Build event meta and format
+    let meta = if targets.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({"targets": targets})
+    };
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let new_content = format_event(next_line, &handler, &now, event_type, &meta);
+
+    // Append to .thread
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&thread_path)
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(new_content.as_bytes()) {
+                return Response::error(format!("write failed: {}", e));
+            }
+        }
+        Err(e) => return Response::error(format!("open failed: {}", e)),
+    }
+
+    // Update meta.json members
+    let affected: Vec<String> = if targets.is_empty() {
+        vec![author.clone()]
+    } else {
+        targets.clone()
+    };
+
+    match event_type {
+        "join" => {
+            for user in &affected {
+                if !channel_meta.members.contains(user) {
+                    channel_meta.members.push(user.clone());
+                }
+            }
+            channel_meta.members.sort();
+        }
+        "leave" => {
+            channel_meta.members.retain(|m| !affected.contains(m));
+        }
+        _ => {}
+    }
+
+    let meta_str = serde_json::to_string_pretty(&channel_meta).unwrap();
+    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
+        return Response::error(format!("failed to write channel meta: {}", e));
+    }
+
+    // Git commit both files
+    let thread_rel = format!("channels/{}.thread", channel);
+    let meta_rel = format!("channels/{}.meta.json", channel);
+    let commit_msg = format!("event: @{} {} {}", author, event_type, channel);
+    let commit_status = match state.git_storage.add_and_commit_as(
+        &[&thread_rel, &meta_rel],
+        &commit_msg,
+        Some(&author),
+    ) {
+        Ok(()) => "committed",
+        Err(e) => {
+            warn!("git commit failed for {} event in {}: {}", event_type, channel, e);
+            "written"
+        }
+    };
+
+    // Broadcast MembershipChanged event
+    let _ = state.event_tx.send(Event::MembershipChanged {
+        channel: channel.clone(),
+        event_type: event_type.to_string(),
+        author: author.clone(),
+        targets: affected.clone(),
+    });
+
+    // Invalidate thread cache
+    state.thread_cache.write().await.remove(&channel);
+
+    info!(
+        "{} event in {} by @{} at L{:06} (targets: {:?})",
+        event_type, channel, author, next_line, affected
+    );
+    Response::success(serde_json::json!({
+        "channel": channel,
+        "event_type": event_type,
+        "author": author,
+        "targets": affected,
+        "line_number": next_line,
+        "status": commit_status,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gitim_core::types::config::Config;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    fn setup_test_state(tmp: &std::path::Path) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Initial commit so main branch exists
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo, Config::default(), event_tx, None))
+    }
+
+    /// Register a user by creating meta.json and adding to in-memory user list.
+    async fn register_test_user(state: &SharedState, handler: &str) {
+        let users_dir = state.repo_root.join("users");
+        std::fs::create_dir_all(&users_dir).unwrap();
+        let meta = serde_json::json!({
+            "display_name": handler,
+            "role": "member",
+            "introduction": "test user"
+        });
+        std::fs::write(
+            users_dir.join(format!("{}.meta.json", handler)),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let rel = format!("users/{}.meta.json", handler);
+        let _ = state.git_storage.add_and_commit(&[&rel], &format!("user: register @{}", handler));
+        let mut users = state.users.write().await;
+        if !users.contains(&handler.to_string()) {
+            users.push(handler.to_string());
+            users.sort();
+        }
+    }
+
+    /// Create a channel with meta.json and empty .thread file.
+    fn create_test_channel(state: &SharedState, name: &str, created_by: &str) {
+        let ch_dir = state.repo_root.join("channels");
+        std::fs::create_dir_all(&ch_dir).unwrap();
+        let meta = ChannelMeta {
+            display_name: name.to_string(),
+            created_by: created_by.to_string(),
+            created_at: "20260323T000000Z".to_string(),
+            introduction: "test channel".to_string(),
+            members: Vec::new(),
+        };
+        std::fs::write(
+            ch_dir.join(format!("{}.meta.json", name)),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(ch_dir.join(format!("{}.thread", name)), "").unwrap();
+        let meta_rel = format!("channels/{}.meta.json", name);
+        let thread_rel = format!("channels/{}.thread", name);
+        let _ = state.git_storage.add_and_commit(
+            &[&meta_rel, &thread_rel],
+            &format!("init: channel {}", name),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_join_channel_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        let resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "join failed: {:?}", resp.error);
+
+        // Verify .thread has join event
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        assert!(thread.contains("[E:join]"), "thread missing join event");
+        assert!(thread.contains("@alice"), "thread missing author");
+
+        // Verify meta.json has alice in members
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.contains(&"alice".to_string()), "alice not in members");
+    }
+
+    #[tokio::test]
+    async fn test_join_channel_pull_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins first
+        let resp1 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp1.ok, "alice join failed: {:?}", resp1.error);
+
+        // Alice pulls bob in
+        let resp2 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec!["bob".to_string()],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp2.ok, "pull bob failed: {:?}", resp2.error);
+
+        // Verify both in members
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.contains(&"alice".to_string()), "alice not in members");
+        assert!(meta.members.contains(&"bob".to_string()), "bob not in members");
+
+        // Verify thread has 2 events
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        let join_count = thread.matches("[E:join]").count();
+        assert_eq!(join_count, 2, "expected 2 join events, got {}", join_count);
+    }
+
+    #[tokio::test]
+    async fn test_leave_channel_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins
+        let resp1 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp1.ok, "join failed: {:?}", resp1.error);
+
+        // Alice leaves
+        let resp2 = handle_request(
+            Request::LeaveChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp2.ok, "leave failed: {:?}", resp2.error);
+
+        // Verify meta.json members is empty
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.is_empty(), "members should be empty, got: {:?}", meta.members);
+
+        // Verify thread has both join and leave events
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        assert!(thread.contains("[E:join]"), "thread missing join event");
+        assert!(thread.contains("[E:leave]"), "thread missing leave event");
+    }
+
+    #[tokio::test]
+    async fn test_read_returns_entries_with_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins (creates an event entry)
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "join failed: {:?}", join_resp.error);
+
+        // Alice sends a message
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
+
+        // Read the channel
+        let read_resp = handle_request(
+            Request::Read {
+                channel: "general".to_string(),
+                limit: None,
+                since: None,
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(read_resp.ok, "read failed: {:?}", read_resp.error);
+
+        let data = read_resp.data.unwrap();
+        let entries = data["entries"].as_array().expect("expected entries array");
+        assert_eq!(entries.len(), 2, "expected 2 entries, got {}", entries.len());
+
+        // First entry is the join event
+        assert_eq!(entries[0]["type"], "event");
+        assert_eq!(entries[0]["event_type"], "join");
+        assert_eq!(entries[0]["author"], "alice");
+
+        // Second entry is the message
+        assert_eq!(entries[1]["type"], "message");
+        assert_eq!(entries[1]["body"], "hello");
+        assert_eq!(entries[1]["author"], "alice");
+
+        // Verify "messages" key is absent
+        assert!(data.get("messages").is_none(), "should not have 'messages' key");
+    }
+
+    #[tokio::test]
+    async fn test_poll_filters_non_member_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        create_test_channel(&state, "general", "alice");
+        create_test_channel(&state, "random", "alice");
+
+        // Bob joins random so its members list is non-empty (not legacy/open)
+        let bob_join = handle_request(
+            Request::JoinChannel {
+                channel: "random".to_string(),
+                targets: vec![],
+                author: Some("bob".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(bob_join.ok, "bob join random failed: {:?}", bob_join.error);
+
+        // Push initial state to origin
+        state.git_storage.push().ok();
+
+        // Alice joins general only
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "join general failed: {:?}", join_resp.error);
+
+        // Set current_user to alice
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("alice".to_string());
+        }
+
+        // Get cursor before changes
+        state.git_storage.push().ok();
+        let poll_before = handle_request(
+            Request::Poll { since: None },
+            state.clone(),
+        )
+        .await;
+        let cursor = poll_before.data.unwrap()["commit_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Send messages to both channels (alice is registered so send works)
+        // For random, alice is NOT a member
+        let send_general = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello general".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_general.ok, "send general failed: {:?}", send_general.error);
+
+        let send_random = handle_request(
+            Request::Send {
+                channel: "random".to_string(),
+                body: "hello random".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_random.ok, "send random failed: {:?}", send_random.error);
+
+        // Push so poll can see changes
+        state.git_storage.push().ok();
+
+        // Poll with cursor
+        let poll_resp = handle_request(
+            Request::Poll {
+                since: Some(cursor),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+        let data = poll_resp.data.unwrap();
+        let changes = data["changes"].as_array().unwrap();
+
+        // Should only contain general-related changes, not random
+        let channel_names: Vec<&str> = changes
+            .iter()
+            .filter(|c| c["kind"] == "channel" || c["kind"] == "channel_meta")
+            .filter_map(|c| c["channel"].as_str())
+            .collect();
+        assert!(
+            channel_names.contains(&"general"),
+            "general should be in poll results: {:?}",
+            channel_names
+        );
+        assert!(
+            !channel_names.contains(&"random"),
+            "random should NOT be in poll results (not a member): {:?}",
+            channel_names
+        );
+    }
+}
+
+async fn handle_search(
+    state: SharedState,
+    query: Option<String>,
+    author: Option<String>,
+    channel: Option<String>,
+    channel_type: Option<String>,
+    limit: usize,
+    offset: usize,
+) -> Response {
+    let current_user = state.current_user.read().await.clone();
+    let index = {
+        let guard = state.index.read().unwrap();
+        match &*guard {
+            Some(idx) => idx.clone(),
+            None => return Response::error("search index not available"),
+        }
+    };
+
+    let params = gitim_index::SearchParams {
+        query,
+        author,
+        channel,
+        channel_type,
+        current_user,
+        limit,
+        offset,
+    };
+
+    match tokio::task::spawn_blocking(move || index.search(params)).await {
+        Ok(Ok(result)) => {
+            let messages: Vec<serde_json::Value> = result.messages.iter().map(|m| {
+                serde_json::json!({
+                    "channel": m.channel,
+                    "channel_type": m.channel_type,
+                    "line_number": m.line_number,
+                    "parent_line": m.parent_line,
+                    "author": m.author,
+                    "timestamp": m.timestamp,
+                    "body": m.body,
+                })
+            }).collect();
+            Response::success(serde_json::json!({
+                "messages": messages,
+                "total": result.total,
+            }))
+        }
+        Ok(Err(gitim_index::IndexError::Rebuilding)) => {
+            Response::error("indexing_in_progress")
+        }
+        Ok(Err(gitim_index::IndexError::EmptySearch)) => {
+            Response::error("search requires at least one of: query, author")
+        }
+        Ok(Err(e)) => Response::error(format!("search failed: {}", e)),
+        Err(e) => Response::error(format!("search task failed: {}", e)),
+    }
+}
+
+async fn handle_reindex(state: SharedState) -> Response {
+    let index = {
+        let guard = state.index.read().unwrap();
+        match &*guard {
+            Some(idx) => idx.clone(),
+            None => return Response::error("search index not available"),
+        }
+    };
+
+    let repo_root = state.repo_root.clone();
+    let head = match state.git_storage.rev_parse("HEAD") {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("failed to get HEAD: {}", e)),
+    };
+
+    match tokio::task::spawn_blocking(move || index.reindex(&repo_root, &head)).await {
+        Ok(Ok(count)) => Response::success(serde_json::json!({
+            "status": "complete",
+            "messages_indexed": count,
+        })),
+        Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
+        Err(e) => Response::error(format!("reindex task failed: {}", e)),
+    }
 }
