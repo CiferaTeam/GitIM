@@ -100,6 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Initialize search index (best effort — search is unavailable if this fails)
+    if let Err(e) = state::AppState::initialize_index(&app_state) {
+        tracing::warn!("index initialization failed (search unavailable): {}", e);
+    }
+
     // Start sync loop only if identity is already configured (restart scenario).
     // On first startup (no me.json), the sync loop is deferred until after onboard.
     if app_state.current_user.read().await.is_some() {

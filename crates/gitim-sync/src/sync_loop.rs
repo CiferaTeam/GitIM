@@ -11,14 +11,18 @@ use crate::git::GitStorage;
 /// - `on_pushed`: called after a successful push (all pending messages are now remote)
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
-pub async fn start_sync_loop<F1, F2>(
+/// - `on_synced`: called after every sync cycle completes, with the current HEAD commit hash.
+///   The index layer uses this to decide whether incremental updates are needed.
+pub async fn start_sync_loop<F1, F2, F3>(
     repo_root: &Path,
     interval_secs: u32,
     on_pushed: F1,
     on_renumbered: F2,
+    on_synced: F3,
 ) where
     F1: Fn() + Send + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + 'static,
+    F3: Fn(String) + Send + 'static,
 {
     if interval_secs == 0 {
         info!("sync_interval=0, auto-sync disabled");
@@ -41,15 +45,16 @@ pub async fn start_sync_loop<F1, F2>(
 
     loop {
         ticker.tick().await;
-        run_sync_cycle(&repo, &on_pushed, &on_renumbered);
+        run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced);
     }
 }
 
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
-fn run_sync_cycle<F1, F2>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2)
+fn run_sync_cycle<F1, F2, F3>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3)
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
+    F3: Fn(String),
 {
     let has_unpushed = match repo.has_unpushed_commits() {
         Ok(v) => v,
@@ -70,6 +75,11 @@ where
                 let _ = repo.discard_unpushed();
             }
         }
+    }
+
+    match repo.rev_parse("HEAD") {
+        Ok(head) => on_synced(head),
+        Err(e) => warn!("sync: failed to get HEAD for on_synced: {}", e),
     }
 }
 
