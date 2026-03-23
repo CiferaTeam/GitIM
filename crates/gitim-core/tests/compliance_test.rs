@@ -108,3 +108,44 @@ fn test_append_multiple_mentions_one_unknown() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("ghost"));
 }
+
+#[test]
+fn test_validate_append_event_p_nonzero_rejected() {
+    let result = validate_append(
+        "",
+        "[L000001][P000001][@alice][20260323T120000Z][E:join] {}\n",
+        &["alice"],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_append_event_invalid_json_rejected() {
+    let result = validate_append(
+        "",
+        "[L000001][P000000][@alice][20260323T120000Z][E:join] not-json\n",
+        &["alice"],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_append_event_ok() {
+    let result = validate_append(
+        "",
+        "[L000001][P000000][@alice][20260323T120000Z][E:join] {}\n",
+        &["alice"],
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_validate_append_mixed_messages_and_events() {
+    let existing = "[L000001][P000000][@alice][20260323T120000Z][E:join] {}\n";
+    let result = validate_append(
+        existing,
+        "[L000002][P000000][@alice][20260323T120100Z] hello\n",
+        &["alice"],
+    );
+    assert!(result.is_ok());
+}

@@ -17,6 +17,10 @@ pub enum ComplianceError {
     EmptyBody(u64),
     #[error("unknown mention '<@{handler}>' in message L{line_number:06}")]
     UnknownMention { handler: String, line_number: u64 },
+    #[error("event L{0:06} must have P000000")]
+    EventNonZeroPointTo(u64),
+    #[error("event L{0:06} has invalid JSON body")]
+    EventInvalidJson(u64),
 }
 
 #[derive(Debug)]
@@ -74,9 +78,13 @@ pub fn validate_append(
                     return Err(ComplianceError::EmptyBody(ln));
                 }
             }
-            ThreadEntry::Event(_ev) => {
-                // Events: line number continuity and author checks already done above.
-                // Full event validation will be added in Task 6.
+            ThreadEntry::Event(ev) => {
+                if ev.point_to != 0 {
+                    return Err(ComplianceError::EventNonZeroPointTo(ln));
+                }
+                if !ev.meta.is_object() {
+                    return Err(ComplianceError::EventInvalidJson(ln));
+                }
             }
         }
 
