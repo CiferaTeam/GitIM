@@ -1,10 +1,11 @@
 use crate::api::{Event, Request, Response};
 use crate::state::{PendingMessage, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
-use gitim_core::formatter::format_message;
+use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::Handler;
+use gitim_core::types::{ChannelMeta, Handler};
 use gitim_core::validator::compliance::validate_append;
+use gitim_core::validator::im_rules;
 use tracing::{info, warn};
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
@@ -45,6 +46,32 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::Stop => handle_stop(state).await,
         Request::Onboard { git_server, auth } => {
             crate::onboard::handle_onboard(state, git_server, auth).await
+        }
+        Request::JoinChannel { channel, targets, author } => {
+            let resolved_author = match author {
+                Some(a) if !a.is_empty() => a,
+                _ => {
+                    let current = state.current_user.read().await;
+                    match current.clone() {
+                        Some(u) => u,
+                        None => return Response::error("no author specified and no identity configured"),
+                    }
+                }
+            };
+            handle_join_channel(state, channel, targets, resolved_author).await
+        }
+        Request::LeaveChannel { channel, targets, author } => {
+            let resolved_author = match author {
+                Some(a) if !a.is_empty() => a,
+                _ => {
+                    let current = state.current_user.read().await;
+                    match current.clone() {
+                        Some(u) => u,
+                        None => return Response::error("no author specified and no identity configured"),
+                    }
+                }
+            };
+            handle_leave_channel(state, channel, targets, resolved_author).await
         }
     }
 }
@@ -509,4 +536,422 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         "commit_id": current_commit,
         "changes": changes,
     }))
+}
+
+async fn handle_join_channel(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+) -> Response {
+    write_channel_event(state, channel, targets, author, "join").await
+}
+
+async fn handle_leave_channel(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+) -> Response {
+    write_channel_event(state, channel, targets, author, "leave").await
+}
+
+async fn write_channel_event(
+    state: SharedState,
+    channel: String,
+    targets: Vec<String>,
+    author: String,
+    event_type: &str,
+) -> Response {
+    // Validate author handler format
+    let handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("invalid author: {}", e)),
+    };
+
+    // Check author is registered
+    let user_list: Vec<String> = {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {}", author));
+        }
+        users.clone()
+    };
+    let user_refs: Vec<&str> = user_list.iter().map(|s| s.as_str()).collect();
+
+    // Validate target handler formats
+    for t in &targets {
+        if let Err(e) = Handler::new(t) {
+            return Response::error(format!("invalid target: {}", e));
+        }
+    }
+
+    // Read channel meta.json
+    let meta_path = state.repo_root.join("channels").join(format!("{}.meta.json", channel));
+    let mut channel_meta: ChannelMeta = if meta_path.exists() {
+        match std::fs::read_to_string(&meta_path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(m) => m,
+                Err(e) => return Response::error(format!("failed to parse channel meta: {}", e)),
+            },
+            Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
+        }
+    } else {
+        return Response::error(format!("channel '{}' does not exist", channel));
+    };
+
+    let current_members: Vec<&str> = channel_meta.members.iter().map(|s| s.as_str()).collect();
+    let target_refs: Vec<&str> = targets.iter().map(|s| s.as_str()).collect();
+
+    // Validate join or leave rules
+    match event_type {
+        "join" => {
+            if let Err(e) = im_rules::validate_join(&author, &target_refs, &user_refs, &current_members) {
+                return Response::error(format!("join validation failed: {}", e));
+            }
+        }
+        "leave" => {
+            if let Err(e) = im_rules::validate_leave(&author, &target_refs, &user_refs, &current_members) {
+                return Response::error(format!("leave validation failed: {}", e));
+            }
+        }
+        _ => return Response::error(format!("unknown event type: {}", event_type)),
+    }
+
+    // Read .thread for next line number
+    let thread_path = state.repo_root.join("channels").join(format!("{}.thread", channel));
+    let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
+    let existing_file = match parse_thread(&existing) {
+        Ok(f) => f,
+        Err(e) => return Response::error(format!("failed to parse thread: {}", e)),
+    };
+    let next_line = existing_file.last_line_number() + 1;
+
+    // Build event meta and format
+    let meta = if targets.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({"targets": targets})
+    };
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let new_content = format_event(next_line, &handler, &now, event_type, &meta);
+
+    // Append to .thread
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&thread_path)
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(new_content.as_bytes()) {
+                return Response::error(format!("write failed: {}", e));
+            }
+        }
+        Err(e) => return Response::error(format!("open failed: {}", e)),
+    }
+
+    // Update meta.json members
+    let affected: Vec<String> = if targets.is_empty() {
+        vec![author.clone()]
+    } else {
+        targets.clone()
+    };
+
+    match event_type {
+        "join" => {
+            for user in &affected {
+                if !channel_meta.members.contains(user) {
+                    channel_meta.members.push(user.clone());
+                }
+            }
+            channel_meta.members.sort();
+        }
+        "leave" => {
+            channel_meta.members.retain(|m| !affected.contains(m));
+        }
+        _ => {}
+    }
+
+    let meta_str = serde_json::to_string_pretty(&channel_meta).unwrap();
+    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
+        return Response::error(format!("failed to write channel meta: {}", e));
+    }
+
+    // Git commit both files
+    let thread_rel = format!("channels/{}.thread", channel);
+    let meta_rel = format!("channels/{}.meta.json", channel);
+    let commit_msg = format!("{}: @{} {} {}", event_type, author, event_type, channel);
+    let commit_status = match state.git_storage.add_and_commit_as(
+        &[&thread_rel, &meta_rel],
+        &commit_msg,
+        Some(&author),
+    ) {
+        Ok(()) => "committed",
+        Err(e) => {
+            warn!("git commit failed for {} event in {}: {}", event_type, channel, e);
+            "written"
+        }
+    };
+
+    // Broadcast MembershipChanged event
+    let _ = state.event_tx.send(Event::MembershipChanged {
+        channel: channel.clone(),
+        event_type: event_type.to_string(),
+        author: author.clone(),
+        targets: affected.clone(),
+    });
+
+    // Invalidate thread cache
+    state.thread_cache.write().await.remove(&channel);
+
+    info!(
+        "{} event in {} by @{} at L{:06} (targets: {:?})",
+        event_type, channel, author, next_line, affected
+    );
+    Response::success(serde_json::json!({
+        "channel": channel,
+        "event_type": event_type,
+        "author": author,
+        "targets": affected,
+        "line_number": next_line,
+        "status": commit_status,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gitim_core::types::config::Config;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    fn setup_test_state(tmp: &std::path::Path) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Initial commit so main branch exists
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo, Config::default(), event_tx, None))
+    }
+
+    /// Register a user by creating meta.json and adding to in-memory user list.
+    async fn register_test_user(state: &SharedState, handler: &str) {
+        let users_dir = state.repo_root.join("users");
+        std::fs::create_dir_all(&users_dir).unwrap();
+        let meta = serde_json::json!({
+            "display_name": handler,
+            "role": "member",
+            "introduction": "test user"
+        });
+        std::fs::write(
+            users_dir.join(format!("{}.meta.json", handler)),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let rel = format!("users/{}.meta.json", handler);
+        let _ = state.git_storage.add_and_commit(&[&rel], &format!("user: register @{}", handler));
+        let mut users = state.users.write().await;
+        if !users.contains(&handler.to_string()) {
+            users.push(handler.to_string());
+            users.sort();
+        }
+    }
+
+    /// Create a channel with meta.json and empty .thread file.
+    fn create_test_channel(state: &SharedState, name: &str, created_by: &str) {
+        let ch_dir = state.repo_root.join("channels");
+        std::fs::create_dir_all(&ch_dir).unwrap();
+        let meta = ChannelMeta {
+            display_name: name.to_string(),
+            created_by: created_by.to_string(),
+            created_at: "20260323T000000Z".to_string(),
+            introduction: "test channel".to_string(),
+            members: Vec::new(),
+        };
+        std::fs::write(
+            ch_dir.join(format!("{}.meta.json", name)),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(ch_dir.join(format!("{}.thread", name)), "").unwrap();
+        let meta_rel = format!("channels/{}.meta.json", name);
+        let thread_rel = format!("channels/{}.thread", name);
+        let _ = state.git_storage.add_and_commit(
+            &[&meta_rel, &thread_rel],
+            &format!("init: channel {}", name),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_join_channel_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        let resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "join failed: {:?}", resp.error);
+
+        // Verify .thread has join event
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        assert!(thread.contains("[E:join]"), "thread missing join event");
+        assert!(thread.contains("@alice"), "thread missing author");
+
+        // Verify meta.json has alice in members
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.contains(&"alice".to_string()), "alice not in members");
+    }
+
+    #[tokio::test]
+    async fn test_join_channel_pull_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins first
+        let resp1 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp1.ok, "alice join failed: {:?}", resp1.error);
+
+        // Alice pulls bob in
+        let resp2 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec!["bob".to_string()],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp2.ok, "pull bob failed: {:?}", resp2.error);
+
+        // Verify both in members
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.contains(&"alice".to_string()), "alice not in members");
+        assert!(meta.members.contains(&"bob".to_string()), "bob not in members");
+
+        // Verify thread has 2 events
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        let join_count = thread.matches("[E:join]").count();
+        assert_eq!(join_count, 2, "expected 2 join events, got {}", join_count);
+    }
+
+    #[tokio::test]
+    async fn test_leave_channel_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins
+        let resp1 = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp1.ok, "join failed: {:?}", resp1.error);
+
+        // Alice leaves
+        let resp2 = handle_request(
+            Request::LeaveChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp2.ok, "leave failed: {:?}", resp2.error);
+
+        // Verify meta.json members is empty
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/general.meta.json"),
+        )
+        .unwrap();
+        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+        assert!(meta.members.is_empty(), "members should be empty, got: {:?}", meta.members);
+
+        // Verify thread has both join and leave events
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/general.thread"),
+        )
+        .unwrap();
+        assert!(thread.contains("[E:join]"), "thread missing join event");
+        assert!(thread.contains("[E:leave]"), "thread missing leave event");
+    }
 }
