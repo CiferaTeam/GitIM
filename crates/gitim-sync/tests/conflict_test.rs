@@ -121,16 +121,16 @@ fn test_resolve_content_renumbers_local_messages() {
     // Verify: 4 messages total
     let final_content = std::fs::read_to_string(&thread_b).unwrap();
     let file = gitim_core::parser::parse_thread(&final_content).unwrap();
-    assert_eq!(file.messages.len(), 4);
+    assert_eq!(file.messages().len(), 4);
 
-    assert_eq!(file.messages[0].line_number, 1);
-    assert_eq!(file.messages[0].author.as_str(), "alice");
-    assert_eq!(file.messages[1].line_number, 2);
-    assert_eq!(file.messages[1].author.as_str(), "alice");
-    assert_eq!(file.messages[2].line_number, 3);
-    assert_eq!(file.messages[2].author.as_str(), "bob");
-    assert_eq!(file.messages[3].line_number, 4);
-    assert_eq!(file.messages[3].author.as_str(), "bob");
+    assert_eq!(file.messages()[0].line_number, 1);
+    assert_eq!(file.messages()[0].author.as_str(), "alice");
+    assert_eq!(file.messages()[1].line_number, 2);
+    assert_eq!(file.messages()[1].author.as_str(), "alice");
+    assert_eq!(file.messages()[2].line_number, 3);
+    assert_eq!(file.messages()[2].author.as_str(), "bob");
+    assert_eq!(file.messages()[3].line_number, 4);
+    assert_eq!(file.messages()[3].author.as_str(), "bob");
 
     assert_eq!(mappings.len(), 2);
     let mapping_set: Vec<(u64, u64)> = mappings.iter().map(|m| (m.old_line, m.new_line)).collect();
@@ -193,10 +193,10 @@ fn test_resolve_content_updates_p_references() {
     let final_content = std::fs::read_to_string(&thread_b).unwrap();
     let file = gitim_core::parser::parse_thread(&final_content).unwrap();
 
-    assert_eq!(file.messages.len(), 4);
+    assert_eq!(file.messages().len(), 4);
 
-    let bob_msg1 = &file.messages[2];
-    let bob_msg2 = &file.messages[3];
+    let bob_msg1 = &file.messages()[2];
+    let bob_msg2 = &file.messages()[3];
     assert_eq!(bob_msg1.line_number, 3);
     assert_eq!(bob_msg2.line_number, 4);
 
@@ -264,9 +264,9 @@ fn test_resolve_content_preserves_external_p_references() {
     let final_content = std::fs::read_to_string(&thread_b).unwrap();
     let file = gitim_core::parser::parse_thread(&final_content).unwrap();
 
-    assert_eq!(file.messages.len(), 4);
+    assert_eq!(file.messages().len(), 4);
 
-    let bob_msg = &file.messages[3];
+    let bob_msg = &file.messages()[3];
     assert_eq!(bob_msg.line_number, 4);
     assert_eq!(bob_msg.author.as_str(), "bob");
     assert_eq!(bob_msg.point_to, 1, "external P reference should be preserved");

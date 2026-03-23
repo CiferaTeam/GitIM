@@ -118,9 +118,9 @@ fn test_sync_pushes_committed_messages() {
     let remote_content =
         std::fs::read_to_string(verify_clone.path().join("channels/general.thread")).unwrap();
     let file = parse_thread(&remote_content).unwrap();
-    assert_eq!(file.messages.len(), 1);
-    assert_eq!(file.messages[0].line_number, 1);
-    assert_eq!(file.messages[0].body, "hello world");
+    assert_eq!(file.messages().len(), 1);
+    assert_eq!(file.messages()[0].line_number, 1);
+    assert_eq!(file.messages()[0].body, "hello world");
 }
 
 #[test]
@@ -172,19 +172,19 @@ fn test_sync_resolves_concurrent_writes() {
     // 5. Verify: thread_b has 4 messages with sequential L000001-L000004
     let final_content = std::fs::read_to_string(&thread_b).unwrap();
     let file = parse_thread(&final_content).unwrap();
-    assert_eq!(file.messages.len(), 4, "should have 4 messages total");
+    assert_eq!(file.messages().len(), 4, "should have 4 messages total");
 
     // First 2 are alice's (from remote)
-    assert_eq!(file.messages[0].line_number, 1);
-    assert_eq!(file.messages[0].author.as_str(), "alice");
-    assert_eq!(file.messages[1].line_number, 2);
-    assert_eq!(file.messages[1].author.as_str(), "alice");
+    assert_eq!(file.messages()[0].line_number, 1);
+    assert_eq!(file.messages()[0].author.as_str(), "alice");
+    assert_eq!(file.messages()[1].line_number, 2);
+    assert_eq!(file.messages()[1].author.as_str(), "alice");
 
     // Next 2 are bob's, renumbered to L000003, L000004
-    assert_eq!(file.messages[2].line_number, 3);
-    assert_eq!(file.messages[2].author.as_str(), "bob");
-    assert_eq!(file.messages[3].line_number, 4);
-    assert_eq!(file.messages[3].author.as_str(), "bob");
+    assert_eq!(file.messages()[2].line_number, 3);
+    assert_eq!(file.messages()[2].author.as_str(), "bob");
+    assert_eq!(file.messages()[3].line_number, 4);
+    assert_eq!(file.messages()[3].author.as_str(), "bob");
 
     // 6. Push should succeed
     repo_b.push().expect("push should succeed after conflict resolution");
@@ -193,7 +193,7 @@ fn test_sync_resolves_concurrent_writes() {
     repo_a.pull_rebase().unwrap();
     let a_final = std::fs::read_to_string(&thread_a).unwrap();
     let a_file = parse_thread(&a_final).unwrap();
-    assert_eq!(a_file.messages.len(), 4, "clone_a should see all 4 messages");
+    assert_eq!(a_file.messages().len(), 4, "clone_a should see all 4 messages");
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn test_sync_pulls_when_nothing_to_push() {
     // Verify: clone_b now has the content from clone_a
     let b_content = std::fs::read_to_string(&thread_b).unwrap();
     let file = parse_thread(&b_content).unwrap();
-    assert_eq!(file.messages.len(), 1);
-    assert_eq!(file.messages[0].author.as_str(), "alice");
-    assert_eq!(file.messages[0].body, "hello from alice");
+    assert_eq!(file.messages().len(), 1);
+    assert_eq!(file.messages()[0].author.as_str(), "alice");
+    assert_eq!(file.messages()[0].body, "hello from alice");
 }

@@ -1,6 +1,7 @@
 use crate::api::Response;
 use crate::identity::{AuthData, GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
+use gitim_core::types::Handler;
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
 
@@ -47,6 +48,14 @@ pub async fn handle_onboard(
     };
 
     info!("onboard: user registered — @{} (created={})", handler, created);
+
+    // --- Step E: Auto-join general channel (for newly created users) ---
+    if created {
+        if let Err(resp) = auto_join_general(&state, &handler) {
+            return resp;
+        }
+        info!("onboard: @{} auto-joined general channel", handler);
+    }
 
     // Refresh in-memory user list
     {
@@ -162,16 +171,21 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
             "created_by": handler,
             "created_at": now,
             "introduction": "默认频道",
+            "members": [handler],
         });
         let meta_str = serde_json::to_string_pretty(&meta).unwrap();
         std::fs::write(&meta_path, &meta_str)
             .map_err(|e| Response::error(format!("failed to write general.meta.json: {}", e)))?;
         changed_paths.push("channels/general.meta.json".to_string());
 
-        // Create empty thread file
+        // Create thread file with join event
         let thread_path = channels_dir.join("general.thread");
         if !thread_path.exists() {
-            std::fs::write(&thread_path, "")
+            let h = Handler::new(handler)
+                .map_err(|e| Response::error(format!("invalid handler: {}", e)))?;
+            let join_line =
+                gitim_core::formatter::format_event(1, &h, &now, "join", &serde_json::json!({}));
+            std::fs::write(&thread_path, &join_line)
                 .map_err(|e| Response::error(format!("failed to write general.thread: {}", e)))?;
             changed_paths.push("channels/general.thread".to_string());
         }
@@ -271,6 +285,61 @@ fn register_user(
         "register_user: push still conflicting after {} retries",
         MAX_PUSH_RETRIES
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Auto-join general channel on registration
+// ---------------------------------------------------------------------------
+
+fn auto_join_general(state: &SharedState, handler: &str) -> Result<(), Response> {
+    let meta_path = state.repo_root.join("channels/general.meta.json");
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let meta_content = std::fs::read_to_string(&meta_path)
+        .map_err(|e| Response::error(format!("read meta: {}", e)))?;
+    let mut meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content)
+        .map_err(|e| Response::error(format!("parse meta: {}", e)))?;
+
+    if meta.members.contains(&handler.to_string()) {
+        return Ok(()); // idempotent
+    }
+
+    // Write join event to .thread
+    let thread_path = state.repo_root.join("channels/general.thread");
+    let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
+    let file = gitim_core::parser::parse_thread(&existing)
+        .map_err(|e| Response::error(format!("parse: {}", e)))?;
+    let next_line = file.last_line_number() + 1;
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let h = Handler::new(handler).map_err(|e| Response::error(format!("handler: {}", e)))?;
+    let event_line =
+        gitim_core::formatter::format_event(next_line, &h, &now, "join", &serde_json::json!({}));
+
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&thread_path)
+        .and_then(|mut f| f.write_all(event_line.as_bytes()))
+        .map_err(|e| Response::error(format!("write event: {}", e)))?;
+
+    // Update meta.json members
+    meta.members.push(handler.to_string());
+    meta.members.sort();
+    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+    std::fs::write(&meta_path, &meta_str)
+        .map_err(|e| Response::error(format!("write meta: {}", e)))?;
+
+    // Git commit
+    let _ = state.git_storage.add_and_commit_as(
+        &["channels/general.thread", "channels/general.meta.json"],
+        &format!("event: @{} join general", handler),
+        Some(handler),
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -755,5 +824,101 @@ mod tests {
         println!("Bot A thread:\n{}", thread_a);
         println!("Bot B thread:\n{}", thread_b);
         println!("Bot C thread:\n{}", thread_c);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_repo_creator_joins_general() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+
+        ensure_repo(&state, "alice").unwrap();
+
+        // meta.json should have creator in members
+        let meta_content =
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
+        let meta: gitim_core::types::ChannelMeta =
+            serde_json::from_str(&meta_content).unwrap();
+        assert_eq!(meta.members, vec!["alice"]);
+
+        // .thread should have a join event (not be empty)
+        let thread_content =
+            std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
+        assert!(!thread_content.is_empty(), "thread should not be empty");
+        assert!(thread_content.contains("[E:join]"), "thread should contain join event");
+        assert!(thread_content.contains("@alice"), "join event should reference alice");
+    }
+
+    #[tokio::test]
+    async fn test_onboard_new_user_joins_general() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create bare remote with initial commit
+        let bare = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+
+        let seed = tmp.path().join("seed");
+        clone_from_bare(&bare, &seed);
+        std::fs::write(seed.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+
+        // Bot A onboards first — creates general channel, auto-joins
+        let bot_a_path = tmp.path().join("bot-a");
+        clone_from_bare(&bare, &bot_a_path);
+        let state_a = make_state(bot_a_path.clone());
+
+        let resp_a = handle_onboard(
+            state_a.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+        )
+        .await;
+        assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
+
+        // Bot B onboards second — should auto-join existing general channel
+        let bot_b_path = tmp.path().join("bot-b");
+        clone_from_bare(&bare, &bot_b_path);
+        let state_b = make_state(bot_b_path.clone());
+
+        let resp_b = handle_onboard(
+            state_b.clone(),
+            "git".to_string(),
+            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+        )
+        .await;
+        assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
+
+        // Verify: bot-b's local general.meta.json should have both members
+        let meta_content =
+            std::fs::read_to_string(bot_b_path.join("channels/general.meta.json")).unwrap();
+        let meta: gitim_core::types::ChannelMeta =
+            serde_json::from_str(&meta_content).unwrap();
+        assert!(meta.members.contains(&"bot-a".to_string()), "bot-a should be a member");
+        assert!(meta.members.contains(&"bot-b".to_string()), "bot-b should be a member");
+
+        // Verify: thread should have join events for both
+        let thread_content =
+            std::fs::read_to_string(bot_b_path.join("channels/general.thread")).unwrap();
+        let file = gitim_core::parser::parse_thread(&thread_content).unwrap();
+        let events = file.events();
+        assert!(events.len() >= 2, "should have at least 2 join events, got {}", events.len());
     }
 }

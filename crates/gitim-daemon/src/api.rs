@@ -11,6 +11,14 @@ pub enum Event {
 
     #[serde(rename = "message_renumbered")]
     MessageRenumbered { channel: String, old_line: u64, new_line: u64 },
+
+    #[serde(rename = "membership_changed")]
+    MembershipChanged {
+        channel: String,
+        event_type: String,
+        author: String,
+        targets: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +72,22 @@ pub enum Request {
     Onboard {
         git_server: String,
         auth: serde_json::Value,
+    },
+    #[serde(rename = "join_channel")]
+    JoinChannel {
+        channel: String,
+        #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "leave_channel")]
+    LeaveChannel {
+        channel: String,
+        #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
+        author: Option<String>,
     },
     #[serde(rename = "search")]
     Search {

@@ -148,7 +148,7 @@ impl Index {
     }
 
     /// 批量插入消息（在事务内）。
-    fn insert_messages(conn: &Connection, channel: &str, channel_type: &str, messages: &[Message]) -> Result<(), IndexError> {
+    fn insert_messages(conn: &Connection, channel: &str, channel_type: &str, messages: &[&Message]) -> Result<(), IndexError> {
         let mut stmt = conn.prepare_cached(
             "INSERT OR IGNORE INTO messages (channel, channel_type, line_number, parent_line, author, timestamp, body)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
@@ -184,8 +184,8 @@ impl Index {
             }
         };
 
-        let count = parsed.messages.len();
-        Self::insert_messages(conn, channel_name, channel_type, &parsed.messages)?;
+        let count = parsed.messages().len();
+        Self::insert_messages(conn, channel_name, channel_type, &parsed.messages())?;
         Ok(count)
     }
 
@@ -219,8 +219,8 @@ impl Index {
                 }
             };
 
-            Self::insert_messages(&tx, &channel_name, channel_type, &parsed.messages)?;
-            total += parsed.messages.len();
+            Self::insert_messages(&tx, &channel_name, channel_type, &parsed.messages())?;
+            total += parsed.messages().len();
         }
 
         Self::set_commit_id(&tx, new_commit_id)?;
@@ -260,8 +260,8 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages)?;
-                                total += parsed.messages.len();
+                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages())?;
+                                total += parsed.messages().len();
                             }
                             Err(e) => warn!("index rebuild: skip {}: {}", name, e),
                         }
@@ -287,8 +287,8 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages)?;
-                                total += parsed.messages.len();
+                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
+                                total += parsed.messages().len();
                             }
                             Err(e) => warn!("index rebuild: skip {}: {}", name, e),
                         }
@@ -367,8 +367,8 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages)?;
-                                total += parsed.messages.len();
+                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages())?;
+                                total += parsed.messages().len();
                             }
                             Err(e) => warn!("index reindex: skip {}: {}", name, e),
                         }
@@ -394,8 +394,8 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages)?;
-                                total += parsed.messages.len();
+                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
+                                total += parsed.messages().len();
                             }
                             Err(e) => warn!("index reindex: skip {}: {}", name, e),
                         }

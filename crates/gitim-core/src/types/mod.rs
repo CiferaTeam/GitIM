@@ -6,6 +6,6 @@ pub mod config;
 
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
-pub use message::{Message, ThreadLine, ThreadFile};
+pub use message::{Message, ChannelEvent, ThreadEntry, ThreadLine, ThreadFile};
 pub use meta::{UserMeta, ChannelMeta};
 pub use config::Config;

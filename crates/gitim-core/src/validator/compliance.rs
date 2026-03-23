@@ -1,4 +1,5 @@
 use crate::parser::parse_thread;
+use crate::types::ThreadEntry;
 use thiserror::Error;
 use std::collections::HashSet;
 
@@ -16,6 +17,10 @@ pub enum ComplianceError {
     EmptyBody(u64),
     #[error("unknown mention '<@{handler}>' in message L{line_number:06}")]
     UnknownMention { handler: String, line_number: u64 },
+    #[error("event L{0:06} must have P000000")]
+    EventNonZeroPointTo(u64),
+    #[error("event L{0:06} has invalid JSON body")]
+    EventInvalidJson(u64),
 }
 
 #[derive(Debug)]
@@ -29,53 +34,62 @@ pub fn validate_append(
     let existing_file = parse_thread(existing)?;
     let new_file = parse_thread(new_lines)?;
 
-    let max_existing = existing_file
-        .messages
-        .last()
-        .map(|m| m.line_number)
-        .unwrap_or(0);
+    let max_existing = existing_file.last_line_number();
 
     let mut known_lines: HashSet<u64> = existing_file
-        .messages
+        .entries
         .iter()
-        .map(|m| m.line_number)
+        .map(|e| e.line_number())
         .collect();
 
     let user_set: HashSet<&str> = registered_users.iter().copied().collect();
 
     let mut expected_next = max_existing + 1;
 
-    for msg in &new_file.messages {
-        if msg.line_number != expected_next {
+    for entry in &new_file.entries {
+        let ln = entry.line_number();
+        if ln != expected_next {
             return Err(ComplianceError::LineNumberGap {
                 expected: expected_next,
-                got: msg.line_number,
+                got: ln,
             });
         }
 
-        if !user_set.contains(msg.author.as_str()) {
-            return Err(ComplianceError::UnknownAuthor(msg.author.to_string()));
+        if !user_set.contains(entry.author().as_str()) {
+            return Err(ComplianceError::UnknownAuthor(entry.author().to_string()));
         }
 
-        if msg.point_to != 0 && !known_lines.contains(&msg.point_to) {
-            return Err(ComplianceError::InvalidPointTo(msg.point_to));
-        }
+        match entry {
+            ThreadEntry::Message(msg) => {
+                if msg.point_to != 0 && !known_lines.contains(&msg.point_to) {
+                    return Err(ComplianceError::InvalidPointTo(msg.point_to));
+                }
 
-        for mention in &msg.mentions {
-            if !user_set.contains(mention.as_str()) {
-                return Err(ComplianceError::UnknownMention {
-                    handler: mention.to_string(),
-                    line_number: msg.line_number,
-                });
+                for mention in &msg.mentions {
+                    if !user_set.contains(mention.as_str()) {
+                        return Err(ComplianceError::UnknownMention {
+                            handler: mention.to_string(),
+                            line_number: ln,
+                        });
+                    }
+                }
+
+                if msg.body.trim().is_empty() {
+                    return Err(ComplianceError::EmptyBody(ln));
+                }
+            }
+            ThreadEntry::Event(ev) => {
+                if ev.point_to != 0 {
+                    return Err(ComplianceError::EventNonZeroPointTo(ln));
+                }
+                if !ev.meta.is_object() {
+                    return Err(ComplianceError::EventInvalidJson(ln));
+                }
             }
         }
 
-        if msg.body.trim().is_empty() {
-            return Err(ComplianceError::EmptyBody(msg.line_number));
-        }
-
-        known_lines.insert(msg.line_number);
-        expected_next = msg.line_number + 1;
+        known_lines.insert(ln);
+        expected_next = ln + 1;
     }
 
     Ok(AppendValidation)
