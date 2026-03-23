@@ -1,4 +1,5 @@
 use crate::types::handler::Handler;
+use crate::types::link::Link;
 
 /// A parsed message from a .thread file.
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +10,7 @@ pub struct Message {
     pub timestamp: String,
     pub body: String,
     pub mentions: Vec<Handler>,
+    pub links: Vec<Link>,
 }
 
 /// A line in a .thread file — either a message start or a continuation.
