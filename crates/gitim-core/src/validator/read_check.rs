@@ -60,9 +60,13 @@ pub fn check_thread_integrity(input: &str, registered_users: &[&str]) -> Vec<Int
                     }
                 }
             }
-            ThreadEntry::Event(_ev) => {
-                // Events: line number continuity and author checks already done above.
-                // Full event validation will be added in Task 6.
+            ThreadEntry::Event(ev) => {
+                if ev.point_to != 0 {
+                    issues.push(IntegrityIssue::LineNumberGap { expected: 0, got: ev.point_to });
+                }
+                if !ev.meta.is_object() {
+                    issues.push(IntegrityIssue::EmptyBody(ln));
+                }
             }
         }
 

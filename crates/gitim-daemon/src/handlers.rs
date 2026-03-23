@@ -16,16 +16,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             "status": "running",
         })),
         Request::Send { channel, body, reply_to, author } => {
-            // Resolve author: explicit > current_user > error
-            let resolved_author = match author {
-                Some(a) if !a.is_empty() => a,
-                _ => {
-                    let current = state.current_user.read().await;
-                    match current.clone() {
-                        Some(u) => u,
-                        None => return Response::error("no author specified and no identity configured".to_string()),
-                    }
-                }
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
             };
             handle_send(state, channel, body, reply_to, resolved_author).await
         }
@@ -49,28 +42,16 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             crate::onboard::handle_onboard(state, git_server, auth).await
         }
         Request::JoinChannel { channel, targets, author } => {
-            let resolved_author = match author {
-                Some(a) if !a.is_empty() => a,
-                _ => {
-                    let current = state.current_user.read().await;
-                    match current.clone() {
-                        Some(u) => u,
-                        None => return Response::error("no author specified and no identity configured"),
-                    }
-                }
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
             };
             handle_join_channel(state, channel, targets, resolved_author).await
         }
         Request::LeaveChannel { channel, targets, author } => {
-            let resolved_author = match author {
-                Some(a) if !a.is_empty() => a,
-                _ => {
-                    let current = state.current_user.read().await;
-                    match current.clone() {
-                        Some(u) => u,
-                        None => return Response::error("no author specified and no identity configured"),
-                    }
-                }
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
             };
             handle_leave_channel(state, channel, targets, resolved_author).await
         }
@@ -101,6 +82,40 @@ fn resolve_thread_path(
             .join("channels")
             .join(format!("{}.thread", channel));
         Ok((path, channel.to_string()))
+    }
+}
+
+fn entry_to_json(entry: &ThreadEntry) -> serde_json::Value {
+    match entry {
+        ThreadEntry::Message(m) => serde_json::json!({
+            "type": "message",
+            "line_number": m.line_number,
+            "point_to": m.point_to,
+            "author": m.author.as_str(),
+            "timestamp": m.timestamp,
+            "body": m.body,
+        }),
+        ThreadEntry::Event(ev) => serde_json::json!({
+            "type": "event",
+            "event_type": ev.event_type,
+            "line_number": ev.line_number,
+            "author": ev.author.as_str(),
+            "timestamp": ev.timestamp,
+            "meta": ev.meta,
+        }),
+    }
+}
+
+async fn resolve_author(author: Option<String>, state: &SharedState) -> Result<String, Response> {
+    match author {
+        Some(a) if !a.is_empty() => Ok(a),
+        _ => {
+            let current = state.current_user.read().await;
+            match current.clone() {
+                Some(u) => Ok(u),
+                None => Err(Response::error("no author specified and no identity configured")),
+            }
+        }
     }
 }
 
@@ -251,24 +266,7 @@ async fn handle_read(
 
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|entry| match entry {
-            ThreadEntry::Message(m) => serde_json::json!({
-                "type": "message",
-                "line_number": m.line_number,
-                "point_to": m.point_to,
-                "author": m.author.as_str(),
-                "timestamp": m.timestamp,
-                "body": m.body,
-            }),
-            ThreadEntry::Event(ev) => serde_json::json!({
-                "type": "event",
-                "event_type": ev.event_type,
-                "line_number": ev.line_number,
-                "author": ev.author.as_str(),
-                "timestamp": ev.timestamp,
-                "meta": ev.meta,
-            }),
-        })
+        .map(|entry| entry_to_json(entry))
         .collect();
 
     Response::success(serde_json::json!({
@@ -578,24 +576,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         let entries: Vec<serde_json::Value> = parsed
             .entries
             .iter()
-            .map(|entry| match entry {
-                ThreadEntry::Message(m) => serde_json::json!({
-                    "type": "message",
-                    "line_number": m.line_number,
-                    "point_to": m.point_to,
-                    "author": m.author.as_str(),
-                    "timestamp": m.timestamp,
-                    "body": m.body,
-                }),
-                ThreadEntry::Event(ev) => serde_json::json!({
-                    "type": "event",
-                    "event_type": ev.event_type,
-                    "line_number": ev.line_number,
-                    "author": ev.author.as_str(),
-                    "timestamp": ev.timestamp,
-                    "meta": ev.meta,
-                }),
-            })
+            .map(|entry| entry_to_json(entry))
             .collect();
 
         changes.push(serde_json::json!({
@@ -754,7 +735,7 @@ async fn write_channel_event(
     // Git commit both files
     let thread_rel = format!("channels/{}.thread", channel);
     let meta_rel = format!("channels/{}.meta.json", channel);
-    let commit_msg = format!("{}: @{} {} {}", event_type, author, event_type, channel);
+    let commit_msg = format!("event: @{} {} {}", author, event_type, channel);
     let commit_status = match state.git_storage.add_and_commit_as(
         &[&thread_rel, &meta_rel],
         &commit_msg,
