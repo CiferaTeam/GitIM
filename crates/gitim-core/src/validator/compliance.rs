@@ -30,13 +30,13 @@ pub fn validate_append(
     let new_file = parse_thread(new_lines)?;
 
     let max_existing = existing_file
-        .messages
+        .messages()
         .last()
         .map(|m| m.line_number)
         .unwrap_or(0);
 
     let mut known_lines: HashSet<u64> = existing_file
-        .messages
+        .messages()
         .iter()
         .map(|m| m.line_number)
         .collect();
@@ -45,7 +45,7 @@ pub fn validate_append(
 
     let mut expected_next = max_existing + 1;
 
-    for msg in &new_file.messages {
+    for msg in new_file.messages() {
         if msg.line_number != expected_next {
             return Err(ComplianceError::LineNumberGap {
                 expected: expected_next,

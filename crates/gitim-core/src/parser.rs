@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
 use crate::mention::extract_mentions;
-use crate::types::{Handler, Message, ThreadFile};
+use crate::types::{Handler, Message, ThreadEntry, ThreadFile};
 
 #[derive(Error, Debug)]
 pub enum ParseError {
@@ -22,19 +22,16 @@ static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
     let input = &input.replace("\r\n", "\n");
     if input.is_empty() {
-        return Ok(ThreadFile { messages: vec![] });
+        return Ok(ThreadFile { entries: vec![] });
     }
 
-    let mut messages: Vec<Message> = Vec::new();
+    let mut entries: Vec<ThreadEntry> = Vec::new();
     let mut current_body: Option<String> = None;
     let mut first_content_line = true;
 
     for (file_line_idx, line) in input.lines().enumerate() {
         if let Some(caps) = MSG_RE.captures(line) {
-            if let (Some(body), Some(msg)) = (current_body.take(), messages.last_mut()) {
-                msg.body = body;
-                msg.mentions = extract_mentions(&msg.body);
-            }
+            finalize_entry(&mut entries, current_body.take());
 
             let line_number: u64 = caps[1].parse().unwrap();
             let point_to: u64 = caps[2].parse().unwrap();
@@ -45,14 +42,14 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
             let timestamp = caps[4].to_string();
             let body_first_line = caps[5].to_string();
 
-            messages.push(Message {
+            entries.push(ThreadEntry::Message(Message {
                 line_number,
                 point_to,
                 author,
                 timestamp,
                 body: String::new(),
                 mentions: Vec::new(),
-            });
+            }));
             current_body = Some(body_first_line);
             first_content_line = false;
         } else {
@@ -72,10 +69,21 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
         }
     }
 
-    if let (Some(body), Some(msg)) = (current_body, messages.last_mut()) {
-        msg.body = body;
-        msg.mentions = extract_mentions(&msg.body);
-    }
+    finalize_entry(&mut entries, current_body.take());
 
-    Ok(ThreadFile { messages })
+    Ok(ThreadFile { entries })
+}
+
+fn finalize_entry(entries: &mut [ThreadEntry], body: Option<String>) {
+    if let (Some(body), Some(entry)) = (body, entries.last_mut()) {
+        match entry {
+            ThreadEntry::Message(msg) => {
+                msg.body = body;
+                msg.mentions = extract_mentions(&msg.body);
+            }
+            ThreadEntry::Event(_ev) => {
+                // Events don't need body finalization at this stage
+            }
+        }
+    }
 }

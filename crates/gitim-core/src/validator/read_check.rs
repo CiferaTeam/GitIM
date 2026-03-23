@@ -26,7 +26,7 @@ pub fn check_thread_integrity(input: &str, registered_users: &[&str]) -> Vec<Int
     let mut known_lines: HashSet<u64> = HashSet::new();
     let mut expected_next: u64 = 1;
 
-    for msg in &file.messages {
+    for msg in file.messages() {
         if msg.line_number != expected_next {
             issues.push(IntegrityIssue::LineNumberGap {
                 expected: expected_next,
