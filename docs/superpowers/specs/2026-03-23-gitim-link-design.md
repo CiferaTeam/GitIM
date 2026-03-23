@@ -68,15 +68,15 @@
 ### 2.4 各类型内容规则
 
 **频道链接 `<#channel>`：**
-- channel 遵循 handler 字符集：`[a-z0-9]([a-z0-9-]*[a-z0-9])?`
+- channel 遵循频道命名规则：`^[a-z0-9]+(-[a-z0-9]+)*$`，1-32 字符，禁止连续连字符
 
 **消息链接 `<#channel:LNNNNNN>`：**
-- channel 同上
+- channel 遵循上述频道命名规则
 - `:L` 为固定分隔符
-- 行号为 6 位及以上数字
+- 行号为 6 位及以上数字（与 v1 协议一致）
 
 **用户资料链接 `<~handler>`：**
-- handler 遵循现有 Handler 规则：`[a-z0-9]([a-z0-9-]*[a-z0-9])?`
+- handler 遵循现有 Handler 规则：`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`，1-39 字符，禁止连续连字符，`system` 为保留字
 
 **外部链接 `<!url>` / `<!url|文本>`：**
 - URL 必须是 RFC 3986 合法编码
@@ -93,7 +93,7 @@
 ```rust
 pub struct Link {
     pub kind: LinkKind,
-    pub raw: String,
+    pub raw: String,        // 完整匹配文本，含角括号，如 "<#general:L000042>"
 }
 
 pub enum LinkKind {
@@ -132,7 +132,7 @@ pub struct Message {
 <([#~!])([^>]+)>
 ```
 
-mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。
+mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。正则首字符限定 `[#~!]`，天然排除 `@` 前缀。
 
 ### 4.2 分发逻辑
 
@@ -140,16 +140,16 @@ mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。
 
 | 首字符 | 解析逻辑 |
 |--------|---------|
-| `#` | 若内容含 `:L\d{6,}` → `Message { channel, line_number }`，否则 → `Channel { name }` |
-| `~` | → `UserProfile { handler }` |
+| `#` | 若内容匹配 `^<channel>:L\d{6,}$` → `Message { channel, line_number }`（channel 部分需通过频道命名规则验证），否则 → `Channel { name }`（需通过频道命名规则验证） |
+| `~` | → `UserProfile { handler }`（需通过 `Handler::new()` 格式验证） |
 | `!` | 若内容含裸 `\|` → `Softlink { url, title }`，否则 → `Softlink { url, title: None }` |
 
 ### 4.3 解析流程
 
 1. 按现有逻辑解析消息起始行和续行，组装完整 body。
 2. 对完整 body 应用提取正则，收集所有匹配。
-3. 对每个匹配按首字符分发，构建 `Link` 实例。
-4. 格式不合法的匹配（如 channel 名不合法）静默忽略，不中断解析。
+3. 对每个匹配按首字符分发，进行**格式验证**（频道名、handler 格式），构建 `Link` 实例。
+4. 格式不合法的匹配（如 channel 名含非法字符、行号不足 6 位、handler 格式不合法）静默忽略，不中断解析。
 5. 按出现顺序存入 `links` 字段，不去重。
 
 ---
@@ -158,7 +158,9 @@ mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。
 
 ### 5.1 写入验证
 
-**不验证。** Link 目标不要求存在。频道可能被 archive，用户可能离开，外部 URL 可能失效。
+**不验证目标存在性。** Link 目标不要求存在。频道可能被 archive，用户可能离开，外部 URL 可能失效。
+
+注意：解析时仍会验证**格式合法性**（频道命名规则、handler 格式），格式不合法的标记被静默忽略。这与 mention 一致（mention 也先验证 handler 格式，再验证存在性）。
 
 ### 5.2 读取检测
 
@@ -213,12 +215,16 @@ mention `<@handler>` 由现有 `mention.rs` 负责，`link.rs` 不处理。
 | `<~>` 空 handler | 同上 |
 | `<!>` 空 URL | 同上 |
 | `<#GENERAL>` 大写 | channel 名不合法，静默忽略 |
+| `<#a--b>` 连续连字符 | 频道命名规则禁止，静默忽略 |
+| `<#channel:L00042>` 行号不足 6 位 | 不匹配 Message 模式，channel 部分含 `:L00042` 也不合法，静默忽略 |
 | 未闭合 `<#general` | 正则不匹配，视为普通文本 |
 | softlink URL 含裸 `\|` | 协议要求编码为 `%7C`，裸 `\|` 按分隔符处理 |
 | softlink URL 含裸 `>` | 协议要求编码为 `%3E`，裸 `>` 按闭合标记处理 |
-| `<!url\|>` 空显示文本 | `title` 为空字符串（非 None） |
+| `<!url\|>` 空显示文本 | `title` 为空字符串（非 None），消费端自行决定渲染方式 |
 | 同一链接出现多次 | 不去重，全部保留 |
 | 单条消息链接数量 | 无上限 |
+| `<@bob>` 和 `<~bob>` 同时出现 | 各自独立：mention 进 `mentions` 字段，link 进 `links` 字段，不跨字段去重 |
+| DM 会话链接 | 本次不支持，未来按需扩展 |
 
 ---
 
