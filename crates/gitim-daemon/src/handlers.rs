@@ -6,6 +6,7 @@ use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, Handler, ThreadEntry};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
@@ -476,38 +477,92 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         }
     };
 
-    // Parse changed .thread files into messages
+    // Parse changed files into entries
     let mut changes: Vec<serde_json::Value> = Vec::new();
 
     let current_user_snapshot = state.current_user.read().await.clone();
 
+    // Step 1: Build channel membership cache
+    let mut channel_membership: HashMap<String, bool> = HashMap::new();
+    for (path, _) in &diff {
+        let path_str = path.to_string_lossy();
+        if let Some(ch_name) = path_str
+            .strip_prefix("channels/")
+            .and_then(|s| s.strip_suffix(".thread").or_else(|| s.strip_suffix(".meta.json")))
+        {
+            if channel_membership.contains_key(ch_name) {
+                continue;
+            }
+            let meta_path = state
+                .repo_root
+                .join("channels")
+                .join(format!("{}.meta.json", ch_name));
+            let is_member = if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+                    current_user_snapshot
+                        .as_ref()
+                        .map_or(false, |me| meta.members.contains(me))
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+            channel_membership.insert(ch_name.to_string(), is_member);
+        }
+    }
+
+    // Step 2: Process diff entries with membership filter
     for (path, added_content) in &diff {
         let path_str = path.to_string_lossy();
 
-        // Determine channel name and kind from file path
         let (channel, kind) = if let Some(name) = path_str.strip_prefix("channels/") {
-            let name = name.strip_suffix(".thread").unwrap_or(name);
-            (name.to_string(), "channel")
+            if let Some(ch_name) = name.strip_suffix(".thread") {
+                (ch_name.to_string(), "channel")
+            } else if let Some(ch_name) = name.strip_suffix(".meta.json") {
+                // Meta change — only push if user is (now) a member
+                if !channel_membership.get(ch_name).copied().unwrap_or(true) {
+                    continue;
+                }
+                changes.push(serde_json::json!({
+                    "channel": ch_name,
+                    "kind": "channel_meta",
+                    "entries": [],
+                }));
+                continue;
+            } else {
+                continue;
+            }
         } else if let Some(name) = path_str.strip_prefix("dm/") {
             let name = name.strip_suffix(".thread").unwrap_or(name);
             (format!("dm:{}", name.replace("--", ",")), "dm")
         } else {
-            continue; // Skip non-thread files
+            continue;
         };
+
+        // Channel membership filter
+        if kind == "channel" {
+            if !channel_membership.get(&channel).copied().unwrap_or(true) {
+                continue;
+            }
+        }
 
         // DM visibility filter — skip DMs not involving current user
         if kind == "dm" {
-            if let Some(stem) = path_str.strip_prefix("dm/").and_then(|s| s.strip_suffix(".thread")) {
+            if let Some(stem) = path_str
+                .strip_prefix("dm/")
+                .and_then(|s| s.strip_suffix(".thread"))
+            {
                 if let Some((a, b)) = parse_dm_filename(stem) {
                     match &current_user_snapshot {
                         Some(me) if me == a || me == b => { /* allowed */ }
-                        _ => continue, // no identity or not a participant → skip
+                        _ => continue,
                     }
                 }
             }
         }
 
-        // Parse added lines as messages
+        // Parse added lines as entries (both messages and events)
         let parsed = match parse_thread(added_content) {
             Ok(f) => f,
             Err(e) => {
@@ -516,28 +571,37 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
             }
         };
 
-        let poll_messages = parsed.messages();
-        if poll_messages.is_empty() {
+        if parsed.entries.is_empty() {
             continue;
         }
 
-        let messages: Vec<serde_json::Value> = poll_messages
+        let entries: Vec<serde_json::Value> = parsed
+            .entries
             .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "line": m.line_number,
+            .map(|entry| match entry {
+                ThreadEntry::Message(m) => serde_json::json!({
+                    "type": "message",
+                    "line_number": m.line_number,
+                    "point_to": m.point_to,
                     "author": m.author.as_str(),
                     "timestamp": m.timestamp,
                     "body": m.body,
-                    "reply_to": if m.point_to == 0 { None } else { Some(m.point_to) },
-                })
+                }),
+                ThreadEntry::Event(ev) => serde_json::json!({
+                    "type": "event",
+                    "event_type": ev.event_type,
+                    "line_number": ev.line_number,
+                    "author": ev.author.as_str(),
+                    "timestamp": ev.timestamp,
+                    "meta": ev.meta,
+                }),
             })
             .collect();
 
         changes.push(serde_json::json!({
             "channel": channel,
             "kind": kind,
-            "messages": messages,
+            "entries": entries,
         }));
     }
 
@@ -1024,5 +1088,106 @@ mod tests {
 
         // Verify "messages" key is absent
         assert!(data.get("messages").is_none(), "should not have 'messages' key");
+    }
+
+    #[tokio::test]
+    async fn test_poll_filters_non_member_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+        create_test_channel(&state, "random", "alice");
+
+        // Push initial state to origin
+        state.git_storage.push().ok();
+
+        // Alice joins general only
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "join general failed: {:?}", join_resp.error);
+
+        // Set current_user to alice
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("alice".to_string());
+        }
+
+        // Get cursor before changes
+        state.git_storage.push().ok();
+        let poll_before = handle_request(
+            Request::Poll { since: None },
+            state.clone(),
+        )
+        .await;
+        let cursor = poll_before.data.unwrap()["commit_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Send messages to both channels (alice is registered so send works)
+        // For random, alice is NOT a member
+        let send_general = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello general".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_general.ok, "send general failed: {:?}", send_general.error);
+
+        let send_random = handle_request(
+            Request::Send {
+                channel: "random".to_string(),
+                body: "hello random".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_random.ok, "send random failed: {:?}", send_random.error);
+
+        // Push so poll can see changes
+        state.git_storage.push().ok();
+
+        // Poll with cursor
+        let poll_resp = handle_request(
+            Request::Poll {
+                since: Some(cursor),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+        let data = poll_resp.data.unwrap();
+        let changes = data["changes"].as_array().unwrap();
+
+        // Should only contain general-related changes, not random
+        let channel_names: Vec<&str> = changes
+            .iter()
+            .filter(|c| c["kind"] == "channel" || c["kind"] == "channel_meta")
+            .filter_map(|c| c["channel"].as_str())
+            .collect();
+        assert!(
+            channel_names.contains(&"general"),
+            "general should be in poll results: {:?}",
+            channel_names
+        );
+        assert!(
+            !channel_names.contains(&"random"),
+            "random should NOT be in poll results (not a member): {:?}",
+            channel_names
+        );
     }
 }
