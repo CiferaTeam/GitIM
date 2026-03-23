@@ -8,6 +8,8 @@ import { usersCommand } from './commands/users.js';
 import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
 import { onboardCommand } from './commands/onboard.js';
 import { stopCommand } from './commands/stop.js';
+import { searchCommand } from './commands/search.js';
+import { reindexCommand } from './commands/reindex.js';
 
 const program = new Command();
 
@@ -64,6 +66,21 @@ program
   .action(async () => {
     await stopCommand();
   });
+
+program
+  .command('search [query]')
+  .description('搜索消息')
+  .option('-a, --author <handler>', '按作者过滤')
+  .option('-c, --channel <name>', '限定频道')
+  .option('-t, --type <type>', '频道类型: channel | dm')
+  .option('-l, --limit <n>', '结果数量限制', '50')
+  .option('--offset <n>', '分页偏移', '0')
+  .action((query, options) => searchCommand(query, options));
+
+program
+  .command('reindex')
+  .description('重建搜索索引')
+  .action(() => reindexCommand());
 
 const dm = program.command('dm').description('Direct messages');
 
