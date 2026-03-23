@@ -11,6 +11,7 @@ static MSG_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+):L(\d{6,})$").unwrap()
 });
 
+/// 从消息 body 中提取所有协议级链接，按出现顺序返回，不去重。
 pub fn extract_links(body: &str) -> Vec<Link> {
     let mut result = Vec::new();
     for caps in LINK_RE.captures_iter(body) {
@@ -50,6 +51,7 @@ fn parse_user_profile(content: &str) -> Option<LinkKind> {
 fn parse_softlink(content: &str) -> Option<LinkKind> {
     if let Some(pos) = content.find('|') {
         let url = &content[..pos];
+        // Safe: '|' is ASCII (0x7C), so pos + 1 is always a valid UTF-8 boundary
         let title = &content[pos + 1..];
         Some(LinkKind::Softlink { url: url.to_string(), title: Some(title.to_string()) })
     } else {
