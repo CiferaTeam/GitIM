@@ -77,6 +77,14 @@ export class GitimClient {
     return this.request('onboard', { git_server: gitServer, auth });
   }
 
+  async joinChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+    return this.request('join_channel', { channel, targets: targets ?? [] });
+  }
+
+  async leaveChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+    return this.request('leave_channel', { channel, targets: targets ?? [] });
+  }
+
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
   }
