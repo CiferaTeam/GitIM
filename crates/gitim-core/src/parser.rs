@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
 use crate::mention::extract_mentions;
-use crate::types::{Handler, Message, ThreadEntry, ThreadFile};
+use crate::types::{Handler, Message, ChannelEvent, ThreadEntry, ThreadFile};
 
 #[derive(Error, Debug)]
 pub enum ParseError {
@@ -16,7 +16,7 @@ pub enum ParseError {
 }
 
 static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\] (.+)$").unwrap()
+    Regex::new(r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z_]+)\])? (.+)$").unwrap()
 });
 
 pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
@@ -40,16 +40,28 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
                 source: e,
             })?;
             let timestamp = caps[4].to_string();
-            let body_first_line = caps[5].to_string();
+            let event_type = caps.get(5).map(|m| m.as_str().to_string());
+            let body_first_line = caps[6].to_string();
 
-            entries.push(ThreadEntry::Message(Message {
-                line_number,
-                point_to,
-                author,
-                timestamp,
-                body: String::new(),
-                mentions: Vec::new(),
-            }));
+            if let Some(et) = event_type {
+                entries.push(ThreadEntry::Event(ChannelEvent {
+                    line_number,
+                    point_to,
+                    author,
+                    timestamp,
+                    event_type: et,
+                    meta: serde_json::Value::Null,
+                }));
+            } else {
+                entries.push(ThreadEntry::Message(Message {
+                    line_number,
+                    point_to,
+                    author,
+                    timestamp,
+                    body: String::new(),
+                    mentions: Vec::new(),
+                }));
+            }
             current_body = Some(body_first_line);
             first_content_line = false;
         } else {
@@ -81,8 +93,8 @@ fn finalize_entry(entries: &mut [ThreadEntry], body: Option<String>) {
                 msg.body = body;
                 msg.mentions = extract_mentions(&msg.body);
             }
-            ThreadEntry::Event(_ev) => {
-                // Events don't need body finalization at this stage
+            ThreadEntry::Event(ev) => {
+                ev.meta = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
             }
         }
     }

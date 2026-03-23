@@ -1,4 +1,5 @@
 use gitim_core::parser::parse_thread;
+use gitim_core::types::ThreadEntry;
 
 #[test]
 fn test_parse_single_message() {
@@ -111,4 +112,50 @@ fn test_parse_bare_at_not_extracted() {
     let input = "[L000001][P000000][@nexus][20250316T120000Z] cc @lewis 看看\n";
     let result = parse_thread(input).unwrap();
     assert!(result.messages()[0].mentions.is_empty());
+}
+
+#[test]
+fn test_parse_event_line() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z][E:join] {}\n";
+    let result = parse_thread(input).unwrap();
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(result.messages().len(), 0);
+    assert_eq!(result.events().len(), 1);
+    let ev = result.events()[0];
+    assert_eq!(ev.line_number, 1);
+    assert_eq!(ev.point_to, 0);
+    assert_eq!(ev.author.as_str(), "nexus");
+    assert_eq!(ev.event_type, "join");
+    assert_eq!(ev.meta, serde_json::json!({}));
+}
+
+#[test]
+fn test_parse_mixed_messages_and_events() {
+    let input = "\
+[L000001][P000000][@nexus][20250316T120000Z][E:join] {}
+[L000002][P000000][@nexus][20250316T120100Z] hello everyone
+[L000003][P000000][@lewis][20250316T120200Z][E:join] {}
+[L000004][P000002][@lewis][20250316T120300Z] hi nexus
+";
+    let result = parse_thread(input).unwrap();
+    assert_eq!(result.entries.len(), 4);
+    assert_eq!(result.messages().len(), 2);
+    assert_eq!(result.events().len(), 2);
+    assert!(matches!(&result.entries[0], ThreadEntry::Event(_)));
+    assert!(matches!(&result.entries[1], ThreadEntry::Message(_)));
+    assert!(matches!(&result.entries[2], ThreadEntry::Event(_)));
+    assert!(matches!(&result.entries[3], ThreadEntry::Message(_)));
+}
+
+#[test]
+fn test_parse_event_multiline_json_body() {
+    let input = "\
+[L000001][P000000][@nexus][20250316T120000Z][E:leave] {\"reason\":
+\"goodbye\"}
+";
+    let result = parse_thread(input).unwrap();
+    assert_eq!(result.events().len(), 1);
+    let ev = result.events()[0];
+    assert_eq!(ev.event_type, "leave");
+    assert_eq!(ev.meta, serde_json::json!({"reason": "goodbye"}));
 }
