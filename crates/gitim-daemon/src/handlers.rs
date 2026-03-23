@@ -3,9 +3,53 @@ use crate::state::{PendingMessage, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::Handler;
+use gitim_core::types::{Handler, Link, LinkKind};
 use gitim_core::validator::compliance::validate_append;
 use tracing::{info, warn};
+
+fn link_to_json(link: &Link) -> serde_json::Value {
+    match &link.kind {
+        LinkKind::Channel { name } => serde_json::json!({
+            "kind": "channel",
+            "name": name,
+            "raw": link.raw,
+        }),
+        LinkKind::Message { channel, line_number } => serde_json::json!({
+            "kind": "message",
+            "channel": channel,
+            "line_number": line_number,
+            "raw": link.raw,
+        }),
+        LinkKind::UserProfile { handler } => serde_json::json!({
+            "kind": "user_profile",
+            "handler": handler.as_str(),
+            "raw": link.raw,
+        }),
+        LinkKind::Softlink { url, title } => {
+            let mut v = serde_json::json!({
+                "kind": "softlink",
+                "url": url,
+                "raw": link.raw,
+            });
+            if let Some(t) = title {
+                v["title"] = serde_json::json!(t);
+            }
+            v
+        }
+    }
+}
+
+fn message_to_json(m: &gitim_core::types::Message) -> serde_json::Value {
+    serde_json::json!({
+        "line_number": m.line_number,
+        "point_to": m.point_to,
+        "author": m.author.as_str(),
+        "timestamp": m.timestamp,
+        "body": m.body,
+        "mentions": m.mentions.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+        "links": m.links.iter().map(link_to_json).collect::<Vec<_>>(),
+    })
+}
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
@@ -227,15 +271,7 @@ async fn handle_read(
 
     let json_msgs: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
-            serde_json::json!({
-                "line_number": m.line_number,
-                "point_to": m.point_to,
-                "author": m.author.as_str(),
-                "timestamp": m.timestamp,
-                "body": m.body,
-            })
-        })
+        .map(|m| message_to_json(m))
         .collect();
 
     Response::success(serde_json::json!({
@@ -352,13 +388,7 @@ async fn handle_get_thread(
         }
         for msg in &file.messages {
             if msg.line_number == target || msg.point_to == target {
-                thread_msgs.push(serde_json::json!({
-                    "line_number": msg.line_number,
-                    "point_to": msg.point_to,
-                    "author": msg.author.as_str(),
-                    "timestamp": msg.timestamp,
-                    "body": msg.body,
-                }));
+                thread_msgs.push(message_to_json(msg));
                 if msg.line_number != target {
                     stack.push(msg.line_number);
                 }
@@ -491,15 +521,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         let messages: Vec<serde_json::Value> = parsed
             .messages
             .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "line": m.line_number,
-                    "author": m.author.as_str(),
-                    "timestamp": m.timestamp,
-                    "body": m.body,
-                    "reply_to": if m.point_to == 0 { None } else { Some(m.point_to) },
-                })
-            })
+            .map(|m| message_to_json(m))
             .collect();
 
         changes.push(serde_json::json!({
