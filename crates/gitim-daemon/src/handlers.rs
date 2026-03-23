@@ -3,7 +3,7 @@ use crate::state::{PendingMessage, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler};
+use gitim_core::types::{ChannelMeta, Handler, ThreadEntry};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
 use tracing::{info, warn};
@@ -237,33 +237,42 @@ async fn handle_read(
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
-    let mut messages: Vec<&gitim_core::types::Message> = file.messages().into_iter().collect();
+    let mut entries: Vec<&ThreadEntry> = file.entries.iter().collect();
 
     if let Some(since_line) = since {
-        messages.retain(|m| m.line_number > since_line);
+        entries.retain(|e| e.line_number() > since_line);
     }
 
     if let Some(lim) = limit {
-        let start = messages.len().saturating_sub(lim);
-        messages = messages[start..].to_vec();
+        let start = entries.len().saturating_sub(lim);
+        entries = entries[start..].to_vec();
     }
 
-    let json_msgs: Vec<serde_json::Value> = messages
+    let json_entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|m| {
-            serde_json::json!({
+        .map(|entry| match entry {
+            ThreadEntry::Message(m) => serde_json::json!({
+                "type": "message",
                 "line_number": m.line_number,
                 "point_to": m.point_to,
                 "author": m.author.as_str(),
                 "timestamp": m.timestamp,
                 "body": m.body,
-            })
+            }),
+            ThreadEntry::Event(ev) => serde_json::json!({
+                "type": "event",
+                "event_type": ev.event_type,
+                "line_number": ev.line_number,
+                "author": ev.author.as_str(),
+                "timestamp": ev.timestamp,
+                "meta": ev.meta,
+            }),
         })
         .collect();
 
     Response::success(serde_json::json!({
         "channel": channel,
-        "messages": json_msgs,
+        "entries": json_entries,
     }))
 }
 
@@ -953,5 +962,67 @@ mod tests {
         .unwrap();
         assert!(thread.contains("[E:join]"), "thread missing join event");
         assert!(thread.contains("[E:leave]"), "thread missing leave event");
+    }
+
+    #[tokio::test]
+    async fn test_read_returns_entries_with_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins (creates an event entry)
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "join failed: {:?}", join_resp.error);
+
+        // Alice sends a message
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
+
+        // Read the channel
+        let read_resp = handle_request(
+            Request::Read {
+                channel: "general".to_string(),
+                limit: None,
+                since: None,
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(read_resp.ok, "read failed: {:?}", read_resp.error);
+
+        let data = read_resp.data.unwrap();
+        let entries = data["entries"].as_array().expect("expected entries array");
+        assert_eq!(entries.len(), 2, "expected 2 entries, got {}", entries.len());
+
+        // First entry is the join event
+        assert_eq!(entries[0]["type"], "event");
+        assert_eq!(entries[0]["event_type"], "join");
+        assert_eq!(entries[0]["author"], "alice");
+
+        // Second entry is the message
+        assert_eq!(entries[1]["type"], "message");
+        assert_eq!(entries[1]["body"], "hello");
+        assert_eq!(entries[1]["author"], "alice");
+
+        // Verify "messages" key is absent
+        assert!(data.get("messages").is_none(), "should not have 'messages' key");
     }
 }
