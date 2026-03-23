@@ -89,7 +89,26 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
+    #[serde(rename = "search")]
+    Search {
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        channel_type: Option<String>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    #[serde(rename = "reindex")]
+    Reindex,
 }
+
+fn default_limit() -> usize { 50 }
 
 fn default_role() -> String {
     "member".to_string()

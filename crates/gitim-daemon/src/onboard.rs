@@ -69,6 +69,13 @@ pub async fn handle_onboard(
     // --- Start sync loop ---
     AppState::spawn_sync_loop(state.clone());
 
+    // Initialize search index (if not already initialized)
+    if state.index.read().unwrap().is_none() {
+        if let Err(e) = AppState::initialize_index(&state) {
+            warn!("index initialization after onboard failed: {}", e);
+        }
+    }
+
     Response::success(serde_json::json!({
         "handler": handler,
         "created": created,

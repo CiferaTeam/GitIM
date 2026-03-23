@@ -1,6 +1,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
+use crate::link::extract_links;
 use crate::mention::extract_mentions;
 use crate::types::{Handler, Message, ChannelEvent, ThreadEntry, ThreadFile};
 
@@ -60,6 +61,7 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
                     timestamp,
                     body: String::new(),
                     mentions: Vec::new(),
+                    links: Vec::new(),
                 }));
             }
             current_body = Some(body_first_line);
@@ -92,6 +94,7 @@ fn finalize_entry(entries: &mut [ThreadEntry], body: Option<String>) {
             ThreadEntry::Message(msg) => {
                 msg.body = body;
                 msg.mentions = extract_mentions(&msg.body);
+                msg.links = extract_links(&msg.body);
             }
             ThreadEntry::Event(ev) => {
                 ev.meta = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);

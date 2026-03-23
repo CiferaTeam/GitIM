@@ -3,11 +3,43 @@ use crate::state::{PendingMessage, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler, ThreadEntry};
+use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
 use std::collections::HashMap;
 use tracing::{info, warn};
+
+fn link_to_json(link: &Link) -> serde_json::Value {
+    match &link.kind {
+        LinkKind::Channel { name } => serde_json::json!({
+            "kind": "channel",
+            "name": name,
+            "raw": link.raw,
+        }),
+        LinkKind::Message { channel, line_number } => serde_json::json!({
+            "kind": "message",
+            "channel": channel,
+            "line_number": line_number,
+            "raw": link.raw,
+        }),
+        LinkKind::UserProfile { handler } => serde_json::json!({
+            "kind": "user_profile",
+            "handler": handler.as_str(),
+            "raw": link.raw,
+        }),
+        LinkKind::Softlink { url, title } => {
+            let mut v = serde_json::json!({
+                "kind": "softlink",
+                "url": url,
+                "raw": link.raw,
+            });
+            if let Some(t) = title {
+                v["title"] = serde_json::json!(t);
+            }
+            v
+        }
+    }
+}
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
@@ -55,6 +87,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             };
             handle_leave_channel(state, channel, targets, resolved_author).await
         }
+        Request::Search { query, author, channel, channel_type, limit, offset } => {
+            handle_search(state, query, author, channel, channel_type, limit, offset).await
+        }
+        Request::Reindex => handle_reindex(state).await,
     }
 }
 
@@ -94,6 +130,8 @@ fn entry_to_json(entry: &ThreadEntry) -> serde_json::Value {
             "author": m.author.as_str(),
             "timestamp": m.timestamp,
             "body": m.body,
+            "mentions": m.mentions.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+            "links": m.links.iter().map(link_to_json).collect::<Vec<_>>(),
         }),
         ThreadEntry::Event(ev) => serde_json::json!({
             "type": "event",
@@ -1181,5 +1219,87 @@ mod tests {
             "random should NOT be in poll results (not a member): {:?}",
             channel_names
         );
+    }
+}
+
+async fn handle_search(
+    state: SharedState,
+    query: Option<String>,
+    author: Option<String>,
+    channel: Option<String>,
+    channel_type: Option<String>,
+    limit: usize,
+    offset: usize,
+) -> Response {
+    let current_user = state.current_user.read().await.clone();
+    let index = {
+        let guard = state.index.read().unwrap();
+        match &*guard {
+            Some(idx) => idx.clone(),
+            None => return Response::error("search index not available"),
+        }
+    };
+
+    let params = gitim_index::SearchParams {
+        query,
+        author,
+        channel,
+        channel_type,
+        current_user,
+        limit,
+        offset,
+    };
+
+    match tokio::task::spawn_blocking(move || index.search(params)).await {
+        Ok(Ok(result)) => {
+            let messages: Vec<serde_json::Value> = result.messages.iter().map(|m| {
+                serde_json::json!({
+                    "channel": m.channel,
+                    "channel_type": m.channel_type,
+                    "line_number": m.line_number,
+                    "parent_line": m.parent_line,
+                    "author": m.author,
+                    "timestamp": m.timestamp,
+                    "body": m.body,
+                })
+            }).collect();
+            Response::success(serde_json::json!({
+                "messages": messages,
+                "total": result.total,
+            }))
+        }
+        Ok(Err(gitim_index::IndexError::Rebuilding)) => {
+            Response::error("indexing_in_progress")
+        }
+        Ok(Err(gitim_index::IndexError::EmptySearch)) => {
+            Response::error("search requires at least one of: query, author")
+        }
+        Ok(Err(e)) => Response::error(format!("search failed: {}", e)),
+        Err(e) => Response::error(format!("search task failed: {}", e)),
+    }
+}
+
+async fn handle_reindex(state: SharedState) -> Response {
+    let index = {
+        let guard = state.index.read().unwrap();
+        match &*guard {
+            Some(idx) => idx.clone(),
+            None => return Response::error("search index not available"),
+        }
+    };
+
+    let repo_root = state.repo_root.clone();
+    let head = match state.git_storage.rev_parse("HEAD") {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("failed to get HEAD: {}", e)),
+    };
+
+    match tokio::task::spawn_blocking(move || index.reindex(&repo_root, &head)).await {
+        Ok(Ok(count)) => Response::success(serde_json::json!({
+            "status": "complete",
+            "messages_indexed": count,
+        })),
+        Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
+        Err(e) => Response::error(format!("reindex task failed: {}", e)),
     }
 }

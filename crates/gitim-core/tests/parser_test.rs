@@ -1,5 +1,5 @@
 use gitim_core::parser::parse_thread;
-use gitim_core::types::ThreadEntry;
+use gitim_core::types::{ThreadEntry, LinkKind, Handler};
 
 #[test]
 fn test_parse_single_message() {
@@ -158,4 +158,45 @@ fn test_parse_event_multiline_json_body() {
     let ev = result.events()[0];
     assert_eq!(ev.event_type, "leave");
     assert_eq!(ev.meta, serde_json::json!({"reason": "goodbye"}));
+}
+
+#[test]
+fn test_parse_message_with_links() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] see <#general> and <!https://x.com>\n";
+    let result = parse_thread(input).unwrap();
+    let msg = &result.messages()[0];
+    assert_eq!(msg.links.len(), 2);
+    assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "general".into() });
+    assert_eq!(msg.links[1].kind, LinkKind::Softlink { url: "https://x.com".into(), title: None });
+}
+
+#[test]
+fn test_parse_multiline_message_links() {
+    let input = "\
+[L000001][P000000][@nexus][20250316T120000Z] first line <#dev>
+second line <~alice>
+";
+    let result = parse_thread(input).unwrap();
+    let msg = &result.messages()[0];
+    assert_eq!(msg.links.len(), 2);
+    assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "dev".into() });
+    assert_eq!(msg.links[1].kind, LinkKind::UserProfile { handler: Handler::new("alice").unwrap() });
+}
+
+#[test]
+fn test_parse_message_no_links() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] plain message\n";
+    let result = parse_thread(input).unwrap();
+    assert!(result.messages()[0].links.is_empty());
+}
+
+#[test]
+fn test_parse_mentions_and_links_independent() {
+    let input = "[L000001][P000000][@nexus][20250316T120000Z] <@lewis> see <#general>\n";
+    let result = parse_thread(input).unwrap();
+    let msg = &result.messages()[0];
+    assert_eq!(msg.mentions.len(), 1);
+    assert_eq!(msg.mentions[0].as_str(), "lewis");
+    assert_eq!(msg.links.len(), 1);
+    assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "general".into() });
 }
