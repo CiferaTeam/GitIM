@@ -17,13 +17,25 @@ export async function searchCommand(query: string | undefined, options: {
   await ensureDaemon(repoRoot);
   const client = new GitimClient(repoRoot);
 
+  const limit = options.limit ? parseInt(options.limit) : undefined;
+  const offset = options.offset ? parseInt(options.offset) : undefined;
+
+  if (limit !== undefined && isNaN(limit)) {
+    console.error('Invalid limit: must be a number');
+    process.exit(1);
+  }
+  if (offset !== undefined && isNaN(offset)) {
+    console.error('Invalid offset: must be a number');
+    process.exit(1);
+  }
+
   const result = await client.search({
     query: query || undefined,
     author: options.author,
     channel: options.channel,
     channel_type: options.type,
-    limit: options.limit ? parseInt(options.limit) : undefined,
-    offset: options.offset ? parseInt(options.offset) : undefined,
+    limit,
+    offset,
   });
 
   if (!result.ok) {

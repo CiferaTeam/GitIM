@@ -303,28 +303,110 @@ impl Index {
     }
 
     /// 全量重建（reindex 命令用）：关闭连接 → 删 db → 重建 → 重开。
+    /// Ready 仅在重建成功后设置；失败时尝试恢复为空 db 以避免永久 Rebuilding。
     pub fn reindex(&self, repo_root: &Path, commit_id: &str) -> Result<usize, IndexError> {
+        // 1. Mark as rebuilding
         {
             let mut guard = self.state.lock().unwrap();
             *guard = IndexState::Rebuilding;
         }
 
-        // 删除旧 db 文件（及 WAL/SHM）
+        // 2. 删除旧 db 文件（及 WAL/SHM）
         let _ = std::fs::remove_file(&self.db_path);
         let _ = std::fs::remove_file(self.db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(self.db_path.with_extension("db-shm"));
 
-        // 重新打开
+        // 3. Try to open, rebuild, and only then set Ready
+        match self.try_open_and_rebuild(repo_root, commit_id) {
+            Ok((conn, count)) => {
+                let mut guard = self.state.lock().unwrap();
+                *guard = IndexState::Ready(conn);
+                Ok(count)
+            }
+            Err(e) => {
+                // Recovery: try to open an empty db so we are not stuck in Rebuilding
+                match Connection::open(&self.db_path) {
+                    Ok(conn) => {
+                        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+                        let _ = conn.execute_batch(SCHEMA_SQL);
+                        let mut guard = self.state.lock().unwrap();
+                        *guard = IndexState::Ready(conn);
+                    }
+                    Err(open_err) => {
+                        warn!("reindex recovery failed, index stuck in Rebuilding: {}", open_err);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Open a fresh db, create schema, run full rebuild, return connection + count.
+    fn try_open_and_rebuild(&self, repo_root: &Path, commit_id: &str) -> Result<(Connection, usize), IndexError> {
         let conn = Connection::open(&self.db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA_SQL)?;
 
-        {
-            let mut guard = self.state.lock().unwrap();
-            *guard = IndexState::Ready(conn);
+        let tx = conn.unchecked_transaction()?;
+        let mut total = 0;
+
+        // 扫描 channels/
+        let channels_dir = repo_root.join("channels");
+        if channels_dir.exists() {
+            for entry in std::fs::read_dir(&channels_dir).into_iter().flatten() {
+                if let Ok(entry) = entry {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".thread") {
+                        let channel_name = name.trim_end_matches(".thread");
+                        match std::fs::read_to_string(entry.path()) {
+                            Ok(content) => {
+                                let parsed = match parse_thread(&content) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        warn!("index reindex: skip {}: {}", name, e);
+                                        continue;
+                                    }
+                                };
+                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages)?;
+                                total += parsed.messages.len();
+                            }
+                            Err(e) => warn!("index reindex: skip {}: {}", name, e),
+                        }
+                    }
+                }
+            }
         }
 
-        self.rebuild(repo_root, commit_id)
+        // 扫描 dm/
+        let dm_dir = repo_root.join("dm");
+        if dm_dir.exists() {
+            for entry in std::fs::read_dir(&dm_dir).into_iter().flatten() {
+                if let Ok(entry) = entry {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".thread") {
+                        let channel_name = name.trim_end_matches(".thread");
+                        match std::fs::read_to_string(entry.path()) {
+                            Ok(content) => {
+                                let parsed = match parse_thread(&content) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        warn!("index reindex: skip {}: {}", name, e);
+                                        continue;
+                                    }
+                                };
+                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages)?;
+                                total += parsed.messages.len();
+                            }
+                            Err(e) => warn!("index reindex: skip {}: {}", name, e),
+                        }
+                    }
+                }
+            }
+        }
+
+        Self::set_commit_id(&tx, commit_id)?;
+        tx.commit()?;
+        Ok((conn, total))
     }
 
     /// 搜索。
