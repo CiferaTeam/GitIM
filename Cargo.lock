@@ -454,6 +454,7 @@ dependencies = [
  "chrono",
  "futures",
  "gitim-core",
+ "gitim-index",
  "gitim-sync",
  "hyper",
  "hyper-util",

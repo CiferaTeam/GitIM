@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 gitim-core = { path = "../gitim-core" }
 gitim-sync = { path = "../gitim-sync" }
+gitim-index = { path = "../gitim-index" }
 libc = "0.2"
 thiserror.workspace = true
 tokio.workspace = true
