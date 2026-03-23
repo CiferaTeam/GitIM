@@ -145,6 +145,37 @@ else
   exit 1
 fi
 
+# === Test: Links in messages ===
+echo "=== Test: Links ==="
+
+# Send message with links
+RES=$(echo '{"method":"send","channel":"general","body":"see <#general:L000001> and <!https://example.com|docs> and <~tester>"}' | nc -U "$SOCK" -w 2)
+echo "$RES" | grep -q '"ok":true' || { echo "FAIL: send with links ($RES)"; exit 1; }
+echo "PASS: send with links"
+
+# Read and verify links in response
+RES=$(echo '{"method":"read","channel":"general","since":3}' | nc -U "$SOCK" -w 2)
+echo "Read with links: $RES"
+
+# Verify links array exists and has 3 entries
+LINK_COUNT=$(echo "$RES" | jq '[.data.messages[] | select(.links | length > 0)] | .[0].links | length')
+if [ "$LINK_COUNT" -eq 3 ]; then
+  echo "PASS: message has 3 links"
+else
+  echo "FAIL: expected 3 links, got $LINK_COUNT"
+  echo "Full response: $RES"
+  exit 1
+fi
+
+# Verify mentions array also present
+HAS_MENTIONS=$(echo "$RES" | jq '[.data.messages[] | select(has("mentions"))] | length')
+if [ "$HAS_MENTIONS" -gt 0 ]; then
+  echo "PASS: mentions field present in response"
+else
+  echo "FAIL: mentions field missing"
+  exit 1
+fi
+
 # Test: stop
 RES=$(echo '{"method":"stop"}' | nc -U "$SOCK")
 echo "$RES" | grep -q '"stopping"' || { echo "FAIL: stop ($RES)"; exit 1; }
