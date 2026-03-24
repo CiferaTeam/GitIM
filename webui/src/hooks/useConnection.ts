@@ -66,7 +66,7 @@ export function useConnection() {
     async (channel: string) => {
       const res = await api.read(channel, 200);
       if (res.ok && res.data) {
-        setMessages((res.data.messages as unknown as Message[]) || []);
+        setMessages((res.data.entries as unknown as Message[]) || []);
       }
     },
     [setMessages],
@@ -108,7 +108,7 @@ export function useConnection() {
           selectChannel(channels[0].name);
           const readRes = await api.read(channels[0].name, 200);
           if (!disposed && readRes.ok && readRes.data) {
-            setMessages((readRes.data.messages as unknown as Message[]) || []);
+            setMessages((readRes.data.entries as unknown as Message[]) || []);
           }
         }
       }
@@ -157,7 +157,7 @@ export function useConnection() {
             // 当前频道 → 重新加载消息
             const readRes = await api.read(change.channel, 200);
             if (readRes.ok && readRes.data) {
-              setMessages((readRes.data.messages as unknown as Message[]) || []);
+              setMessages((readRes.data.entries as unknown as Message[]) || []);
             }
           } else if (change.channel) {
             // 其他频道 → 增加未读

@@ -1,6 +1,8 @@
 import http from 'node:http';
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { GitimClient } from '../client.js';
 
 // Module-level client, initialized in startServer
@@ -23,9 +25,14 @@ function parseQuery(url: string): URLSearchParams {
   return new URLSearchParams(idx >= 0 ? url.slice(idx + 1) : '');
 }
 
+const MAX_BODY_BYTES = 64 * 1024;
+
 async function readBody(req: http.IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of req) {
+    total += (chunk as Buffer).length;
+    if (total > MAX_BODY_BYTES) throw new Error('Request body too large');
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString('utf-8');
@@ -49,12 +56,10 @@ const MIME_TYPES: Record<string, string> = {
 async function handleMe(res: http.ServerResponse): Promise<void> {
   const meJsonPath = path.join(repoRoot, '.gitim', 'me.json');
   try {
-    const raw = fs.readFileSync(meJsonPath, 'utf-8');
+    const raw = await fs.readFile(meJsonPath, 'utf-8');
     const me = JSON.parse(raw);
     jsonResponse(res, 200, { ok: true, data: me });
   } catch {
-    // Fallback: read from git config
-    const { execSync } = await import('node:child_process');
     try {
       const name = execSync('git config user.name', { cwd: repoRoot, encoding: 'utf-8' }).trim();
       jsonResponse(res, 200, { ok: true, data: { handler: name.toLowerCase().replace(/\s+/g, '-'), display_name: name } });
@@ -166,15 +171,15 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, static
   // If requesting a directory, try index.html
   if (filePath.endsWith('/') || !path.extname(filePath)) {
     const asIndex = path.join(filePath, 'index.html');
-    if (fs.existsSync(asIndex)) {
+    if (existsSync(asIndex)) {
       filePath = asIndex;
     }
   }
 
   // Try to serve the file; SPA fallback to index.html if not found
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+  if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
     filePath = path.join(staticDir, 'index.html');
-    if (!fs.existsSync(filePath)) {
+    if (!existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not Found');
       return;
@@ -183,7 +188,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, static
 
   const ext = path.extname(filePath);
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
-  const content = fs.readFileSync(filePath);
+  const content = readFileSync(filePath);
   res.writeHead(200, {
     'Content-Type': contentType,
     'Content-Length': content.length,
@@ -247,7 +252,7 @@ export async function startServer(options: ServerOptions): Promise<http.Server> 
       }
     });
 
-    server.listen(options.port, () => {
+    server.listen(options.port, '127.0.0.1', () => {
       console.log(`GitIM WebUI server listening on http://localhost:${options.port}`);
       if (options.dev) {
         console.log('  Mode: development (Vite HMR enabled)');
