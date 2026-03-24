@@ -25,6 +25,7 @@ export class GitimClient {
       });
 
       const rl = readline.createInterface({ input: socket });
+      rl.on('error', () => {}); // socket error is already handled below
       rl.on('line', (line: string) => {
         try {
           resolve(JSON.parse(line));
