@@ -9,6 +9,7 @@ import { dmSendCommand, dmReadCommand, dmListCommand } from './commands/dm.js';
 import { onboardCommand } from './commands/onboard.js';
 import { stopCommand } from './commands/stop.js';
 import { tuiCommand } from './commands/tui.js';
+import { webuiCommand } from './commands/webui.js';
 import { searchCommand } from './commands/search.js';
 import { reindexCommand } from './commands/reindex.js';
 
@@ -108,6 +109,15 @@ program
   .description('启动 TUI 聊天界面')
   .action(async () => {
     await tuiCommand();
+  });
+
+program
+  .command('webui')
+  .description('启动 WebUI 浏览器聊天界面')
+  .option('-p, --port <port>', '服务端口号', '6868')
+  .option('--dev', '开发模式（启用 Vite HMR）', false)
+  .action(async (options) => {
+    await webuiCommand({ port: parseInt(options.port, 10), dev: options.dev });
   });
 
 program.parse();
