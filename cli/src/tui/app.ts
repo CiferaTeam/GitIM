@@ -3,7 +3,7 @@
  */
 import { TUI, ProcessTerminal, Editor, matchesKey, Key } from '@mariozechner/pi-tui';
 import type { OverlayHandle } from '@mariozechner/pi-tui';
-import { DaemonConnection, type Message, type PushEvent } from '../daemon-connection.js';
+import { DaemonConnection, type Message, type PushEvent } from './daemon-connection.js';
 import { ChannelSidebar, SIDEBAR_WIDTH } from './channel-sidebar.js';
 import { MessageView } from './message-view.js';
 import { SplitLayout } from './split-layout.js';

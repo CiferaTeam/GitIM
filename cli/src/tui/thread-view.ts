@@ -3,7 +3,7 @@
  */
 import chalk from 'chalk';
 import { type Component, truncateToWidth, visibleWidth } from '@mariozechner/pi-tui';
-import type { Message } from '../daemon-connection.js';
+import type { Message } from './daemon-connection.js';
 import { authorColor, colors } from './themes.js';
 
 function formatTime(ts: string): string {
