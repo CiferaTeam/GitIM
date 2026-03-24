@@ -41,7 +41,7 @@ export function App() {
   const handleSend = useCallback(
     async (body: string, pointTo: number) => {
       if (!currentChannel) {
-        return { id: 0, ok: false, error: '未选择频道' };
+        return { ok: false, error: '未选择频道' };
       }
 
       // 生成临时 ID 和时间戳

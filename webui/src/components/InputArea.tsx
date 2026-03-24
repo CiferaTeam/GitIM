@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback } from 'react';
 import { useStore } from '../hooks/useStore.js';
 import { MentionPopup } from './MentionPopup.js';
-import type { WsResponse } from '../lib/types.js';
+import type { ApiResponse } from '../lib/types.js';
 
 interface InputAreaProps {
-  onSend: (body: string, pointTo: number) => Promise<WsResponse>;
+  onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
 }
 
 export function InputArea({ onSend }: InputAreaProps) {

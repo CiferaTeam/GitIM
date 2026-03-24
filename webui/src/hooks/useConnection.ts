@@ -1,11 +1,12 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { WsClient } from '../lib/ws-client.js';
+import * as api from '../lib/http-client.js';
 import { useStore } from './useStore.js';
-import type { Message, Channel } from '../lib/types.js';
+import type { Message, Channel, ApiResponse, PollChange } from '../lib/types.js';
 
-/** WebSocket 连接管理 hook */
+const POLL_INTERVAL = 3000;
+
+/** HTTP 轮询连接管理 hook */
 export function useConnection() {
-  const clientRef = useRef<WsClient | null>(null);
   const {
     setConnected,
     setCurrentUser,
@@ -17,16 +18,45 @@ export function useConnection() {
     incrementUnread,
   } = useStore();
 
-  // 用 ref 跟踪当前频道，避免 push handler 闭包陷阱
+  // 用 ref 跟踪当前频道，避免 interval 闭包陷阱
   const currentChannelRef = useRef(currentChannel);
   currentChannelRef.current = currentChannel;
 
+  const commitIdRef = useRef<string | undefined>(undefined);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /** request 适配层 — 保持 App.tsx 调用接口不变 */
   const request = useCallback(
-    async (method: string, params: Record<string, unknown> = {}) => {
-      if (!clientRef.current) {
-        return { id: 0, ok: false, error: '客户端未初始化' };
+    async (method: string, params: Record<string, unknown> = {}): Promise<ApiResponse> => {
+      switch (method) {
+        case 'send':
+          return api.send(
+            params.channel as string,
+            params.body as string,
+            params.author as string | undefined,
+            params.reply_to as number | undefined,
+          );
+        case 'read':
+          return api.read(
+            params.channel as string,
+            params.limit as number | undefined,
+          );
+        case 'thread':
+          return api.thread(
+            params.channel as string,
+            params.line as number,
+          );
+        case 'me':
+          return api.me();
+        case 'channels':
+          return api.channels();
+        case 'users':
+          return api.users();
+        case 'poll':
+          return api.poll(params.since as string | undefined);
+        default:
+          return { ok: false, error: `Unknown method: ${method}` };
       }
-      return clientRef.current.request(method, params);
     },
     [],
   );
@@ -34,86 +64,124 @@ export function useConnection() {
   // 加载频道消息
   const loadMessages = useCallback(
     async (channel: string) => {
-      const res = await request('read', { channel, limit: 200 });
+      const res = await api.read(channel, 200);
       if (res.ok && res.data) {
-        setMessages((res.data.messages as Message[]) || []);
+        setMessages((res.data.messages as unknown as Message[]) || []);
       }
     },
-    [request, setMessages],
+    [setMessages],
   );
 
   useEffect(() => {
-    const wsUrl = `ws://${location.host}/ws`;
-    const client = new WsClient(wsUrl);
-    clientRef.current = client;
+    let disposed = false;
 
-    client.onConnectionChange = (connected) => {
-      setConnected(connected);
-      if (connected) {
-        // 初始化加载
-        void (async () => {
-          // 获取当前用户
-          const meRes = await client.request('me');
-          if (meRes.ok && meRes.data) {
-            setCurrentUser(meRes.data.handler as string);
-          }
+    async function init() {
+      // 并行获取初始数据
+      const [meRes, chRes, usersRes] = await Promise.all([
+        api.me(),
+        api.channels(),
+        api.users(),
+      ]);
 
-          // 获取频道列表（daemon 返回 string[]，需要转换为 Channel[]）
-          const chRes = await client.request('channels');
-          if (chRes.ok && chRes.data) {
-            const names = (chRes.data.channels as string[]) || [];
-            const channels: Channel[] = names.map((name) => ({
-              name,
-              kind: name.includes('--') ? 'dm' as const : 'channel' as const,
-              unreadCount: 0,
-            }));
-            setChannels(channels);
-            // 默认选中第一个频道
-            if (channels.length > 0 && !currentChannelRef.current) {
-              selectChannel(channels[0].name);
-              const readRes = await client.request('read', {
-                channel: channels[0].name,
-                limit: 200,
-              });
-              if (readRes.ok && readRes.data) {
-                setMessages((readRes.data.messages as Message[]) || []);
-              }
-            }
-          }
+      if (disposed) return;
 
-          // 获取用户列表
-          const usersRes = await client.request('users');
-          if (usersRes.ok && usersRes.data) {
-            setUsers((usersRes.data.users as string[]) || []);
-          }
-        })();
+      // 任何一个成功即认为 API 可达
+      if (meRes.ok || chRes.ok || usersRes.ok) {
+        setConnected(true);
       }
-    };
 
-    // 推送事件处理
-    client.onPush((event) => {
-      if (event.event === 'thread_changed') {
-        const ch = event.channel;
-        if (ch === currentChannelRef.current) {
-          // 当前频道更新 → 重新加载消息
-          void (async () => {
-            const res = await client.request('read', { channel: ch, limit: 200 });
-            if (res.ok && res.data) {
-              setMessages((res.data.messages as Message[]) || []);
-            }
-          })();
-        } else {
-          // 其他频道 → 增加未读数
-          incrementUnread(ch);
+      if (meRes.ok && meRes.data) {
+        setCurrentUser(meRes.data.handler as string);
+      }
+
+      if (chRes.ok && chRes.data) {
+        const names = (chRes.data.channels as unknown as string[]) || [];
+        const channels: Channel[] = names.map((name) => ({
+          name,
+          kind: name.includes('--') ? 'dm' as const : 'channel' as const,
+          unreadCount: 0,
+        }));
+        setChannels(channels);
+
+        // 默认选中第一个频道并加载消息
+        if (channels.length > 0 && !currentChannelRef.current) {
+          selectChannel(channels[0].name);
+          const readRes = await api.read(channels[0].name, 200);
+          if (!disposed && readRes.ok && readRes.data) {
+            setMessages((readRes.data.messages as unknown as Message[]) || []);
+          }
         }
       }
-    });
 
-    client.connect();
+      if (usersRes.ok && usersRes.data) {
+        setUsers((usersRes.data.users as unknown as string[]) || []);
+      }
+
+      // 获取初始 commit_id（不带 since 参数）
+      const pollRes = await api.poll();
+      if (!disposed && pollRes.ok && pollRes.data) {
+        commitIdRef.current = pollRes.data.commit_id as string | undefined;
+      }
+
+      if (disposed) return;
+
+      // 开始轮询
+      intervalRef.current = setInterval(async () => {
+        const res = await api.poll(commitIdRef.current);
+        if (!res.ok) {
+          setConnected(false);
+          return;
+        }
+        setConnected(true);
+
+        const data = res.data;
+        if (!data) return;
+
+        // 更新 commit_id
+        if (data.commit_id) {
+          commitIdRef.current = data.commit_id as string;
+        }
+
+        const changes = (data.changes as unknown as PollChange[]) || [];
+        if (changes.length === 0) return;
+
+        let needRefreshUsers = false;
+
+        for (const change of changes) {
+          if (change.kind === 'user') {
+            needRefreshUsers = true;
+            continue;
+          }
+          // channel / dm 变更
+          if (change.channel === currentChannelRef.current) {
+            // 当前频道 → 重新加载消息
+            const readRes = await api.read(change.channel, 200);
+            if (readRes.ok && readRes.data) {
+              setMessages((readRes.data.messages as unknown as Message[]) || []);
+            }
+          } else if (change.channel) {
+            // 其他频道 → 增加未读
+            incrementUnread(change.channel);
+          }
+        }
+
+        if (needRefreshUsers) {
+          const usersRes = await api.users();
+          if (usersRes.ok && usersRes.data) {
+            setUsers((usersRes.data.users as unknown as string[]) || []);
+          }
+        }
+      }, POLL_INTERVAL);
+    }
+
+    void init();
 
     return () => {
-      client.disconnect();
-      clientRef.current = null;
+      disposed = true;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

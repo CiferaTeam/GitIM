@@ -27,24 +27,15 @@ export interface UserInfo {
   display_name: string;
 }
 
-/** WebSocket 请求 */
-export interface WsRequest {
-  id: number;
-  method: string;
-  [key: string]: unknown;
-}
-
-/** WebSocket 响应 */
-export interface WsResponse {
-  id: number;
+/** HTTP API 响应 */
+export interface ApiResponse {
   ok: boolean;
   data?: Record<string, unknown>;
   error?: string;
 }
 
-/** 推送事件 */
-export interface PushEvent {
-  event: string;
+/** 轮询变更项 */
+export interface PollChange {
   channel: string;
   kind: string;
 }
