@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time;
 use tracing::{info, warn};
 
@@ -16,6 +18,7 @@ use crate::git::GitStorage;
 pub async fn start_sync_loop<F1, F2, F3>(
     repo_root: &Path,
     interval_secs: u32,
+    push_notify: Arc<Notify>,
     on_pushed: F1,
     on_renumbered: F2,
     on_synced: F3,
@@ -44,7 +47,10 @@ pub async fn start_sync_loop<F1, F2, F3>(
     ticker.tick().await; // skip first immediate tick
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = push_notify.notified() => {}
+        }
         run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced);
     }
 }

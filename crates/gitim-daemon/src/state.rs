@@ -111,6 +111,7 @@ impl AppState {
 
         let sync_interval = state.config.daemon.sync_interval;
         let sync_root = state.repo_root.clone();
+        let push_notify = state.push_notify.clone();
         let push_state = state.clone();
         let renum_state = state.clone();
         let synced_state = state.clone();
@@ -119,6 +120,7 @@ impl AppState {
             gitim_sync::sync_loop::start_sync_loop(
                 &sync_root,
                 sync_interval,
+                push_notify,
                 move || {
                     // on_pushed: clear pending_push and broadcast MessagesPushed events
                     let mut pending = push_state.pending_push.write().unwrap();
