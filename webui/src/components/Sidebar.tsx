@@ -78,17 +78,15 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         </>
       )}
 
-      <div className="sidebar-section-title">
-        私信
-        {!dmSearchOpen && (
-          <button
-            className="sidebar-item dm-new-btn"
-            onClick={() => setDmSearchOpen(true)}
-          >
-            + 发起新私信
-          </button>
-        )}
-      </div>
+      <div className="sidebar-section-title">私信</div>
+      {!dmSearchOpen && (
+        <div
+          className="sidebar-item dm-new-btn"
+          onClick={() => setDmSearchOpen(true)}
+        >
+          + 发起新私信
+        </div>
+      )}
 
       {dmSearchOpen && (
         <div className="dm-search">

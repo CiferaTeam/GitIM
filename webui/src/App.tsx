@@ -8,6 +8,15 @@ import { InputArea } from './components/InputArea.js';
 import { ThreadPanel } from './components/ThreadPanel.js';
 import type { Message } from './lib/types.js';
 
+/** 将 sidebar 显示名转为 API channel 名：DM "alice--bob" → "dm:alice,bob" */
+function toApiChannel(name: string): string {
+  if (name.includes('--')) {
+    const parts = name.split('--');
+    return `dm:${parts[0]},${parts[1]}`;
+  }
+  return name;
+}
+
 export function App() {
   const { request, loadMessages } = useConnection();
   const {
@@ -33,25 +42,35 @@ export function App() {
       clearUnread(name);
       setMessages([]);
       setThreadRoot(null);
-      await loadMessages(name);
+      await loadMessages(toApiChannel(name));
     },
     [selectChannel, clearUnread, setMessages, setThreadRoot, loadMessages],
   );
 
   // 发起私信
+  // DM 在 sidebar 显示为 "alice--bob" 格式，但 API 调用需要 "dm:alice,bob" 格式
   const handleStartDm = useCallback(
-    (targetUser: string) => {
-      const dmChannel = [currentUser, targetUser].sort().join('--');
-      const exists = channels.some((c) => c.name === dmChannel);
-      if (exists) {
-        handleChannelSelect(dmChannel);
+    async (targetUser: string) => {
+      const sorted = [currentUser, targetUser].sort();
+      const dmDisplayName = `${sorted[0]}--${sorted[1]}`; // sidebar 显示用
+      const dmApiChannel = `dm:${sorted[0]},${sorted[1]}`; // API 调用用
+
+      const existing = useStore.getState().channels.find((c) => c.name === dmDisplayName);
+      if (existing) {
+        // 已有 DM，跳转并加载（使用 API 格式）
+        selectChannel(dmDisplayName);
+        clearUnread(dmDisplayName);
+        setMessages([]);
+        setThreadRoot(null);
+        await loadMessages(toApiChannel(dmDisplayName));
       } else {
-        selectChannel(dmChannel);
+        // 不存在的 DM — 选中 display name，发消息时 handleSend 会转换格式
+        selectChannel(dmDisplayName);
         setMessages([]);
         setThreadRoot(null);
       }
     },
-    [currentUser, channels, handleChannelSelect, selectChannel, setMessages, setThreadRoot],
+    [currentUser, selectChannel, clearUnread, setMessages, setThreadRoot, loadMessages],
   );
 
   // 发送消息（乐观 UI）
@@ -78,9 +97,9 @@ export function App() {
       };
       addPendingMessage(pendingMsg);
 
-      // 发送请求
+      // 发送请求（DM channel 需要转为 dm:h1,h2 格式）
       const params: Record<string, unknown> = {
-        channel: currentChannel,
+        channel: toApiChannel(currentChannel),
         body,
         author: currentUser,
       };

@@ -570,7 +570,7 @@ body {
   border-left-color: var(--accent);
 }
 
-/* 消息正文可交互 */
-.message-body {
+/* 消息正文可交互（仅主消息列表，不影响线程面板） */
+.message-list .message-body {
   cursor: pointer;
 }

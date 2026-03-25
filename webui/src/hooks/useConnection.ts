@@ -5,6 +5,15 @@ import type { Message, Channel, ApiResponse, PollChange } from '../lib/types.js'
 
 const POLL_INTERVAL = 3000;
 
+/** 将 sidebar 显示名转为 API channel 名：DM "alice--bob" → "dm:alice,bob" */
+function toApiChannel(name: string): string {
+  if (name.includes('--')) {
+    const parts = name.split('--');
+    return `dm:${parts[0]},${parts[1]}`;
+  }
+  return name;
+}
+
 /** HTTP 轮询连接管理 hook */
 export function useConnection() {
   const {
@@ -106,7 +115,7 @@ export function useConnection() {
         // 默认选中第一个频道并加载消息
         if (channels.length > 0 && !currentChannelRef.current) {
           selectChannel(channels[0].name);
-          const readRes = await api.read(channels[0].name, 200);
+          const readRes = await api.read(toApiChannel(channels[0].name), 200);
           if (!disposed && readRes.ok && readRes.data) {
             setMessages((readRes.data.entries as unknown as Message[]) || []);
           }
@@ -154,8 +163,8 @@ export function useConnection() {
           }
           // channel / dm 变更
           if (change.channel === currentChannelRef.current) {
-            // 当前频道 → 重新加载消息
-            const readRes = await api.read(change.channel, 200);
+            // 当前频道 → 重新加载消息（DM 需要 dm: 前缀）
+            const readRes = await api.read(toApiChannel(change.channel), 200);
             if (readRes.ok && readRes.data) {
               setMessages((readRes.data.entries as unknown as Message[]) || []);
             }

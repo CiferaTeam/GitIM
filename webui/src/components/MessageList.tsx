@@ -89,7 +89,7 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
     <div className="message-list" ref={listRef}>
       {messages.map((msg) => (
         <MessageItem
-          key={msg.line_number}
+          key={msg._pendingId ?? msg.line_number}
           message={msg}
           replyTarget={msg.point_to > 0 ? msgByLine.get(msg.point_to) ?? null : null}
           onReply={onReply}

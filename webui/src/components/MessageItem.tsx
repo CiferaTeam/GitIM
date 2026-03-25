@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import type { Message } from '../lib/types.js';
 import { formatTimestamp } from '../lib/types.js';
 
@@ -33,6 +33,13 @@ export function MessageItem({
 }: MessageItemProps) {
   const clickTimerRef = useRef<number | null>(null);
 
+  // 组件卸载时清理定时器，防止跨频道 stale 回复
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
+    };
+  }, []);
+
   const isSending = message._status === 'sending';
   const isSent = message._status === 'sent';
   const isFailed = message._status === 'failed';
@@ -40,9 +47,12 @@ export function MessageItem({
   const statusText = message._status ? STATUS_LABEL[message._status] : null;
 
   const handleBodyClick = () => {
+    if (isPending) return;
     // 用户正在选择文本，不触发回复
     if (window.getSelection()?.toString().length) return;
 
+    // 先清除已有定时器，防止快速点击累积
+    if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
     clickTimerRef.current = window.setTimeout(() => {
       clickTimerRef.current = null;
       onReply(message);
@@ -50,6 +60,7 @@ export function MessageItem({
   };
 
   const handleBodyDblClick = () => {
+    if (isPending) return;
     if (clickTimerRef.current !== null) {
       window.clearTimeout(clickTimerRef.current);
       clickTimerRef.current = null;

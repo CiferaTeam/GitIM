@@ -42,8 +42,10 @@ export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
             >
               {parentMsg && (
                 <div className="message-reply-ref">
-                  <span className="reply-author">@{parentMsg.author}</span>
-                  {parentMsg.body.slice(0, 60)}
+                  <span className="reply-author">@{parentMsg.author}:</span>
+                  {parentMsg.body.length > 60
+                    ? parentMsg.body.slice(0, 60) + '...'
+                    : parentMsg.body}
                 </div>
               )}
               <div className="message-header">
