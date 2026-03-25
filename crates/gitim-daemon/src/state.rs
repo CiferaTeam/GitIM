@@ -115,6 +115,7 @@ impl AppState {
         let push_state = state.clone();
         let renum_state = state.clone();
         let synced_state = state.clone();
+        let cycle_done_state = state.clone();
 
         tokio::spawn(async move {
             gitim_sync::sync_loop::start_sync_loop(
@@ -122,11 +123,20 @@ impl AppState {
                 sync_interval,
                 push_notify,
                 move || {
-                    // on_pushed: clear pending_push and broadcast MessagesPushed events
+                    // on_pushed: get commit_id, send PushResult::Pushed to waiters,
+                    // clear pending_push and broadcast MessagesPushed events
+                    let commit_id = push_state.git_storage.rev_parse("HEAD")
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("on_pushed: failed to get HEAD: {}", e);
+                            "unknown".to_string()
+                        });
                     let mut pending = push_state.pending_push.write().unwrap();
                     let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
                         std::collections::HashMap::new();
-                    for msg in pending.drain(..) {
+                    for mut msg in pending.drain(..) {
+                        if let Some(tx) = msg.result_tx.take() {
+                            let _ = tx.send(PushResult::Pushed { commit_id: commit_id.clone() });
+                        }
                         by_channel.entry(msg.channel).or_default().push(msg.line_number);
                     }
                     for (channel, line_numbers) in by_channel {
@@ -201,6 +211,22 @@ impl AppState {
                             }
                         }
                     }
+                },
+                move || {
+                    // on_cycle_done: notify remaining waiters (with result_tx) that push failed
+                    let mut pending = cycle_done_state.pending_push.write().unwrap();
+                    pending.retain_mut(|msg| {
+                        if msg.result_tx.is_some() {
+                            if let Some(tx) = msg.result_tx.take() {
+                                let _ = tx.send(PushResult::Failed {
+                                    reason: "push cycle completed without success".to_string(),
+                                });
+                            }
+                            false // remove entries that had waiters
+                        } else {
+                            true // keep entries without waiters (from sync_loop's own tracking)
+                        }
+                    });
                 },
             )
             .await;
