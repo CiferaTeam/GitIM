@@ -1,5 +1,5 @@
 use crate::api::{Event, Request, Response};
-use crate::state::{PendingMessage, SharedState};
+use crate::state::{PendingMessage, PushResult, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
@@ -244,15 +244,32 @@ async fn handle_send(
         }
     };
 
-    // Record in pending_push
-    {
-        let mut pending = state.pending_push.write().unwrap();
-        pending.push(PendingMessage {
-            channel: thread_name.clone(),
-            line_number: next_line,
-            result_tx: None,
-        });
-    }
+    // Record in pending_push and optionally set up push-result channel.
+    // Only wait for push if we have a remote AND the sync loop is actually running.
+    let should_await_push = state.has_remote
+        && state.sync_started.load(std::sync::atomic::Ordering::SeqCst);
+    let push_rx = if should_await_push {
+        let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
+        {
+            let mut pending = state.pending_push.write().unwrap();
+            pending.push(PendingMessage {
+                channel: thread_name.clone(),
+                line_number: next_line,
+                result_tx: Some(tx),
+            });
+        }
+        Some(rx)
+    } else {
+        {
+            let mut pending = state.pending_push.write().unwrap();
+            pending.push(PendingMessage {
+                channel: thread_name.clone(),
+                line_number: next_line,
+                result_tx: None,
+            });
+        }
+        None
+    };
 
     // Invalidate cache
     state.thread_cache.write().await.remove(&thread_name);
@@ -268,11 +285,44 @@ async fn handle_send(
         "message sent to {} by @{} at L{:06}",
         thread_name, author, next_line
     );
-    Response::success(serde_json::json!({
-        "line_number": next_line,
-        "channel": thread_name,
-        "status": commit_status,
-    }))
+
+    // If has_remote, wake sync_loop and await push result
+    if let Some(rx) = push_rx {
+        state.push_notify.notify_one();
+        match rx.await {
+            Ok(PushResult::Pushed { commit_id }) => {
+                Response::success(serde_json::json!({
+                    "line_number": next_line,
+                    "channel": thread_name,
+                    "status": "pushed",
+                    "commit_id": commit_id,
+                }))
+            }
+            Ok(PushResult::Failed { reason }) => {
+                Response::success(serde_json::json!({
+                    "line_number": next_line,
+                    "channel": thread_name,
+                    "status": "commit_only",
+                    "error": reason,
+                }))
+            }
+            Err(_) => {
+                // Sender dropped — sync_loop may have been shut down
+                Response::success(serde_json::json!({
+                    "line_number": next_line,
+                    "channel": thread_name,
+                    "status": "commit_only",
+                    "error": "push result channel closed",
+                }))
+            }
+        }
+    } else {
+        Response::success(serde_json::json!({
+            "line_number": next_line,
+            "channel": thread_name,
+            "status": commit_status,
+        }))
+    }
 }
 
 async fn handle_read(
