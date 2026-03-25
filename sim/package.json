@@ -3,7 +3,10 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "chat": "tsx src/chat-demo.ts"
+    "chat": "tsx src/chat-demo.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "werewolf": "tsx src/werewolf/runner.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0"
@@ -11,6 +14,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
   }
 }

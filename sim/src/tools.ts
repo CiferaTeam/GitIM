@@ -9,7 +9,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 
 const DAEMON_URL = process.env.GITIM_DAEMON_URL ?? "http://localhost:3000";
 
-async function callDaemon(payload: Record<string, unknown>): Promise<unknown> {
+export async function callDaemon(payload: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${DAEMON_URL}/api`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
