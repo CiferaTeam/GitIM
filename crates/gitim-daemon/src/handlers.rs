@@ -250,6 +250,7 @@ async fn handle_send(
         pending.push(PendingMessage {
             channel: thread_name.clone(),
             line_number: next_line,
+            result_tx: None,
         });
     }
 

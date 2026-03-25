@@ -9,10 +9,17 @@ use crate::api::Event;
 
 pub type SharedState = Arc<AppState>;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+pub enum PushResult {
+    Pushed { commit_id: String },
+    Failed { reason: String },
+}
+
+#[derive(Debug)]
 pub struct PendingMessage {
     pub channel: String,
     pub line_number: u64,
+    pub result_tx: Option<tokio::sync::oneshot::Sender<PushResult>>,
 }
 
 pub struct AppState {
