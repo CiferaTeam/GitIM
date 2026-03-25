@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Notify, RwLock};
 use gitim_core::types::{Config, ThreadFile};
 use gitim_sync::git::GitStorage;
 use crate::api::Event;
@@ -31,6 +31,8 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<Event>,
     pub current_user: RwLock<Option<String>>,
     pub pending_push: std::sync::RwLock<Vec<PendingMessage>>,
+    pub push_notify: Arc<Notify>,
+    pub has_remote: bool,
     pub sync_started: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
 }
@@ -38,6 +40,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(repo_root: PathBuf, config: Config, event_tx: broadcast::Sender<Event>, current_user: Option<String>) -> Self {
         let git_storage = GitStorage::new(&repo_root);
+        let has_remote = git_storage.has_remote();
         Self {
             repo_root,
             config,
@@ -47,6 +50,8 @@ impl AppState {
             event_tx,
             current_user: RwLock::new(current_user),
             pending_push: std::sync::RwLock::new(Vec::new()),
+            push_notify: Arc::new(Notify::new()),
+            has_remote,
             sync_started: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
         }
