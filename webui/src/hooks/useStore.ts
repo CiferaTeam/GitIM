@@ -35,6 +35,10 @@ interface Store {
   replyTo: Message | null;
   setReplyTo: (m: Message | null) => void;
 
+  // 高亮
+  highlightLine: number | null;
+  setHighlightLine: (line: number | null) => void;
+
   // 线程面板
   threadRoot: Message | null;
   setThreadRoot: (m: Message | null) => void;
@@ -108,6 +112,9 @@ export const useStore = create<Store>((set) => ({
 
   replyTo: null,
   setReplyTo: (m) => set({ replyTo: m }),
+
+  highlightLine: null,
+  setHighlightLine: (line) => set({ highlightLine: line }),
 
   threadRoot: null,
   setThreadRoot: (m) => set({ threadRoot: m }),

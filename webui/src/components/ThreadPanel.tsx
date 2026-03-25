@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useStore } from '../hooks/useStore.js';
 import { formatTimestamp } from '../lib/types.js';
 import type { Message } from '../lib/types.js';
@@ -11,50 +12,55 @@ export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
   const setThreadRoot = useStore((s) => s.setThreadRoot);
   const threadMessages = useStore((s) => s.threadMessages);
 
-  if (!threadRoot) return null;
+  const msgByLine = useMemo(() => {
+    const map = new Map<number, Message>();
+    for (const m of threadMessages) {
+      map.set(m.line_number, m);
+    }
+    return map;
+  }, [threadMessages]);
 
-  // 构建树：根消息 + 直接回复
-  const root = threadMessages.find(
-    (m) => m.line_number === threadRoot.line_number,
-  ) ?? threadRoot;
-  const replies = threadMessages.filter(
-    (m) => m.point_to === threadRoot.line_number,
-  );
+  if (!threadRoot) return null;
 
   return (
     <div className="thread-panel">
       <div className="thread-header">
-        <span>引用链: L{threadRoot.line_number}</span>
+        <span>线程: L{threadRoot.line_number}</span>
         <button className="thread-close-btn" onClick={() => setThreadRoot(null)}>
           ×
         </button>
       </div>
       <div className="thread-messages">
-        {/* 根消息 */}
-        <div className="thread-msg">
-          <div className="message-header">
-            <span className="message-author">@{root.author}</span>
-            <span className="message-time">{formatTimestamp(root.timestamp)}</span>
-          </div>
-          <div className="message-body">{root.body}</div>
-        </div>
-        {/* 回复列表 */}
-        {replies.map((msg) => (
-          <div key={msg.line_number} className="thread-msg thread-msg-indent">
-            <div className="message-header">
-              <span className="message-author">@{msg.author}</span>
-              <span className="message-time">{formatTimestamp(msg.timestamp)}</span>
-            </div>
-            <div className="message-body">{msg.body}</div>
-            <button
-              className="message-action-btn"
-              style={{ marginTop: 4 }}
-              onClick={() => onReplyInThread(msg)}
+        {threadMessages.map((msg) => {
+          const isRoot = msg.line_number === threadRoot.line_number;
+          const parentMsg = msg.point_to > 0 ? msgByLine.get(msg.point_to) : undefined;
+
+          return (
+            <div
+              key={msg.line_number}
+              className={`thread-msg${isRoot ? ' thread-msg-root' : ''}`}
             >
-              回复
-            </button>
-          </div>
-        ))}
+              {parentMsg && (
+                <div className="message-reply-ref">
+                  <span className="reply-author">@{parentMsg.author}</span>
+                  {parentMsg.body.slice(0, 60)}
+                </div>
+              )}
+              <div className="message-header">
+                <span className="message-author">@{msg.author}</span>
+                <span className="message-time">{formatTimestamp(msg.timestamp)}</span>
+              </div>
+              <div className="message-body">{msg.body}</div>
+              <button
+                className="message-action-btn"
+                style={{ marginTop: 4 }}
+                onClick={() => onReplyInThread(msg)}
+              >
+                回复
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

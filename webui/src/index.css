@@ -161,6 +161,57 @@ body {
   text-align: center;
 }
 
+/* 私信搜索 */
+.dm-new-btn {
+  color: var(--accent) !important;
+  font-size: 13px;
+}
+
+.dm-search {
+  padding: 4px 8px;
+}
+
+.dm-search-input {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.dm-search-input:focus {
+  border-color: var(--accent);
+}
+
+.dm-search-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.dm-search-item {
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+.dm-search-item:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+
+.dm-search-empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
 /* 主内容区 */
 .main-content {
   flex: 1;
@@ -441,9 +492,8 @@ body {
   background: var(--hover);
 }
 
-.thread-msg-indent {
-  margin-left: 20px;
-  border-left: 2px solid var(--border);
+.thread-msg-root {
+  border-left: 2px solid var(--accent);
   padding-left: 8px;
 }
 
@@ -491,4 +541,36 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+/* 消息高亮闪烁 */
+.message-highlight {
+  animation: highlight-fade 1.5s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% { background: rgba(79, 195, 247, 0.3); }
+  100% { background: transparent; }
+}
+
+/* 正在回复的消息 */
+.message-replying {
+  background: rgba(79, 195, 247, 0.08);
+  border-left: 2px solid var(--accent);
+}
+
+/* 可点击的回复引用 */
+.reply-ref-clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.reply-ref-clickable:hover {
+  background: rgba(79, 195, 247, 0.1);
+  border-left-color: var(--accent);
+}
+
+/* 消息正文可交互 */
+.message-body {
+  cursor: pointer;
 }

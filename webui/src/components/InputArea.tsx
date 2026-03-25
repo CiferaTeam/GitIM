@@ -46,6 +46,12 @@ export function InputArea({ onSend }: InputAreaProps) {
     // 提及弹窗打开时不处理 Enter
     if (mentionOpen) return;
 
+    if (e.key === 'Escape' && replyTo) {
+      e.preventDefault();
+      setReplyTo(null);
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void handleSend();

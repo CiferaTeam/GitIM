@@ -13,6 +13,7 @@ export function App() {
   const {
     currentChannel,
     currentUser,
+    channels,
     selectChannel,
     clearUnread,
     setMessages,
@@ -35,6 +36,22 @@ export function App() {
       await loadMessages(name);
     },
     [selectChannel, clearUnread, setMessages, setThreadRoot, loadMessages],
+  );
+
+  // 发起私信
+  const handleStartDm = useCallback(
+    (targetUser: string) => {
+      const dmChannel = [currentUser, targetUser].sort().join('--');
+      const exists = channels.some((c) => c.name === dmChannel);
+      if (exists) {
+        handleChannelSelect(dmChannel);
+      } else {
+        selectChannel(dmChannel);
+        setMessages([]);
+        setThreadRoot(null);
+      }
+    },
+    [currentUser, channels, handleChannelSelect, selectChannel, setMessages, setThreadRoot],
   );
 
   // 发送消息（乐观 UI）
@@ -93,30 +110,52 @@ export function App() {
     [currentChannel, currentUser, request, addPendingMessage, markPendingSent, markPendingFailed],
   );
 
-  // 回复消息
+  // 回复消息（点击同一条消息时取消回复）
   const handleReply = useCallback(
     (msg: Message) => {
-      setReplyTo(msg);
+      const current = useStore.getState().replyTo;
+      if (current && current.line_number === msg.line_number) {
+        setReplyTo(null);
+      } else {
+        setReplyTo(msg);
+      }
     },
     [setReplyTo],
   );
 
   // 显示线程
   const handleShowThread = useCallback(
-    async (msg: Message) => {
-      // 找到线程根：如果 point_to > 0 则用 point_to，否则用自身
-      const rootLine = msg.point_to > 0 ? msg.point_to : msg.line_number;
-      const rootMsg =
-        msg.point_to > 0
-          ? messages.find((m) => m.line_number === rootLine) ?? msg
-          : msg;
+    (msg: Message) => {
+      // 向上追溯 point_to 链，找到真正的根消息
+      let rootLine = msg.line_number;
+      let current = msg;
+      while (current.point_to > 0) {
+        const parent = messages.find((m) => m.line_number === current.point_to);
+        if (!parent) break;
+        rootLine = parent.line_number;
+        current = parent;
+      }
+
+      const rootMsg = messages.find((m) => m.line_number === rootLine) ?? msg;
       setThreadRoot(rootMsg);
 
-      // 加载线程中所有相关消息（从当前已加载消息中过滤）
-      const threadMsgs = messages.filter(
-        (m) =>
-          m.line_number === rootLine || m.point_to === rootLine,
-      );
+      // BFS 收集整棵线程树
+      const treeLines = new Set([rootLine]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const m of messages) {
+          if (!treeLines.has(m.line_number) && treeLines.has(m.point_to)) {
+            treeLines.add(m.line_number);
+            changed = true;
+          }
+        }
+      }
+
+      // 按行号排序（时间序）
+      const threadMsgs = messages
+        .filter((m) => treeLines.has(m.line_number))
+        .sort((a, b) => a.line_number - b.line_number);
       setThreadMessages(threadMsgs);
     },
     [messages, setThreadRoot, setThreadMessages],
@@ -126,7 +165,7 @@ export function App() {
     <div className="app-layout">
       <Header />
       <div className="app-body">
-        <Sidebar onChannelSelect={handleChannelSelect} />
+        <Sidebar onChannelSelect={handleChannelSelect} onStartDm={handleStartDm} />
         <div className="main-content">
           <MessageList onReply={handleReply} onShowThread={handleShowThread} />
           <InputArea onSend={handleSend} />
