@@ -73,9 +73,17 @@ export function App() {
 
       const res = await request('send', params);
       if (res.ok) {
-        // daemon 接受了 — 标记为 sent，记录真实行号
-        // push 事件触发 loadMessages 后，setMessages 会按 line_number 去重移除 pending
-        const lineNumber = (res.data as Record<string, unknown>)?.line_number as number;
+        const data = res.data as Record<string, unknown>;
+        const status = data?.status as string | undefined;
+        const lineNumber = data?.line_number as number;
+
+        if (status === 'commit_only') {
+          // 本地提交成功但 push 失败 — 消息未到达远端
+          markPendingFailed(pendingId);
+          return { ok: false, error: (data?.error as string) || 'push 失败，消息仅保存在本地' };
+        }
+
+        // "pushed" 或 "committed"（无远端）均视为成功
         markPendingSent(pendingId, lineNumber);
       } else {
         markPendingFailed(pendingId);

@@ -114,10 +114,11 @@ export function InputArea({ onSend }: InputAreaProps) {
         <textarea
           ref={textareaRef}
           className="input-textarea"
-          placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+          placeholder={sending ? '发送中...' : '输入消息... (Enter 发送, Shift+Enter 换行)'}
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          disabled={sending}
           rows={1}
         />
       </div>
