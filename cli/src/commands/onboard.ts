@@ -18,6 +18,7 @@ interface OnboardOptions {
   withWebui?: boolean;
   webuiPort?: string;
   webuiDev?: boolean;
+  admin?: boolean;
 }
 
 function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string, string> {
@@ -196,12 +197,13 @@ export async function onboardCommand(
     await ensureDaemon(cwd);
     const client = new GitimClient(cwd);
     const auth = buildAuth(gitServer, options);
-    const res = await client.onboard(gitServer, auth);
+    const res = await client.onboard(gitServer, auth, options.admin);
     if (!res.ok) {
       console.error(`身份刷新失败：${res.error}`);
       process.exit(1);
     }
-    console.log(`身份已刷新：@${res.data?.handler}`);
+    const adminTag = options.admin ? ' [ADMIN]' : '';
+    console.log(`身份已刷新：@${res.data?.handler}${adminTag}`);
     if (options.withWebui) {
       await launchWebui(cwd, options);
     }
@@ -233,7 +235,7 @@ export async function onboardCommand(
   // 5. Send Onboard request
   const client = new GitimClient(repoDir);
   const auth = buildAuth(gitServer, options);
-  const res = await client.onboard(gitServer, auth);
+  const res = await client.onboard(gitServer, auth, options.admin);
   if (!res.ok) {
     console.error(`Onboard 失败：${res.error}`);
     process.exit(1);
@@ -242,7 +244,8 @@ export async function onboardCommand(
   // 6. Report result
   const handler = res.data?.handler ?? '(unknown)';
   const created = res.data?.created ? '（新建）' : '（已加入）';
-  console.log(`成功 ${created}：@${handler} @ ${repoName}`);
+  const adminTag = options.admin ? ' [ADMIN]' : '';
+  console.log(`成功 ${created}：@${handler}${adminTag} @ ${repoName}`);
 
   // 7. Optional: start WebUI
   if (options.withWebui) {
