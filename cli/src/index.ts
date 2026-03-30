@@ -30,6 +30,9 @@ program
   .option('-u, --url <url>', 'Gitea/GitLab 服务地址')
   .option('--refresh', '重新推断身份')
   .option('--debug-http', '开启 HTTP 调试端口')
+  .option('--with-webui', 'Onboard 完成后启动 WebUI')
+  .option('--webui-port <port>', 'WebUI 端口号', '6868')
+  .option('--webui-dev', 'WebUI 开发模式（启用 Vite HMR）', false)
   .action(async (repoName, org, options) => {
     await onboardCommand(repoName, org, options);
   });

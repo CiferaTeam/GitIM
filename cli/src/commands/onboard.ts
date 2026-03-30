@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ensureDaemon, isDaemonRunning } from '../daemon.js';
 import { GitimClient } from '../client.js';
+import { startServer } from '../webui/server.js';
 
 type GitServer = 'git' | 'github' | 'gitea' | 'gitlab';
 
@@ -14,6 +15,9 @@ interface OnboardOptions {
   url?: string;
   refresh?: boolean;
   debugHttp?: boolean;
+  withWebui?: boolean;
+  webuiPort?: string;
+  webuiDev?: boolean;
 }
 
 function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string, string> {
@@ -198,6 +202,9 @@ export async function onboardCommand(
       process.exit(1);
     }
     console.log(`身份已刷新：@${res.data?.handler}`);
+    if (options.withWebui) {
+      await launchWebui(cwd, options);
+    }
     return;
   }
 
@@ -236,4 +243,37 @@ export async function onboardCommand(
   const handler = res.data?.handler ?? '(unknown)';
   const created = res.data?.created ? '（新建）' : '（已加入）';
   console.log(`成功 ${created}：@${handler} @ ${repoName}`);
+
+  // 7. Optional: start WebUI
+  if (options.withWebui) {
+    await launchWebui(repoDir, options);
+  }
+}
+
+async function launchWebui(repoDir: string, options: OnboardOptions): Promise<void> {
+  const port = parseInt(options.webuiPort || '6868', 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error('错误：--webui-port 必须是 1-65535 之间的数字');
+    process.exit(1);
+  }
+  const dev = options.webuiDev || false;
+
+  try {
+    await startServer({ repoRoot: repoDir, port, dev });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('already in use')) {
+      console.error(`错误：端口 ${port} 已被占用`);
+      console.error('  → 使用 --webui-port <port> 指定其他端口');
+    } else {
+      console.error(`错误：无法启动 WebUI — ${msg}`);
+    }
+    process.exit(1);
+  }
+
+  // HTTP server 保持进程运行，Ctrl+C 干净退出
+  process.on('SIGINT', () => {
+    console.log('\n正在关闭 WebUI...');
+    process.exit(0);
+  });
 }
