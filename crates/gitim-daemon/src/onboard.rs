@@ -12,7 +12,14 @@ pub async fn handle_onboard(
     state: SharedState,
     git_server: String,
     auth: serde_json::Value,
+    admin: bool,
 ) -> Response {
+    // --- Set admin mode ---
+    state.is_admin.store(admin, std::sync::atomic::Ordering::SeqCst);
+    if admin {
+        info!("onboard: admin mode enabled");
+    }
+
     // --- Step A: Infer identity ---
     let identity = match infer(git_server.clone(), auth) {
         Ok(id) => id,

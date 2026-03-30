@@ -70,8 +70,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         }
         Request::Poll { since } => handle_poll(state, since).await,
         Request::Stop => handle_stop(state).await,
-        Request::Onboard { git_server, auth } => {
-            crate::onboard::handle_onboard(state, git_server, auth).await
+        Request::Onboard { git_server, auth, admin } => {
+            crate::onboard::handle_onboard(state, git_server, auth, admin).await
         }
         Request::JoinChannel { channel, targets, author } => {
             let resolved_author = match resolve_author(author, &state).await {
