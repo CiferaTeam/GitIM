@@ -1,38 +1,51 @@
 import { describe, it, expect } from "vitest";
-import { Role, getVisibleChannels } from "../types.js";
-import { formatInjection, ChannelMessages, maxLineFromMessages } from "../context-manager.js";
+import { Role, dmChannel } from "../types.js";
+import { formatPollChanges, type PollChange } from "../context-manager.js";
 import { makePlayerPrompt, GOD_SYSTEM_PROMPT } from "../prompts.js";
 
 describe("E2E mock: full pipeline without LLM", () => {
-  const wolves = ["dave", "eve"];
+  describe("poll changes → context injection", () => {
+    it("wolf gets wolf channel messages in injection", () => {
+      const changes: PollChange[] = [
+        { channel: "general", kind: "channel", entries: [
+          { type: "message", author: "god", body: "天黑了", line_number: 1, timestamp: "20260325T100000Z" },
+        ]},
+        { channel: "wolves", kind: "channel", entries: [
+          { type: "message", author: "eve", body: "杀 alice", line_number: 1, timestamp: "20260325T100100Z" },
+        ]},
+      ];
 
-  describe("role assignment → visibility → context", () => {
-    it("wolf gets correct visibility and context injection", () => {
-      const channels = getVisibleChannels("dave", Role.Wolf, wolves);
-      expect(channels).toContain("wolves");
-      expect(channels).toContain("general");
-
-      const msgs: ChannelMessages = {
-        general: [{ author: "god", body: "天黑了", line_number: 1, timestamp: "20260325T100000Z" }],
-        wolves: [{ author: "eve", body: "杀 alice", line_number: 1, timestamp: "20260325T100100Z" }],
-      };
-
-      const injection = formatInjection(msgs, "请在狼人频道讨论击杀目标。", ["alice 可能是预言家"]);
+      const injection = formatPollChanges(changes, "请在狼人频道讨论击杀目标。", ["alice 可能是预言家"]);
       expect(injection).toContain("#general");
       expect(injection).toContain("#wolves");
       expect(injection).toContain("杀 alice");
       expect(injection).toContain("alice 可能是预言家");
     });
 
-    it("villager cannot see wolf channel", () => {
-      const channels = getVisibleChannels("bob", Role.Villager, wolves);
-      expect(channels).not.toContain("wolves");
-
-      const msgs: ChannelMessages = {
-        general: [{ author: "god", body: "天亮了", line_number: 2, timestamp: "20260325T100200Z" }],
-      };
-      const injection = formatInjection(msgs, "请发言。");
+    it("villager injection has no wolf channel (daemon filters)", () => {
+      // Daemon would not include wolves channel for a villager.
+      // Simulate: only general channel in poll result.
+      const changes: PollChange[] = [
+        { channel: "general", kind: "channel", entries: [
+          { type: "message", author: "god", body: "天亮了", line_number: 2, timestamp: "20260325T100200Z" },
+        ]},
+      ];
+      const injection = formatPollChanges(changes, "请发言。");
       expect(injection).not.toContain("wolves");
+      expect(injection).toContain("#general");
+    });
+
+    it("DM channels format correctly in injection", () => {
+      const dm = dmChannel("alice", "god");
+      expect(dm).toBe("dm:alice,god");
+
+      const changes: PollChange[] = [
+        { channel: dm, kind: "dm", entries: [
+          { type: "message", author: "god", body: "你是预言家", line_number: 1, timestamp: "" },
+        ]},
+      ];
+      const injection = formatPollChanges(changes, "回复上帝");
+      expect(injection).toContain("DM(alice,god)");
     });
   });
 
@@ -65,21 +78,6 @@ describe("E2E mock: full pipeline without LLM", () => {
       });
       expect(prompt).toContain("村民");
       expect(prompt).toContain("投票");
-    });
-  });
-
-  describe("cursor tracking", () => {
-    it("maxLineFromMessages returns correct cursors", () => {
-      const msgs: ChannelMessages = {
-        general: [
-          { author: "a", body: "hi", line_number: 3, timestamp: "" },
-          { author: "b", body: "yo", line_number: 7, timestamp: "" },
-        ],
-        wolves: [{ author: "c", body: "kill", line_number: 2, timestamp: "" }],
-      };
-      const cursors = maxLineFromMessages(msgs);
-      expect(cursors.general).toBe(7);
-      expect(cursors.wolves).toBe(2);
     });
   });
 });

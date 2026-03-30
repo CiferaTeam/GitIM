@@ -1,46 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { getVisibleChannels, Role } from "../types.js";
+import { Role, dmChannel } from "../types.js";
 
-describe("getVisibleChannels", () => {
-  const wolves = ["dave", "eve"];
-
-  it("wolf sees general + wolves + dm(god) + dm(self)", () => {
-    const channels = getVisibleChannels("dave", Role.Wolf, wolves);
-    expect(channels).toContain("general");
-    expect(channels).toContain("wolves");
-    expect(channels).toContain("dm:dave,god");
-    expect(channels).toContain("dm:dave,dave");
-    expect(channels).not.toContain("dm:alice,god");
+describe("dmChannel", () => {
+  it("sorts handlers lexicographically", () => {
+    expect(dmChannel("bob", "alice")).toBe("dm:alice,bob");
+    expect(dmChannel("alice", "bob")).toBe("dm:alice,bob");
   });
 
-  it("seer sees general + dm(god) + dm(self)", () => {
-    const channels = getVisibleChannels("alice", Role.Seer, wolves);
-    expect(channels).toContain("general");
-    expect(channels).toContain("dm:alice,god");
-    expect(channels).toContain("dm:alice,alice");
-    expect(channels).not.toContain("wolves");
+  it("handles self-DM", () => {
+    expect(dmChannel("alice", "alice")).toBe("dm:alice,alice");
   });
 
-  it("villager sees general + dm(self) only", () => {
-    const channels = getVisibleChannels("bob", Role.Villager, wolves);
-    expect(channels).toContain("general");
-    expect(channels).toContain("dm:bob,bob");
-    expect(channels).not.toContain("wolves");
-    expect(channels).not.toContain("dm:bob,god");
+  it("handles god DM", () => {
+    expect(dmChannel("alice", "god")).toBe("dm:alice,god");
+    expect(dmChannel("god", "alice")).toBe("dm:alice,god");
   });
+});
 
-  it("witch sees general + dm(god) + dm(self)", () => {
-    const channels = getVisibleChannels("charlie", Role.Witch, wolves);
-    expect(channels).toContain("general");
-    expect(channels).toContain("dm:charlie,god");
-    expect(channels).toContain("dm:charlie,charlie");
-    expect(channels).not.toContain("wolves");
-  });
-
-  it("god sees everything", () => {
-    const channels = getVisibleChannels("god", Role.God, wolves, ["alice", "bob", "charlie", "dave", "eve"]);
-    expect(channels).toContain("general");
-    expect(channels).toContain("wolves");
-    expect(channels.length).toBeGreaterThan(3);
+describe("Role enum", () => {
+  it("has all expected roles", () => {
+    expect(Object.values(Role)).toContain("wolf");
+    expect(Object.values(Role)).toContain("seer");
+    expect(Object.values(Role)).toContain("witch");
+    expect(Object.values(Role)).toContain("hunter");
+    expect(Object.values(Role)).toContain("villager");
+    expect(Object.values(Role)).toContain("god");
   });
 });

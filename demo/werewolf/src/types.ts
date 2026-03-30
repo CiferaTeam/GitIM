@@ -14,43 +14,6 @@ export interface AgentConfig {
   personality: string;
 }
 
-export interface GameConfig {
-  players: AgentConfig[];
-  daemonUrl: string;
-  llmModel: string;
-}
-
-function dmChannel(a: string, b: string): string {
+export function dmChannel(a: string, b: string): string {
   return a <= b ? `dm:${a},${b}` : `dm:${b},${a}`;
-}
-
-export function getVisibleChannels(
-  handler: string,
-  role: Role,
-  wolfHandlers: string[],
-  allHandlers?: string[]
-): string[] {
-  const channels: string[] = ["general"];
-  channels.push(dmChannel(handler, handler));
-
-  if (role === Role.God) {
-    channels.push("wolves");
-    if (allHandlers) {
-      for (const h of allHandlers) {
-        channels.push(dmChannel("god", h));
-        channels.push(dmChannel(h, h));
-      }
-    }
-    return channels;
-  }
-
-  if (role === Role.Wolf) {
-    channels.push("wolves");
-  }
-
-  if (role !== Role.Villager) {
-    channels.push(dmChannel(handler, "god"));
-  }
-
-  return channels;
 }

@@ -1,25 +1,49 @@
-export interface MessageEntry {
-  author: string;
-  body: string;
+// ── Poll Response Types (match daemon poll API) ──────────
+
+export interface PollEntry {
+  type: "message" | "event";
   line_number: number;
+  author: string;
   timestamp: string;
+  body?: string;
+  point_to?: number;
+  mentions?: string[];
+  event_type?: string;
+  meta?: Record<string, unknown>;
 }
 
-export type ChannelMessages = Record<string, MessageEntry[]>;
+export interface PollChange {
+  channel: string;
+  kind: string;
+  entries: PollEntry[];
+}
 
-export function formatInjection(
-  channelMessages: ChannelMessages,
+export interface PollResult {
+  commit_id: string;
+  changes: PollChange[];
+}
+
+// ── Format Poll Changes for LLM Injection ────────────────
+
+export function formatPollChanges(
+  changes: PollChange[],
   task: string,
   recentThinking?: string[]
 ): string {
   const sections: string[] = [];
 
-  for (const [channel, messages] of Object.entries(channelMessages)) {
+  for (const change of changes) {
+    const messages = change.entries.filter((e) => e.type === "message" && e.body);
     if (messages.length === 0) continue;
-    const channelLabel = channel.startsWith("dm:") ? `DM(${channel.slice(3)})` : `#${channel}`;
-    sections.push(`=== ${channelLabel} 新消息 (${messages.length}条) ===`);
+
+    const label = change.channel.startsWith("dm:")
+      ? `DM(${change.channel.slice(3)})`
+      : `#${change.channel}`;
+    sections.push(`=== ${label} 新消息 (${messages.length}条) ===`);
     for (const m of messages) {
-      sections.push(`[L${String(m.line_number).padStart(6, "0")}][@${m.author}][${m.timestamp}] ${m.body}`);
+      sections.push(
+        `[L${String(m.line_number).padStart(6, "0")}][@${m.author}][${m.timestamp}] ${m.body}`
+      );
     }
     sections.push("");
   }
@@ -34,50 +58,4 @@ export function formatInjection(
   sections.push(task);
 
   return sections.join("\n");
-}
-
-export async function pollVisibleChannels(
-  daemonUrl: string,
-  channels: string[],
-  sinceLines: Record<string, number>
-): Promise<ChannelMessages> {
-  const result: ChannelMessages = {};
-
-  for (const ch of channels) {
-    const since = sinceLines[ch] ?? 0;
-    try {
-      const res = await fetch(`${daemonUrl}/api`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          method: "read",
-          channel: ch,
-          since: since > 0 ? since : undefined,
-        }),
-      });
-      const json = await res.json();
-      if (json.ok && json.data?.messages) {
-        result[ch] = json.data.messages.map((m: any) => ({
-          author: m.author,
-          body: m.body,
-          line_number: m.line_number,
-          timestamp: m.timestamp ?? "",
-        }));
-      } else {
-        result[ch] = [];
-      }
-    } catch {
-      result[ch] = [];
-    }
-  }
-
-  return result;
-}
-
-export function maxLineFromMessages(channelMessages: ChannelMessages): Record<string, number> {
-  const result: Record<string, number> = {};
-  for (const [ch, msgs] of Object.entries(channelMessages)) {
-    result[ch] = msgs.reduce((max, m) => Math.max(max, m.line_number), 0);
-  }
-  return result;
 }

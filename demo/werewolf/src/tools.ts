@@ -1,26 +1,42 @@
+import net from "node:net";
+import readline from "node:readline";
 import type Anthropic from "@anthropic-ai/sdk";
 
-// ── GitIM Tool Schema ───────────────────────────────────────
+// ── Socket Client ─────────────────────────────────────────
 //
-//  Agent 通过 Claude tool use 调用这些工具和 gitim-daemon 通信。
-//  和 gitim-daemon/src/api.rs 的 Request 对齐。
-//
-//  Agent → Claude tool use → tools → HTTP POST /api → gitim-daemon
+//  Line-delimited JSON over Unix socket.
+//  Protocol 同 cli/src/client.ts.
 
-const DAEMON_URL = process.env.GITIM_DAEMON_URL ?? "http://localhost:3000";
+export async function callDaemon(
+  socketPath: string,
+  payload: Record<string, unknown>
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    const message = JSON.stringify(payload) + "\n";
 
-export async function callDaemon(payload: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch(`${DAEMON_URL}/api`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    socket.on("connect", () => socket.write(message));
+
+    const rl = readline.createInterface({ input: socket });
+    rl.on("error", () => {});
+    rl.on("line", (line: string) => {
+      try {
+        const json = JSON.parse(line);
+        if (!json.ok) reject(new Error(json.error ?? "daemon error"));
+        else resolve(json.data);
+      } catch {
+        reject(new Error(`Invalid response: ${line}`));
+      }
+      socket.end();
+    });
+
+    socket.on("error", (err: Error) => {
+      reject(new Error(`Cannot connect to daemon: ${err.message}`));
+    });
   });
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error ?? "daemon error");
-  return json.data;
 }
 
-// ── Tool Definitions (Claude tool_use format) ───────────────
+// ── Tool Definitions (Claude tool_use format) ─────────────
 
 export const gitimTools: Anthropic.Messages.Tool[] = [
   {
@@ -93,16 +109,17 @@ export const gitimTools: Anthropic.Messages.Tool[] = [
   },
 ];
 
-// ── Tool Executor ───────────────────────────────────────────
+// ── Tool Executor ─────────────────────────────────────────
 
 export async function executeTool(
+  socketPath: string,
   toolName: string,
   input: Record<string, unknown>,
   author: string
 ): Promise<string> {
   switch (toolName) {
     case "send_message": {
-      const data = await callDaemon({
+      const data = await callDaemon(socketPath, {
         method: "send",
         channel: input.channel,
         body: input.body,
@@ -112,7 +129,7 @@ export async function executeTool(
       return JSON.stringify(data);
     }
     case "read_messages": {
-      const data = await callDaemon({
+      const data = await callDaemon(socketPath, {
         method: "read",
         channel: input.channel,
         limit: input.limit ?? null,
@@ -121,15 +138,15 @@ export async function executeTool(
       return JSON.stringify(data);
     }
     case "list_channels": {
-      const data = await callDaemon({ method: "channels" });
+      const data = await callDaemon(socketPath, { method: "channels" });
       return JSON.stringify(data);
     }
     case "list_users": {
-      const data = await callDaemon({ method: "users" });
+      const data = await callDaemon(socketPath, { method: "users" });
       return JSON.stringify(data);
     }
     case "get_thread": {
-      const data = await callDaemon({
+      const data = await callDaemon(socketPath, {
         method: "thread",
         channel: input.channel,
         line_number: input.line_number,
