@@ -594,9 +594,11 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     let mut changes: Vec<serde_json::Value> = Vec::new();
 
     let current_user_snapshot = state.current_user.read().await.clone();
+    let is_admin = state.is_admin.load(std::sync::atomic::Ordering::SeqCst);
 
-    // Step 1: Build channel membership cache
+    // Step 1: Build channel membership cache (admin skips — never checked)
     let mut channel_membership: HashMap<String, bool> = HashMap::new();
+    if !is_admin {
     for (path, _) in &diff {
         let path_str = path.to_string_lossy();
         if let Some(ch_name) = path_str
@@ -628,6 +630,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
             channel_membership.insert(ch_name.to_string(), is_member);
         }
     }
+    } // end if !is_admin
 
     // Step 2: Process diff entries with membership filter
     for (path, added_content) in &diff {
@@ -638,7 +641,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 (ch_name.to_string(), "channel")
             } else if let Some(ch_name) = name.strip_suffix(".meta.json") {
                 // Meta change — only push if user is (now) a member
-                if !channel_membership.get(ch_name).copied().unwrap_or(true) {
+                if !is_admin && !channel_membership.get(ch_name).copied().unwrap_or(true) {
                     continue;
                 }
                 changes.push(serde_json::json!({
@@ -658,14 +661,14 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         };
 
         // Channel membership filter
-        if kind == "channel" {
+        if kind == "channel" && !is_admin {
             if !channel_membership.get(&channel).copied().unwrap_or(true) {
                 continue;
             }
         }
 
         // DM visibility filter — skip DMs not involving current user
-        if kind == "dm" {
+        if kind == "dm" && !is_admin {
             if let Some(stem) = path_str
                 .strip_prefix("dm/")
                 .and_then(|s| s.strip_suffix(".thread"))
