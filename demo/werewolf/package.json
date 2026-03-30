@@ -1,12 +1,11 @@
 {
-  "name": "gitim-sim",
+  "name": "gitim-demo-werewolf",
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "chat": "tsx src/chat-demo.ts",
+    "start": "tsx src/runner.ts",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "werewolf": "tsx src/werewolf/runner.ts"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0"

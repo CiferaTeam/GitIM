@@ -16,7 +16,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Role, getVisibleChannels } from "./types.js";
 import { formatInjection, pollVisibleChannels, maxLineFromMessages } from "./context-manager.js";
 import { makePlayerPrompt } from "./prompts.js";
-import { gitimTools, executeTool } from "../tools.js";
+import { gitimTools, executeTool } from "./tools.js";
 
 // ── CLI Args ──────────────────────────────────────────────
 

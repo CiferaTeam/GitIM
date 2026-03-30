@@ -15,7 +15,7 @@ import {
   formatInjection,
   type ChannelMessages,
 } from "./context-manager.js";
-import { gitimTools, executeTool } from "../tools.js";
+import { gitimTools, executeTool } from "./tools.js";
 
 // ── CLI args ────────────────────────────────────────────────
 

@@ -13,7 +13,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { parseArgs } from "node:util";
-import { callDaemon } from "../tools.js";
+import { callDaemon } from "./tools.js";
 import { Role } from "./types.js";
 
 // ── CLI Args ──────────────────────────────────────────────
@@ -214,7 +214,7 @@ async function setupGame(players: PlayerAssignment[]): Promise<void> {
 function spawnGod(players: PlayerAssignment[]): ChildProcess {
   const playersArg = players.map((p) => `${p.handler}:${p.role}`).join(",");
   const args = [
-    "src/werewolf/god-agent.ts",
+    "src/god-agent.ts",
     "--players", playersArg,
     "--daemon-url", daemonUrl,
   ];
@@ -233,7 +233,7 @@ function spawnPlayer(p: PlayerAssignment, wolves: string[]): ChildProcess {
     : [];
 
   const args = [
-    "src/werewolf/player-agent.ts",
+    "src/player-agent.ts",
     "--handler", p.handler,
     "--role", p.role,
     "--display-name", p.displayName,
