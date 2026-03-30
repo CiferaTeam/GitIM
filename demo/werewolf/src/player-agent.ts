@@ -1,18 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * player-agent.ts — 狼人杀玩家进程
+ * player-agent.ts — 狼人杀通用玩家进程
  *
- * 每个玩家是独立进程，有自己的 daemon 和 socket。
- * 通过 poll 拉取 daemon 过滤后的消息（只看得到自己有权限的频道）。
- *
- * 用法:
- *   tsx src/player-agent.ts \
- *     --handler alice --role seer --display-name Alice \
- *     --personality "你很谨慎..." --socket-path /tmp/.../alice/.gitim/run/gitim.sock
+ * 启动时不知道角色，等 God 通过 DM 通知。
+ * 每个玩家有自己的 daemon 和 socket，poll 拉取消息。
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { Role, dmChannel } from "./types.js";
+import { dmChannel } from "./types.js";
 import { formatPollChanges, type PollChange, type PollResult } from "./context-manager.js";
 import { makePlayerPrompt } from "./prompts.js";
 import { gitimTools, executeTool, callDaemon } from "./tools.js";
@@ -27,25 +22,16 @@ function parseArgs(argv: string[]) {
   };
 
   const handler = get("--handler");
-  const roleStr = get("--role");
   const displayName = get("--display-name");
   const personality = get("--personality");
   const socketPath = get("--socket-path");
-  const wolfPartnersStr = get("--wolf-partners") ?? "";
 
-  if (!handler || !roleStr || !displayName || !personality || !socketPath) {
-    console.error("用法: --handler <h> --role <r> --display-name <n> --personality <p> --socket-path <s>");
+  if (!handler || !displayName || !personality || !socketPath) {
+    console.error("用法: --handler <h> --display-name <n> --personality <p> --socket-path <s>");
     process.exit(1);
   }
 
-  const role = roleStr as Role;
-  if (!Object.values(Role).includes(role)) {
-    console.error(`未知角色: ${roleStr}`);
-    process.exit(1);
-  }
-
-  const wolfPartners = wolfPartnersStr ? wolfPartnersStr.split(",").filter(Boolean) : [];
-  return { handler, role, displayName, personality, socketPath, wolfPartners };
+  return { handler, displayName, personality, socketPath };
 }
 
 // ── Player Tools (subset) ─────────────────────────────────
@@ -55,20 +41,23 @@ const playerTools = gitimTools.filter((t) => PLAYER_TOOL_NAMES.has(t.name));
 
 // ── Determine Task from Poll Changes ─────────────────────
 
-function determineTask(handler: string, role: Role, changes: PollChange[]): string {
+function determineTask(handler: string, changes: PollChange[]): string {
   const godDm = dmChannel(handler, "god");
 
   for (const ch of changes) {
     const msgs = ch.entries.filter((e) => e.type === "message" && e.body);
     if (msgs.length === 0) continue;
 
+    // God DM takes highest priority
     if (ch.channel === godDm) {
       const last = msgs[msgs.length - 1];
       return `上帝通过私信联系了你："${last.body}"。请通过 DM 回复上帝。`;
     }
-    if (ch.channel === "wolves" && role === Role.Wolf) {
-      return "狼人频道有新消息，请与同伴讨论击杀目标。";
+    // Wolf channel (only visible if you're a wolf member)
+    if (ch.channel === "wolves") {
+      return "狼人频道有新消息，请与同伴讨论。";
     }
+    // General channel
     if (ch.channel === "general") {
       for (const m of msgs) {
         if (m.body?.includes(`@${handler}`)) {
@@ -85,11 +74,10 @@ function determineTask(handler: string, role: Role, changes: PollChange[]): stri
 // ── Main Loop ─────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const config = parseArgs(process.argv);
-  const { handler, role, displayName, personality, socketPath, wolfPartners } = config;
+  const { handler, displayName, personality, socketPath } = parseArgs(process.argv);
 
   const tag = `[${handler}]`;
-  console.log(`${tag} 启动 — 角色: ${role}, 显示名: ${displayName}`);
+  console.log(`${tag} 启动 — 显示名: ${displayName}`);
 
   // LLM client
   const llmApiKey = process.env.LLM_API_KEY ?? process.env.ANTHROPIC_API_KEY;
@@ -106,15 +94,13 @@ async function main(): Promise<void> {
     defaultHeaders: llmBaseURL ? { Authorization: `Bearer ${llmApiKey}` } : undefined,
   });
 
-  const systemPrompt = makePlayerPrompt({ handler, role, personality, wolfPartners });
+  const systemPrompt = makePlayerPrompt({ handler, personality });
   const thinkingChannel = dmChannel(handler, handler);
   const messages: Anthropic.Messages.MessageParam[] = [];
   const thinkingHistory: string[] = [];
 
-  // Poll cursor (git commit hash)
+  // Poll cursor
   let pollCursor: string | null = null;
-
-  // Get initial cursor
   try {
     const init = (await callDaemon(socketPath, { method: "poll", since: null })) as PollResult;
     pollCursor = init.commit_id;
@@ -163,7 +149,7 @@ async function main(): Promise<void> {
     }
 
     // Build injection and call LLM
-    const task = determineTask(handler, role, relevant);
+    const task = determineTask(handler, relevant);
     const injection = formatPollChanges(
       relevant,
       task,

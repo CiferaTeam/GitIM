@@ -1,16 +1,12 @@
 #!/usr/bin/env tsx
 /**
- * runner.ts — 狼人杀 Game Runner
+ * runner.ts — 狼人杀 Game Runner（配置驱动）
  *
- * 每个 agent 独立 daemon + 独立 git clone + socket 通信。
+ * 读取 JSON 配置文件，验证角色合法性，
+ * 为每个 agent 启动独立的 git clone + daemon + socket。
+ * Runner 只做基础设施（注册用户），游戏逻辑全由 God 通过 IM 驱动。
  *
- * 流程：
- *   1. 创建 bare git repo 作为共享 remote
- *   2. God 先 init + onboard（创建频道、用户）
- *   3. 玩家依次 clone + onboard
- *   4. God 设置游戏（角色 DM、频道成员）
- *   5. 启动 god-agent + player-agent 子进程
- *   6. 等待 god 退出后清理
+ * 启动顺序：所有 daemon+onboard → 所有 player → 最后 God
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -18,32 +14,35 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { callDaemon } from "./tools.js";
-import { Role, dmChannel } from "./types.js";
+import { Role } from "./types.js";
 
 // ── CLI Args ──────────────────────────────────────────────
 
 const { values } = parseArgs({
   options: {
-    players: { type: "string", default: "5" },
-    "work-dir": { type: "string", default: "" },
+    config: { type: "string" },
   },
   strict: true,
 });
 
-const playerCount = parseInt(values.players!, 10);
-if (isNaN(playerCount) || playerCount < 5 || playerCount > 7) {
-  console.error("--players 必须在 5-7 之间");
+if (!values.config) {
+  console.error("用法: npm start -- --config <path-to-config.json>");
   process.exit(1);
 }
 
+// ── Config Schema ─────────────────────────────────────────
+
+interface PlayerConfig {
+  role: string;
+  personality?: string;
+}
+
+interface GameConfig {
+  work_dir: string;
+  players: Record<string, PlayerConfig>;
+}
+
 // ── Constants ─────────────────────────────────────────────
-
-const NAME_POOL = ["alice", "bob", "charlie", "dave", "eve", "frank", "grace"];
-
-const DISPLAY_NAMES: Record<string, string> = {
-  alice: "Alice", bob: "Bob", charlie: "Charlie", dave: "Dave",
-  eve: "Eve", frank: "Frank", grace: "Grace",
-};
 
 const PERSONALITY_POOL = [
   "你性格沉稳冷静，善于观察细节，发言总是有理有据。",
@@ -55,39 +54,61 @@ const PERSONALITY_POOL = [
   "你比较安静内向，但一旦发言必有关键信息，善于在关键时刻一击致命。",
 ];
 
-// ── Role Assignment ───────────────────────────────────────
+// ── Load & Validate Config ────────────────────────────────
 
-interface PlayerAssignment {
+function loadConfig(configPath: string): GameConfig {
+  const raw = fs.readFileSync(configPath, "utf-8");
+  const config: GameConfig = JSON.parse(raw);
+
+  if (!config.work_dir) throw new Error("config 缺少 work_dir");
+  if (!config.players || typeof config.players !== "object") throw new Error("config 缺少 players");
+
+  const handlers = Object.keys(config.players);
+  if (handlers.length < 5 || handlers.length > 7) {
+    throw new Error(`玩家数必须在 5-7 之间，当前 ${handlers.length}`);
+  }
+
+  const validRoles = new Set(Object.values(Role).filter((r) => r !== Role.God));
+  const roleCounts: Record<string, number> = {};
+
+  for (const [handler, pc] of Object.entries(config.players)) {
+    if (!validRoles.has(pc.role as Role)) {
+      throw new Error(`玩家 ${handler} 的角色 "${pc.role}" 无效。可选: ${[...validRoles].join(", ")}`);
+    }
+    roleCounts[pc.role] = (roleCounts[pc.role] ?? 0) + 1;
+  }
+
+  // Validate role composition
+  if ((roleCounts["wolf"] ?? 0) !== 2) throw new Error("必须恰好 2 个狼人");
+  if ((roleCounts["seer"] ?? 0) !== 1) throw new Error("必须恰好 1 个预言家");
+  if ((roleCounts["witch"] ?? 0) !== 1) throw new Error("必须恰好 1 个女巫");
+
+  return config;
+}
+
+// ── Resolve Players ───────────────────────────────────────
+
+interface ResolvedPlayer {
   handler: string;
   displayName: string;
   role: Role;
   personality: string;
 }
 
-function assignRoles(count: number): PlayerAssignment[] {
-  const roles: Role[] = [Role.Wolf, Role.Wolf, Role.Seer, Role.Witch, Role.Villager];
-  if (count >= 6) roles.push(Role.Hunter);
-  for (let i = roles.length; i < count; i++) roles.push(Role.Villager);
-
-  // Shuffle roles
-  for (let i = roles.length - 1; i > 0; i--) {
+function resolvePlayers(players: Record<string, PlayerConfig>): ResolvedPlayer[] {
+  // Shuffle personality pool for random assignment
+  const pool = [...PERSONALITY_POOL];
+  for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [roles[i], roles[j]] = [roles[j], roles[i]];
+    [pool[i], pool[j]] = [pool[j], pool[i]];
   }
 
-  // Shuffle personalities
-  const personalities = [...PERSONALITY_POOL];
-  for (let i = personalities.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [personalities[i], personalities[j]] = [personalities[j], personalities[i]];
-  }
-
-  const names = NAME_POOL.slice(0, count);
-  return names.map((name, i) => ({
-    handler: name,
-    displayName: DISPLAY_NAMES[name],
-    role: roles[i],
-    personality: personalities[i],
+  let poolIdx = 0;
+  return Object.entries(players).map(([handler, pc]) => ({
+    handler,
+    displayName: handler.charAt(0).toUpperCase() + handler.slice(1),
+    role: pc.role as Role,
+    personality: pc.personality ?? pool[poolIdx++ % pool.length],
   }));
 }
 
@@ -98,7 +119,6 @@ function socketPathFor(repoDir: string): string {
 }
 
 async function startDaemon(repoDir: string): Promise<ChildProcess> {
-  // Clean stale runtime files
   const runDir = path.join(repoDir, ".gitim", "run");
   fs.mkdirSync(runDir, { recursive: true });
   for (const f of ["gitim.pid", "gitim.sock", "gitim.port", "gitim.lock"]) {
@@ -112,7 +132,6 @@ async function startDaemon(repoDir: string): Promise<ChildProcess> {
   });
   child.unref();
 
-  // Wait for socket to appear
   const sockPath = socketPathFor(repoDir);
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -153,71 +172,9 @@ function cloneRepo(remoteUrl: string, repoDir: string): void {
   fs.mkdirSync(path.join(repoDir, ".gitim"), { recursive: true });
 }
 
-// ── Game Setup ────────────────────────────────────────────
-
-async function setupGame(
-  godSocket: string,
-  players: PlayerAssignment[]
-): Promise<void> {
-  const wolves = players.filter((p) => p.role === Role.Wolf);
-  const wolfHandlers = wolves.map((w) => w.handler);
-
-  // Create #general
-  await callDaemon(godSocket, {
-    method: "send",
-    channel: "general",
-    body: "欢迎来到狼人杀！游戏即将开始。",
-    author: "god",
-  });
-  console.log("[runner] 创建 #general 频道");
-
-  // Create #wolves + add wolf members
-  await callDaemon(godSocket, {
-    method: "send",
-    channel: "wolves",
-    body: "这是狼人专属频道。你们可以在这里密谋。",
-    author: "god",
-  });
-  for (const w of wolves) {
-    await callDaemon(godSocket, {
-      method: "join_channel",
-      channel: "wolves",
-      handler: w.handler,
-    });
-  }
-  console.log(`[runner] 创建 #wolves 频道 (${wolfHandlers.join(", ")})`);
-
-  // Send role assignment DMs
-  for (const p of players) {
-    const dm = dmChannel("god", p.handler);
-    let roleMsg: string;
-    switch (p.role) {
-      case Role.Wolf:
-        roleMsg = `你的身份是【狼人】。你的同伴是: ${wolfHandlers.filter((h) => h !== p.handler).join("、")}。在 #wolves 频道与同伴沟通。`;
-        break;
-      case Role.Seer:
-        roleMsg = "你的身份是【预言家】。每晚你可以查验一名玩家的身份。";
-        break;
-      case Role.Witch:
-        roleMsg = "你的身份是【女巫】。你有一瓶解药和一瓶毒药，各限用一次。";
-        break;
-      case Role.Hunter:
-        roleMsg = "你的身份是【猎人】。被淘汰时你可以开枪带走一名玩家。";
-        break;
-      case Role.Villager:
-        roleMsg = "你的身份是【村民】。你没有特殊技能，但你的观察力和投票权是关键。";
-        break;
-      default:
-        roleMsg = `你的身份是【${p.role}】。`;
-    }
-    await callDaemon(godSocket, { method: "send", channel: dm, body: roleMsg, author: "god" });
-    console.log(`[runner] DM → ${p.handler}: 身份通知已发送`);
-  }
-}
-
 // ── Spawn Agent Processes ─────────────────────────────────
 
-function spawnGod(socketPath: string, players: PlayerAssignment[]): ChildProcess {
+function spawnGod(socketPath: string, players: ResolvedPlayer[]): ChildProcess {
   const playersArg = players.map((p) => `${p.handler}:${p.role}`).join(",");
   return spawn("npx", ["tsx", "src/god-agent.ts", "--players", playersArg, "--socket-path", socketPath], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -226,20 +183,14 @@ function spawnGod(socketPath: string, players: PlayerAssignment[]): ChildProcess
   });
 }
 
-function spawnPlayer(p: PlayerAssignment, socketPath: string, wolves: string[]): ChildProcess {
-  const wolfPartners = p.role === Role.Wolf ? wolves.filter((h) => h !== p.handler) : [];
-  const args = [
+function spawnPlayer(p: ResolvedPlayer, socketPath: string): ChildProcess {
+  return spawn("npx", [
     "tsx", "src/player-agent.ts",
     "--handler", p.handler,
-    "--role", p.role,
     "--display-name", p.displayName,
     "--personality", p.personality,
     "--socket-path", socketPath,
-  ];
-  if (wolfPartners.length > 0) {
-    args.push("--wolf-partners", wolfPartners.join(","));
-  }
-  return spawn("npx", args, {
+  ], {
     stdio: ["ignore", "inherit", "inherit"],
     cwd: process.cwd(),
     env: process.env,
@@ -249,28 +200,26 @@ function spawnPlayer(p: PlayerAssignment, socketPath: string, wolves: string[]):
 // ── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  // Work directory
-  const workDir = values["work-dir"]
-    || path.join(process.env.TMPDIR ?? "/tmp", `werewolf-${Date.now()}`);
+  const config = loadConfig(values.config!);
+  const players = resolvePlayers(config.players);
+  const workDir = config.work_dir;
+
   fs.mkdirSync(workDir, { recursive: true });
 
   const bareDir = path.join(workDir, "remote.git");
   const remoteUrl = `file://${bareDir}`;
 
   console.log(`[runner] 狼人杀 Game Runner 启动`);
-  console.log(`[runner] 玩家数: ${playerCount}, 工作目录: ${workDir}`);
+  console.log(`[runner] 玩家数: ${players.length}, 工作目录: ${workDir}`);
 
   // 1. Create bare repo
   setupBareRepo(bareDir);
   console.log(`[runner] 创建 bare repo: ${bareDir}`);
 
-  // 2. Assign roles
-  const players = assignRoles(playerCount);
-  const wolves = players.filter((p) => p.role === Role.Wolf).map((p) => p.handler);
-
+  // 2. Print role assignments
   console.log("[runner] 角色分配:");
   for (const p of players) {
-    console.log(`  ${p.handler} → ${p.role} (${p.personality.slice(0, 15)}...)`);
+    console.log(`  ${p.handler} → ${p.role}`);
   }
 
   // 3. Setup God: init → daemon → onboard
@@ -281,7 +230,6 @@ async function main(): Promise<void> {
   await onboard(godSocket, "god", "上帝");
   console.log("[runner] God daemon 就绪");
 
-  // Track all daemon processes for cleanup
   const daemonProcs: ChildProcess[] = [godDaemon];
   const agentProcs: ChildProcess[] = [];
 
@@ -298,19 +246,19 @@ async function main(): Promise<void> {
     console.log(`[runner] ${p.handler} daemon 就绪`);
   }
 
-  // 5. God creates game channels and sends role DMs
-  await setupGame(godSocket, players);
-
-  // 6. Spawn agent processes
-  const godProc = spawnGod(godSocket, players);
-  agentProcs.push(godProc);
+  // 5. Spawn all player agents FIRST
+  for (const p of players) {
+    const proc = spawnPlayer(p, playerSockets[p.handler]);
+    agentProcs.push(proc);
+  }
+  console.log("[runner] 所有 player agent 已启动");
 
   await sleep(1000);
 
-  for (const p of players) {
-    const proc = spawnPlayer(p, playerSockets[p.handler], wolves);
-    agentProcs.push(proc);
-  }
+  // 6. Spawn God agent LAST
+  const godProc = spawnGod(godSocket, players);
+  agentProcs.push(godProc);
+  console.log("[runner] God agent 已启动，游戏开始");
 
   // 7. Cleanup handler
   const cleanup = () => {

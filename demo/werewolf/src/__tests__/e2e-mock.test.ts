@@ -23,8 +23,6 @@ describe("E2E mock: full pipeline without LLM", () => {
     });
 
     it("villager injection has no wolf channel (daemon filters)", () => {
-      // Daemon would not include wolves channel for a villager.
-      // Simulate: only general channel in poll result.
       const changes: PollChange[] = [
         { channel: "general", kind: "channel", entries: [
           { type: "message", author: "god", body: "天亮了", line_number: 2, timestamp: "20260325T100200Z" },
@@ -50,34 +48,35 @@ describe("E2E mock: full pipeline without LLM", () => {
   });
 
   describe("prompts", () => {
-    it("God prompt contains game rules", () => {
-      expect(GOD_SYSTEM_PROMPT).toContain("狼人杀");
-      expect(GOD_SYSTEM_PROMPT).toContain("夜晚");
+    it("God prompt contains setup phase and game rules", () => {
+      expect(GOD_SYSTEM_PROMPT).toContain("第一阶段：游戏设置");
+      expect(GOD_SYSTEM_PROMPT).toContain("第二阶段：游戏流程");
+      expect(GOD_SYSTEM_PROMPT).toContain('回复"收到"');
+      expect(GOD_SYSTEM_PROMPT).toContain("#wolves");
+      expect(GOD_SYSTEM_PROMPT).toContain("join_channel");
       expect(GOD_SYSTEM_PROMPT).toContain("【游戏结束】");
     });
 
-    it("wolf player prompt includes partner info", () => {
+    it("player prompt is generic — no role information", () => {
       const prompt = makePlayerPrompt({
-        handler: "dave", role: Role.Wolf,
-        personality: "你很狡猾。", wolfPartners: ["eve"],
+        handler: "alice",
+        personality: "你很聪明。",
       });
-      expect(prompt).toContain("eve");
-      expect(prompt).toContain("狼人");
+      expect(prompt).toContain("@alice");
+      expect(prompt).toContain("你很聪明");
+      expect(prompt).toContain("还不知道自己的角色");
+      expect(prompt).toContain("send_message");
+      expect(prompt).not.toContain("你的身份");
+      expect(prompt).not.toContain("预言家");
     });
 
-    it("seer player prompt includes verify ability", () => {
+    it("player prompt instructs to confirm role receipt", () => {
       const prompt = makePlayerPrompt({
-        handler: "alice", role: Role.Seer, personality: "你很聪明。",
+        handler: "bob",
+        personality: "你很直率。",
       });
-      expect(prompt).toContain("预言家");
-    });
-
-    it("villager prompt mentions voting", () => {
-      const prompt = makePlayerPrompt({
-        handler: "bob", role: Role.Villager, personality: "你很直率。",
-      });
-      expect(prompt).toContain("村民");
-      expect(prompt).toContain("投票");
+      expect(prompt).toContain("收到");
+      expect(prompt).toContain("@god");
     });
   });
 });

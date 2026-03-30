@@ -1,0 +1,10 @@
+{
+  "work_dir": "/tmp/werewolf",
+  "players": {
+    "alice": { "role": "wolf", "personality": "你性格沉稳冷静，善于观察细节，发言总是有理有据。" },
+    "bob": { "role": "seer", "personality": "你很有攻击性，喜欢直接质疑别人，不怕得罪人。" },
+    "charlie": { "role": "witch" },
+    "dave": { "role": "wolf" },
+    "eve": { "role": "villager" }
+  }
+}

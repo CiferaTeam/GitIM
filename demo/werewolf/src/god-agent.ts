@@ -2,7 +2,7 @@
  * God Agent — LLM-driven game master process for werewolf.
  *
  * 独立进程，有自己的 daemon 和 socket。
- * 通过 poll 拉取所有频道的消息（God 是所有频道的成员）。
+ * 负责游戏全流程：设置（创建频道、分配角色、确认）→ 游戏循环。
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -29,7 +29,7 @@ if (!values.players || !values["socket-path"]) {
 
 const socketPath = values["socket-path"]!;
 
-// Parse "alice:seer,bob:villager,..." into a map
+// Parse "alice:seer,bob:villager,..."
 const playerRoles = new Map<string, Role>();
 for (const entry of values.players.split(",")) {
   const [handler, roleStr] = entry.trim().split(":");
@@ -53,15 +53,27 @@ const model = process.env.LLM_MODEL ?? "claude-sonnet-4-20250514";
 
 const client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
 
-// ── Build initial kick-off message ──────────────────────────
+// ── Build kick-off message ──────────────────────────────────
 
 function buildKickoff(): string {
-  const lines = ["游戏开始！", "", "玩家角色分配（只有你知道）:"];
+  const handlers = [...playerRoles.keys()];
+  const wolfHandlers = handlers.filter((h) => playerRoles.get(h) === Role.Wolf);
+
+  const lines = [
+    `以下 ${playerRoles.size} 名玩家已在 GitIM 上就绪，可以通信：`,
+    "",
+  ];
   for (const [handler, role] of playerRoles) {
-    lines.push(`- ${handler}: ${role}`);
+    lines.push(`- @${handler} → ${role}`);
   }
   lines.push("");
-  lines.push("请开始第一个夜晚阶段。先在 #general 宣布天黑，然后依次处理狼人、预言家、女巫的夜间行动。");
+  lines.push("注意事项：");
+  lines.push(`- 狼人同伴关系：${wolfHandlers.join("、")} 互为同伴，请在角色 DM 中告知。`);
+  lines.push("- DM 格式：两个 handler 按字母序排列，用 dm:handler1,handler2 格式。例如给 alice 发 DM 用 dm:alice,god。");
+  lines.push("- 创建 #wolves 频道：先发一条消息到 channel \"wolves\"（自动创建），然后用 join_channel 工具逐个拉狼人成员入群。");
+  lines.push("");
+  lines.push("请按照你的系统提示中的「第一阶段：游戏设置」步骤开始。");
+
   return lines.join("\n");
 }
 
@@ -81,7 +93,6 @@ async function main() {
   let pollCursor: string | null = null;
   let gameOver = false;
 
-  // Get initial poll cursor
   try {
     const init = (await callDaemon(socketPath, { method: "poll", since: null })) as PollResult;
     pollCursor = init.commit_id;
@@ -91,7 +102,6 @@ async function main() {
   }
 
   while (!gameOver) {
-    // Call LLM
     let response: Anthropic.Messages.Message;
     try {
       response = await client.messages.create({
@@ -109,7 +119,6 @@ async function main() {
 
     messages.push({ role: "assistant", content: response.content });
 
-    // Check for game-over marker
     for (const block of response.content) {
       if (block.type === "text" && block.text.includes("【游戏结束】")) {
         gameOver = true;
@@ -160,7 +169,6 @@ async function main() {
     );
 
     if (!hasMessages) {
-      // Retry once after 5s
       await sleep(5000);
       try {
         pollResult = (await callDaemon(socketPath, { method: "poll", since: pollCursor })) as PollResult;
@@ -172,14 +180,12 @@ async function main() {
       );
 
       if (hasRetryMessages) {
-        const injection = formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。");
-        messages.push({ role: "user", content: injection });
+        messages.push({ role: "user", content: formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。") });
       } else {
         messages.push({ role: "user", content: "已等待超时，没有收到新的玩家回复。请继续推进游戏流程。" });
       }
     } else {
-      const injection = formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。");
-      messages.push({ role: "user", content: injection });
+      messages.push({ role: "user", content: formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。") });
     }
   }
 
