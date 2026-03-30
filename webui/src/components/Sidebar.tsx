@@ -34,8 +34,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     const parts = name.split('--');
     const isSelf = parts.every((p) => p === currentUser);
     if (isSelf) return `${currentUser} (我)`;
-    const other = parts.find((p) => p !== currentUser) ?? name;
-    return other;
+    // 自己是其中一方：显示对方名字；都不是自己（admin 视角）：显示双方
+    if (parts.includes(currentUser)) {
+      return parts.find((p) => p !== currentUser) ?? name;
+    }
+    return parts.join(' ↔ ');
   };
 
   // Filter users for search dropdown

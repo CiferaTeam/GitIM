@@ -2,10 +2,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
+use gitim_core::types::Config;
 use gitim_daemon::api::{Event, Request};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-use gitim_core::types::Config;
 
 fn make_config() -> Config {
     serde_yaml::from_str("version: 1").unwrap()

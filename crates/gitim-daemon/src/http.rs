@@ -1,9 +1,13 @@
-use axum::{extract::State, routing::{get, post}, Json, Router};
-use axum::response::sse::{Event as SseEvent, Sse};
-use futures::stream::Stream;
-use std::convert::Infallible;
 use crate::api::{Request, Response};
 use crate::state::SharedState;
+use axum::response::sse::{Event as SseEvent, Sse};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
+use futures::stream::Stream;
+use std::convert::Infallible;
 
 pub fn create_router(state: SharedState) -> Router {
     Router::new()
@@ -12,10 +16,7 @@ pub fn create_router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-async fn handle_api(
-    State(state): State<SharedState>,
-    Json(req): Json<Request>,
-) -> Json<Response> {
+async fn handle_api(State(state): State<SharedState>, Json(req): Json<Request>) -> Json<Response> {
     Json(crate::handlers::handle_request(req, state).await)
 }
 

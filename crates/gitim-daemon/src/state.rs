@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{broadcast, Notify, RwLock};
+use crate::api::Event;
 use gitim_core::types::{Config, ThreadFile};
 use gitim_sync::git::GitStorage;
-use crate::api::Event;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::{broadcast, Notify, RwLock};
 
 pub type SharedState = Arc<AppState>;
 
@@ -34,11 +34,17 @@ pub struct AppState {
     pub push_notify: Arc<Notify>,
     pub has_remote: bool,
     pub sync_started: AtomicBool,
+    pub is_admin: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
 }
 
 impl AppState {
-    pub fn new(repo_root: PathBuf, config: Config, event_tx: broadcast::Sender<Event>, current_user: Option<String>) -> Self {
+    pub fn new(
+        repo_root: PathBuf,
+        config: Config,
+        event_tx: broadcast::Sender<Event>,
+        current_user: Option<String>,
+    ) -> Self {
         let git_storage = GitStorage::new(&repo_root);
         let has_remote = git_storage.has_remote();
         Self {
@@ -53,6 +59,7 @@ impl AppState {
             push_notify: Arc::new(Notify::new()),
             has_remote,
             sync_started: AtomicBool::new(false),
+            is_admin: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
         }
     }
@@ -64,10 +71,13 @@ impl AppState {
         let index = gitim_index::Index::open(&db_path)
             .map_err(|e| format!("failed to open index: {}", e))?;
 
-        let current_head = state.git_storage.rev_parse("HEAD")
+        let current_head = state
+            .git_storage
+            .rev_parse("HEAD")
             .map_err(|e| format!("failed to get HEAD: {}", e))?;
 
-        let stored_commit = index.get_commit_id()
+        let stored_commit = index
+            .get_commit_id()
             .map_err(|e| format!("failed to get stored commit: {}", e))?;
 
         match stored_commit {
@@ -75,20 +85,28 @@ impl AppState {
                 tracing::info!("index up to date at {}", &current_head[..8]);
             }
             Some(ref stored) if is_ancestor(stored, &current_head, &state.repo_root) => {
-                tracing::info!("index incremental update {}..{}", &stored[..8], &current_head[..8]);
-                let diff = state.git_storage.diff_range(stored, &current_head)
+                tracing::info!(
+                    "index incremental update {}..{}",
+                    &stored[..8],
+                    &current_head[..8]
+                );
+                let diff = state
+                    .git_storage
+                    .diff_range(stored, &current_head)
                     .map_err(|e| format!("diff_range failed: {}", e))?;
                 let diff_strings: HashMap<String, String> = diff
                     .into_iter()
                     .map(|(k, v)| (k.to_string_lossy().to_string(), v))
                     .collect();
-                let count = index.append_from_diff(&diff_strings, &current_head)
+                let count = index
+                    .append_from_diff(&diff_strings, &current_head)
                     .map_err(|e| format!("append_from_diff failed: {}", e))?;
                 tracing::info!("index updated: {} messages added", count);
             }
             _ => {
                 tracing::info!("index full rebuild for {}", &current_head[..8]);
-                let count = index.rebuild(&state.repo_root, &current_head)
+                let count = index
+                    .rebuild(&state.repo_root, &current_head)
                     .map_err(|e| format!("rebuild failed: {}", e))?;
                 tracing::info!("index rebuilt: {} messages indexed", count);
             }
@@ -104,7 +122,11 @@ impl AppState {
     /// The AtomicBool ensures the loop is only ever started once.
     pub fn spawn_sync_loop(state: SharedState) {
         // CAS: only the first caller proceeds; all others return immediately.
-        if state.sync_started.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if state
+            .sync_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::warn!("spawn_sync_loop called but sync loop already running — ignoring");
             return;
         }
@@ -125,7 +147,9 @@ impl AppState {
                 move || {
                     // on_pushed: get commit_id, send PushResult::Pushed to waiters,
                     // clear pending_push and broadcast MessagesPushed events
-                    let commit_id = push_state.git_storage.rev_parse("HEAD")
+                    let commit_id = push_state
+                        .git_storage
+                        .rev_parse("HEAD")
                         .unwrap_or_else(|e| {
                             tracing::warn!("on_pushed: failed to get HEAD: {}", e);
                             "unknown".to_string()
@@ -135,9 +159,14 @@ impl AppState {
                         std::collections::HashMap::new();
                     for mut msg in pending.drain(..) {
                         if let Some(tx) = msg.result_tx.take() {
-                            let _ = tx.send(PushResult::Pushed { commit_id: commit_id.clone() });
+                            let _ = tx.send(PushResult::Pushed {
+                                commit_id: commit_id.clone(),
+                            });
                         }
-                        by_channel.entry(msg.channel).or_default().push(msg.line_number);
+                        by_channel
+                            .entry(msg.channel)
+                            .or_default()
+                            .push(msg.line_number);
                     }
                     for (channel, line_numbers) in by_channel {
                         let _ = push_state.event_tx.send(Event::MessagesPushed {
@@ -199,14 +228,21 @@ impl AppState {
                                 .map(|(k, v)| (k.to_string_lossy().to_string(), v))
                                 .collect();
                             match index.append_from_diff(&diff_strings, &head_commit) {
-                                Ok(n) => tracing::info!("on_synced: index updated, {} messages added", n),
-                                Err(e) => tracing::warn!("on_synced: append_from_diff failed: {}", e),
+                                Ok(n) => {
+                                    tracing::info!("on_synced: index updated, {} messages added", n)
+                                }
+                                Err(e) => {
+                                    tracing::warn!("on_synced: append_from_diff failed: {}", e)
+                                }
                             }
                         }
                         _ => {
                             // No stored commit or not ancestor — full rebuild
                             match index.rebuild(&synced_state.repo_root, &head_commit) {
-                                Ok(n) => tracing::info!("on_synced: index rebuilt, {} messages indexed", n),
+                                Ok(n) => tracing::info!(
+                                    "on_synced: index rebuilt, {} messages indexed",
+                                    n
+                                ),
                                 Err(e) => tracing::warn!("on_synced: rebuild failed: {}", e),
                             }
                         }

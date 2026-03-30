@@ -4,10 +4,10 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 
+use gitim_core::types::Config;
 use gitim_daemon::api::{Event, Request};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-use gitim_core::types::Config;
 
 fn make_config() -> Config {
     serde_yaml::from_str("version: 1").unwrap()
@@ -22,10 +22,16 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
     std::fs::write(
         root.join("users/alice.meta.json"),
         r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(root, make_config(), event_tx, Some("alice".to_string())));
+    let state = Arc::new(AppState::new(
+        root,
+        make_config(),
+        event_tx,
+        Some("alice".to_string()),
+    ));
 
     {
         let mut users = state.users.write().await;
@@ -134,7 +140,8 @@ async fn handle_send_broadcasts_dm_event() {
     std::fs::write(
         state.repo_root.join("users/bob.meta.json"),
         r#"{"display_name":"Bob","role":"dev","introduction":"hi"}"#,
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::create_dir_all(state.repo_root.join("dm")).unwrap();
 
     let mut rx = state.event_tx.subscribe();
@@ -177,7 +184,10 @@ async fn unix_socket_subscribe_receives_push_events() {
     let mut reader = BufReader::new(reader);
 
     // Send subscribe request
-    writer.write_all(b"{\"method\":\"subscribe\"}\n").await.unwrap();
+    writer
+        .write_all(b"{\"method\":\"subscribe\"}\n")
+        .await
+        .unwrap();
 
     // Read subscribe response
     let mut line = String::new();
@@ -196,14 +206,13 @@ async fn unix_socket_subscribe_receives_push_events() {
     reader2.read_line(&mut line2).await.unwrap(); // consume send response
 
     // Subscriber should receive push event
-    let event_line = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
-            let mut l = String::new();
-            reader.read_line(&mut l).await.unwrap();
-            l
-        }
-    ).await.unwrap();
+    let event_line = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut l = String::new();
+        reader.read_line(&mut l).await.unwrap();
+        l
+    })
+    .await
+    .unwrap();
 
     let event: serde_json::Value = serde_json::from_str(&event_line).unwrap();
     assert_eq!(event["event"], "thread_changed");
@@ -238,16 +247,17 @@ async fn unix_socket_without_subscribe_no_push() {
     assert_eq!(resp["ok"], true);
 
     // Try to read more - should timeout (no push events)
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        async {
-            let mut l = String::new();
-            reader.read_line(&mut l).await.unwrap();
-            l
-        }
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        let mut l = String::new();
+        reader.read_line(&mut l).await.unwrap();
+        l
+    })
+    .await;
 
-    assert!(result.is_err(), "should timeout - no push events without subscribe");
+    assert!(
+        result.is_err(),
+        "should timeout - no push events without subscribe"
+    );
 }
 
 #[tokio::test]
@@ -287,16 +297,21 @@ async fn http_sse_receives_push_events() {
     assert!(send_resp.status().is_success());
 
     // Read SSE event
-    let chunk = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        resp.chunk(),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .unwrap();
+    let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), resp.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 
     let chunk_str = String::from_utf8(chunk.to_vec()).unwrap();
-    assert!(chunk_str.contains("thread_changed"), "SSE should contain event data: {}", chunk_str);
-    assert!(chunk_str.contains("general"), "SSE should contain channel name: {}", chunk_str);
+    assert!(
+        chunk_str.contains("thread_changed"),
+        "SSE should contain event data: {}",
+        chunk_str
+    );
+    assert!(
+        chunk_str.contains("general"),
+        "SSE should contain channel name: {}",
+        chunk_str
+    );
 }
