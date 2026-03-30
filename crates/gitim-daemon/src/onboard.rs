@@ -14,14 +14,6 @@ pub async fn handle_onboard(
     auth: serde_json::Value,
     admin: bool,
 ) -> Response {
-    // --- Set admin mode ---
-    state
-        .is_admin
-        .store(admin, std::sync::atomic::Ordering::SeqCst);
-    if admin {
-        info!("onboard: admin mode enabled");
-    }
-
     // --- Step A: Infer identity ---
     let identity = match infer(git_server.clone(), auth) {
         Ok(id) => id,
@@ -86,6 +78,14 @@ pub async fn handle_onboard(
         if let Err(e) = AppState::initialize_index(&state) {
             warn!("index initialization after onboard failed: {}", e);
         }
+    }
+
+    // --- Set admin mode (after all steps succeed) ---
+    state
+        .is_admin
+        .store(admin, std::sync::atomic::Ordering::SeqCst);
+    if admin {
+        info!("onboard: admin mode enabled");
     }
 
     Response::success(serde_json::json!({
