@@ -72,6 +72,8 @@ pub enum Request {
     Onboard {
         git_server: String,
         auth: serde_json::Value,
+        #[serde(default)]
+        admin: bool,
     },
     #[serde(rename = "join_channel")]
     JoinChannel {
