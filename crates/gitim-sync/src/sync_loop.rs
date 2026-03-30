@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time;
 use tracing::{info, warn};
 
@@ -13,16 +15,21 @@ use crate::git::GitStorage;
 ///   (file, old_line, new_line)
 /// - `on_synced`: called after every sync cycle completes, with the current HEAD commit hash.
 ///   The index layer uses this to decide whether incremental updates are needed.
-pub async fn start_sync_loop<F1, F2, F3>(
+/// - `on_cycle_done`: called at the very end of every cycle, regardless of success or failure.
+///   Used to notify remaining waiters that the push did not succeed.
+pub async fn start_sync_loop<F1, F2, F3, F4>(
     repo_root: &Path,
     interval_secs: u32,
+    push_notify: Arc<Notify>,
     on_pushed: F1,
     on_renumbered: F2,
     on_synced: F3,
+    on_cycle_done: F4,
 ) where
     F1: Fn() + Send + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + 'static,
     F3: Fn(String) + Send + 'static,
+    F4: Fn() + Send + 'static,
 {
     if interval_secs == 0 {
         info!("sync_interval=0, auto-sync disabled");
@@ -44,22 +51,27 @@ pub async fn start_sync_loop<F1, F2, F3>(
     ticker.tick().await; // skip first immediate tick
 
     loop {
-        ticker.tick().await;
-        run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced);
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = push_notify.notified() => {}
+        }
+        run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced, &on_cycle_done);
     }
 }
 
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
-fn run_sync_cycle<F1, F2, F3>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3)
+fn run_sync_cycle<F1, F2, F3, F4>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3, on_cycle_done: &F4)
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
     F3: Fn(String),
+    F4: Fn(),
 {
     let has_unpushed = match repo.has_unpushed_commits() {
         Ok(v) => v,
         Err(e) => {
             warn!("sync: failed to check unpushed commits: {}", e);
+            on_cycle_done();
             return;
         }
     };
@@ -81,6 +93,8 @@ where
         Ok(head) => on_synced(head),
         Err(e) => warn!("sync: failed to get HEAD for on_synced: {}", e),
     }
+
+    on_cycle_done();
 }
 
 /// Push-first strategy: try push, fallback to fetch+rebase, then conflict resolution.

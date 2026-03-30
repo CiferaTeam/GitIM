@@ -8,3 +8,5 @@ node_modules/
 *.db-shm
 *.db-wal
 dist/
+cli/dist/webui/
+*.tsbuildinfo
