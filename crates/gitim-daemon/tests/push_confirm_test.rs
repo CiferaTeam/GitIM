@@ -267,11 +267,7 @@ async fn push_conflict_still_succeeds() {
     // Rival writes a message directly to the thread and pushes
     let bob = Handler::new("bob").unwrap();
     let rival_msg = format_message(1, 0, &bob, "20260325T120000Z", "rival msg");
-    std::fs::write(
-        rival.path().join("channels/general.thread"),
-        &rival_msg,
-    )
-    .unwrap();
+    std::fs::write(rival.path().join("channels/general.thread"), &rival_msg).unwrap();
     // Also create bob's user file so the thread content is valid
     std::fs::create_dir_all(rival.path().join("users")).ok();
     std::fs::write(
@@ -287,8 +283,16 @@ async fn push_conflict_still_succeeds() {
     AppState::spawn_sync_loop(state.clone());
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let resp = handle_request(send_request("general", "alice after conflict"), state.clone()).await;
-    assert!(resp.ok, "send should succeed after conflict: {:?}", resp.error);
+    let resp = handle_request(
+        send_request("general", "alice after conflict"),
+        state.clone(),
+    )
+    .await;
+    assert!(
+        resp.ok,
+        "send should succeed after conflict: {:?}",
+        resp.error
+    );
 
     let data = resp.data.unwrap();
     assert_eq!(

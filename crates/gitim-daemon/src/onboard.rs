@@ -15,7 +15,9 @@ pub async fn handle_onboard(
     admin: bool,
 ) -> Response {
     // --- Set admin mode ---
-    state.is_admin.store(admin, std::sync::atomic::Ordering::SeqCst);
+    state
+        .is_admin
+        .store(admin, std::sync::atomic::Ordering::SeqCst);
     if admin {
         info!("onboard: admin mode enabled");
     }
@@ -54,7 +56,10 @@ pub async fn handle_onboard(
         Err(resp) => return resp,
     };
 
-    info!("onboard: user registered — @{} (created={})", handler, created);
+    info!(
+        "onboard: user registered — @{} (created={})",
+        handler, created
+    );
 
     // --- Step E: Auto-join general channel (for newly created users) ---
     if created {
@@ -94,15 +99,19 @@ pub async fn handle_onboard(
 // ---------------------------------------------------------------------------
 
 fn infer(git_server: String, auth: serde_json::Value) -> Result<InferredIdentity, Response> {
-    let server: GitServer = serde_json::from_value(serde_json::Value::String(git_server.clone()))
-        .map_err(|_| Response::error(format!("unknown git_server: {}", git_server)))?;
+    let server: GitServer =
+        serde_json::from_value(serde_json::Value::String(git_server.clone()))
+            .map_err(|_| Response::error(format!("unknown git_server: {}", git_server)))?;
 
     // Determine which AuthData variant to deserialize based on git_server string.
     // The auth JSON must contain the fields for the matching variant (without the "type" tag),
     // so we inject the tag before deserializing.
     let mut auth_obj = auth;
     if let Some(obj) = auth_obj.as_object_mut() {
-        obj.insert("type".to_string(), serde_json::Value::String(git_server.clone()));
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String(git_server.clone()),
+        );
     } else {
         return Err(Response::error("auth must be a JSON object"));
     }
@@ -154,7 +163,10 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
     // 1. .gitignore: ensure it contains ".gitim/"
     let gitignore_path = state.repo_root.join(".gitignore");
     let gitignore_content = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
-    if !gitignore_content.lines().any(|line| line.trim() == ".gitim/") {
+    if !gitignore_content
+        .lines()
+        .any(|line| line.trim() == ".gitim/")
+    {
         let mut new_content = gitignore_content;
         if !new_content.is_empty() && !new_content.ends_with('\n') {
             new_content.push('\n');
@@ -203,7 +215,10 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
         let path_refs: Vec<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
         state
             .git_storage
-            .add_and_commit(&path_refs, "init: repo structure (.gitignore + general channel)")
+            .add_and_commit(
+                &path_refs,
+                "init: repo structure (.gitignore + general channel)",
+            )
             .map_err(|e| Response::error(format!("ensure_repo commit failed: {}", e)))?;
 
         if state.git_storage.has_remote() {
@@ -229,11 +244,7 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
 // Step D: RegisterUser
 // ---------------------------------------------------------------------------
 
-fn register_user(
-    state: &SharedState,
-    handler: &str,
-    display_name: &str,
-) -> Result<bool, Response> {
+fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Result<bool, Response> {
     let users_dir = state.repo_root.join("users");
     std::fs::create_dir_all(&users_dir)
         .map_err(|e| Response::error(format!("failed to create users dir: {}", e)))?;
@@ -278,10 +289,7 @@ fn register_user(
                     .fetch()
                     .map_err(|e| Response::error(format!("fetch failed during retry: {}", e)))?;
                 state.git_storage.rebase_onto_origin().map_err(|e| {
-                    Response::error(format!(
-                        "rebase failed (real conflict on user file): {}",
-                        e
-                    ))
+                    Response::error(format!("rebase failed (real conflict on user file): {}", e))
                 })?;
             }
             Err(e) => return Err(Response::error(format!("register_user push failed: {}", e))),
@@ -465,10 +473,7 @@ mod tests {
         assert!(gitignore.contains(".gitim/"));
 
         // channels/general.meta.json should exist
-        assert!(state
-            .repo_root
-            .join("channels/general.meta.json")
-            .exists());
+        assert!(state.repo_root.join("channels/general.meta.json").exists());
         assert!(state.repo_root.join("channels/general.thread").exists());
     }
 
@@ -669,7 +674,10 @@ mod tests {
 
         let thread_path = state.repo_root.join("channels/general.thread");
         let content = std::fs::read_to_string(&thread_path).unwrap();
-        assert!(content.contains("hello world"), "message missing from thread");
+        assert!(
+            content.contains("hello world"),
+            "message missing from thread"
+        );
     }
 
     /// 3 bots onboard concurrently to the same repo, then each sends a message.
@@ -756,11 +764,26 @@ mod tests {
         // === Verify: all 3 users registered in remote ===
         let verify = tmp.path().join("verify");
         clone_from_bare(&bare, &verify);
-        assert!(verify.join("users/bot-a.meta.json").exists(), "bot-a user file missing in remote");
-        assert!(verify.join("users/bot-b.meta.json").exists(), "bot-b user file missing in remote");
-        assert!(verify.join("users/bot-c.meta.json").exists(), "bot-c user file missing in remote");
-        assert!(verify.join("channels/general.meta.json").exists(), "general channel missing");
-        assert!(verify.join("channels/general.thread").exists(), "general thread missing");
+        assert!(
+            verify.join("users/bot-a.meta.json").exists(),
+            "bot-a user file missing in remote"
+        );
+        assert!(
+            verify.join("users/bot-b.meta.json").exists(),
+            "bot-b user file missing in remote"
+        );
+        assert!(
+            verify.join("users/bot-c.meta.json").exists(),
+            "bot-c user file missing in remote"
+        );
+        assert!(
+            verify.join("channels/general.meta.json").exists(),
+            "general channel missing"
+        );
+        assert!(
+            verify.join("channels/general.thread").exists(),
+            "general thread missing"
+        );
 
         // === Phase 2: Each bot sends a message ===
         // Each bot needs to pull latest state first (simulating sync)
@@ -822,14 +845,23 @@ mod tests {
         // === Verify: all 3 messages in thread ===
         // Each bot committed locally. Read from bot-a's local thread.
         let thread_a = std::fs::read_to_string(bot_a_path.join("channels/general.thread")).unwrap();
-        assert!(thread_a.contains("hello from bot-a"), "bot-a message missing");
+        assert!(
+            thread_a.contains("hello from bot-a"),
+            "bot-a message missing"
+        );
 
         // Bot B and C have their messages locally too
         let thread_b = std::fs::read_to_string(bot_b_path.join("channels/general.thread")).unwrap();
-        assert!(thread_b.contains("hello from bot-b"), "bot-b message missing");
+        assert!(
+            thread_b.contains("hello from bot-b"),
+            "bot-b message missing"
+        );
 
         let thread_c = std::fs::read_to_string(bot_c_path.join("channels/general.thread")).unwrap();
-        assert!(thread_c.contains("hello from bot-c"), "bot-c message missing");
+        assert!(
+            thread_c.contains("hello from bot-c"),
+            "bot-c message missing"
+        );
 
         println!("=== 3-bot concurrent onboard + send: ALL PASSED ===");
         println!("Bot A thread:\n{}", thread_a);
@@ -847,16 +879,21 @@ mod tests {
         // meta.json should have creator in members
         let meta_content =
             std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
-        let meta: gitim_core::types::ChannelMeta =
-            serde_json::from_str(&meta_content).unwrap();
+        let meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content).unwrap();
         assert_eq!(meta.members, vec!["alice"]);
 
         // .thread should have a join event (not be empty)
         let thread_content =
             std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
         assert!(!thread_content.is_empty(), "thread should not be empty");
-        assert!(thread_content.contains("[E:join]"), "thread should contain join event");
-        assert!(thread_content.contains("@alice"), "join event should reference alice");
+        assert!(
+            thread_content.contains("[E:join]"),
+            "thread should contain join event"
+        );
+        assert!(
+            thread_content.contains("@alice"),
+            "join event should reference alice"
+        );
     }
 
     #[tokio::test]
@@ -922,16 +959,39 @@ mod tests {
         // Verify: bot-b's local general.meta.json should have both members
         let meta_content =
             std::fs::read_to_string(bot_b_path.join("channels/general.meta.json")).unwrap();
-        let meta: gitim_core::types::ChannelMeta =
-            serde_json::from_str(&meta_content).unwrap();
-        assert!(meta.members.contains(&"bot-a".to_string()), "bot-a should be a member");
-        assert!(meta.members.contains(&"bot-b".to_string()), "bot-b should be a member");
+        let meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content).unwrap();
+        assert!(
+            meta.members.contains(&"bot-a".to_string()),
+            "bot-a should be a member"
+        );
+        assert!(
+            meta.members.contains(&"bot-b".to_string()),
+            "bot-b should be a member"
+        );
 
         // Verify: thread should have join events for both
         let thread_content =
             std::fs::read_to_string(bot_b_path.join("channels/general.thread")).unwrap();
         let file = gitim_core::parser::parse_thread(&thread_content).unwrap();
         let events = file.events();
-        assert!(events.len() >= 2, "should have at least 2 join events, got {}", events.len());
+        assert!(
+            events.len() >= 2,
+            "should have at least 2 join events, got {}",
+            events.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_admin_mode_sets_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+
+        let auth = serde_json::json!({"handler": "admin-user", "display_name": "Admin"});
+        let resp = handle_onboard(state.clone(), "git".to_string(), auth, true).await;
+        assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
+        assert!(
+            state.is_admin.load(std::sync::atomic::Ordering::SeqCst),
+            "is_admin should be true"
+        );
     }
 }

@@ -59,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_user: Option<String> = if me_path.exists() {
         let me_content = std::fs::read_to_string(&me_path)?;
         let me_json: serde_json::Value = serde_json::from_str(&me_content)?;
-        me_json.get("handler").and_then(|v| v.as_str()).map(|s| s.to_string())
+        me_json
+            .get("handler")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
@@ -72,7 +75,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debug_port = config.daemon.debug_port;
 
     let (event_tx, _) = broadcast::channel::<api::Event>(256);
-    let app_state = Arc::new(state::AppState::new(repo_root.clone(), config, event_tx, current_user));
+    let app_state = Arc::new(state::AppState::new(
+        repo_root.clone(),
+        config,
+        event_tx,
+        current_user,
+    ));
     {
         let mut u = app_state.users.write().await;
         *u = users;
@@ -115,7 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start file watcher
     let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel(100);
-    gitim_sync::watcher::watch_repo(&repo_root, watcher_tx).await.ok();
+    gitim_sync::watcher::watch_repo(&repo_root, watcher_tx)
+        .await
+        .ok();
 
     // Process watcher events - invalidate cache
     let watcher_state = app_state.clone();
@@ -128,10 +138,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Safe: handler/channel names MUST NOT contain "--" (spec §3.2, §4.1)
                     // so "--" only appears in DM filenames as the separator
                     let kind = if name.contains("--") { "dm" } else { "channel" };
-                    let _ = watcher_state.event_tx.send(gitim_daemon::api::Event::ThreadChanged {
-                        channel: name,
-                        kind: kind.to_string(),
-                    });
+                    let _ = watcher_state
+                        .event_tx
+                        .send(gitim_daemon::api::Event::ThreadChanged {
+                            channel: name,
+                            kind: kind.to_string(),
+                        });
                 }
                 gitim_sync::watcher::FileEvent::MetaModified(name) => {
                     tracing::debug!("meta modified: {}", name);

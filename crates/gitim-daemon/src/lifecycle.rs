@@ -1,6 +1,6 @@
+use crate::error::DaemonError;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::error::DaemonError;
 
 pub struct DaemonLifecycle {
     run_dir: PathBuf,

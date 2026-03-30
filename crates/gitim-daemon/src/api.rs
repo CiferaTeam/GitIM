@@ -7,10 +7,17 @@ pub enum Event {
     ThreadChanged { channel: String, kind: String },
 
     #[serde(rename = "messages_pushed")]
-    MessagesPushed { channel: String, line_numbers: Vec<u64> },
+    MessagesPushed {
+        channel: String,
+        line_numbers: Vec<u64>,
+    },
 
     #[serde(rename = "message_renumbered")]
-    MessageRenumbered { channel: String, old_line: u64, new_line: u64 },
+    MessageRenumbered {
+        channel: String,
+        old_line: u64,
+        new_line: u64,
+    },
 
     #[serde(rename = "membership_changed")]
     MembershipChanged {
@@ -44,10 +51,7 @@ pub enum Request {
     #[serde(rename = "users")]
     ListUsers,
     #[serde(rename = "thread")]
-    GetThread {
-        channel: String,
-        line_number: u64,
-    },
+    GetThread { channel: String, line_number: u64 },
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "subscribe")]
@@ -110,7 +114,9 @@ pub enum Request {
     Reindex,
 }
 
-fn default_limit() -> usize { 50 }
+fn default_limit() -> usize {
+    50
+}
 
 fn default_role() -> String {
     "member".to_string()
@@ -131,10 +137,18 @@ pub struct Response {
 
 impl Response {
     pub fn success(data: serde_json::Value) -> Self {
-        Self { ok: true, data: Some(data), error: None }
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { ok: false, data: None, error: Some(msg.into()) }
+        Self {
+            ok: false,
+            data: None,
+            error: Some(msg.into()),
+        }
     }
 }
