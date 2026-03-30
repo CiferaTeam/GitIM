@@ -155,11 +155,17 @@ export function useConnection() {
         if (changes.length === 0) return;
 
         let needRefreshUsers = false;
+        let needRefreshChannels = false;
+        const currentChannels = useStore.getState().channels;
 
         for (const change of changes) {
           if (change.kind === 'user') {
             needRefreshUsers = true;
             continue;
+          }
+          // 检查是否为新 channel（不在当前列表中）
+          if (change.channel && !currentChannels.some((c) => c.name === change.channel)) {
+            needRefreshChannels = true;
           }
           // channel / dm 变更
           if (change.channel === currentChannelRef.current) {
@@ -171,6 +177,25 @@ export function useConnection() {
           } else if (change.channel) {
             // 其他频道 → 增加未读
             incrementUnread(change.channel);
+          }
+        }
+
+        // 有新 channel/DM 出现 → 重新拉取频道列表
+        if (needRefreshChannels) {
+          const chRes = await api.channels();
+          if (chRes.ok && chRes.data) {
+            const names = (chRes.data.channels as unknown as string[]) || [];
+            // 保留已有 channel 的 unreadCount
+            const oldMap = new Map(currentChannels.map((c) => [c.name, c]));
+            const refreshed: Channel[] = names.map((name) => {
+              const old = oldMap.get(name);
+              return old ?? {
+                name,
+                kind: name.includes('--') ? 'dm' as const : 'channel' as const,
+                unreadCount: 1, // 新 channel 标记 1 条未读
+              };
+            });
+            setChannels(refreshed);
           }
         }
 
