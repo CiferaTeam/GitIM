@@ -182,7 +182,7 @@ export function App() {
 
   return (
     <div className="app-layout">
-      <Header />
+      <Header onStartDm={handleStartDm} />
       <div className="app-body">
         <Sidebar onChannelSelect={handleChannelSelect} onStartDm={handleStartDm} />
         <div className="main-content">

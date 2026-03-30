@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { useStore } from '../hooks/useStore.js';
 
-export function Header() {
+interface HeaderProps {
+  onStartDm: (targetUser: string) => void;
+}
+
+export function Header({ onStartDm }: HeaderProps) {
   const connected = useStore((s) => s.connected);
   const currentChannel = useStore((s) => s.currentChannel);
   const currentUser = useStore((s) => s.currentUser);
@@ -32,7 +36,18 @@ export function Header() {
                 {users.map((u) => (
                   <div key={u} className="members-dropdown-item">
                     <span className="members-dot" />
-                    @ {u}{u === currentUser ? ' (我)' : ''}
+                    <span className="members-name">@ {u}{u === currentUser ? ' (我)' : ''}</span>
+                    <button
+                      className="members-dm-btn"
+                      title={`发起私信: ${u}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowMembers(false);
+                        onStartDm(u);
+                      }}
+                    >
+                      💬
+                    </button>
                   </div>
                 ))}
               </div>
