@@ -82,7 +82,7 @@ impl GitStorage {
 
     pub fn push(&self) -> Result<(), GitError> {
         let output = Command::new("git")
-            .args(["push"])
+            .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {

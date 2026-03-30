@@ -51,7 +51,10 @@ if (!apiKey) {
 const baseURL = process.env.LLM_BASE_URL;
 const model = process.env.LLM_MODEL ?? "claude-sonnet-4-20250514";
 
-const client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
+const client = new Anthropic({
+  apiKey,
+  ...(baseURL ? { baseURL, defaultHeaders: { Authorization: `Bearer ${apiKey}` } } : {}),
+});
 
 // ── Build kick-off message ──────────────────────────────────
 
