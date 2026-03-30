@@ -423,35 +423,51 @@ async fn handle_register_user(
 }
 
 async fn handle_list_channels(state: SharedState) -> Response {
-    let mut channels = Vec::new();
+    let mut channels: Vec<serde_json::Value> = Vec::new();
 
-    // 扫描 channels/*.meta.json
+    // 扫描 channels/*.meta.json — 读取 members 字段
     let ch_dir = state.repo_root.join("channels");
     if ch_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&ch_dir) {
             for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".meta.json") {
-                    channels.push(name.trim_end_matches(".meta.json").to_string());
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".meta.json") {
+                    let name = fname.trim_end_matches(".meta.json").to_string();
+                    let members: Vec<String> = std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|c| serde_json::from_str::<ChannelMeta>(&c).ok())
+                        .map(|m| m.members)
+                        .unwrap_or_default();
+                    channels.push(serde_json::json!({
+                        "name": name,
+                        "kind": "channel",
+                        "members": members,
+                    }));
                 }
             }
         }
     }
 
-    // 扫描 dm/*.thread — DM 文件名即为 channel 显示名（如 alice--bob）
+    // 扫描 dm/*.thread — 从文件名提取双方 handler 作为 members
     let dm_dir = state.repo_root.join("dm");
     if dm_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&dm_dir) {
             for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".thread") {
-                    channels.push(name.trim_end_matches(".thread").to_string());
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".thread") {
+                    let name = fname.trim_end_matches(".thread").to_string();
+                    let members: Vec<String> = name.split("--").map(|s| s.to_string()).collect();
+                    channels.push(serde_json::json!({
+                        "name": name,
+                        "kind": "dm",
+                        "members": members,
+                    }));
                 }
             }
         }
     }
 
-    channels.sort();
+    channels.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Response::success(serde_json::json!({ "channels": channels }))
 }
 

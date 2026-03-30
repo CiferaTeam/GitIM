@@ -14,6 +14,28 @@ function toApiChannel(name: string): string {
   return name;
 }
 
+/** 解析 /api/channels 响应 — 兼容新格式（对象数组）和旧格式（字符串数组） */
+function parseChannelsResponse(data: Record<string, unknown>): Channel[] {
+  const raw = data.channels as unknown[];
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  if (typeof raw[0] === 'string') {
+    // 旧格式：字符串数组
+    return (raw as string[]).map((name) => ({
+      name,
+      kind: name.includes('--') ? 'dm' as const : 'channel' as const,
+      unreadCount: 0,
+      members: [],
+    }));
+  }
+  // 新格式：对象数组 {name, kind, members}
+  return (raw as Array<{ name: string; kind: string; members?: string[] }>).map((ch) => ({
+    name: ch.name,
+    kind: (ch.kind === 'dm' ? 'dm' : 'channel') as 'channel' | 'dm',
+    unreadCount: 0,
+    members: ch.members ?? [],
+  }));
+}
+
 /** HTTP 轮询连接管理 hook */
 export function useConnection() {
   const {
@@ -104,12 +126,7 @@ export function useConnection() {
       }
 
       if (chRes.ok && chRes.data) {
-        const names = (chRes.data.channels as unknown as string[]) || [];
-        const channels: Channel[] = names.map((name) => ({
-          name,
-          kind: name.includes('--') ? 'dm' as const : 'channel' as const,
-          unreadCount: 0,
-        }));
+        const channels: Channel[] = parseChannelsResponse(chRes.data);
         setChannels(channels);
 
         // 默认选中第一个频道并加载消息
@@ -184,16 +201,12 @@ export function useConnection() {
         if (needRefreshChannels) {
           const chRes = await api.channels();
           if (chRes.ok && chRes.data) {
-            const names = (chRes.data.channels as unknown as string[]) || [];
+            const freshChannels = parseChannelsResponse(chRes.data);
             // 保留已有 channel 的 unreadCount
             const oldMap = new Map(currentChannels.map((c) => [c.name, c]));
-            const refreshed: Channel[] = names.map((name) => {
-              const old = oldMap.get(name);
-              return old ?? {
-                name,
-                kind: name.includes('--') ? 'dm' as const : 'channel' as const,
-                unreadCount: 1, // 新 channel 标记 1 条未读
-              };
+            const refreshed: Channel[] = freshChannels.map((ch) => {
+              const old = oldMap.get(ch.name);
+              return old ? { ...old, members: ch.members } : { ...ch, unreadCount: 1 };
             });
             setChannels(refreshed);
           }

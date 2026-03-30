@@ -9,8 +9,13 @@ export function Header({ onStartDm }: HeaderProps) {
   const connected = useStore((s) => s.connected);
   const currentChannel = useStore((s) => s.currentChannel);
   const currentUser = useStore((s) => s.currentUser);
-  const users = useStore((s) => s.users);
+  const channels = useStore((s) => s.channels);
   const [showMembers, setShowMembers] = useState(false);
+
+  // 当前频道信息
+  const currentCh = channels.find((c) => c.name === currentChannel);
+  const isChannel = currentCh?.kind === 'channel';
+  const members = currentCh?.members ?? [];
 
   return (
     <header className="header">
@@ -21,19 +26,19 @@ export function Header({ onStartDm }: HeaderProps) {
         )}
       </div>
       <div className="header-right">
-        {currentChannel && (
+        {currentChannel && isChannel && (
           <div className="members-btn-wrapper">
             <button
               className="members-btn"
               onClick={() => setShowMembers((v) => !v)}
               title="成员列表"
             >
-              👤 {users.length}
+              👤 {members.length}
             </button>
             {showMembers && (
               <div className="members-dropdown">
-                <div className="members-dropdown-title">成员 ({users.length})</div>
-                {users.map((u) => (
+                <div className="members-dropdown-title">成员 ({members.length})</div>
+                {members.map((u) => (
                   <div key={u} className="members-dropdown-item">
                     <span className="members-dot" />
                     <span className="members-name">@ {u}{u === currentUser ? ' (我)' : ''}</span>
@@ -50,6 +55,11 @@ export function Header({ onStartDm }: HeaderProps) {
                     </button>
                   </div>
                 ))}
+                {members.length === 0 && (
+                  <div className="members-dropdown-item" style={{ color: 'var(--text-secondary)' }}>
+                    暂无成员
+                  </div>
+                )}
               </div>
             )}
           </div>

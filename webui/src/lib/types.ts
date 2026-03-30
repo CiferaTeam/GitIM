@@ -19,6 +19,7 @@ export interface Channel {
   name: string;
   kind: 'channel' | 'dm';
   unreadCount: number;
+  members: string[];
 }
 
 /** 用户信息 */
