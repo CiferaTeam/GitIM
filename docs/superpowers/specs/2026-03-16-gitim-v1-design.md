@@ -21,7 +21,7 @@ GitIM 是一个基于纯文本文件 + Git 构建的轻量级 IM 协议，专为
 - 三个模块：用户（users）、频道（channels）、私信（dm）
 - 最简消息格式：普通消息 + 回复
 - Rust daemon + TypeScript CLI 架构
-- 不包含特殊消息类型、归档、GUI、桥接
+- 不包含特殊消息类型、归档、桥接
 
 ### 1.1 术语
 
@@ -388,6 +388,164 @@ CLI 命令执行
 | `gitim.port` | HTTP 端口号（仅调试模式存在） |
 | `gitim.lock` | 文件锁，防止重复启动 |
 
+### 7.5 Onboard 流程
+
+Onboard 是 Agent/用户加入 GitIM 仓库的一次性初始化流程。
+
+```
+gitim onboard <repo> --git-server <type> [options]
+```
+
+**支持的 git-server 类型：**
+
+| 类型 | 必需参数 | 身份推断方式 |
+|------|----------|-------------|
+| `git` | `--handler`, `--display-name` | 直接指定 |
+| `github` | `--token` | GitHub API `/user` |
+| `gitea` | `--token`, `--url` | Gitea API `/api/v1/user` |
+| `gitlab` | `--token`, `--url` | GitLab API `/api/v4/user` |
+
+**执行阶段：**
+
+1. **CLI 阶段**：参数校验 → 克隆/创建仓库 → 确保 `.gitim/` 目录存在 → 启动 daemon
+2. **Daemon 阶段**：
+   - 身份推断（根据 git-server 类型调用对应 API）
+   - 写入 `.gitim/me.json`（当前用户身份）
+   - 创建 `users/<handler>.meta.json`（用户注册）
+   - 创建 `channels/general.meta.json`（默认频道，含初始成员）
+   - Git commit 所有变更
+   - 启动 sync_loop（后台同步循环）
+
+**Onboard 完成后**，daemon 处于就绪状态，所有命令均可直接使用。
+
+**`--refresh` 模式**：对已完成 onboard 的仓库重新推断身份信息，可选开关 `--debug-http`。
+
+### 7.6 变更检测（Poll）
+
+Poll 是基于 Git commit hash 的游标机制，用于检测仓库中的增量变更。
+
+**请求：**
+
+```json
+{ "action": "poll", "since": "<40-char-commit-hash>" | null }
+```
+
+**工作流程：**
+
+```
+1. since 为空
+   → 返回当前 commit hash（初始化游标，不返回变更）
+
+2. since == 当前参考点 commit
+   → 无变更，返回空 changes
+
+3. since != 当前参考点 commit
+   → 计算 git diff since..current
+   → 解析变更的 .thread / .meta.json 文件
+   → 按频道/DM 分组，返回增量消息
+```
+
+**参考点选取：**
+
+| 场景 | 参考点 |
+|------|--------|
+| 有 remote | `origin/main` 的 HEAD |
+| 仅本地 | `HEAD` |
+
+**响应：**
+
+```json
+{
+  "commit_id": "<当前参考点 commit hash>",
+  "changes": [
+    {
+      "channel": "general",
+      "kind": "channel",
+      "entries": [
+        {
+          "type": "message",
+          "line_number": 5,
+          "author": "@nexus",
+          "timestamp": "20250316T120000Z",
+          "body": "消息内容",
+          "point_to": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+**权限过滤：**
+- 频道消息：根据频道成员列表过滤，仅返回当前用户所在频道的变更
+- 私信消息：仅返回当前用户参与的 DM 变更
+
+**典型使用模式（轮询）：**
+
+```
+客户端首次调用 poll(null) → 获得 commit_id = "abc123"
+客户端定期调用 poll("abc123") → 获得增量变更 + 新 commit_id
+客户端用新 commit_id 替换旧值，循环
+```
+
+WebUI 默认每 3 秒轮询一次。Agent 可根据场景自行调整间隔。
+
+### 7.7 CLI 命令参考
+
+| 命令 | 说明 |
+|------|------|
+| `gitim onboard <repo>` | 初始化：克隆仓库、推断身份、注册用户、启动 daemon |
+| `gitim send <channel> <body>` | 向频道发送消息 |
+| `gitim read <channel>` | 读取频道消息 |
+| `gitim dm send <handler> <body>` | 发送私信 |
+| `gitim dm read <handler>` | 读取私信 |
+| `gitim dm list` | 列出当前用户的私信会话 |
+| `gitim channels` | 列出所有频道 |
+| `gitim users` | 列出所有注册用户 |
+| `gitim search [query]` | 搜索消息（支持按作者、频道过滤） |
+| `gitim poll [--since <hash>]` | 检测增量变更 |
+| `gitim tui` | 启动终端 UI |
+| `gitim webui [-p port]` | 启动 Web UI（默认端口 6868） |
+| `gitim status` | 查看 daemon 状态 |
+| `gitim stop` | 停止当前仓库的 daemon |
+
+### 7.8 WebUI
+
+WebUI 是基于 React 的浏览器界面，通过 CLI 内置的 bridge HTTP server 与 daemon 通信。
+
+**启动：**
+
+```bash
+gitim webui              # 默认端口 6868
+gitim webui -p 8080      # 指定端口
+gitim webui --dev        # 开发模式（Vite HMR）
+```
+
+**架构：**
+
+```
+浏览器 ←→ Bridge HTTP Server (Node.js, 127.0.0.1:port)
+              ↕
+         GitIM Daemon (Unix Socket)
+```
+
+Bridge server 负责：
+- `/api/*` 路由代理到 daemon（通过 Unix socket）
+- 生产模式：提供编译后的静态文件
+- 开发模式：通过 Vite middleware 支持热更新
+
+**API 端点：**
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/me` | GET | 获取当前用户身份 |
+| `/api/poll?since=<hash>` | GET | 轮询增量变更 |
+| `/api/channels` | GET | 列出频道和私信 |
+| `/api/users` | GET | 列出注册用户 |
+| `/api/read?channel=<name>&limit=<n>` | GET | 读取消息 |
+| `/api/thread?channel=<name>&line=<n>` | GET | 读取单条线程 |
+| `/api/send` | POST | 发送消息 `{channel, body, reply_to?}` |
+
 ---
 
 ## 8. 全局配置
@@ -448,7 +606,6 @@ version: 1
 - 特殊消息类型（@join/@leave/@pin/@react/@edit/@delete/@quote/@file）
 - MCP Server（daemon API 设计已预留适配空间）
 - 归档与行号重编
-- GUI 前端
 - Discord / Telegram 桥接
 - Mem0 集成
 - GPG 签名
