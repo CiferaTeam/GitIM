@@ -224,7 +224,7 @@ export async function startServer(options: ServerOptions): Promise<http.Server> 
     });
   }
 
-  const server = http.createServer(async (req, res) => {
+  const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
     const url = req.url ?? '/';
 
     // API routes
@@ -244,7 +244,7 @@ export async function startServer(options: ServerOptions): Promise<http.Server> 
   });
 
   return new Promise((resolve, reject) => {
-    server.on('error', (err: NodeJS.ErrnoException) => {
+    server.on('error', (err: Error & { code?: string }) => {
       if (err.code === 'EADDRINUSE') {
         reject(new Error(`Port ${options.port} is already in use`));
       } else {
