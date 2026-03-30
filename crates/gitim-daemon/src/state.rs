@@ -34,6 +34,7 @@ pub struct AppState {
     pub push_notify: Arc<Notify>,
     pub has_remote: bool,
     pub sync_started: AtomicBool,
+    pub is_admin: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
 }
 
@@ -53,6 +54,7 @@ impl AppState {
             push_notify: Arc::new(Notify::new()),
             has_remote,
             sync_started: AtomicBool::new(false),
+            is_admin: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
         }
     }
