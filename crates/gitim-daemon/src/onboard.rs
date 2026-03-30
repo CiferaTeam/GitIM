@@ -527,7 +527,7 @@ mod tests {
             "handler": "alice",
             "display_name": "Alice"
         });
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth).await;
+        let resp = handle_onboard(state.clone(), "git".to_string(), auth, false).await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
 
         let data = resp.data.unwrap();
@@ -556,7 +556,7 @@ mod tests {
             "display_name": "Alice"
         });
 
-        let resp1 = handle_onboard(state.clone(), "git".to_string(), auth.clone()).await;
+        let resp1 = handle_onboard(state.clone(), "git".to_string(), auth.clone(), false).await;
         assert!(resp1.ok);
         assert!(resp1.data.unwrap()["created"].as_bool().unwrap());
 
@@ -565,7 +565,7 @@ mod tests {
             .sync_started
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth).await;
+        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth, false).await;
         assert!(resp2.ok);
         // Second time: user already exists
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
@@ -635,6 +635,7 @@ mod tests {
             state.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "alice", "display_name": "Alice"}),
+            false,
         )
         .await;
         assert!(resp.ok, "onboard failed: {:?}", resp.error);
@@ -724,6 +725,7 @@ mod tests {
             state_a.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            false,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -734,6 +736,7 @@ mod tests {
             state_b.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            false,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -744,6 +747,7 @@ mod tests {
             state_c.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-c", "display_name": "Bot C"}),
+            false,
         )
         .await;
         assert!(resp_c.ok, "bot-c onboard failed: {:?}", resp_c.error);
@@ -896,6 +900,7 @@ mod tests {
             state_a.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            false,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -909,6 +914,7 @@ mod tests {
             state_b.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            false,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
