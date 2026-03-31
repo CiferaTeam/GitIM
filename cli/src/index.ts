@@ -12,6 +12,7 @@ import { tuiCommand } from './commands/tui.js';
 import { webuiCommand } from './commands/webui.js';
 import { searchCommand } from './commands/search.js';
 import { reindexCommand } from './commands/reindex.js';
+import { createChannelCommand } from './commands/create-channel.js';
 
 const program = new Command();
 
@@ -61,6 +62,15 @@ program
   .command('channels')
   .description('List channels')
   .action(() => channelsCommand());
+
+program
+  .command('create-channel <name>')
+  .description('创建新频道')
+  .option('--display-name <name>', '频道显示名称')
+  .option('--introduction <text>', '频道简介')
+  .action(async (name: string, options: { displayName?: string; introduction?: string }) => {
+    await createChannelCommand(name, options);
+  });
 
 program
   .command('users')

@@ -86,6 +86,14 @@ export class GitimClient {
     return this.request('leave_channel', { channel, targets: targets ?? [] });
   }
 
+  async createChannel(name: string, displayName?: string, introduction?: string): Promise<ApiResponse> {
+    return this.request('create_channel', {
+      name,
+      display_name: displayName,
+      introduction,
+    });
+  }
+
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
   }
