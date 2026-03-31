@@ -21,6 +21,8 @@ pub enum ComplianceError {
     EventNonZeroPointTo(u64),
     #[error("event L{0:06} has invalid JSON body")]
     EventInvalidJson(u64),
+    #[error("author '@{0}' is not a member of this channel")]
+    NotMember(String),
 }
 
 #[derive(Debug)]
@@ -30,6 +32,7 @@ pub fn validate_append(
     existing: &str,
     new_lines: &str,
     registered_users: &[&str],
+    allowed_senders: &[&str],
 ) -> Result<AppendValidation, ComplianceError> {
     let existing_file = parse_thread(existing)?;
     let new_file = parse_thread(new_lines)?;
@@ -57,6 +60,10 @@ pub fn validate_append(
 
         if !user_set.contains(entry.author().as_str()) {
             return Err(ComplianceError::UnknownAuthor(entry.author().to_string()));
+        }
+
+        if !allowed_senders.is_empty() && !allowed_senders.contains(&entry.author().as_str()) {
+            return Err(ComplianceError::NotMember(entry.author().to_string()));
         }
 
         match entry {
