@@ -42,8 +42,8 @@ pub async fn watch_repo(
                 if filename.ends_with(".thread") {
                     let name = filename.trim_end_matches(".thread").to_string();
                     let _ = tx.send(FileEvent::ThreadModified(name)).await;
-                } else if filename.ends_with(".meta.json") {
-                    let name = filename.trim_end_matches(".meta.json").to_string();
+                } else if filename.ends_with(".meta.yaml") {
+                    let name = filename.trim_end_matches(".meta.yaml").to_string();
                     let _ = tx.send(FileEvent::MetaModified(name)).await;
                 }
             }
