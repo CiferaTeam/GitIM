@@ -20,8 +20,8 @@ pub enum ValidationError {
     InvalidConfig(String),
 }
 
-pub fn validate_user_meta(json: &str) -> Result<UserMeta, ValidationError> {
-    let meta: UserMeta = serde_json::from_str(json)?;
+pub fn validate_user_meta(yaml: &str) -> Result<UserMeta, ValidationError> {
+    let meta: UserMeta = serde_yaml::from_str(yaml)?;
     if meta.display_name.is_empty() || meta.display_name.len() > 64 {
         return Err(ValidationError::FieldConstraint {
             field: "display_name".into(),
@@ -43,8 +43,8 @@ pub fn validate_user_meta(json: &str) -> Result<UserMeta, ValidationError> {
     Ok(meta)
 }
 
-pub fn validate_channel_meta(json: &str) -> Result<ChannelMeta, ValidationError> {
-    let meta: ChannelMeta = serde_json::from_str(json)?;
+pub fn validate_channel_meta(yaml: &str) -> Result<ChannelMeta, ValidationError> {
+    let meta: ChannelMeta = serde_yaml::from_str(yaml)?;
     if meta.display_name.is_empty() || meta.display_name.len() > 64 {
         return Err(ValidationError::FieldConstraint {
             field: "display_name".into(),

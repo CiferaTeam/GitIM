@@ -2,45 +2,45 @@ use gitim_core::validator::{validate_user_meta, validate_channel_meta, validate_
 
 #[test]
 fn test_valid_user_meta() {
-    let json = r#"{"display_name":"Nexus","role":"ceo","introduction":"hello"}"#;
-    assert!(validate_user_meta(json).is_ok());
+    let yaml = "display_name: Nexus\nrole: ceo\nintroduction: hello\n";
+    assert!(validate_user_meta(yaml).is_ok());
 }
 
 #[test]
 fn test_user_meta_missing_field() {
-    let json = r#"{"display_name":"Nexus","role":"ceo"}"#;
-    assert!(validate_user_meta(json).is_err());
+    let yaml = "display_name: Nexus\nrole: ceo\n";
+    assert!(validate_user_meta(yaml).is_err());
 }
 
 #[test]
 fn test_user_meta_display_name_too_long() {
     let name = "x".repeat(65);
-    let json = format!(r#"{{"display_name":"{}","role":"ceo","introduction":"hi"}}"#, name);
-    assert!(validate_user_meta(&json).is_err());
+    let yaml = format!("display_name: {}\nrole: ceo\nintroduction: hi\n", name);
+    assert!(validate_user_meta(&yaml).is_err());
 }
 
 #[test]
 fn test_valid_channel_meta() {
-    let json = r#"{"display_name":"General","created_by":"nexus","created_at":"20250316T120000Z","introduction":"hello"}"#;
-    assert!(validate_channel_meta(json).is_ok());
+    let yaml = "display_name: General\ncreated_by: nexus\ncreated_at: \"20250316T120000Z\"\nintroduction: hello\n";
+    assert!(validate_channel_meta(yaml).is_ok());
 }
 
 #[test]
 fn test_channel_meta_missing_field() {
-    let json = r#"{"display_name":"General","created_by":"nexus"}"#;
-    assert!(validate_channel_meta(json).is_err());
+    let yaml = "display_name: General\ncreated_by: nexus\n";
+    assert!(validate_channel_meta(yaml).is_err());
 }
 
 #[test]
 fn test_channel_meta_invalid_created_at() {
-    let json = r#"{"display_name":"General","created_by":"nexus","created_at":"not-a-date","introduction":"hello"}"#;
-    assert!(validate_channel_meta(json).is_err());
+    let yaml = "display_name: General\ncreated_by: nexus\ncreated_at: not-a-date\nintroduction: hello\n";
+    assert!(validate_channel_meta(yaml).is_err());
 }
 
 #[test]
 fn test_channel_meta_invalid_created_by() {
-    let json = r#"{"display_name":"General","created_by":"INVALID","created_at":"20250316T120000Z","introduction":"hello"}"#;
-    assert!(validate_channel_meta(json).is_err());
+    let yaml = "display_name: General\ncreated_by: INVALID\ncreated_at: \"20250316T120000Z\"\nintroduction: hello\n";
+    assert!(validate_channel_meta(yaml).is_err());
 }
 
 #[test]
