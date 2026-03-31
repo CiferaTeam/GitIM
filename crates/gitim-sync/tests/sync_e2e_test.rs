@@ -3,8 +3,8 @@ use std::process::Command;
 
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::Handler;
-use gitim_sync::conflict::resolve_content;
+use gitim_core::types::{ChannelMeta, Handler};
+use gitim_sync::conflict::{merge_channel_meta, resolve_content};
 use gitim_sync::git::GitStorage;
 use tempfile::TempDir;
 
@@ -230,4 +230,107 @@ fn test_sync_pulls_when_nothing_to_push() {
     assert_eq!(file.messages().len(), 1);
     assert_eq!(file.messages()[0].author.as_str(), "alice");
     assert_eq!(file.messages()[0].body, "hello from alice");
+}
+
+#[test]
+fn test_sync_resolves_concurrent_meta_changes() {
+    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let meta_rel = PathBuf::from("channels/general.meta.yaml");
+    let meta_a = clone_a_dir.path().join(&meta_rel);
+    let meta_b = clone_b_dir.path().join(&meta_rel);
+
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    let repo_b = GitStorage::new(clone_b_dir.path());
+
+    // Step 1: repo_a creates channels/general.meta.yaml with members: [god], pushes
+    let initial_meta = ChannelMeta {
+        display_name: "General".to_string(),
+        created_by: "god".to_string(),
+        created_at: "20260317T100000Z".to_string(),
+        introduction: "General channel".to_string(),
+        members: vec!["god".to_string()],
+    };
+    std::fs::write(&meta_a, serde_yaml::to_string(&initial_meta).unwrap()).unwrap();
+    repo_a
+        .add_and_commit(&["channels/general.meta.yaml"], "meta: create general")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    // Step 2: repo_b pulls
+    repo_b.pull_rebase().unwrap();
+
+    // Step 3: repo_a adds alice to members, pushes
+    let mut a_meta: ChannelMeta =
+        serde_yaml::from_str(&std::fs::read_to_string(&meta_a).unwrap()).unwrap();
+    a_meta.members.push("alice".to_string());
+    a_meta.members.sort();
+    std::fs::write(&meta_a, serde_yaml::to_string(&a_meta).unwrap()).unwrap();
+    repo_a
+        .add_and_commit(&["channels/general.meta.yaml"], "meta: add alice")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    // Step 4: repo_b adds bob to members (from old base with only god), commits
+    let mut b_meta: ChannelMeta =
+        serde_yaml::from_str(&std::fs::read_to_string(&meta_b).unwrap()).unwrap();
+    b_meta.members.push("bob".to_string());
+    b_meta.members.sort();
+    std::fs::write(&meta_b, serde_yaml::to_string(&b_meta).unwrap()).unwrap();
+    repo_b
+        .add_and_commit(&["channels/general.meta.yaml"], "meta: add bob")
+        .unwrap();
+
+    // Step 5: Manual sync flow mirroring sync_loop logic
+    // Push should fail (remote has diverged)
+    assert!(repo_b.push().is_err(), "push should fail due to conflict");
+
+    // Fetch remote changes
+    repo_b.fetch().unwrap();
+
+    // Capture changed meta files
+    let changed_meta_files = repo_b.changed_files_unpushed("*.meta.yaml").unwrap();
+    assert!(!changed_meta_files.is_empty(), "should have changed meta files");
+
+    // Read local meta content before discard
+    let mut local_metas = std::collections::HashMap::new();
+    for rel_path in &changed_meta_files {
+        let abs_path = clone_b_dir.path().join(rel_path);
+        let content = std::fs::read_to_string(&abs_path).unwrap();
+        local_metas.insert(rel_path.clone(), content);
+    }
+
+    // Discard unpushed (reset to remote state)
+    repo_b.discard_unpushed().unwrap();
+
+    // Read remote content, parse, merge, write
+    for (rel_path, local_content) in &local_metas {
+        let abs_path = clone_b_dir.path().join(rel_path);
+        let remote_content = std::fs::read_to_string(&abs_path).unwrap();
+
+        let local_meta: ChannelMeta = serde_yaml::from_str(local_content).unwrap();
+        let remote_meta: ChannelMeta = serde_yaml::from_str(&remote_content).unwrap();
+
+        let merged = merge_channel_meta(&local_meta, &remote_meta);
+        std::fs::write(&abs_path, serde_yaml::to_string(&merged).unwrap()).unwrap();
+    }
+
+    // Commit and push
+    let meta_paths: Vec<&str> = changed_meta_files
+        .iter()
+        .map(|p| p.to_str().unwrap())
+        .collect();
+    repo_b
+        .add_and_commit(&meta_paths, "meta: sync after rebase")
+        .unwrap();
+    repo_b.push().expect("push should succeed after meta merge");
+
+    // Step 6: Assert merged members = ["alice", "bob", "god"]
+    let final_content = std::fs::read_to_string(&meta_b).unwrap();
+    let final_meta: ChannelMeta = serde_yaml::from_str(&final_content).unwrap();
+    assert_eq!(
+        final_meta.members,
+        vec!["alice".to_string(), "bob".to_string(), "god".to_string()],
+        "merged members should be union of both sides, sorted"
+    );
 }

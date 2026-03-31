@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,6 +139,16 @@ where
             }
         };
 
+        // Capture changed meta files BEFORE attempting rebase
+        let changed_meta_files = repo.changed_files_unpushed("*.meta.yaml").unwrap_or_default();
+        let mut local_metas: HashMap<PathBuf, String> = HashMap::new();
+        for rel_path in &changed_meta_files {
+            let abs_path = repo.root().join(rel_path);
+            if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                local_metas.insert(rel_path.clone(), content);
+            }
+        }
+
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
@@ -154,10 +165,10 @@ where
                 }
             }
             Err(_) => {
-                // Rebase failed — use thread-aware conflict resolution
-                if local_additions.is_empty() {
+                // Rebase failed — use thread-aware + meta conflict resolution
+                if local_additions.is_empty() && local_metas.is_empty() {
                     let _ = repo.discard_unpushed();
-                    warn!("sync: non-thread rebase conflict, aborted");
+                    warn!("sync: non-thread/meta rebase conflict, aborted");
                     return;
                 }
 
@@ -167,48 +178,107 @@ where
                     return;
                 }
 
-                match conflict::resolve_content(&local_additions, repo.root()) {
-                    Ok((resolved_files, mappings)) => {
-                        // Write resolved content to files
-                        let mut modified_paths: Vec<String> = Vec::new();
-                        for resolved in &resolved_files {
-                            let abs_path = repo.root().join(&resolved.path);
-                            if let Err(e) = std::fs::write(&abs_path, &resolved.content) {
-                                warn!("sync: failed to write resolved file: {}", e);
-                                return;
-                            }
-                            modified_paths.push(resolved.path.to_str().unwrap_or("").to_string());
-                        }
+                let mut modified_paths: Vec<String> = Vec::new();
 
-                        // Commit resolved content
-                        if !modified_paths.is_empty() {
-                            let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
-                            let commit_msg = build_rebase_commit_msg(&mappings, &local_additions);
-                            if let Err(e) = repo.add_and_commit(&path_refs, &commit_msg) {
-                                warn!("sync: commit after conflict resolution failed: {}", e);
-                                return;
+                // Thread resolution
+                let thread_mappings = if !local_additions.is_empty() {
+                    match conflict::resolve_content(&local_additions, repo.root()) {
+                        Ok((resolved_files, mappings)) => {
+                            for resolved in &resolved_files {
+                                let abs_path = repo.root().join(&resolved.path);
+                                if let Err(e) = std::fs::write(&abs_path, &resolved.content) {
+                                    warn!("sync: failed to write resolved file: {}", e);
+                                    return;
+                                }
+                                modified_paths.push(resolved.path.to_str().unwrap_or("").to_string());
                             }
+                            mappings
                         }
-
-                        for m in &mappings {
-                            on_renumbered(m.file.clone(), m.old_line, m.new_line);
+                        Err(e) => {
+                            warn!("sync: conflict resolution failed: {}", e);
+                            return;
                         }
+                    }
+                } else {
+                    Vec::new()
+                };
 
-                        match repo.push() {
-                            Ok(()) => {
-                                on_pushed();
-                                info!("sync: push complete after conflict resolution (attempt {})", attempt);
-                                return;
+                // Meta resolution
+                for (rel_path, local_content) in &local_metas {
+                    let abs_path = repo.root().join(rel_path);
+                    if rel_path.starts_with("channels/") {
+                        // Channel meta: merge members as union, scalars take remote
+                        let remote_content = match std::fs::read_to_string(&abs_path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!("sync: failed to read remote meta {}: {}", rel_path.display(), e);
+                                continue;
                             }
-                            Err(_) => {
-                                warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                        };
+                        let local_meta: gitim_core::types::ChannelMeta = match serde_yaml::from_str(local_content) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                warn!("sync: failed to parse local meta {}: {}", rel_path.display(), e);
+                                continue;
+                            }
+                        };
+                        let remote_meta: gitim_core::types::ChannelMeta = match serde_yaml::from_str(&remote_content) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                warn!("sync: failed to parse remote meta {}: {}", rel_path.display(), e);
+                                continue;
+                            }
+                        };
+                        let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
+                        match serde_yaml::to_string(&merged) {
+                            Ok(yaml) => {
+                                if let Err(e) = std::fs::write(&abs_path, &yaml) {
+                                    warn!("sync: failed to write merged meta: {}", e);
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("sync: failed to serialize merged meta: {}", e);
                                 continue;
                             }
                         }
+                    } else {
+                        // User meta or other: write local content back as-is
+                        if let Err(e) = std::fs::write(&abs_path, local_content) {
+                            warn!("sync: failed to write back local meta: {}", e);
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        warn!("sync: conflict resolution failed: {}", e);
+                    modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
+                }
+
+                // Commit resolved content
+                if !modified_paths.is_empty() {
+                    let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
+                    let commit_msg = if !thread_mappings.is_empty() {
+                        build_rebase_commit_msg(&thread_mappings, &local_additions)
+                    } else {
+                        "meta: sync after rebase".to_string()
+                    };
+                    if let Err(e) = repo.add_and_commit(&path_refs, &commit_msg) {
+                        warn!("sync: commit after conflict resolution failed: {}", e);
                         return;
+                    }
+                }
+
+                for m in &thread_mappings {
+                    on_renumbered(m.file.clone(), m.old_line, m.new_line);
+                }
+
+                match repo.push() {
+                    Ok(()) => {
+                        on_pushed();
+                        info!("sync: push complete after conflict resolution (attempt {})", attempt);
+                        return;
+                    }
+                    Err(_) => {
+                        warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                        continue;
                     }
                 }
             }
