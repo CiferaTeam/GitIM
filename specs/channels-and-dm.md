@@ -9,7 +9,7 @@
 ### 文件
 
 ```
-channels/<channel_name>.meta.json    # 元信息
+channels/<channel_name>.meta.yaml    # 元信息
 channels/<channel_name>.thread       # 消息文件
 ```
 
@@ -29,7 +29,7 @@ channels/<channel_name>.thread       # 消息文件
 ### 文件
 
 ```
-dm/<handler1>--<handler2>.meta.json
+dm/<handler1>--<handler2>.meta.yaml
 dm/<handler1>--<handler2>.thread
 ```
 

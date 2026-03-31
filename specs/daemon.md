@@ -199,7 +199,7 @@ JSON 请求 / JSON 响应，通过 Unix Domain Socket 通信（行分隔 JSON）
 
 ### File Watcher
 
-使用 `notify` crate 监控 `channels/` 和 `dm/` 目录，区分 `.thread` 和 `.meta.json` 事件，通过 tokio mpsc 转发给 daemon 主循环。文件变更时清除 thread cache 对应条目并广播 Event。
+使用 `notify` crate 监控 `channels/` 和 `dm/` 目录，区分 `.thread` 和 `.meta.yaml` 事件，通过 tokio mpsc 转发给 daemon 主循环。文件变更时清除 thread cache 对应条目并广播 Event。
 
 ---
 

@@ -8,8 +8,6 @@ pub mod read_check;
 
 #[derive(Error, Debug)]
 pub enum ValidationError {
-    #[error("JSON parse error: {0}")]
-    JsonParse(#[from] serde_json::Error),
     #[error("YAML parse error: {0}")]
     YamlParse(#[from] serde_yaml::Error),
     #[error("field '{field}' {reason}")]

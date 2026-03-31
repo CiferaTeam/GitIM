@@ -17,13 +17,13 @@
 │       ├── gitim.port             # HTTP 端口（仅调试模式）
 │       └── gitim.lock             # 文件锁，防止重复启动
 ├── users/                         # 用户目录（必需）
-│   └── <handler>.meta.json
+│   └── <handler>.meta.yaml
 ├── channels/                      # 公共频道（必需）
 │   ├── <channel_name>.thread
-│   └── <channel_name>.meta.json
+│   └── <channel_name>.meta.yaml
 └── dm/                            # 私信（可选）
     ├── <handler1>--<handler2>.thread
-    └── <handler1>--<handler2>.meta.json
+    └── <handler1>--<handler2>.meta.yaml
 ```
 
 ### 必需结构

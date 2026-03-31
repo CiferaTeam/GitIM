@@ -7,7 +7,7 @@
 ## 用户文件
 
 ```
-users/<handler>.meta.json
+users/<handler>.meta.yaml
 ```
 
 文件名 = GitHub handle（小写）。`users/` 目录下 MUST 至少存在一个身份文件。
@@ -82,7 +82,7 @@ gitim onboard <repo_name> [org]
 
 ### 用户注册
 
-Onboard 推断身份后，检查 `users/<handler>.meta.json` 是否存在：
+Onboard 推断身份后，检查 `users/<handler>.meta.yaml` 是否存在：
 - **存在** → 直接使用
 - **不存在** → 调用 daemon 的 `register_user` API 创建文件，由 daemon 负责写入、commit 和 push
 
