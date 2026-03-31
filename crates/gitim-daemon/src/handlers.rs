@@ -885,33 +885,40 @@ async fn handle_create_channel(
         .git_storage
         .add_and_commit_as(&[&meta_rel, &thread_rel], &commit_msg, Some(&author))
     {
-        warn!("git commit failed for create_channel {}: {}", name, e);
+        return Response::error(format!("create_channel commit failed: {}", e));
     }
 
-    // 8. Push with retry
+    // 8. Push with retry (skip if no remote)
     if state.git_storage.has_remote() {
+        let mut pushed = false;
         for attempt in 1..=MAX_PUSH_RETRIES {
             match state.git_storage.push() {
-                Ok(()) => break,
+                Ok(()) => {
+                    pushed = true;
+                    break;
+                }
                 Err(GitError::PushConflict) => {
                     warn!(
                         "create_channel: push conflict (attempt {}/{}), rebasing",
                         attempt, MAX_PUSH_RETRIES
                     );
                     if let Err(e) = state.git_storage.fetch() {
-                        warn!("create_channel: fetch failed during retry: {}", e);
-                        break;
+                        return Response::error(format!("create_channel fetch failed: {}", e));
                     }
                     if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        warn!("create_channel: rebase failed: {}", e);
-                        break;
+                        return Response::error(format!("create_channel rebase failed: {}", e));
                     }
                 }
                 Err(e) => {
-                    warn!("create_channel: push failed: {}", e);
-                    break;
+                    return Response::error(format!("create_channel push failed: {}", e));
                 }
             }
+        }
+        if !pushed {
+            return Response::error(format!(
+                "create_channel: push still conflicting after {} retries",
+                MAX_PUSH_RETRIES
+            ));
         }
     }
 
