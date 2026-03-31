@@ -47,8 +47,8 @@ async fn setup_git_test_repo() -> (TempDir, Arc<AppState>) {
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
     std::fs::write(
-        root.join("users/alice.meta.json"),
-        r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
 

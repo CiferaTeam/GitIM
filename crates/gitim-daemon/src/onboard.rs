@@ -472,8 +472,8 @@ mod tests {
         let gitignore = std::fs::read_to_string(state.repo_root.join(".gitignore")).unwrap();
         assert!(gitignore.contains(".gitim/"));
 
-        // channels/general.meta.json should exist
-        assert!(state.repo_root.join("channels/general.meta.json").exists());
+        // channels/general.meta.yaml should exist
+        assert!(state.repo_root.join("channels/general.meta.yaml").exists());
         assert!(state.repo_root.join("channels/general.thread").exists());
     }
 
@@ -499,10 +499,10 @@ mod tests {
 
         let created = register_user(&state, "bob", "Bob Builder").unwrap();
         assert!(created);
-        assert!(state.repo_root.join("users/bob.meta.json").exists());
+        assert!(state.repo_root.join("users/bob.meta.yaml").exists());
 
-        let content: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(state.repo_root.join("users/bob.meta.json")).unwrap(),
+        let content: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(state.repo_root.join("users/bob.meta.yaml")).unwrap(),
         )
         .unwrap();
         assert_eq!(content["display_name"], "Bob Builder");
@@ -541,8 +541,8 @@ mod tests {
 
         // Verify side effects
         assert!(state.repo_root.join(".gitim/me.json").exists());
-        assert!(state.repo_root.join("channels/general.meta.json").exists());
-        assert!(state.repo_root.join("users/alice.meta.json").exists());
+        assert!(state.repo_root.join("channels/general.meta.yaml").exists());
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
 
         let current = state.current_user.read().await;
         assert_eq!(current.as_deref(), Some("alice"));
@@ -652,8 +652,8 @@ mod tests {
         if let Ok(entries) = std::fs::read_dir(&users_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".meta.json") {
-                    users.push(name.trim_end_matches(".meta.json").to_string());
+                if name.ends_with(".meta.yaml") {
+                    users.push(name.trim_end_matches(".meta.yaml").to_string());
                 }
             }
         }
@@ -765,19 +765,19 @@ mod tests {
         let verify = tmp.path().join("verify");
         clone_from_bare(&bare, &verify);
         assert!(
-            verify.join("users/bot-a.meta.json").exists(),
+            verify.join("users/bot-a.meta.yaml").exists(),
             "bot-a user file missing in remote"
         );
         assert!(
-            verify.join("users/bot-b.meta.json").exists(),
+            verify.join("users/bot-b.meta.yaml").exists(),
             "bot-b user file missing in remote"
         );
         assert!(
-            verify.join("users/bot-c.meta.json").exists(),
+            verify.join("users/bot-c.meta.yaml").exists(),
             "bot-c user file missing in remote"
         );
         assert!(
-            verify.join("channels/general.meta.json").exists(),
+            verify.join("channels/general.meta.yaml").exists(),
             "general channel missing"
         );
         assert!(
@@ -796,8 +796,8 @@ mod tests {
             if let Ok(entries) = std::fs::read_dir(&users_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".meta.json") {
-                        users.push(name.trim_end_matches(".meta.json").to_string());
+                    if name.ends_with(".meta.yaml") {
+                        users.push(name.trim_end_matches(".meta.yaml").to_string());
                     }
                 }
             }
@@ -876,10 +876,10 @@ mod tests {
 
         ensure_repo(&state, "alice").unwrap();
 
-        // meta.json should have creator in members
+        // meta.yaml should have creator in members
         let meta_content =
-            std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
-        let meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content).unwrap();
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+        let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(meta.members, vec!["alice"]);
 
         // .thread should have a join event (not be empty)
@@ -956,10 +956,10 @@ mod tests {
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
 
-        // Verify: bot-b's local general.meta.json should have both members
+        // Verify: bot-b's local general.meta.yaml should have both members
         let meta_content =
-            std::fs::read_to_string(bot_b_path.join("channels/general.meta.json")).unwrap();
-        let meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content).unwrap();
+            std::fs::read_to_string(bot_b_path.join("channels/general.meta.yaml")).unwrap();
+        let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
         assert!(
             meta.members.contains(&"bot-a".to_string()),
             "bot-a should be a member"

@@ -51,8 +51,8 @@ async fn setup_no_remote() -> (TempDir, Arc<AppState>) {
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
     std::fs::write(
-        root.join("users/alice.meta.json"),
-        r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
 
@@ -104,8 +104,8 @@ async fn setup_with_remote() -> (TempDir, TempDir, Arc<AppState>) {
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
     std::fs::write(
-        root.join("users/alice.meta.json"),
-        r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
     // Create an empty thread file so the channel exists
@@ -271,8 +271,8 @@ async fn push_conflict_still_succeeds() {
     // Also create bob's user file so the thread content is valid
     std::fs::create_dir_all(rival.path().join("users")).ok();
     std::fs::write(
-        rival.path().join("users/bob.meta.json"),
-        r#"{"display_name":"Bob","role":"dev","introduction":"hi"}"#,
+        rival.path().join("users/bob.meta.yaml"),
+        "display_name: Bob\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
     run_git(rival.path(), &["add", "."]);

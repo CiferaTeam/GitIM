@@ -69,7 +69,7 @@ fn setup_two_clones_with_initial_commit() -> (TempDir, TempDir, TempDir) {
     (bare_dir, clone_a_dir, clone_b_dir)
 }
 
-/// Simulate the ensure_repo file creation: .gitignore + channels/general.meta.json +
+/// Simulate the ensure_repo file creation: .gitignore + channels/general.meta.yaml +
 /// channels/general.thread. Returns the list of relative paths that were written.
 fn write_ensure_repo_files(root: &Path) -> Vec<String> {
     // .gitignore
@@ -80,21 +80,16 @@ fn write_ensure_repo_files(root: &Path) -> Vec<String> {
     let channels_dir = root.join("channels");
     std::fs::create_dir_all(&channels_dir).unwrap();
 
-    let meta_path = channels_dir.join("general.meta.json");
-    let meta = serde_json::json!({
-        "display_name": "General",
-        "created_by": "alice",
-        "created_at": "20260321T000000Z",
-        "introduction": "默认频道",
-    });
-    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    let meta_path = channels_dir.join("general.meta.yaml");
+    let meta = "display_name: General\ncreated_by: alice\ncreated_at: 20260321T000000Z\nintroduction: 默认频道\n";
+    std::fs::write(&meta_path, meta).unwrap();
 
     let thread_path = channels_dir.join("general.thread");
     std::fs::write(&thread_path, "").unwrap();
 
     vec![
         ".gitignore".to_string(),
-        "channels/general.meta.json".to_string(),
+        "channels/general.meta.yaml".to_string(),
         "channels/general.thread".to_string(),
     ]
 }
@@ -176,9 +171,9 @@ fn test_ensure_repo_push_conflict_discard_succeeds() {
     assert!(
         verify_clone
             .path()
-            .join("channels/general.meta.json")
+            .join("channels/general.meta.yaml")
             .exists(),
-        "origin should have general.meta.json from Clone A"
+        "origin should have general.meta.yaml from Clone A"
     );
 
     let gitignore_content =
@@ -251,18 +246,13 @@ fn test_register_user_concurrent_rebase_retry_succeeds() {
     // ---- Clone A: register alice ----
     let users_dir_a = clone_a_dir.path().join("users");
     std::fs::create_dir_all(&users_dir_a).unwrap();
-    let alice_meta = serde_json::json!({
-        "display_name": "Alice",
-        "role": "member",
-        "introduction": "GitIM user",
-    });
     std::fs::write(
-        users_dir_a.join("alice.meta.json"),
-        serde_json::to_string_pretty(&alice_meta).unwrap(),
+        users_dir_a.join("alice.meta.yaml"),
+        "display_name: Alice\nrole: member\nintroduction: GitIM user\n",
     )
     .unwrap();
     repo_a
-        .add_and_commit(&["users/alice.meta.json"], "user: register @alice")
+        .add_and_commit(&["users/alice.meta.yaml"], "user: register @alice")
         .unwrap();
     repo_a.push().expect("Clone A (alice) push should succeed");
 
@@ -270,18 +260,13 @@ fn test_register_user_concurrent_rebase_retry_succeeds() {
     let repo_b = GitStorage::new(clone_b_dir.path());
     let users_dir_b = clone_b_dir.path().join("users");
     std::fs::create_dir_all(&users_dir_b).unwrap();
-    let bob_meta = serde_json::json!({
-        "display_name": "Bob",
-        "role": "member",
-        "introduction": "GitIM user",
-    });
     std::fs::write(
-        users_dir_b.join("bob.meta.json"),
-        serde_json::to_string_pretty(&bob_meta).unwrap(),
+        users_dir_b.join("bob.meta.yaml"),
+        "display_name: Bob\nrole: member\nintroduction: GitIM user\n",
     )
     .unwrap();
     repo_b
-        .add_and_commit(&["users/bob.meta.json"], "user: register @bob")
+        .add_and_commit(&["users/bob.meta.yaml"], "user: register @bob")
         .unwrap();
 
     // ---- Clone B: push → PushConflict ----
@@ -314,23 +299,23 @@ fn test_register_user_concurrent_rebase_retry_succeeds() {
         ],
     );
     assert!(
-        verify_clone.path().join("users/alice.meta.json").exists(),
-        "origin should have alice.meta.json"
+        verify_clone.path().join("users/alice.meta.yaml").exists(),
+        "origin should have alice.meta.yaml"
     );
     assert!(
-        verify_clone.path().join("users/bob.meta.json").exists(),
-        "origin should have bob.meta.json"
+        verify_clone.path().join("users/bob.meta.yaml").exists(),
+        "origin should have bob.meta.yaml"
     );
 
     // Verify content of both user files
-    let alice_content: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(verify_clone.path().join("users/alice.meta.json")).unwrap(),
+    let alice_content: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(verify_clone.path().join("users/alice.meta.yaml")).unwrap(),
     )
     .unwrap();
     assert_eq!(alice_content["display_name"], "Alice");
 
-    let bob_content: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(verify_clone.path().join("users/bob.meta.json")).unwrap(),
+    let bob_content: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(verify_clone.path().join("users/bob.meta.yaml")).unwrap(),
     )
     .unwrap();
     assert_eq!(bob_content["display_name"], "Bob");
@@ -354,12 +339,12 @@ fn test_register_user_after_rebase_push_no_unpushed_commits() {
     let users_dir_a = clone_a_dir.path().join("users");
     std::fs::create_dir_all(&users_dir_a).unwrap();
     std::fs::write(
-        users_dir_a.join("alice.meta.json"),
-        r#"{"display_name":"Alice","role":"member","introduction":"GitIM user"}"#,
+        users_dir_a.join("alice.meta.yaml"),
+        "display_name: Alice\nrole: member\nintroduction: GitIM user\n",
     )
     .unwrap();
     repo_a
-        .add_and_commit(&["users/alice.meta.json"], "user: register @alice")
+        .add_and_commit(&["users/alice.meta.yaml"], "user: register @alice")
         .unwrap();
     repo_a.push().unwrap();
 
@@ -368,12 +353,12 @@ fn test_register_user_after_rebase_push_no_unpushed_commits() {
     let users_dir_b = clone_b_dir.path().join("users");
     std::fs::create_dir_all(&users_dir_b).unwrap();
     std::fs::write(
-        users_dir_b.join("bob.meta.json"),
-        r#"{"display_name":"Bob","role":"member","introduction":"GitIM user"}"#,
+        users_dir_b.join("bob.meta.yaml"),
+        "display_name: Bob\nrole: member\nintroduction: GitIM user\n",
     )
     .unwrap();
     repo_b
-        .add_and_commit(&["users/bob.meta.json"], "user: register @bob")
+        .add_and_commit(&["users/bob.meta.yaml"], "user: register @bob")
         .unwrap();
 
     assert!(matches!(repo_b.push(), Err(GitError::PushConflict)));

@@ -782,7 +782,7 @@ mod tests {
             parse_diff_path("dm/alice--bob.thread"),
             Some(("alice--bob".to_string(), "dm"))
         );
-        assert_eq!(parse_diff_path("users/alice.meta.json"), None);
+        assert_eq!(parse_diff_path("users/alice.meta.yaml"), None);
     }
 
     #[test]

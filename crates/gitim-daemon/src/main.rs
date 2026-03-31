@@ -46,8 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for entry in std::fs::read_dir(&users_dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".meta.json") {
-                let handler = name.trim_end_matches(".meta.json").to_string();
+            if name.ends_with(".meta.yaml") {
+                let handler = name.trim_end_matches(".meta.yaml").to_string();
                 users.push(handler);
             }
         }

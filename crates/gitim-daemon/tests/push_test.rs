@@ -20,8 +20,8 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
     std::fs::create_dir_all(root.join("channels")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
     std::fs::write(
-        root.join("users/alice.meta.json"),
-        r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
 
@@ -138,8 +138,8 @@ async fn handle_send_broadcasts_dm_event() {
         users.push("bob".to_string());
     }
     std::fs::write(
-        state.repo_root.join("users/bob.meta.json"),
-        r#"{"display_name":"Bob","role":"dev","introduction":"hi"}"#,
+        state.repo_root.join("users/bob.meta.yaml"),
+        "display_name: Bob\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
     std::fs::create_dir_all(state.repo_root.join("dm")).unwrap();
