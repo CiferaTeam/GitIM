@@ -5,13 +5,17 @@
 
 ## 系统/架构类
 
-### P1. 频道无读权限隔离（根本性）
+### ✅ P1. 频道无读权限隔离（根本性）
 
 - **现象**：charlie（女巫）和 eve（村民）的 clone 里都有完整的 `channels/wolves.thread`
 - **根因**：git sync 拉取所有文件到所有 clone，无文件级 ACL
 - **影响**：charlie 实际看到狼人私聊内容后在 general 不断泄露
-- **分类**：架构限制
-- **修复方向**：daemon 的 poll / read_messages 需要过滤非成员频道；但物理文件仍在 clone 里，依赖客户端自律
+- **分类**：设计如此，非 bug
+- **分析**：物理文件在 clone 里是 git 固有限制。但 daemon API 层面已有完整隔离：
+  - `poll`：已实现 membership 过滤（非成员频道变更不推送）
+  - `send`：已加 membership 校验（非成员不能发消息）
+  - `read_messages` / `list_channels`：无过滤，但 player agent 工具集不含这两个 API（仅 send_message + list_users）
+  - Player 获取内容仅通过 poll（已过滤），不直接读文件
 
 ### ✅ P2. general.meta.json members 不完整
 
@@ -28,12 +32,12 @@
 - **分类**：daemon bug — 频道自动创建应同时生成 meta
 - **关联**：P1 — 即使有 meta 也拦不住 git sync 的读取
 
-### P4. 缺少 join_channel 工具
+### ✅ P4. 缺少 join_channel 工具
 
 - **现象**：God 系统提示词写了"用 join_channel 工具逐个拉狼人成员入群"，但 tools.ts 只有 5 个工具（send_message, read_messages, list_channels, list_users, get_thread）
 - **根因**：工具集不完整，God 被指示使用不存在的工具
 - **分类**：demo 代码 bug
-- **修复**：tools.ts 添加 join_channel / create_channel 工具，或修改 God 提示词
+- **修复**：tools.ts 添加 join_channel 工具定义 + executeTool 处理分支（fix/werewolf-bugs 分支）
 
 ### ⚠️ P5. `dm:god` 格式消息静默丢失
 
@@ -83,9 +87,9 @@
 | 根因 | 涉及问题 | 修复层 | 状态 |
 |------|---------|--------|------|
 | sync_loop 冲突解决不处理 meta | P2 | sync_loop + meta YAML 迁移 | ✅ 已修复 |
-| git 全量同步无 ACL | P1 | daemon read 过滤 | 待修 |
+| git 全量同步无 ACL | P1 | 设计如此（poll/send 已过滤，player 工具集已限制）| ✅ 非 bug |
 | send_message 不生成 meta | P3 | daemon send | 待修 |
-| 工具集不完整 | P4 | demo tools.ts | 待修 |
+| 工具集不完整 | P4 | demo tools.ts | ✅ 已修复（join_channel 已加）|
 | daemon 对无效输入静默 | P5 | daemon send 校验 | ⚠️ 部分（membership 校验已加，DM 格式校验待补）|
 | 缺少游戏状态层 | P6 | 暂不修 | 低优先 |
 | prompt + 模型质量 | P7, P8, P9, P10 | prompts.ts | 待修 |
