@@ -305,3 +305,33 @@ fn test_diff_range_invalid_commit() {
     let result = repo.diff_range("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD");
     assert!(result.is_err(), "diff_range with invalid commit should error");
 }
+
+#[test]
+fn test_changed_files_unpushed_detects_meta() {
+    let (_bare_dir, clone_dir, repo) = setup_repo_pair();
+
+    let ch_dir = clone_dir.path().join("channels");
+    std::fs::create_dir_all(&ch_dir).unwrap();
+    std::fs::write(ch_dir.join("general.meta.yaml"), "display_name: General\n").unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add meta"]);
+
+    let changed = repo.changed_files_unpushed("*.meta.yaml").unwrap();
+    assert_eq!(changed.len(), 1);
+    assert!(changed[0].to_str().unwrap().contains("general.meta.yaml"));
+}
+
+#[test]
+fn test_changed_files_unpushed_empty_when_pushed() {
+    let (_bare_dir, clone_dir, repo) = setup_repo_pair();
+
+    let ch_dir = clone_dir.path().join("channels");
+    std::fs::create_dir_all(&ch_dir).unwrap();
+    std::fs::write(ch_dir.join("general.meta.yaml"), "display_name: General\n").unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add meta"]);
+    repo.push().unwrap();
+
+    let changed = repo.changed_files_unpushed("*.meta.yaml").unwrap();
+    assert!(changed.is_empty());
+}

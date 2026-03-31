@@ -220,6 +220,25 @@ impl GitStorage {
         Ok(())
     }
 
+    /// List files changed between origin/main and HEAD, matching a pattern.
+    /// Returns relative paths (e.g. "channels/general.meta.yaml").
+    pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "origin/main..HEAD", "--", pattern])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
     /// Discard all unpushed local changes, reset to remote state.
     /// Encapsulates rebase_abort + reset_hard_origin.
     pub fn discard_unpushed(&self) -> Result<(), GitError> {
