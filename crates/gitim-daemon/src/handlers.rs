@@ -241,9 +241,9 @@ async fn handle_send(
         let meta_path = state
             .repo_root
             .join("channels")
-            .join(format!("{}.meta.json", channel));
+            .join(format!("{}.meta.yaml", channel));
         if let Ok(content) = std::fs::read_to_string(&meta_path) {
-            if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+            if let Ok(meta) = serde_yaml::from_str::<ChannelMeta>(&content) {
                 meta.members
             } else {
                 Vec::new()
