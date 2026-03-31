@@ -3,7 +3,7 @@ use crate::state::{PendingMessage, PushResult, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry};
+use gitim_core::types::{ChannelMeta, ChannelName, Handler, Link, LinkKind, ThreadEntry};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
 use std::collections::HashMap;
@@ -140,11 +140,13 @@ fn resolve_thread_path(
         let path = state.repo_root.join("dm").join(format!("{}.thread", name));
         Ok((path, name))
     } else {
+        let name = ChannelName::new(channel)
+            .map_err(|e| Response::error(format!("invalid channel name: {}", e)))?;
         let path = state
             .repo_root
             .join("channels")
-            .join(format!("{}.thread", channel));
-        Ok((path, channel.to_string()))
+            .join(format!("{}.thread", name));
+        Ok((path, name.to_string()))
     }
 }
 
@@ -1654,6 +1656,59 @@ mod tests {
                 .contains("not a member"),
             "expected 'not a member' error, got: {:?}",
             send_resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_invalid_channel_name_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "../../etc/passwd".to_string(),
+                body: "pwn".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "send to traversal path should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("invalid channel name"),
+            "expected 'invalid channel name' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_invalid_channel_name_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::Read {
+                channel: "../../etc/passwd".to_string(),
+                limit: None,
+                since: None,
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "read from traversal path should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("invalid channel name"),
+            "expected 'invalid channel name' error, got: {:?}",
+            resp.error
         );
     }
 }
