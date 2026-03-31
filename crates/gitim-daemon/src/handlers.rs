@@ -234,8 +234,28 @@ async fn handle_send(
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let new_content = format_message(next_line, point_to, &handler, &now, &body);
 
+    // Compute allowed_senders based on channel type
+    let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
+        channel[3..].split(',').map(|s| s.to_string()).collect()
+    } else {
+        let meta_path = state
+            .repo_root
+            .join("channels")
+            .join(format!("{}.meta.json", channel));
+        if let Ok(content) = std::fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+                meta.members
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+    let allowed_refs: Vec<&str> = allowed_senders.iter().map(|s| s.as_str()).collect();
+
     // Validate compliance
-    if let Err(e) = validate_append(&existing, &new_content, &user_refs) {
+    if let Err(e) = validate_append(&existing, &new_content, &user_refs, &allowed_refs) {
         return Response::error(format!("compliance check failed: {}", e));
     }
 
@@ -1294,8 +1314,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Send messages to both channels (alice is registered so send works)
-        // For random, alice is NOT a member
+        // Alice sends to general (she is a member) — should succeed
         let send_general = handle_request(
             Request::Send {
                 channel: "general".to_string(),
@@ -1312,6 +1331,7 @@ mod tests {
             send_general.error
         );
 
+        // Alice sends to random (she is NOT a member) — should be rejected
         let send_random = handle_request(
             Request::Send {
                 channel: "random".to_string(),
@@ -1323,8 +1343,16 @@ mod tests {
         )
         .await;
         assert!(
-            send_random.ok,
-            "send random failed: {:?}",
+            !send_random.ok,
+            "send random should have been rejected"
+        );
+        assert!(
+            send_random
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("not a member"),
+            "expected 'not a member' error, got: {:?}",
             send_random.error
         );
 
@@ -1412,7 +1440,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Send messages to both channels
+        // Alice sends to general (she is a member)
         let send_general = handle_request(
             Request::Send {
                 channel: "general".to_string(),
@@ -1429,12 +1457,13 @@ mod tests {
             send_general.error
         );
 
+        // Bob sends to random (he is a member)
         let send_random = handle_request(
             Request::Send {
                 channel: "random".to_string(),
                 body: "hello random".to_string(),
                 reply_to: None,
-                author: Some("alice".to_string()),
+                author: Some("bob".to_string()),
             },
             state.clone(),
         )
