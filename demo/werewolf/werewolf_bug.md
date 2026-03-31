@@ -1,0 +1,90 @@
+# Werewolf Demo Bug Report (2026-03-30 首轮测试)
+
+模型：Minimax-M2.7-highspeed via api.minimaxi.com/anthropic
+配置：5 人局（alice/dave=狼人, bob=预言家, charlie=女巫, eve=村民）
+
+## 系统/架构类
+
+### P1. 频道无读权限隔离（根本性）
+
+- **现象**：charlie（女巫）和 eve（村民）的 clone 里都有完整的 `channels/wolves.thread`
+- **根因**：git sync 拉取所有文件到所有 clone，无文件级 ACL
+- **影响**：charlie 实际看到狼人私聊内容后在 general 不断泄露
+- **分类**：架构限制
+- **修复方向**：daemon 的 poll / read_messages 需要过滤非成员频道；但物理文件仍在 clone 里，依赖客户端自律
+
+### ✅ P2. general.meta.json members 不完整
+
+- **现象**：members 只有 `["alice", "god"]`，缺少 bob/charlie/dave/eve
+- **证据**：git log 只有 2 个 commit 碰了 meta（初始化 + alice join），其他 4 人有 thread 里的 `[E:join]` 事件但 meta 未更新
+- **根因**：auto_join_general 确实更新了 meta members，但并发 onboard 导致 meta 文件 push 冲突，sync_loop 的冲突解决只保留 .thread 新增行，meta.json 变更被 `discard_unpushed()` 静默丢弃
+- **分类**：sync bug
+- **修复**：meta 文件从 JSON 迁移为 YAML（减少冲突），sync_loop 扩展冲突解决：捕获本地 meta → discard → 与远端合并（members 取并集）→ 写回提交（fix/werewolf-bugs 分支）
+
+### P3. wolves.meta.json 不存在
+
+- **现象**：`wolves.thread` 有 22 行消息，但 `wolves.meta.json` 不存在
+- **根因**：`send_message` 自动创建 thread 文件时不生成 meta.json
+- **分类**：daemon bug — 频道自动创建应同时生成 meta
+- **关联**：P1 — 即使有 meta 也拦不住 git sync 的读取
+
+### P4. 缺少 join_channel 工具
+
+- **现象**：God 系统提示词写了"用 join_channel 工具逐个拉狼人成员入群"，但 tools.ts 只有 5 个工具（send_message, read_messages, list_channels, list_users, get_thread）
+- **根因**：工具集不完整，God 被指示使用不存在的工具
+- **分类**：demo 代码 bug
+- **修复**：tools.ts 添加 join_channel / create_channel 工具，或修改 God 提示词
+
+### P5. `dm:god` 格式消息静默丢失
+
+- **现象**：bob/dave/eve 发到 `dm:god`（缺少自己的 handler），tool 调用返回成功但消息未落盘
+- **证据**：dm/ 目录无 `god.thread`，bob 的"收到"确认从未到达 God
+- **根因**：daemon 的 send handler 对无效 DM channel 格式未做校验/报错
+- **分类**：daemon bug — 应校验 `dm:a,b` 格式并返回错误
+- **关联**：P8 — 模型写错格式 + 系统不报错 = 消息黑洞
+
+### P6. 淘汰玩家仍可发言
+
+- **现象**：charlie 在 L035 被投票出局后继续发了 6 条消息（L037-L042）
+- **根因**：daemon 不追踪游戏状态，无禁言机制
+- **分类**：设计局限 — v1 游戏规则完全由 LLM 执行，无系统保障
+- **优先级**：低（可接受的 v1 限制）
+
+## 提示词/LLM 行为类
+
+### P7. 玩家公开暴露角色
+
+- **现象**：charlie L018 说"我是女巫"，bob L019 说"收到预言家身份"——均在 general
+- **根因**：player prompt 未强调角色保密；Minimax 模型指令遵循精度不够
+- **分类**：prompt 问题
+
+### P8. 玩家 DM 格式写错
+
+- **现象**：bob/dave/eve 发到 `dm:god` 而非 `dm:bob,god`
+- **根因**：player prompt 对 DM 格式说明不够清晰，或模型不遵循
+- **分类**：prompt 问题
+- **关联**：P5 — 与静默丢失联动，多个玩家确认消息成为黑洞
+
+### P9. God 以 1/5 票淘汰玩家
+
+- **现象**：投票结果只有 alice 1 票投 charlie，其余 4 人弃票，God 直接判出局
+- **根因**：God 提示词对投票规则（需多数票/平票处理）表述不够严格
+- **分类**：prompt 问题
+
+### P10. God 未回复预言家查验结果
+
+- **现象**：bob 在 DM 里发了 3 次"查验charlie"，God 从未回复
+- **根因**：bob 回复晚了（142618Z），God 在 142530Z 已宣布天亮。时序问题 + God 可能没 poll 到 DM 变更
+- **分类**：prompt + 系统时序问题
+
+## 按根因分类
+
+| 根因 | 涉及问题 | 修复层 | 状态 |
+|------|---------|--------|------|
+| sync_loop 冲突解决不处理 meta | P2 | sync_loop + meta YAML 迁移 | ✅ 已修复 |
+| git 全量同步无 ACL | P1 | daemon read 过滤 | 待修 |
+| send_message 不生成 meta | P3 | daemon send | 待修 |
+| 工具集不完整 | P4 | demo tools.ts | 待修 |
+| daemon 对无效输入静默 | P5 | daemon send 校验 | 待修 |
+| 缺少游戏状态层 | P6 | 暂不修 | 低优先 |
+| prompt + 模型质量 | P7, P8, P9, P10 | prompts.ts | 待修 |
