@@ -150,45 +150,33 @@ async function main() {
       continue;
     }
 
-    // end_turn: poll for player messages
-    await sleep(3000);
-    let pollResult: PollResult;
-    try {
-      pollResult = (await callDaemon(socketPath, { method: "poll", since: pollCursor })) as PollResult;
-    } catch {
-      await sleep(5000);
+    // end_turn: poll for player messages with timeout
+    const POLL_INTERVAL = 5000;
+    const POLL_TIMEOUT = 120_000;
+    const pollDeadline = Date.now() + POLL_TIMEOUT;
+    let allChanges: PollResult["changes"] = [];
+
+    await sleep(POLL_INTERVAL);
+    while (Date.now() < pollDeadline) {
       try {
-        pollResult = (await callDaemon(socketPath, { method: "poll", since: pollCursor })) as PollResult;
-      } catch {
-        messages.push({ role: "user", content: "已等待超时，没有收到新的玩家回复。请继续推进游戏流程。" });
-        continue;
-      }
+        const pollResult = (await callDaemon(socketPath, { method: "poll", since: pollCursor })) as PollResult;
+        pollCursor = pollResult.commit_id;
+
+        const newMessages = pollResult.changes.filter((ch) =>
+          ch.entries.some((e) => e.type === "message" && e.body)
+        );
+        if (newMessages.length > 0) {
+          allChanges.push(...pollResult.changes);
+          break;
+        }
+      } catch { /* ignore, retry */ }
+      await sleep(POLL_INTERVAL);
     }
 
-    pollCursor = pollResult.commit_id;
-
-    const hasMessages = pollResult.changes.some((ch) =>
-      ch.entries.some((e) => e.type === "message" && e.body)
-    );
-
-    if (!hasMessages) {
-      await sleep(5000);
-      try {
-        pollResult = (await callDaemon(socketPath, { method: "poll", since: pollCursor })) as PollResult;
-        pollCursor = pollResult.commit_id;
-      } catch { /* ignore */ }
-
-      const hasRetryMessages = pollResult.changes.some((ch) =>
-        ch.entries.some((e) => e.type === "message" && e.body)
-      );
-
-      if (hasRetryMessages) {
-        messages.push({ role: "user", content: formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。") });
-      } else {
-        messages.push({ role: "user", content: "已等待超时，没有收到新的玩家回复。请继续推进游戏流程。" });
-      }
+    if (allChanges.length > 0) {
+      messages.push({ role: "user", content: formatPollChanges(allChanges, "请根据以上新消息继续推进游戏。") });
     } else {
-      messages.push({ role: "user", content: formatPollChanges(pollResult.changes, "请根据以上新消息继续推进游戏。") });
+      messages.push({ role: "user", content: "已等待 120 秒，没有收到新的玩家回复。请继续推进游戏流程（可能有玩家离线）。" });
     }
   }
 
