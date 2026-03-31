@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitim_core::parser::{parse_thread, ParseError};
+use gitim_core::types::ChannelMeta;
 use thiserror::Error;
 
 use crate::renumber::{renumber_batch, RenumberError};
@@ -148,5 +149,24 @@ pub fn resolve_content(
     }
 
     Ok((resolved_files, all_mappings))
+}
+
+/// Merge two ChannelMeta: members 取并集（排序去重），标量字段取 remote。
+pub fn merge_channel_meta(local: &ChannelMeta, remote: &ChannelMeta) -> ChannelMeta {
+    let mut members: Vec<String> = remote.members.clone();
+    for m in &local.members {
+        if !members.contains(m) {
+            members.push(m.clone());
+        }
+    }
+    members.sort();
+
+    ChannelMeta {
+        display_name: remote.display_name.clone(),
+        created_by: remote.created_by.clone(),
+        created_at: remote.created_at.clone(),
+        introduction: remote.introduction.clone(),
+        members,
+    }
 }
 
