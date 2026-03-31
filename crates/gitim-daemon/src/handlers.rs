@@ -554,6 +554,9 @@ async fn handle_list_users(state: SharedState) -> Response {
 }
 
 async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
+    if let Err(e) = ChannelName::new(&channel) {
+        return Response::error(format!("invalid channel name: {}", e));
+    }
     let thread_path = state
         .repo_root
         .join("channels")
@@ -808,6 +811,11 @@ async fn write_channel_event(
     author: String,
     event_type: &str,
 ) -> Response {
+    // Validate channel name
+    if let Err(e) = ChannelName::new(&channel) {
+        return Response::error(format!("invalid channel name: {}", e));
+    }
+
     // Validate author handler format
     let handler = match Handler::new(&author) {
         Ok(h) => h,
