@@ -35,13 +35,14 @@
 - **分类**：demo 代码 bug
 - **修复**：tools.ts 添加 join_channel / create_channel 工具，或修改 God 提示词
 
-### P5. `dm:god` 格式消息静默丢失
+### ⚠️ P5. `dm:god` 格式消息静默丢失
 
 - **现象**：bob/dave/eve 发到 `dm:god`（缺少自己的 handler），tool 调用返回成功但消息未落盘
 - **证据**：dm/ 目录无 `god.thread`，bob 的"收到"确认从未到达 God
 - **根因**：daemon 的 send handler 对无效 DM channel 格式未做校验/报错
 - **分类**：daemon bug — 应校验 `dm:a,b` 格式并返回错误
 - **关联**：P8 — 模型写错格式 + 系统不报错 = 消息黑洞
+- **部分修复**：main 分支已加 membership 校验（handle_send 检查 allowed_senders），`dm:god` 格式下 bob 不在 `["god"]` 中会被拒绝返回错误，不再静默丢失。但仍缺少 DM 格式的显式校验（如必须包含 2 个 handler、必须按字典序等）
 
 ### P6. 淘汰玩家仍可发言
 
@@ -85,6 +86,6 @@
 | git 全量同步无 ACL | P1 | daemon read 过滤 | 待修 |
 | send_message 不生成 meta | P3 | daemon send | 待修 |
 | 工具集不完整 | P4 | demo tools.ts | 待修 |
-| daemon 对无效输入静默 | P5 | daemon send 校验 | 待修 |
+| daemon 对无效输入静默 | P5 | daemon send 校验 | ⚠️ 部分（membership 校验已加，DM 格式校验待补）|
 | 缺少游戏状态层 | P6 | 暂不修 | 低优先 |
 | prompt + 模型质量 | P7, P8, P9, P10 | prompts.ts | 待修 |
