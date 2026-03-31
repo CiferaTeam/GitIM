@@ -234,8 +234,28 @@ async fn handle_send(
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let new_content = format_message(next_line, point_to, &handler, &now, &body);
 
+    // Compute allowed_senders based on channel type
+    let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
+        channel[3..].split(',').map(|s| s.to_string()).collect()
+    } else {
+        let meta_path = state
+            .repo_root
+            .join("channels")
+            .join(format!("{}.meta.json", channel));
+        if let Ok(content) = std::fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+                meta.members
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+    let allowed_refs: Vec<&str> = allowed_senders.iter().map(|s| s.as_str()).collect();
+
     // Validate compliance
-    if let Err(e) = validate_append(&existing, &new_content, &user_refs) {
+    if let Err(e) = validate_append(&existing, &new_content, &user_refs, &allowed_refs) {
         return Response::error(format!("compliance check failed: {}", e));
     }
 
@@ -1294,8 +1314,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Send messages to both channels (alice is registered so send works)
-        // For random, alice is NOT a member
+        // Alice sends to general (she is a member) — should succeed
         let send_general = handle_request(
             Request::Send {
                 channel: "general".to_string(),
@@ -1312,6 +1331,7 @@ mod tests {
             send_general.error
         );
 
+        // Alice sends to random (she is NOT a member) — should be rejected
         let send_random = handle_request(
             Request::Send {
                 channel: "random".to_string(),
@@ -1323,8 +1343,16 @@ mod tests {
         )
         .await;
         assert!(
-            send_random.ok,
-            "send random failed: {:?}",
+            !send_random.ok,
+            "send random should have been rejected"
+        );
+        assert!(
+            send_random
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("not a member"),
+            "expected 'not a member' error, got: {:?}",
             send_random.error
         );
 
@@ -1412,7 +1440,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Send messages to both channels
+        // Alice sends to general (she is a member)
         let send_general = handle_request(
             Request::Send {
                 channel: "general".to_string(),
@@ -1429,12 +1457,13 @@ mod tests {
             send_general.error
         );
 
+        // Bob sends to random (he is a member)
         let send_random = handle_request(
             Request::Send {
                 channel: "random".to_string(),
                 body: "hello random".to_string(),
                 reply_to: None,
-                author: Some("alice".to_string()),
+                author: Some("bob".to_string()),
             },
             state.clone(),
         )
@@ -1475,6 +1504,156 @@ mod tests {
             channel_names.contains(&"random"),
             "random SHOULD be in admin poll results (admin bypass): {:?}",
             channel_names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_member_channel_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Alice joins general
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "join failed: {:?}", join_resp.error);
+
+        // Alice sends to general — should succeed
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello from member".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
+    }
+
+    #[tokio::test]
+    async fn test_send_non_member_channel_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        create_test_channel(&state, "general", "alice");
+
+        // Bob joins so members list is non-empty
+        let join_resp = handle_request(
+            Request::JoinChannel {
+                channel: "general".to_string(),
+                targets: vec![],
+                author: Some("bob".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(join_resp.ok, "bob join failed: {:?}", join_resp.error);
+
+        // Alice sends to general — she is NOT a member
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "should be rejected".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!send_resp.ok, "send should have been rejected");
+        assert!(
+            send_resp
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("not a member"),
+            "expected 'not a member' error, got: {:?}",
+            send_resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_open_channel_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // create_test_channel creates with empty members (open channel)
+        create_test_channel(&state, "general", "alice");
+
+        // Alice sends to general — open channel, should succeed
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "open channel message".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
+    }
+
+    #[tokio::test]
+    async fn test_send_dm_participant_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+
+        // Alice sends DM to dm:alice,bob — she is a participant
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "dm:alice,bob".to_string(),
+                body: "hey bob".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "dm send failed: {:?}", send_resp.error);
+    }
+
+    #[tokio::test]
+    async fn test_send_dm_non_participant_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        register_test_user(&state, "charlie").await;
+
+        // Charlie sends to dm:alice,bob — he is NOT a participant
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "dm:alice,bob".to_string(),
+                body: "sneaky message".to_string(),
+                reply_to: None,
+                author: Some("charlie".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!send_resp.ok, "dm send should have been rejected");
+        assert!(
+            send_resp
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("not a member"),
+            "expected 'not a member' error, got: {:?}",
+            send_resp.error
         );
     }
 }
