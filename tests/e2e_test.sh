@@ -28,13 +28,18 @@ cat > .gitim/me.json <<'MEJSON'
 MEJSON
 
 # Create user
-cat > users/tester.meta.json <<'USERMETA'
-{"display_name":"Tester","role":"dev","introduction":"hi"}
+cat > users/tester.meta.yaml <<'USERMETA'
+display_name: Tester
+role: dev
+introduction: hi
 USERMETA
 
 # Create channel
-cat > channels/general.meta.json <<'CHANMETA'
-{"display_name":"General","created_by":"tester","created_at":"20260317T120000Z","introduction":"test channel"}
+cat > channels/general.meta.yaml <<'CHANMETA'
+display_name: General
+created_by: tester
+created_at: "20260317T120000Z"
+introduction: test channel
 CHANMETA
 touch channels/general.thread
 
@@ -93,7 +98,7 @@ echo "PASS: users"
 # Test: register_user (new user)
 RES=$(echo '{"method":"register_user","handler":"newbie","display_name":"New User"}' | nc -U "$SOCK")
 echo "$RES" | grep -q '"ok":true' || { echo "FAIL: register_user ($RES)"; exit 1; }
-[ -f "$TMPDIR/users/newbie.meta.json" ] || { echo "FAIL: newbie meta not created"; exit 1; }
+[ -f "$TMPDIR/users/newbie.meta.yaml" ] || { echo "FAIL: newbie meta not created"; exit 1; }
 echo "PASS: register_user"
 
 # Test: register_user (existing user, should succeed with exists=true)
