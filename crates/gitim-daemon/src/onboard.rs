@@ -1,7 +1,7 @@
 use crate::api::Response;
 use crate::identity::{AuthData, GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
-use gitim_core::types::Handler;
+use gitim_core::types::{ChannelMeta, Handler, UserMeta};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
 
@@ -177,25 +177,25 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
         changed_paths.push(".gitignore".to_string());
     }
 
-    // 2. channels/general.meta.json + channels/general.thread
+    // 2. channels/general.meta.yaml + channels/general.thread
     let channels_dir = state.repo_root.join("channels");
     std::fs::create_dir_all(&channels_dir)
         .map_err(|e| Response::error(format!("failed to create channels dir: {}", e)))?;
 
-    let meta_path = channels_dir.join("general.meta.json");
+    let meta_path = channels_dir.join("general.meta.yaml");
     if !meta_path.exists() {
         let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        let meta = serde_json::json!({
-            "display_name": "General",
-            "created_by": handler,
-            "created_at": now,
-            "introduction": "默认频道",
-            "members": [handler],
-        });
-        let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+        let meta = ChannelMeta {
+            display_name: "General".to_string(),
+            created_by: handler.to_string(),
+            created_at: now.clone(),
+            introduction: "默认频道".to_string(),
+            members: vec![handler.to_string()],
+        };
+        let meta_str = serde_yaml::to_string(&meta).unwrap();
         std::fs::write(&meta_path, &meta_str)
-            .map_err(|e| Response::error(format!("failed to write general.meta.json: {}", e)))?;
-        changed_paths.push("channels/general.meta.json".to_string());
+            .map_err(|e| Response::error(format!("failed to write general.meta.yaml: {}", e)))?;
+        changed_paths.push("channels/general.meta.yaml".to_string());
 
         // Create thread file with join event
         let thread_path = channels_dir.join("general.thread");
@@ -249,21 +249,21 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
     std::fs::create_dir_all(&users_dir)
         .map_err(|e| Response::error(format!("failed to create users dir: {}", e)))?;
 
-    let meta_path = users_dir.join(format!("{}.meta.json", handler));
+    let meta_path = users_dir.join(format!("{}.meta.yaml", handler));
     if meta_path.exists() {
         return Ok(false); // already registered
     }
 
-    let meta = serde_json::json!({
-        "display_name": display_name,
-        "role": "member",
-        "introduction": "GitIM user",
-    });
-    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+    let meta = UserMeta {
+        display_name: display_name.to_string(),
+        role: "member".to_string(),
+        introduction: "GitIM user".to_string(),
+    };
+    let meta_str = serde_yaml::to_string(&meta).unwrap();
     std::fs::write(&meta_path, &meta_str)
         .map_err(|e| Response::error(format!("failed to write user meta: {}", e)))?;
 
-    let rel_path = format!("users/{}.meta.json", handler);
+    let rel_path = format!("users/{}.meta.yaml", handler);
     let commit_msg = format!("user: register @{}", handler);
 
     state
@@ -307,14 +307,14 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
 // ---------------------------------------------------------------------------
 
 fn auto_join_general(state: &SharedState, handler: &str) -> Result<(), Response> {
-    let meta_path = state.repo_root.join("channels/general.meta.json");
+    let meta_path = state.repo_root.join("channels/general.meta.yaml");
     if !meta_path.exists() {
         return Ok(());
     }
 
     let meta_content = std::fs::read_to_string(&meta_path)
         .map_err(|e| Response::error(format!("read meta: {}", e)))?;
-    let mut meta: gitim_core::types::ChannelMeta = serde_json::from_str(&meta_content)
+    let mut meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content)
         .map_err(|e| Response::error(format!("parse meta: {}", e)))?;
 
     if meta.members.contains(&handler.to_string()) {
@@ -340,16 +340,16 @@ fn auto_join_general(state: &SharedState, handler: &str) -> Result<(), Response>
         .and_then(|mut f| f.write_all(event_line.as_bytes()))
         .map_err(|e| Response::error(format!("write event: {}", e)))?;
 
-    // Update meta.json members
+    // Update meta.yaml members
     meta.members.push(handler.to_string());
     meta.members.sort();
-    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+    let meta_str = serde_yaml::to_string(&meta).unwrap();
     std::fs::write(&meta_path, &meta_str)
         .map_err(|e| Response::error(format!("write meta: {}", e)))?;
 
     // Git commit
     let _ = state.git_storage.add_and_commit_as(
-        &["channels/general.thread", "channels/general.meta.json"],
+        &["channels/general.thread", "channels/general.meta.yaml"],
         &format!("event: @{} join general", handler),
         Some(handler),
     );
