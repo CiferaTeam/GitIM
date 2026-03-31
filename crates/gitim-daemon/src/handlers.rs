@@ -3,7 +3,7 @@ use crate::state::{PendingMessage, PushResult, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry};
+use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry, UserMeta};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
 use std::collections::HashMap;
@@ -411,7 +411,7 @@ async fn handle_register_user(
 
     let users_dir = state.repo_root.join("users");
     std::fs::create_dir_all(&users_dir).ok();
-    let meta_path = users_dir.join(format!("{}.meta.json", handler));
+    let meta_path = users_dir.join(format!("{}.meta.yaml", handler));
 
     // If already exists, return success with exists=true
     if meta_path.exists() {
@@ -422,12 +422,12 @@ async fn handle_register_user(
     }
 
     // Create meta file
-    let meta = serde_json::json!({
-        "display_name": display_name,
-        "role": role,
-        "introduction": introduction
-    });
-    let meta_str = serde_json::to_string_pretty(&meta).unwrap();
+    let meta = UserMeta {
+        display_name,
+        role,
+        introduction,
+    };
+    let meta_str = serde_yaml::to_string(&meta).unwrap();
 
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write user meta: {}", e));
@@ -444,7 +444,7 @@ async fn handle_register_user(
 
     // Git add + commit (best effort)
     let _ = state.git_storage.add_and_commit_as(
-        &[&format!("users/{}.meta.json", handler)],
+        &[&format!("users/{}.meta.yaml", handler)],
         &format!("user: register @{}", handler),
         Some(&handler),
     );
@@ -458,17 +458,17 @@ async fn handle_register_user(
 async fn handle_list_channels(state: SharedState) -> Response {
     let mut channels: Vec<serde_json::Value> = Vec::new();
 
-    // 扫描 channels/*.meta.json — 读取 members 字段
+    // 扫描 channels/*.meta.yaml — 读取 members 字段
     let ch_dir = state.repo_root.join("channels");
     if ch_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&ch_dir) {
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname.ends_with(".meta.json") {
-                    let name = fname.trim_end_matches(".meta.json").to_string();
+                if fname.ends_with(".meta.yaml") {
+                    let name = fname.trim_end_matches(".meta.yaml").to_string();
                     let members: Vec<String> = std::fs::read_to_string(entry.path())
                         .ok()
-                        .and_then(|c| serde_json::from_str::<ChannelMeta>(&c).ok())
+                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
                         .map(|m| m.members)
                         .unwrap_or_default();
                     channels.push(serde_json::json!({
@@ -630,7 +630,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
             let path_str = path.to_string_lossy();
             if let Some(ch_name) = path_str.strip_prefix("channels/").and_then(|s| {
                 s.strip_suffix(".thread")
-                    .or_else(|| s.strip_suffix(".meta.json"))
+                    .or_else(|| s.strip_suffix(".meta.yaml"))
             }) {
                 if channel_membership.contains_key(ch_name) {
                     continue;
@@ -638,9 +638,9 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 let meta_path = state
                     .repo_root
                     .join("channels")
-                    .join(format!("{}.meta.json", ch_name));
+                    .join(format!("{}.meta.yaml", ch_name));
                 let is_member = if let Ok(content) = std::fs::read_to_string(&meta_path) {
-                    if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
+                    if let Ok(meta) = serde_yaml::from_str::<ChannelMeta>(&content) {
                         if meta.members.is_empty() {
                             true // Legacy: no members list = everyone has access
                         } else {
@@ -666,7 +666,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         let (channel, kind) = if let Some(name) = path_str.strip_prefix("channels/") {
             if let Some(ch_name) = name.strip_suffix(".thread") {
                 (ch_name.to_string(), "channel")
-            } else if let Some(ch_name) = name.strip_suffix(".meta.json") {
+            } else if let Some(ch_name) = name.strip_suffix(".meta.yaml") {
                 // Meta change — only push if user is (now) a member
                 if !is_admin && !channel_membership.get(ch_name).copied().unwrap_or(true) {
                     continue;
@@ -789,14 +789,14 @@ async fn write_channel_event(
         }
     }
 
-    // Read channel meta.json
+    // Read channel meta.yaml
     let meta_path = state
         .repo_root
         .join("channels")
-        .join(format!("{}.meta.json", channel));
+        .join(format!("{}.meta.yaml", channel));
     let mut channel_meta: ChannelMeta = if meta_path.exists() {
         match std::fs::read_to_string(&meta_path) {
-            Ok(content) => match serde_json::from_str(&content) {
+            Ok(content) => match serde_yaml::from_str(&content) {
                 Ok(m) => m,
                 Err(e) => return Response::error(format!("failed to parse channel meta: {}", e)),
             },
@@ -864,7 +864,7 @@ async fn write_channel_event(
         Err(e) => return Response::error(format!("open failed: {}", e)),
     }
 
-    // Update meta.json members
+    // Update meta.yaml members
     let affected: Vec<String> = if targets.is_empty() {
         vec![author.clone()]
     } else {
@@ -886,14 +886,14 @@ async fn write_channel_event(
         _ => {}
     }
 
-    let meta_str = serde_json::to_string_pretty(&channel_meta).unwrap();
+    let meta_str = serde_yaml::to_string(&channel_meta).unwrap();
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
 
     // Git commit both files
     let thread_rel = format!("channels/{}.thread", channel);
-    let meta_rel = format!("channels/{}.meta.json", channel);
+    let meta_rel = format!("channels/{}.meta.yaml", channel);
     let commit_msg = format!("event: @{} {} {}", author, event_type, channel);
     let commit_status = match state.git_storage.add_and_commit_as(
         &[&thread_rel, &meta_rel],
@@ -990,21 +990,21 @@ mod tests {
         Arc::new(AppState::new(repo, Config::default(), event_tx, None))
     }
 
-    /// Register a user by creating meta.json and adding to in-memory user list.
+    /// Register a user by creating meta.yaml and adding to in-memory user list.
     async fn register_test_user(state: &SharedState, handler: &str) {
         let users_dir = state.repo_root.join("users");
         std::fs::create_dir_all(&users_dir).unwrap();
-        let meta = serde_json::json!({
-            "display_name": handler,
-            "role": "member",
-            "introduction": "test user"
-        });
+        let meta = UserMeta {
+            display_name: handler.to_string(),
+            role: "member".to_string(),
+            introduction: "test user".to_string(),
+        };
         std::fs::write(
-            users_dir.join(format!("{}.meta.json", handler)),
-            serde_json::to_string_pretty(&meta).unwrap(),
+            users_dir.join(format!("{}.meta.yaml", handler)),
+            serde_yaml::to_string(&meta).unwrap(),
         )
         .unwrap();
-        let rel = format!("users/{}.meta.json", handler);
+        let rel = format!("users/{}.meta.yaml", handler);
         let _ = state
             .git_storage
             .add_and_commit(&[&rel], &format!("user: register @{}", handler));
@@ -1015,7 +1015,7 @@ mod tests {
         }
     }
 
-    /// Create a channel with meta.json and empty .thread file.
+    /// Create a channel with meta.yaml and empty .thread file.
     fn create_test_channel(state: &SharedState, name: &str, created_by: &str) {
         let ch_dir = state.repo_root.join("channels");
         std::fs::create_dir_all(&ch_dir).unwrap();
@@ -1027,12 +1027,12 @@ mod tests {
             members: Vec::new(),
         };
         std::fs::write(
-            ch_dir.join(format!("{}.meta.json", name)),
-            serde_json::to_string_pretty(&meta).unwrap(),
+            ch_dir.join(format!("{}.meta.yaml", name)),
+            serde_yaml::to_string(&meta).unwrap(),
         )
         .unwrap();
         std::fs::write(ch_dir.join(format!("{}.thread", name)), "").unwrap();
-        let meta_rel = format!("channels/{}.meta.json", name);
+        let meta_rel = format!("channels/{}.meta.yaml", name);
         let thread_rel = format!("channels/{}.thread", name);
         let _ = state.git_storage.add_and_commit(
             &[&meta_rel, &thread_rel],
@@ -1064,10 +1064,10 @@ mod tests {
         assert!(thread.contains("[E:join]"), "thread missing join event");
         assert!(thread.contains("@alice"), "thread missing author");
 
-        // Verify meta.json has alice in members
+        // Verify meta.yaml has alice in members
         let meta_str =
-            std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
-        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
         assert!(
             meta.members.contains(&"alice".to_string()),
             "alice not in members"
@@ -1108,8 +1108,8 @@ mod tests {
 
         // Verify both in members
         let meta_str =
-            std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
-        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
         assert!(
             meta.members.contains(&"alice".to_string()),
             "alice not in members"
@@ -1157,10 +1157,10 @@ mod tests {
         .await;
         assert!(resp2.ok, "leave failed: {:?}", resp2.error);
 
-        // Verify meta.json members is empty
+        // Verify meta.yaml members is empty
         let meta_str =
-            std::fs::read_to_string(state.repo_root.join("channels/general.meta.json")).unwrap();
-        let meta: ChannelMeta = serde_json::from_str(&meta_str).unwrap();
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
         assert!(
             meta.members.is_empty(),
             "members should be empty, got: {:?}",
