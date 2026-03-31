@@ -73,7 +73,7 @@ function buildKickoff(): string {
   lines.push("注意事项：");
   lines.push(`- 狼人同伴关系：${wolfHandlers.join("、")} 互为同伴，请在角色 DM 中告知。`);
   lines.push("- DM 格式：两个 handler 按字母序排列，用 dm:handler1,handler2 格式。例如给 alice 发 DM 用 dm:alice,god。");
-  lines.push("- 创建 #wolves 频道：先发一条消息到 channel \"wolves\"（自动创建），然后用 join_channel 工具逐个拉狼人成员入群。");
+  lines.push("- 请先用 list_channels 查看已有频道，然后按系统提示创建 werewolf-N 游戏频道和 werewolf-wolves-N 狼人频道。");
   lines.push("");
   lines.push("请按照你的系统提示中的「第一阶段：游戏设置」步骤开始。");
 
