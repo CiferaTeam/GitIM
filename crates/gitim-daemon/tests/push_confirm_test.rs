@@ -55,6 +55,12 @@ async fn setup_no_remote() -> (TempDir, Arc<AppState>) {
         r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
     )
     .unwrap();
+    // Create "general" channel meta.json (required by handle_send)
+    std::fs::write(
+        root.join("channels/general.meta.json"),
+        r#"{"display_name":"general","created_by":"alice","created_at":"20260323T000000Z","introduction":"general channel","members":[]}"#,
+    )
+    .unwrap();
 
     run_git(&root, &["add", "."]);
     run_git(&root, &["commit", "-m", "add initial structure"]);
@@ -106,6 +112,12 @@ async fn setup_with_remote() -> (TempDir, TempDir, Arc<AppState>) {
     std::fs::write(
         root.join("users/alice.meta.json"),
         r#"{"display_name":"Alice","role":"dev","introduction":"hi"}"#,
+    )
+    .unwrap();
+    // Create "general" channel meta.json (required by handle_send)
+    std::fs::write(
+        root.join("channels/general.meta.json"),
+        r#"{"display_name":"general","created_by":"alice","created_at":"20260323T000000Z","introduction":"general channel","members":[]}"#,
     )
     .unwrap();
     // Create an empty thread file so the channel exists

@@ -238,20 +238,40 @@ async fn handle_send(
 
     // Compute allowed_senders based on channel type
     let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
-        channel[3..].split(',').map(|s| s.to_string()).collect()
+        let participants: Vec<String> =
+            channel[3..].split(',').map(|s| s.to_string()).collect();
+        // Check both DM participants are registered users
+        for p in &participants {
+            if !user_list.contains(p) {
+                return Response::error(format!(
+                    "DM participant '@{}' is not a registered user",
+                    p
+                ));
+            }
+        }
+        participants
     } else {
         let meta_path = state
             .repo_root
             .join("channels")
             .join(format!("{}.meta.json", channel));
-        if let Ok(content) = std::fs::read_to_string(&meta_path) {
-            if let Ok(meta) = serde_json::from_str::<ChannelMeta>(&content) {
-                meta.members
-            } else {
-                Vec::new()
+        if meta_path.exists() {
+            match std::fs::read_to_string(&meta_path) {
+                Ok(content) => match serde_json::from_str::<ChannelMeta>(&content) {
+                    Ok(meta) => meta.members,
+                    Err(e) => {
+                        return Response::error(format!(
+                            "failed to parse channel meta: {}",
+                            e
+                        ))
+                    }
+                },
+                Err(e) => {
+                    return Response::error(format!("failed to read channel meta: {}", e))
+                }
             }
         } else {
-            Vec::new()
+            return Response::error(format!("channel '{}' does not exist", channel));
         }
     };
     let allowed_refs: Vec<&str> = allowed_senders.iter().map(|s| s.as_str()).collect();
@@ -1708,6 +1728,65 @@ mod tests {
                 .unwrap()
                 .contains("invalid channel name"),
             "expected 'invalid channel name' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_nonexistent_channel_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // DO NOT create a channel — "nonexistent" has no meta.json
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "nonexistent".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "send to nonexistent channel should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("does not exist"),
+            "expected 'does not exist' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_dm_unregistered_participant_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // ghost is NOT registered
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "dm:alice,ghost".to_string(),
+                body: "hello ghost".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(
+            !resp.ok,
+            "send to DM with unregistered participant should be rejected"
+        );
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("not a registered user"),
+            "expected 'not a registered user' error, got: {:?}",
             resp.error
         );
     }
