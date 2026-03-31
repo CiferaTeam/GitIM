@@ -24,6 +24,12 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
         "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
+    // Create "general" channel meta (required by handle_send)
+    std::fs::write(
+        root.join("channels/general.meta.yaml"),
+        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
+    )
+    .unwrap();
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
     let state = Arc::new(AppState::new(

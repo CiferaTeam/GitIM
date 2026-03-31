@@ -3,9 +3,10 @@ use crate::state::{PendingMessage, PushResult, SharedState};
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler, Link, LinkKind, ThreadEntry, UserMeta};
+use gitim_core::types::{ChannelMeta, ChannelName, Handler, Link, LinkKind, ThreadEntry, UserMeta};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
+use gitim_sync::git::GitError;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
@@ -109,6 +110,18 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             };
             handle_leave_channel(state, channel, targets, resolved_author).await
         }
+        Request::CreateChannel {
+            name,
+            display_name,
+            introduction,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_create_channel(state, name, display_name, introduction, resolved_author).await
+        }
         Request::Search {
             query,
             author,
@@ -140,11 +153,13 @@ fn resolve_thread_path(
         let path = state.repo_root.join("dm").join(format!("{}.thread", name));
         Ok((path, name))
     } else {
+        let name = ChannelName::new(channel)
+            .map_err(|e| Response::error(format!("invalid channel name: {}", e)))?;
         let path = state
             .repo_root
             .join("channels")
-            .join(format!("{}.thread", channel));
-        Ok((path, channel.to_string()))
+            .join(format!("{}.thread", name));
+        Ok((path, name.to_string()))
     }
 }
 
@@ -236,20 +251,40 @@ async fn handle_send(
 
     // Compute allowed_senders based on channel type
     let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
-        channel[3..].split(',').map(|s| s.to_string()).collect()
+        let participants: Vec<String> =
+            channel[3..].split(',').map(|s| s.to_string()).collect();
+        // Check both DM participants are registered users
+        for p in &participants {
+            if !user_list.contains(p) {
+                return Response::error(format!(
+                    "DM participant '@{}' is not a registered user",
+                    p
+                ));
+            }
+        }
+        participants
     } else {
         let meta_path = state
             .repo_root
             .join("channels")
             .join(format!("{}.meta.yaml", channel));
-        if let Ok(content) = std::fs::read_to_string(&meta_path) {
-            if let Ok(meta) = serde_yaml::from_str::<ChannelMeta>(&content) {
-                meta.members
-            } else {
-                Vec::new()
+        if meta_path.exists() {
+            match std::fs::read_to_string(&meta_path) {
+                Ok(content) => match serde_yaml::from_str::<ChannelMeta>(&content) {
+                    Ok(meta) => meta.members,
+                    Err(e) => {
+                        return Response::error(format!(
+                            "failed to parse channel meta: {}",
+                            e
+                        ))
+                    }
+                },
+                Err(e) => {
+                    return Response::error(format!("failed to read channel meta: {}", e))
+                }
             }
         } else {
-            Vec::new()
+            return Response::error(format!("channel '{}' does not exist", channel));
         }
     };
     let allowed_refs: Vec<&str> = allowed_senders.iter().map(|s| s.as_str()).collect();
@@ -532,6 +567,9 @@ async fn handle_list_users(state: SharedState) -> Response {
 }
 
 async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
+    if let Err(e) = ChannelName::new(&channel) {
+        return Response::error(format!("invalid channel name: {}", e));
+    }
     let thread_path = state
         .repo_root
         .join("channels")
@@ -779,6 +817,120 @@ async fn handle_leave_channel(
     write_channel_event(state, channel, targets, author, "leave").await
 }
 
+const MAX_PUSH_RETRIES: u32 = 3;
+
+async fn handle_create_channel(
+    state: SharedState,
+    name: String,
+    display_name: Option<String>,
+    introduction: Option<String>,
+    author: String,
+) -> Response {
+    // 1. Validate author
+    let handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("invalid author: {}", e)),
+    };
+    {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {}", author));
+        }
+    }
+
+    // 2. Validate channel name
+    let channel_name = match ChannelName::new(&name) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+    };
+
+    // 3. Check channel doesn't already exist
+    let channels_dir = state.repo_root.join("channels");
+    let meta_path = channels_dir.join(format!("{}.meta.yaml", channel_name));
+    if meta_path.exists() {
+        return Response::error(format!("channel '{}' already exists", name));
+    }
+
+    // 4. Create channels/ dir
+    if let Err(e) = std::fs::create_dir_all(&channels_dir) {
+        return Response::error(format!("failed to create channels dir: {}", e));
+    }
+
+    // 5. Write meta.yaml
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let meta = ChannelMeta {
+        display_name: display_name.unwrap_or_else(|| name.clone()),
+        created_by: author.clone(),
+        created_at: now.clone(),
+        introduction: introduction.unwrap_or_default(),
+        members: vec![author.clone()],
+    };
+    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    if let Err(e) = std::fs::write(&meta_path, &meta_str) {
+        return Response::error(format!("failed to write channel meta: {}", e));
+    }
+
+    // 6. Write .thread with join event
+    let thread_path = channels_dir.join(format!("{}.thread", channel_name));
+    let join_line = format_event(1, &handler, &now, "join", &serde_json::json!({}));
+    if let Err(e) = std::fs::write(&thread_path, &join_line) {
+        return Response::error(format!("failed to write channel thread: {}", e));
+    }
+
+    // 7. Commit
+    let meta_rel = format!("channels/{}.meta.yaml", channel_name);
+    let thread_rel = format!("channels/{}.thread", channel_name);
+    let commit_msg = format!("channel: create #{} by @{}", name, author);
+    if let Err(e) = state
+        .git_storage
+        .add_and_commit_as(&[&meta_rel, &thread_rel], &commit_msg, Some(&author))
+    {
+        return Response::error(format!("create_channel commit failed: {}", e));
+    }
+
+    // 8. Push with retry (skip if no remote)
+    if state.git_storage.has_remote() {
+        let mut pushed = false;
+        for attempt in 1..=MAX_PUSH_RETRIES {
+            match state.git_storage.push() {
+                Ok(()) => {
+                    pushed = true;
+                    break;
+                }
+                Err(GitError::PushConflict) => {
+                    warn!(
+                        "create_channel: push conflict (attempt {}/{}), rebasing",
+                        attempt, MAX_PUSH_RETRIES
+                    );
+                    if let Err(e) = state.git_storage.fetch() {
+                        return Response::error(format!("create_channel fetch failed: {}", e));
+                    }
+                    if let Err(e) = state.git_storage.rebase_onto_origin() {
+                        return Response::error(format!("create_channel rebase failed: {}", e));
+                    }
+                }
+                Err(e) => {
+                    return Response::error(format!("create_channel push failed: {}", e));
+                }
+            }
+        }
+        if !pushed {
+            return Response::error(format!(
+                "create_channel: push still conflicting after {} retries",
+                MAX_PUSH_RETRIES
+            ));
+        }
+    }
+
+    info!("channel '{}' created by @{}", name, author);
+
+    // 9. Return success
+    Response::success(serde_json::json!({
+        "channel": name,
+        "created_by": author,
+    }))
+}
+
 async fn write_channel_event(
     state: SharedState,
     channel: String,
@@ -786,6 +938,11 @@ async fn write_channel_event(
     author: String,
     event_type: &str,
 ) -> Response {
+    // Validate channel name
+    if let Err(e) = ChannelName::new(&channel) {
+        return Response::error(format!("invalid channel name: {}", e));
+    }
+
     // Validate author handler format
     let handler = match Handler::new(&author) {
         Ok(h) => h,
@@ -1655,6 +1812,240 @@ mod tests {
             "expected 'not a member' error, got: {:?}",
             send_resp.error
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_invalid_channel_name_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "../../etc/passwd".to_string(),
+                body: "pwn".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "send to traversal path should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("invalid channel name"),
+            "expected 'invalid channel name' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_invalid_channel_name_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::Read {
+                channel: "../../etc/passwd".to_string(),
+                limit: None,
+                since: None,
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "read from traversal path should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("invalid channel name"),
+            "expected 'invalid channel name' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_nonexistent_channel_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // DO NOT create a channel — "nonexistent" has no meta.json
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "nonexistent".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "send to nonexistent channel should be rejected");
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("does not exist"),
+            "expected 'does not exist' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_dm_unregistered_participant_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // ghost is NOT registered
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "dm:alice,ghost".to_string(),
+                body: "hello ghost".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(
+            !resp.ok,
+            "send to DM with unregistered participant should be rejected"
+        );
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .contains("not a registered user"),
+            "expected 'not a registered user' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "random".to_string(),
+                display_name: Some("Random".to_string()),
+                introduction: Some("A random channel".to_string()),
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel failed: {:?}", resp.error);
+
+        let data = resp.data.unwrap();
+        assert_eq!(data["channel"], "random");
+        assert_eq!(data["created_by"], "alice");
+
+        // Verify meta.yaml exists with correct content
+        let meta_str =
+            std::fs::read_to_string(state.repo_root.join("channels/random.meta.yaml")).unwrap();
+        let meta: serde_yaml::Value = serde_yaml::from_str(&meta_str).unwrap();
+        assert_eq!(meta["display_name"], "Random");
+        assert_eq!(meta["created_by"], "alice");
+        assert_eq!(meta["introduction"], "A random channel");
+        let members = meta["members"].as_sequence().unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0], "alice");
+
+        // Verify .thread exists with a join event
+        let thread =
+            std::fs::read_to_string(state.repo_root.join("channels/random.thread")).unwrap();
+        assert!(thread.contains("[E:join]"), "thread missing join event");
+        assert!(thread.contains("@alice"), "thread missing author");
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "general", "alice");
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "general".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "create_channel should fail for existing channel");
+        assert!(
+            resp.error.as_ref().unwrap().contains("already exists"),
+            "expected 'already exists' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invalid_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "../../bad".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(!resp.ok, "create_channel should fail for invalid name");
+        assert!(
+            resp.error.as_ref().unwrap().contains("invalid channel name"),
+            "expected 'invalid channel name' error, got: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_then_send() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        // Create channel
+        let create_resp = handle_request(
+            Request::CreateChannel {
+                name: "dev".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(create_resp.ok, "create_channel failed: {:?}", create_resp.error);
+
+        // Send message to the new channel
+        let send_resp = handle_request(
+            Request::Send {
+                channel: "dev".to_string(),
+                body: "hello dev channel".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send_resp.ok, "send to new channel failed: {:?}", send_resp.error);
     }
 }
 

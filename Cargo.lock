@@ -490,7 +490,9 @@ version = "0.1.0"
 dependencies = [
  "gitim-core",
  "notify",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror",
  "tokio",
