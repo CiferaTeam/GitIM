@@ -43,33 +43,17 @@ fn test_bare_at_ignored() {
 }
 
 #[test]
-fn test_empty_handler_ignored() {
-    let mentions = extract_mentions("<@> 空的");
-    assert!(mentions.is_empty());
-}
-
-#[test]
-fn test_uppercase_ignored() {
-    let mentions = extract_mentions("<@LEWIS> 大写");
-    assert!(mentions.is_empty());
-}
-
-#[test]
-fn test_system_reserved_ignored() {
-    let mentions = extract_mentions("<@system> 保留字");
-    assert!(mentions.is_empty());
-}
-
-#[test]
-fn test_consecutive_hyphens_ignored() {
-    let mentions = extract_mentions("<@foo--bar> 连续连字符");
-    assert!(mentions.is_empty());
-}
-
-#[test]
-fn test_unclosed_mention_ignored() {
-    let mentions = extract_mentions("<@lewis 未闭合");
-    assert!(mentions.is_empty());
+fn test_invalid_mention_formats_ignored() {
+    // empty handler
+    assert!(extract_mentions("<@> 空的").is_empty());
+    // uppercase handler
+    assert!(extract_mentions("<@LEWIS> 大写").is_empty());
+    // reserved word "system"
+    assert!(extract_mentions("<@system> 保留字").is_empty());
+    // consecutive hyphens
+    assert!(extract_mentions("<@foo--bar> 连续连字符").is_empty());
+    // unclosed mention (no closing `>`)
+    assert!(extract_mentions("<@lewis 未闭合").is_empty());
 }
 
 #[test]

@@ -276,7 +276,8 @@ use gitim_core::types::ChannelMeta;
 use gitim_sync::conflict::merge_channel_meta;
 
 #[test]
-fn test_merge_channel_meta_union_members() {
+fn test_merge_channel_meta_union_and_dedup() {
+    // Scenario 1: disjoint members → union
     let local = ChannelMeta {
         display_name: "General".into(),
         created_by: "god".into(),
@@ -290,6 +291,24 @@ fn test_merge_channel_meta_union_members() {
         created_at: "20260330T120000Z".into(),
         introduction: "默认频道".into(),
         members: vec!["bob".into(), "god".into()],
+    };
+    let merged = merge_channel_meta(&local, &remote);
+    assert_eq!(merged.members, vec!["alice", "bob", "god"]);
+
+    // Scenario 2: overlapping members → dedup
+    let local = ChannelMeta {
+        display_name: "General".into(),
+        created_by: "god".into(),
+        created_at: "20260330T120000Z".into(),
+        introduction: "默认频道".into(),
+        members: vec!["alice".into(), "bob".into(), "god".into()],
+    };
+    let remote = ChannelMeta {
+        display_name: "General".into(),
+        created_by: "god".into(),
+        created_at: "20260330T120000Z".into(),
+        introduction: "默认频道".into(),
+        members: vec!["alice".into(), "god".into()],
     };
     let merged = merge_channel_meta(&local, &remote);
     assert_eq!(merged.members, vec!["alice", "bob", "god"]);
@@ -315,24 +334,4 @@ fn test_merge_channel_meta_scalars_from_remote() {
     assert_eq!(merged.display_name, "Remote Name");
     assert_eq!(merged.introduction, "remote intro");
     assert_eq!(merged.members, vec!["alice", "bob"]);
-}
-
-#[test]
-fn test_merge_channel_meta_dedup_members() {
-    let local = ChannelMeta {
-        display_name: "General".into(),
-        created_by: "god".into(),
-        created_at: "20260330T120000Z".into(),
-        introduction: "默认频道".into(),
-        members: vec!["alice".into(), "bob".into(), "god".into()],
-    };
-    let remote = ChannelMeta {
-        display_name: "General".into(),
-        created_by: "god".into(),
-        created_at: "20260330T120000Z".into(),
-        introduction: "默认频道".into(),
-        members: vec!["alice".into(), "god".into()],
-    };
-    let merged = merge_channel_meta(&local, &remote);
-    assert_eq!(merged.members, vec!["alice", "bob", "god"]);
 }

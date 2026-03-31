@@ -48,9 +48,10 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
 }
 
 #[test]
-fn event_thread_changed_serializes_to_expected_json() {
+fn test_event_serialization() {
     use gitim_daemon::api::Event;
 
+    // ThreadChanged — channel
     let event = Event::ThreadChanged {
         channel: "general".to_string(),
         kind: "channel".to_string(),
@@ -59,12 +60,8 @@ fn event_thread_changed_serializes_to_expected_json() {
     assert_eq!(json["event"], "thread_changed");
     assert_eq!(json["channel"], "general");
     assert_eq!(json["kind"], "channel");
-}
 
-#[test]
-fn event_thread_changed_dm_kind() {
-    use gitim_daemon::api::Event;
-
+    // ThreadChanged — dm
     let event = Event::ThreadChanged {
         channel: "lewis--nexus".to_string(),
         kind: "dm".to_string(),
@@ -72,12 +69,8 @@ fn event_thread_changed_dm_kind() {
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["event"], "thread_changed");
     assert_eq!(json["kind"], "dm");
-}
 
-#[test]
-fn event_messages_pushed_serializes() {
-    use gitim_daemon::api::Event;
-
+    // MessagesPushed
     let event = Event::MessagesPushed {
         channel: "general".to_string(),
         line_numbers: vec![1, 2],
@@ -86,12 +79,8 @@ fn event_messages_pushed_serializes() {
     assert_eq!(json["event"], "messages_pushed");
     assert_eq!(json["channel"], "general");
     assert_eq!(json["line_numbers"], serde_json::json!([1, 2]));
-}
 
-#[test]
-fn event_message_renumbered_serializes() {
-    use gitim_daemon::api::Event;
-
+    // MessageRenumbered
     let event = Event::MessageRenumbered {
         channel: "general".to_string(),
         old_line: 5,

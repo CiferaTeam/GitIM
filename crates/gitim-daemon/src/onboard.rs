@@ -475,6 +475,25 @@ mod tests {
         // channels/general.meta.yaml should exist
         assert!(state.repo_root.join("channels/general.meta.yaml").exists());
         assert!(state.repo_root.join("channels/general.thread").exists());
+
+        // meta.yaml should have creator in members
+        let meta_content =
+            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+        let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
+        assert_eq!(meta.members, vec!["alice"]);
+
+        // .thread should have a join event (not be empty)
+        let thread_content =
+            std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
+        assert!(!thread_content.is_empty(), "thread should not be empty");
+        assert!(
+            thread_content.contains("[E:join]"),
+            "thread should contain join event"
+        );
+        assert!(
+            thread_content.contains("@alice"),
+            "join event should reference alice"
+        );
     }
 
     #[tokio::test]
@@ -549,30 +568,18 @@ mod tests {
 
         let users = state.users.read().await;
         assert!(users.contains(&"alice".to_string()));
-    }
+        drop(users);
+        drop(current);
 
-    #[tokio::test]
-    async fn full_onboard_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = setup_test_state(tmp.path());
-
-        let auth = serde_json::json!({
-            "handler": "alice",
-            "display_name": "Alice"
-        });
-
-        let resp1 = handle_onboard(state.clone(), "git".to_string(), auth.clone(), false).await;
-        assert!(resp1.ok);
-        assert!(resp1.data.unwrap()["created"].as_bool().unwrap());
-
-        // Reset sync_started so spawn_sync_loop can be called again in second onboard
+        // Idempotent: second onboard should return created: false
+        // Reset sync_started so spawn_sync_loop can be called again
         state
             .sync_started
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth, false).await;
+        let auth2 = serde_json::json!({"handler": "alice", "display_name": "Alice"});
+        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth2, false).await;
         assert!(resp2.ok);
-        // Second time: user already exists
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
     }
 
@@ -597,87 +604,6 @@ mod tests {
     fn make_state(repo_path: std::path::PathBuf) -> SharedState {
         let (event_tx, _) = broadcast::channel(16);
         Arc::new(AppState::new(repo_path, Config::default(), event_tx, None))
-    }
-
-    /// Minimal: 1 bot onboard then send — verify file write works
-    #[tokio::test]
-    async fn single_bot_onboard_then_send() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        let bare = tmp.path().join("remote.git");
-        std::fs::create_dir_all(&bare).unwrap();
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(&bare)
-            .output()
-            .unwrap();
-
-        let seed = tmp.path().join("seed");
-        clone_from_bare(&bare, &seed);
-        std::fs::write(seed.join(".keep"), "").unwrap();
-        std::process::Command::new("git")
-            .args(["add", ".keep"])
-            .current_dir(&seed)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&seed)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&seed)
-            .output()
-            .unwrap();
-
-        let bot_path = tmp.path().join("bot");
-        clone_from_bare(&bare, &bot_path);
-        let state = make_state(bot_path.clone());
-
-        // Onboard
-        let resp = handle_onboard(
-            state.clone(),
-            "git".to_string(),
-            serde_json::json!({"handler": "alice", "display_name": "Alice"}),
-            false,
-        )
-        .await;
-        assert!(resp.ok, "onboard failed: {:?}", resp.error);
-
-        // Refresh users
-        let users_dir = state.repo_root.join("users");
-        let mut users = state.users.write().await;
-        users.clear();
-        if let Ok(entries) = std::fs::read_dir(&users_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".meta.yaml") {
-                    users.push(name.trim_end_matches(".meta.yaml").to_string());
-                }
-            }
-        }
-        drop(users);
-
-        // Send
-        let send = crate::handlers::handle_request(
-            crate::api::Request::Send {
-                channel: "general".to_string(),
-                body: "hello world".to_string(),
-                reply_to: None,
-                author: Some("alice".to_string()),
-            },
-            state.clone(),
-        )
-        .await;
-        assert!(send.ok, "send failed: {:?}", send.error);
-
-        let thread_path = state.repo_root.join("channels/general.thread");
-        let content = std::fs::read_to_string(&thread_path).unwrap();
-        assert!(
-            content.contains("hello world"),
-            "message missing from thread"
-        );
     }
 
     /// 3 bots onboard concurrently to the same repo, then each sends a message.
@@ -867,33 +793,6 @@ mod tests {
         println!("Bot A thread:\n{}", thread_a);
         println!("Bot B thread:\n{}", thread_b);
         println!("Bot C thread:\n{}", thread_c);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_repo_creator_joins_general() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = setup_test_state(tmp.path());
-
-        ensure_repo(&state, "alice").unwrap();
-
-        // meta.yaml should have creator in members
-        let meta_content =
-            std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
-        let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
-        assert_eq!(meta.members, vec!["alice"]);
-
-        // .thread should have a join event (not be empty)
-        let thread_content =
-            std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
-        assert!(!thread_content.is_empty(), "thread should not be empty");
-        assert!(
-            thread_content.contains("[E:join]"),
-            "thread should contain join event"
-        );
-        assert!(
-            thread_content.contains("@alice"),
-            "join event should reference alice"
-        );
     }
 
     #[tokio::test]

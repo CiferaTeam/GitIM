@@ -100,10 +100,10 @@ fn write_ensure_repo_files(root: &Path) -> Vec<String> {
 
 /// Scenario: two clones both try to initialize the repo structure (ensure_repo).
 /// Clone A succeeds. Clone B gets PushConflict and discards its unpushed commit.
-/// After discard, Clone B's working tree should be clean and origin should have
-/// only Clone A's commit (not Clone B's duplicate init).
+/// Verifies both that origin retains Clone A's state and that Clone B's working
+/// tree is clean (no unpushed commits, no leftover rebase state) after discard.
 #[test]
-fn test_ensure_repo_push_conflict_discard_succeeds() {
+fn test_discard_unpushed_recovers_from_conflict() {
     let (bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones_with_initial_commit();
 
     // ---- Clone A: write ensure_repo files, commit, push (succeeds) ----
@@ -154,6 +154,14 @@ fn test_ensure_repo_push_conflict_discard_succeeds() {
         "Clone B should have no unpushed commits after discard"
     );
 
+    // ---- Verify: no leftover rebase state in Clone B ----
+    let rebase_merge = clone_b_dir.path().join(".git/rebase-merge");
+    let rebase_apply = clone_b_dir.path().join(".git/rebase-apply");
+    assert!(
+        !rebase_merge.exists() && !rebase_apply.exists(),
+        "no rebase state should remain after discard_unpushed"
+    );
+
     // ---- Verify: origin has Clone A's commit (the general channel files exist) ----
     let verify_clone = TempDir::new().unwrap();
     run_git(
@@ -184,53 +192,17 @@ fn test_ensure_repo_push_conflict_discard_succeeds() {
     );
 }
 
-/// After discard_unpushed following a PushConflict, Clone B's working tree should
-/// be reset to origin's state (Clone A's files, not Clone B's local commit).
-#[test]
-fn test_ensure_repo_after_discard_working_tree_is_clean() {
-    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones_with_initial_commit();
-
-    // Clone A: push ensure_repo files
-    let repo_a = GitStorage::new(clone_a_dir.path());
-    let paths_a = write_ensure_repo_files(clone_a_dir.path());
-    let path_refs_a: Vec<&str> = paths_a.iter().map(|s| s.as_str()).collect();
-    repo_a
-        .add_and_commit(&path_refs_a, "init: repo structure")
-        .unwrap();
-    repo_a.push().unwrap();
-
-    // Clone B: also write ensure_repo files, commit
-    let repo_b = GitStorage::new(clone_b_dir.path());
-    let paths_b = write_ensure_repo_files(clone_b_dir.path());
-    let path_refs_b: Vec<&str> = paths_b.iter().map(|s| s.as_str()).collect();
-    repo_b.add_and_commit(&path_refs_b, "init: repo structure").unwrap();
-
-    // Push → PushConflict
-    assert!(matches!(repo_b.push(), Err(GitError::PushConflict)));
-
-    // Discard
-    repo_b.discard_unpushed().unwrap();
-
-    // Clone B working tree: no unpushed commits, no in-progress rebase
-    assert!(!repo_b.has_unpushed_commits().unwrap());
-
-    let rebase_merge = clone_b_dir.path().join(".git/rebase-merge");
-    let rebase_apply = clone_b_dir.path().join(".git/rebase-apply");
-    assert!(
-        !rebase_merge.exists() && !rebase_apply.exists(),
-        "no rebase state should remain after discard_unpushed"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Test 2: RegisterUser concurrent → PushConflict → fetch + rebase → push succeeds
 // ---------------------------------------------------------------------------
 
 /// Scenario: two clones register different users simultaneously.
 /// Clone A (alice) pushes first. Clone B (bob) gets PushConflict, then does
-/// fetch + rebase_onto_origin + retry push. Both user files should exist at the end.
+/// fetch + rebase_onto_origin + retry push. Verifies both that origin contains
+/// both user files with correct content and that Clone B has no unpushed commits
+/// after the successful retry push.
 #[test]
-fn test_register_user_concurrent_rebase_retry_succeeds() {
+fn test_concurrent_registration_rebase_succeeds() {
     let (bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones_with_initial_commit();
 
     // ---- Bootstrap: push initial repo structure from Clone A ----
@@ -288,6 +260,12 @@ fn test_register_user_concurrent_rebase_retry_succeeds() {
         .push()
         .expect("Clone B push should succeed after rebase");
 
+    // ---- Verify: Clone B has no unpushed commits after successful push ----
+    assert!(
+        !repo_b.has_unpushed_commits().unwrap(),
+        "no unpushed commits should remain after successful push"
+    );
+
     // ---- Verify: origin has both user files ----
     let verify_clone = TempDir::new().unwrap();
     run_git(
@@ -319,57 +297,4 @@ fn test_register_user_concurrent_rebase_retry_succeeds() {
     )
     .unwrap();
     assert_eq!(bob_content["display_name"], "Bob");
-}
-
-/// Rebase preserves commit history: after rebase, Clone B's commit (bob) sits on top of
-/// Clone A's commit (alice), so Clone B has no unpushed commits after the retry push.
-#[test]
-fn test_register_user_after_rebase_push_no_unpushed_commits() {
-    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones_with_initial_commit();
-
-    let repo_a = GitStorage::new(clone_a_dir.path());
-    let init_paths = write_ensure_repo_files(clone_a_dir.path());
-    let init_refs: Vec<&str> = init_paths.iter().map(|s| s.as_str()).collect();
-    repo_a.add_and_commit(&init_refs, "init: repo structure").unwrap();
-    repo_a.push().unwrap();
-
-    run_git(clone_b_dir.path(), &["pull"]);
-
-    // Clone A: register alice, push
-    let users_dir_a = clone_a_dir.path().join("users");
-    std::fs::create_dir_all(&users_dir_a).unwrap();
-    std::fs::write(
-        users_dir_a.join("alice.meta.yaml"),
-        "display_name: Alice\nrole: member\nintroduction: GitIM user\n",
-    )
-    .unwrap();
-    repo_a
-        .add_and_commit(&["users/alice.meta.yaml"], "user: register @alice")
-        .unwrap();
-    repo_a.push().unwrap();
-
-    // Clone B: register bob, commit, PushConflict, fetch, rebase, push
-    let repo_b = GitStorage::new(clone_b_dir.path());
-    let users_dir_b = clone_b_dir.path().join("users");
-    std::fs::create_dir_all(&users_dir_b).unwrap();
-    std::fs::write(
-        users_dir_b.join("bob.meta.yaml"),
-        "display_name: Bob\nrole: member\nintroduction: GitIM user\n",
-    )
-    .unwrap();
-    repo_b
-        .add_and_commit(&["users/bob.meta.yaml"], "user: register @bob")
-        .unwrap();
-
-    assert!(matches!(repo_b.push(), Err(GitError::PushConflict)));
-
-    repo_b.fetch().unwrap();
-    repo_b.rebase_onto_origin().unwrap();
-    repo_b.push().expect("push after rebase should succeed");
-
-    // After successful push, no unpushed commits remain
-    assert!(
-        !repo_b.has_unpushed_commits().unwrap(),
-        "no unpushed commits should remain after successful push"
-    );
 }
