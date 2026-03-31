@@ -95,6 +95,16 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
+    #[serde(rename = "create_channel")]
+    CreateChannel {
+        name: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        introduction: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
     #[serde(rename = "search")]
     Search {
         #[serde(default)]
