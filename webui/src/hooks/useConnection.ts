@@ -14,6 +14,14 @@ function toApiChannel(name: string): string {
   return name;
 }
 
+/** 将 API 返回的 channel 名转为 store 显示名：DM "dm:alice,bob" → "alice--bob" */
+function fromApiChannel(name: string): string {
+  if (name.startsWith('dm:')) {
+    return name.slice(3).replace(',', '--');
+  }
+  return name;
+}
+
 /** 解析 /api/channels 响应 — 兼容新格式（对象数组）和旧格式（字符串数组） */
 function parseChannelsResponse(data: Record<string, unknown>): Channel[] {
   const raw = data.channels as unknown[];
@@ -180,20 +188,22 @@ export function useConnection() {
             needRefreshUsers = true;
             continue;
           }
+          // poll 返回 API 格式 (dm:a,b)，store 用显示格式 (a--b)
+          const storeName = change.channel ? fromApiChannel(change.channel) : '';
           // 检查是否为新 channel（不在当前列表中）
-          if (change.channel && !currentChannels.some((c) => c.name === change.channel)) {
+          if (storeName && !currentChannels.some((c) => c.name === storeName)) {
             needRefreshChannels = true;
           }
           // channel / dm 变更
-          if (change.channel === currentChannelRef.current) {
-            // 当前频道 → 重新加载消息（DM 需要 dm: 前缀）
-            const readRes = await api.read(toApiChannel(change.channel), 200);
+          if (storeName === currentChannelRef.current) {
+            // 当前频道 → 重新加载消息（API 需要 dm: 前缀）
+            const readRes = await api.read(toApiChannel(storeName), 200);
             if (readRes.ok && readRes.data) {
               setMessages((readRes.data.entries as unknown as Message[]) || []);
             }
-          } else if (change.channel) {
+          } else if (storeName) {
             // 其他频道 → 增加未读
-            incrementUnread(change.channel);
+            incrementUnread(storeName);
           }
         }
 
