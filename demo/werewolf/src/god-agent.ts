@@ -120,9 +120,12 @@ async function main() {
       continue;
     }
 
-    messages.push({ role: "assistant", content: response.content });
+    const content = Array.isArray(response.content)
+      ? response.content
+      : [{ type: "text" as const, text: String(response.content) }];
+    messages.push({ role: "assistant", content });
 
-    for (const block of response.content) {
+    for (const block of content) {
       if (block.type === "text" && block.text.includes("【游戏结束】")) {
         gameOver = true;
       }
@@ -132,7 +135,7 @@ async function main() {
     // Handle tool_use
     if (response.stop_reason === "tool_use") {
       const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-      for (const block of response.content) {
+      for (const block of content) {
         if (block.type !== "tool_use") continue;
         try {
           const result = await executeTool(socketPath, block.name, block.input as Record<string, unknown>, "god");
