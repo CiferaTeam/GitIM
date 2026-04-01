@@ -11,3 +11,4 @@ dist/
 cli/dist/webui/
 *.tsbuildinfo
 .agents/
+.gitim/
