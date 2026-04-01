@@ -246,7 +246,19 @@ async function main(): Promise<void> {
     console.log(`[runner] ${p.handler} daemon 就绪`);
   }
 
-  // 5. Spawn all player agents FIRST
+  // 5. Create game channels via God's daemon (infrastructure, not LLM)
+  const allHandlers = players.map((p) => p.handler);
+  const wolfHandlers = players.filter((p) => p.role === Role.Wolf).map((p) => p.handler);
+
+  await callDaemon(godSocket, { method: "create_channel", name: "werewolf-1", introduction: "狼人杀游戏主频道", author: "god" });
+  await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-1", targets: allHandlers, author: "god" });
+  console.log(`[runner] 创建 #werewolf-1，拉入 ${allHandlers.length} 名玩家`);
+
+  await callDaemon(godSocket, { method: "create_channel", name: "werewolf-wolves-1", introduction: "狼人私聊频道", author: "god" });
+  await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-wolves-1", targets: wolfHandlers, author: "god" });
+  console.log(`[runner] 创建 #werewolf-wolves-1，拉入 ${wolfHandlers.length} 名狼人`);
+
+  // 6. Spawn all player agents
   for (const p of players) {
     const proc = spawnPlayer(p, playerSockets[p.handler]);
     agentProcs.push(proc);
@@ -255,7 +267,7 @@ async function main(): Promise<void> {
 
   await sleep(1000);
 
-  // 6. Spawn God agent LAST
+  // 7. Spawn God agent LAST
   const godProc = spawnGod(godSocket, players);
   agentProcs.push(godProc);
   console.log("[runner] God agent 已启动，游戏开始");

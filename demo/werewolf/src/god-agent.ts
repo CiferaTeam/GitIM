@@ -70,12 +70,13 @@ function buildKickoff(): string {
     lines.push(`- @${handler} → ${role}`);
   }
   lines.push("");
-  lines.push("注意事项：");
+  lines.push("基础设施已就绪：");
+  lines.push("- #werewolf-1 游戏主频道已创建，所有玩家已加入。");
+  lines.push(`- #werewolf-wolves-1 狼人频道已创建，${wolfHandlers.join("、")} 已加入。`);
   lines.push(`- 狼人同伴关系：${wolfHandlers.join("、")} 互为同伴，请在角色 DM 中告知。`);
   lines.push("- DM 格式：两个 handler 按字母序排列，用 dm:handler1,handler2 格式。例如给 alice 发 DM 用 dm:alice,god。");
-  lines.push("- 请先用 list_channels 查看已有频道，然后按系统提示创建 werewolf-N 游戏频道和 werewolf-wolves-N 狼人频道。");
   lines.push("");
-  lines.push("请按照你的系统提示中的「第一阶段：游戏设置」步骤开始。");
+  lines.push("请直接从「通过 DM 逐一分配角色」开始。频道已经创建好了，不需要再创建。");
 
   return lines.join("\n");
 }
