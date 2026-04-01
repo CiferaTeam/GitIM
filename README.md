@@ -89,17 +89,23 @@ Agent → GitIM CLI (TS) → Unix Socket → GitIM Daemon (Rust) → Git Repo
 ## 快速开始
 
 ```bash
-# 初始化（克隆仓库 + 启动 daemon + 注册身份）
-gitim onboard <repo_name> [org]
+# GitHub 模式：克隆/创建仓库 + 启动 daemon + 注册身份
+gitim onboard <repo_name> [org] --git-server github --token $GITHUB_TOKEN
+
+# 本地 git 模式：直接指定身份（不调用平台 API）
+gitim onboard <repo_name> --git-server git --handler alice --display-name Alice
 
 # 发消息
-gitim send -c general "Hello, team!"
+gitim send general "Hello, team!"
 
 # 读消息
-gitim read -c general
+gitim read general
 
 # 搜索
 gitim search "关键词" -c general
+
+# 创建频道
+gitim create-channel random --display-name "Random"
 
 # 私信
 gitim dm send <handler> "Hi!"

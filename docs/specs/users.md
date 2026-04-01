@@ -1,35 +1,33 @@
 # 用户模块
 
-> GitIM v0.1 Schema
+> GitIM 当前实现（用户与身份）
 
 ---
 
 ## 用户文件
 
-```
+```text
 users/<handler>.meta.yaml
 ```
 
-文件名 = GitHub handle（小写）。`users/` 目录下 MUST 至少存在一个身份文件。
+文件名使用小写 handler。`users/` 目录下至少存在一个身份文件。
 
 ### Handler 规则
 
 | 属性 | 值 |
 |------|------|
 | 字符集 | 小写字母 `a-z`、数字 `0-9`、连字符 `-` |
-| 长度 | 1–39 个字符（GitHub 用户名上限） |
+| 长度 | 1–39 个字符 |
 | 模式 | `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` |
 | 限制 | MUST NOT 以连字符开头或结尾；MUST NOT 包含连续连字符 |
 | 保留值 | `system` — MUST NOT 注册 |
 
 ### Schema
 
-```json
-{
-  "display_name": "Cifera Nexus",
-  "role": "ceo",
-  "introduction": "负责团队整体战略与协调"
-}
+```yaml
+display_name: Cifera Nexus
+role: ceo
+introduction: 负责团队整体战略与协调
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -38,74 +36,69 @@ users/<handler>.meta.yaml
 | `role` | string | MUST | 角色，自由填写，1-32 字符 |
 | `introduction` | string | MUST | 自我介绍，1-500 字符 |
 
-文件内容 MUST 是合法的 UTF-8 JSON。
+文件内容是 UTF-8 YAML。
 
 ---
 
-## Onboarding
+## Onboarding 与身份推断
 
-### 身份推断
+当前实现的 `gitim onboard` 分成两段：
 
-`gitim onboard` 通过平台 API 推断当前用户 handler，写入 `.gitim/me.json`。Daemon 启动时从该文件读取身份。
+1. **CLI 阶段**：校验参数、clone/创建仓库、创建本地 `.gitim/`、启动 daemon
+2. **Daemon 阶段**：推断身份、写入 `.gitim/me.json`、确保 repo 结构、注册用户、启动 sync loop
 
-| Endpoint | 推断方式 | 环境要求 |
-|----------|----------|----------|
-| `github` | `gh api /user` → `.login` 小写化 | `gh` CLI 已认证 |
-| `gitea` | Gitea API `/api/v1/user` → `.login` 小写化 | `GITEA_TOKEN` 环境变量 |
+### 支持的身份推断方式
 
-### me.json 格式
+| `git_server` | 输入 | 推断方式 |
+|--------------|------|----------|
+| `git` | `--handler` + `--display-name` | 直接使用用户提供值 |
+| `github` | `--token` | 调 GitHub `/user` API，读取 `login` / `name` |
+| `gitea` | `--token` + `--url` | 调 Gitea `/api/v1/user` API，读取 `login` / `full_name` |
+| `gitlab` | `--token` + `--url` | 调 GitLab `/api/v4/user` API，读取 `username` / `name` |
+
+### `.gitim/me.json` 格式
 
 ```json
 {
   "handler": "alice",
-  "endpoint": "github",
-  "inferred_from": "gh_api",
-  "inferred_at": "20260317T120000Z"
+  "git_server": "github",
+  "display_name": "Alice",
+  "inferred_at": "20260401T120000Z"
 }
 ```
 
-此文件 MUST 在 `.gitignore` 中，每个 clone 副本独立维护。
-
-### Onboard 流程
-
-```
-gitim onboard <repo_name> [org]
-│
-├─ 1. 推断身份（GitHub/Gitea API）
-├─ 2. 校验 Git 可用性
-├─ 3. 尝试 clone
-│     ├─ 成功 → 检查是否为合规 GitIM repo
-│     │         ├─ 是 → 加载（写 me.json → 启动 daemon → register_user）
-│     │         └─ 否 → 初始化（创建目录结构 → 写配置 → commit + push → 启动 daemon）
-│     └─ 失败 → 创建（gh repo create / Gitea API → clone → 初始化）
-```
+此文件保存在本地 `.gitim/` 目录，不提交到 Git 仓库。
 
 ### 用户注册
 
-Onboard 推断身份后，检查 `users/<handler>.meta.yaml` 是否存在：
-- **存在** → 直接使用
-- **不存在** → 调用 daemon 的 `register_user` API 创建文件，由 daemon 负责写入、commit 和 push
+onboard 推断身份后，daemon 会检查 `users/<handler>.meta.yaml` 是否存在：
+
+- **存在**：直接复用
+- **不存在**：创建用户文件，默认 `role=member`、`introduction=GitIM user`
+
+对首次注册的用户，daemon 还会自动加入 `general` 频道。
 
 ### 发消息时的身份使用
 
-CLI 发消息时不需要 `-a` 参数。Daemon 自动使用 `me.json` 中的 handler。`-a` 参数保留用于调试。
+CLI 发消息时通常不需要传 `-a`。daemon 会默认使用 `.gitim/me.json` 中的当前身份；`-a` 仅用于调试覆盖。
 
 ---
 
 ## 设计决策
 
-- **Handler = GitHub handle**：复用已有的唯一标识符，无需额外注册流程。
-- **身份推断而非手动配置**：Agent 场景下零交互完成 onboard 是核心目标。
-- **me.json 由 CLI 写入，daemon 读取**：职责分离——CLI 负责推断和初始化，daemon 负责运行时使用。
-- **register_user 由 daemon 执行**：文件写入 + git commit 统一由 daemon 管理，避免 CLI 直接操作 git 引入并发问题。
+- **handler 作为稳定主键**：用户文件名、消息作者、DM 命名都直接复用同一个标识。
+- **身份推断在 daemon**：避免 CLI 和 daemon 各自维护一套推断逻辑。
+- **`me.json` 本地化**：同一仓库的不同 clone 可以使用不同身份。
+- **用户注册由 daemon 统一落盘**：减少 CLI 直接操作 Git 和文件系统带来的竞态。
 
 ## 涉及源文件
 
 | 文件 | 职责 |
 |------|------|
-| `crates/gitim-core/src/types/handler.rs` | Handler newtype，验证规则 |
-| `crates/gitim-core/src/types/meta.rs` | UserMeta 类型 |
+| `crates/gitim-core/src/types/handler.rs` | Handler 验证规则 |
+| `crates/gitim-core/src/types/meta.rs` | `UserMeta` 类型 |
 | `crates/gitim-core/src/validator/mod.rs` | `validate_user_meta()` |
+| `crates/gitim-daemon/src/identity.rs` | 各平台身份推断 |
+| `crates/gitim-daemon/src/onboard.rs` | onboard 编排与 `me.json` 写入 |
 | `crates/gitim-daemon/src/handlers.rs` | `handle_register_user()` |
-| `crates/gitim-daemon/src/state.rs` | `AppState.current_user` 身份注入 |
-| `cli/src/commands/onboard.ts` | onboard 命令、身份推断、仓库初始化 |
+| `cli/src/commands/onboard.ts` | onboard 命令和仓库 clone/create |
