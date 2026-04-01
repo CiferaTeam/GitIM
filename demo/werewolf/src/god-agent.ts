@@ -70,15 +70,9 @@ function buildKickoff(): string {
     lines.push(`- @${handler} → ${role}`);
   }
   lines.push("");
-  lines.push("你需要完成的设置步骤：");
-  lines.push("1. 用 create_channel 创建游戏频道（如 werewolf-1），然后用 join_channel 将所有玩家拉入。");
-  lines.push(`2. 用 create_channel 创建狼人频道（如 werewolf-wolves-1），然后用 join_channel 将狼人 ${wolfHandlers.join("、")} 拉入。`);
-  lines.push("3. 通过 DM 逐一分配角色（每人一条 DM）。");
-  lines.push(`4. 狼人同伴关系：${wolfHandlers.join("、")} 互为同伴，请在角色 DM 中告知。`);
+  lines.push(`狼人同伴关系：${wolfHandlers.join("、")} 互为同伴，请在角色 DM 中告知。`);
   lines.push("");
-  lines.push("DM 格式：两个 handler 按字母序排列，用 dm:handler1,handler2 格式。例如给 alice 发 DM 用 dm:alice,god。");
-  lines.push("");
-  lines.push("请按照游戏规则的「设置阶段」开始。**注意：create_channel 后必须立即 join_channel 拉人，否则玩家看不到频道。**");
+  lines.push("请按照游戏规则的「设置阶段」开始。");
 
   return lines.join("\n");
 }

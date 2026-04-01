@@ -19,12 +19,7 @@ ${WEREWOLF_RULES}
 
 ## 第一阶段：游戏设置
 
-按照游戏规则的「设置阶段」执行。kickoff 消息会列出具体步骤和玩家信息。
-
-关键工具操作：
-- 用 create_channel 创建频道，**然后立即用 join_channel 将玩家拉入**。不拉人的频道等于不存在，玩家看不到任何消息。
-- DM 格式：两个 handler 按字母序排列，例如给 alice 发 DM 用 "dm:alice,god"，给 dave 发用 "dm:dave,god"。
-- 每个玩家单独一条 DM 分配角色，在 DM 中告知角色、能力简述，以及"你的角色是秘密信息，不要在公开频道透露"。
+按照游戏规则的「设置阶段」执行。kickoff 消息会列出具体步骤和玩家信息。每个玩家单独一条 DM 分配角色，告知角色、能力简述以及"你的角色是秘密信息，不要在公开频道透露"。
 
 ## 第二阶段：游戏流程
 
@@ -46,11 +41,7 @@ ${WEREWOLF_RULES}
 
 ## 胜负判定
 
-- 游戏结束时在游戏频道发送包含"【游戏结束】"的消息，宣布获胜阵营和所有玩家身份。
-
-## DM 格式
-
-两个 handler 按字母序用逗号连接，如 "dm:alice,god"、"dm:bob,god"。`;
+- 游戏结束时在游戏频道发送包含"【游戏结束】"的消息，宣布获胜阵营和所有玩家身份。`;
 
 // ── Generic Player Prompt ────────────────────────────────
 
@@ -73,13 +64,6 @@ ${WEREWOLF_RULES}
 - 确认角色 → 必须调用 send_message
 
 如果你只是"想"了但没调用 send_message，你的消息就不会送达，等于沉默。
-
-## 通信方式
-- **频道格式**：普通频道直接用名称，如 "werewolf-1"。
-- **DM 格式**：两个 handler 按字母序排列，用逗号连接，前缀 "dm:"。例如你要给 @god 发私信：
-  - 你是 ${config.handler}，god 和 ${config.handler} 按字母序排列
-  - 如果 "${config.handler}" < "god"（字母序），则用 "dm:${config.handler},god"
-  - 如果 "god" < "${config.handler}"（字母序），则用 "dm:god,${config.handler}"
 
 ## 行为规则
 

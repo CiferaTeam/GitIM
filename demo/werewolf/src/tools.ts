@@ -48,7 +48,7 @@ export const gitimTools: Anthropic.Messages.Tool[] = [
       properties: {
         channel: {
           type: "string",
-          description: "频道名称，如 'general'。DM 格式: 'dm:handler1,handler2'",
+          description: "频道名称，如 'general'。DM 格式: 'dm:handler1,handler2'（两个 handler 必须按字母序排列，例如给 alice 发私信用 'dm:alice,god'，不是 'dm:god,alice'）",
         },
         body: { type: "string", description: "消息内容" },
         reply_to: {
@@ -110,7 +110,7 @@ export const gitimTools: Anthropic.Messages.Tool[] = [
   {
     name: "create_channel",
     description:
-      "创建一个新频道。创建后频道为空，需要用 join_channel 拉人入群。",
+      "创建一个新频道。重要：创建后频道没有成员，必须紧接着调用 join_channel 将用户拉入，否则没人能看到频道消息。",
     input_schema: {
       type: "object" as const,
       properties: {
