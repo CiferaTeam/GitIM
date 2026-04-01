@@ -107,23 +107,21 @@ async function main() {
   while (!gameOver) {
     let response: Anthropic.Messages.Message;
     try {
-      response = await client.messages.create({
+      const stream = client.messages.stream({
         model,
         max_tokens: 4096,
         system: GOD_SYSTEM_PROMPT,
         tools: gitimTools,
         messages,
-        stream: false,
       });
+      response = await stream.finalMessage();
     } catch (err) {
       console.error("[god] LLM error:", err);
       messages.push({ role: "user", content: "发生了错误，请继续推进游戏。" });
       continue;
     }
 
-    const content = Array.isArray(response.content)
-      ? response.content
-      : [{ type: "text" as const, text: String(response.content) }];
+    const content = response.content;
     messages.push({ role: "assistant", content });
 
     for (const block of content) {
