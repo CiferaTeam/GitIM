@@ -246,9 +246,22 @@ async function main(): Promise<void> {
     console.log(`[runner] ${p.handler} daemon 就绪`);
   }
 
-  // 5. Create game channels via God's daemon (infrastructure, not LLM)
+  // 5. Wait for git sync then create game channels via God's daemon
+  // All players have onboarded and pushed their registrations.
+  // God's sync loop needs to pull these before join_channel will accept them.
+  console.log("[runner] 等待 God daemon 同步玩家注册信息...");
   const allHandlers = players.map((p) => p.handler);
   const wolfHandlers = players.filter((p) => p.role === Role.Wolf).map((p) => p.handler);
+
+  // Poll until God's daemon knows all players
+  const syncDeadline = Date.now() + 30_000;
+  while (Date.now() < syncDeadline) {
+    try {
+      const users = (await callDaemon(godSocket, { method: "users" })) as string[];
+      if (allHandlers.every((h) => users.includes(h))) break;
+    } catch { /* retry */ }
+    await sleep(2000);
+  }
 
   await callDaemon(godSocket, { method: "create_channel", name: "werewolf-1", introduction: "狼人杀游戏主频道", author: "god" });
   await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-1", targets: allHandlers, author: "god" });
