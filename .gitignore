@@ -10,3 +10,4 @@ node_modules/
 dist/
 cli/dist/webui/
 *.tsbuildinfo
+.agents/
