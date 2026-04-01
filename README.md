@@ -59,4 +59,4 @@ Rust daemon（tokio, axum, serde）+ TypeScript CLI（commander）
 
 ## License
 
-MIT
+Apache-2.0
