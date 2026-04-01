@@ -14,7 +14,7 @@ import { gitimTools, executeTool, callDaemon } from "./tools.js";
 
 // ── CLI Args ──────────────────────────────────────────────
 
-function parseArgs(argv: string[]) {
+function parsePlayerArgs(argv: string[]) {
   const args = argv.slice(2);
   const get = (flag: string): string | undefined => {
     const idx = args.indexOf(flag);
@@ -25,13 +25,14 @@ function parseArgs(argv: string[]) {
   const displayName = get("--display-name");
   const personality = get("--personality");
   const socketPath = get("--socket-path");
+  const gameId = parseInt(get("--game-id") ?? "1", 10);
 
   if (!handler || !displayName || !personality || !socketPath) {
-    console.error("用法: --handler <h> --display-name <n> --personality <p> --socket-path <s>");
+    console.error("用法: --handler <h> --display-name <n> --personality <p> --socket-path <s> [--game-id N]");
     process.exit(1);
   }
 
-  return { handler, displayName, personality, socketPath };
+  return { handler, displayName, personality, socketPath, gameId };
 }
 
 // ── Player Tools (subset) ─────────────────────────────────
@@ -41,8 +42,10 @@ const playerTools = gitimTools.filter((t) => PLAYER_TOOL_NAMES.has(t.name));
 
 // ── Determine Task from Poll Changes ─────────────────────
 
-function determineTask(handler: string, changes: PollChange[]): string {
+function determineTask(handler: string, changes: PollChange[], gameId: number): string {
   const godDm = dmChannel(handler, "god");
+  const gameChannel = `werewolf-${gameId}`;
+  const wolvesChannel = `werewolf-wolves-${gameId}`;
 
   for (const ch of changes) {
     const msgs = ch.entries.filter((e) => e.type === "message" && e.body);
@@ -53,12 +56,12 @@ function determineTask(handler: string, changes: PollChange[]): string {
       const last = msgs[msgs.length - 1];
       return `上帝通过私信联系了你："${last.body}"。你必须调用 send_message 工具，channel 填 "${godDm}" 来回复上帝。`;
     }
-    // Wolf channel: werewolf-wolves-N
-    if (ch.channel.startsWith("werewolf-wolves")) {
+    // Wolf channel for this game
+    if (ch.channel === wolvesChannel) {
       return `狼人频道 #${ch.channel} 有新消息，请调用 send_message 工具在 #${ch.channel} 与同伴讨论。`;
     }
-    // Game channel: werewolf-N (but not werewolf-wolves-N)
-    if (ch.channel.startsWith("werewolf-")) {
+    // Game channel for this game
+    if (ch.channel === gameChannel) {
       for (const m of msgs) {
         if (m.body?.includes(`@${handler}`)) {
           return `你在 #${ch.channel} 被 @mention 了："${m.body}"。请调用 send_message 工具在 #${ch.channel} 发言。`;
@@ -66,6 +69,8 @@ function determineTask(handler: string, changes: PollChange[]): string {
       }
       return `游戏频道 #${ch.channel} 有新消息，请根据讨论内容调用 send_message 工具在 #${ch.channel} 发言或行动。`;
     }
+    // Ignore other games' channels
+    if (ch.channel.startsWith("werewolf-")) continue;
     // General channel
     if (ch.channel === "general") {
       for (const m of msgs) {
@@ -83,7 +88,7 @@ function determineTask(handler: string, changes: PollChange[]): string {
 // ── Main Loop ─────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { handler, displayName, personality, socketPath } = parseArgs(process.argv);
+  const { handler, displayName, personality, socketPath, gameId } = parsePlayerArgs(process.argv);
 
   const tag = `[${handler}]`;
   console.log(`${tag} 启动 — 显示名: ${displayName}`);
@@ -131,9 +136,13 @@ async function main(): Promise<void> {
 
     pollCursor = pollResult.commit_id;
 
-    // Filter: only changes with messages, exclude own thinking channel
+    // Filter: only changes with messages, exclude own thinking channel and other games
+    const gameChannel = `werewolf-${gameId}`;
+    const wolvesChannel = `werewolf-wolves-${gameId}`;
     const relevant = pollResult.changes.filter((ch) => {
       if (ch.channel === thinkingChannel) return false;
+      // Ignore other games' channels
+      if (ch.channel.startsWith("werewolf-") && ch.channel !== gameChannel && ch.channel !== wolvesChannel) return false;
       return ch.entries.some((e) => e.type === "message" && e.body);
     });
 
@@ -158,7 +167,7 @@ async function main(): Promise<void> {
     }
 
     // Build injection and call LLM
-    const task = determineTask(handler, relevant);
+    const task = determineTask(handler, relevant, gameId);
     const injection = formatPollChanges(
       relevant,
       task,

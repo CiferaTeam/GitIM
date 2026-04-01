@@ -21,12 +21,19 @@ import { Role } from "./types.js";
 const { values } = parseArgs({
   options: {
     config: { type: "string" },
+    "game-id": { type: "string" },
   },
   strict: true,
 });
 
 if (!values.config) {
-  console.error("用法: npm start -- --config <path-to-config.json>");
+  console.error("用法: npm start -- --config <path-to-config.json> [--game-id N]");
+  process.exit(1);
+}
+
+const gameId = parseInt(values["game-id"] ?? "1", 10);
+if (isNaN(gameId) || gameId < 1) {
+  console.error("game-id 必须为正整数");
   process.exit(1);
 }
 
@@ -68,7 +75,7 @@ function loadConfig(configPath: string): GameConfig {
     throw new Error(`玩家数必须在 5-7 之间，当前 ${handlers.length}`);
   }
 
-  const validRoles = new Set(Object.values(Role).filter((r) => r !== Role.God));
+  const validRoles: Set<string> = new Set(Object.values(Role).filter((r) => r !== Role.God));
   const roleCounts: Record<string, number> = {};
 
   for (const [handler, pc] of Object.entries(config.players)) {
@@ -186,22 +193,23 @@ function cloneRepo(remoteUrl: string, repoDir: string): void {
 
 // ── Spawn Agent Processes ─────────────────────────────────
 
-function spawnGod(socketPath: string, players: ResolvedPlayer[]): ChildProcess {
+function spawnGod(socketPath: string, players: ResolvedPlayer[], gid: number): ChildProcess {
   const playersArg = players.map((p) => `${p.handler}:${p.role}`).join(",");
-  return spawn("npx", ["tsx", "src/god-agent.ts", "--players", playersArg, "--socket-path", socketPath], {
+  return spawn("npx", ["tsx", "src/god-agent.ts", "--players", playersArg, "--socket-path", socketPath, "--game-id", String(gid)], {
     stdio: ["ignore", "inherit", "inherit"],
     cwd: process.cwd(),
     env: process.env,
   });
 }
 
-function spawnPlayer(p: ResolvedPlayer, socketPath: string): ChildProcess {
+function spawnPlayer(p: ResolvedPlayer, socketPath: string, gid: number): ChildProcess {
   return spawn("npx", [
     "tsx", "src/player-agent.ts",
     "--handler", p.handler,
     "--display-name", p.displayName,
     "--personality", p.personality,
     "--socket-path", socketPath,
+    "--game-id", String(gid),
   ], {
     stdio: ["ignore", "inherit", "inherit"],
     cwd: process.cwd(),
@@ -220,46 +228,72 @@ async function main(): Promise<void> {
 
   const bareDir = path.join(workDir, "remote.git");
   const remoteUrl = `file://${bareDir}`;
+  const godDir = path.join(workDir, "god");
+  const godSocket = socketPathFor(godDir);
 
-  console.log(`[runner] 狼人杀 Game Runner 启动`);
+  console.log(`[runner] 狼人杀 Game Runner 启动 (game-id: ${gameId})`);
   console.log(`[runner] 玩家数: ${players.length}, 工作目录: ${workDir}`);
 
-  // 1. Create bare repo
-  setupBareRepo(bareDir);
-  console.log(`[runner] 创建 bare repo: ${bareDir}`);
-
-  // 2. Print role assignments
+  // Print role assignments
   console.log("[runner] 角色分配:");
   for (const p of players) {
     console.log(`  ${p.handler} → ${p.role}`);
   }
 
-  // 3. Setup God: init → daemon → onboard
-  const godDir = path.join(workDir, "god");
-  setupFirstRepo(godDir, remoteUrl);
-  const godDaemon = await startDaemon(godDir);
-  const godSocket = socketPathFor(godDir);
-  await onboard(godSocket, "god", "上帝");
-  console.log("[runner] God daemon 就绪");
-
-  const daemonProcs: ChildProcess[] = [godDaemon];
+  const daemonProcs: ChildProcess[] = [];
   const agentProcs: ChildProcess[] = [];
-
-  // 4. Setup each player: clone → daemon → onboard
   const playerSockets: Record<string, string> = {};
-  for (const p of players) {
-    const playerDir = path.join(workDir, p.handler);
-    cloneRepo(remoteUrl, playerDir);
-    const daemon = await startDaemon(playerDir);
-    daemonProcs.push(daemon);
-    const sock = socketPathFor(playerDir);
-    await onboard(sock, p.handler, p.displayName);
-    playerSockets[p.handler] = sock;
-    console.log(`[runner] ${p.handler} daemon 就绪`);
+
+  // Check if infrastructure already exists (reuse mode)
+  const reuse = fs.existsSync(bareDir) && fs.existsSync(godDir);
+
+  if (reuse) {
+    console.log("[runner] 检测到已有基础设施，进入复用模式");
+
+    // Ensure daemons are running, start if not
+    const ensureDaemon = async (repoDir: string, label: string): Promise<void> => {
+      const sock = socketPathFor(repoDir);
+      try {
+        await callDaemon(sock, { method: "poll", since: null });
+        console.log(`[runner] ${label} daemon 已在运行`);
+      } catch {
+        console.log(`[runner] ${label} daemon 未运行，启动中...`);
+        const daemon = await startDaemon(repoDir);
+        daemonProcs.push(daemon);
+        console.log(`[runner] ${label} daemon 已启动`);
+      }
+    };
+
+    await ensureDaemon(godDir, "god");
+    for (const p of players) {
+      const playerDir = path.join(workDir, p.handler);
+      await ensureDaemon(playerDir, p.handler);
+      playerSockets[p.handler] = socketPathFor(playerDir);
+    }
+  } else {
+    // Fresh setup
+    setupBareRepo(bareDir);
+    console.log(`[runner] 创建 bare repo: ${bareDir}`);
+
+    setupFirstRepo(godDir, remoteUrl);
+    const godDaemon = await startDaemon(godDir);
+    daemonProcs.push(godDaemon);
+    await onboard(godSocket, "god", "上帝");
+    console.log("[runner] God daemon 就绪");
+
+    for (const p of players) {
+      const playerDir = path.join(workDir, p.handler);
+      cloneRepo(remoteUrl, playerDir);
+      const daemon = await startDaemon(playerDir);
+      daemonProcs.push(daemon);
+      const sock = socketPathFor(playerDir);
+      await onboard(sock, p.handler, p.displayName);
+      playerSockets[p.handler] = sock;
+      console.log(`[runner] ${p.handler} daemon 就绪`);
+    }
   }
 
-  // 5. Register all players on God's daemon (idempotent)
-  // This ensures God's daemon knows all players without waiting for git sync.
+  // Register all players on God's daemon (idempotent)
   for (const p of players) {
     try {
       await callDaemon(godSocket, {
@@ -271,19 +305,19 @@ async function main(): Promise<void> {
   }
   console.log(`[runner] God daemon 注册 ${players.length} 名玩家`);
 
-  // 6. Spawn all player agents
+  // Spawn all player agents
   for (const p of players) {
-    const proc = spawnPlayer(p, playerSockets[p.handler]);
+    const proc = spawnPlayer(p, playerSockets[p.handler], gameId);
     agentProcs.push(proc);
   }
   console.log("[runner] 所有 player agent 已启动");
 
   await sleep(1000);
 
-  // 7. Spawn God agent LAST
-  const godProc = spawnGod(godSocket, players);
+  // Spawn God agent LAST
+  const godProc = spawnGod(godSocket, players, gameId);
   agentProcs.push(godProc);
-  console.log("[runner] God agent 已启动，游戏开始");
+  console.log(`[runner] God agent 已启动，第 ${gameId} 局游戏开始`);
 
   // 7. Cleanup handler
   const cleanup = () => {

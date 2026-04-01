@@ -18,16 +18,18 @@ const { values } = parseArgs({
   options: {
     players: { type: "string" },
     "socket-path": { type: "string" },
+    "game-id": { type: "string" },
   },
   strict: true,
 });
 
 if (!values.players || !values["socket-path"]) {
-  console.error("Usage: god-agent --players 'alice:seer,...' --socket-path <path>");
+  console.error("Usage: god-agent --players 'alice:seer,...' --socket-path <path> [--game-id N]");
   process.exit(1);
 }
 
 const socketPath = values["socket-path"]!;
+const gameId = parseInt(values["game-id"] ?? "1", 10);
 
 // Parse "alice:seer,bob:villager,..."
 const playerRoles = new Map<string, Role>();
@@ -63,6 +65,9 @@ function buildKickoff(): string {
   const wolfHandlers = handlers.filter((h) => playerRoles.get(h) === Role.Wolf);
 
   const lines = [
+    `这是第 ${gameId} 局游戏。`,
+    `游戏频道名：werewolf-${gameId}，狼人频道名：werewolf-wolves-${gameId}。`,
+    "",
     `以下 ${playerRoles.size} 名玩家已在 GitIM 上就绪，可以通信：`,
     "",
   ];
