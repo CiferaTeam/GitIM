@@ -142,11 +142,23 @@ async function startDaemon(repoDir: string): Promise<ChildProcess> {
 }
 
 async function onboard(socketPath: string, handler: string, displayName: string): Promise<void> {
-  await callDaemon(socketPath, {
-    method: "onboard",
-    git_server: "git",
-    auth: { handler, display_name: displayName },
-  });
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await callDaemon(socketPath, {
+        method: "onboard",
+        git_server: "git",
+        auth: { handler, display_name: displayName },
+      });
+      return;
+    } catch (err) {
+      if (attempt < 4) {
+        console.log(`[runner] ${handler} onboard 重试 (${attempt + 1}/5): ${err instanceof Error ? err.message : err}`);
+        await sleep(2000);
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 // ── Git Setup ─────────────────────────────────────────────
