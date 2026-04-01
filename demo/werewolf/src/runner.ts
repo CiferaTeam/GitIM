@@ -258,11 +258,8 @@ async function main(): Promise<void> {
     console.log(`[runner] ${p.handler} daemon 就绪`);
   }
 
-  // 5. Register all players on God's daemon (idempotent), then create channels
+  // 5. Register all players on God's daemon (idempotent)
   // This ensures God's daemon knows all players without waiting for git sync.
-  const allHandlers = players.map((p) => p.handler);
-  const wolfHandlers = players.filter((p) => p.role === Role.Wolf).map((p) => p.handler);
-
   for (const p of players) {
     try {
       await callDaemon(godSocket, {
@@ -270,22 +267,9 @@ async function main(): Promise<void> {
         handler: p.handler,
         display_name: p.displayName,
       });
-      console.log(`[runner] God daemon 注册 ${p.handler} 成功`);
-    } catch (err) {
-      console.log(`[runner] God daemon 注册 ${p.handler} 失败: ${err instanceof Error ? err.message : err}`);
-    }
+    } catch { /* idempotent, ignore */ }
   }
-  // Verify users
-  const users = await callDaemon(godSocket, { method: "users" });
-  console.log(`[runner] God daemon 已知用户: ${JSON.stringify(users)}`);
-
-  await callDaemon(godSocket, { method: "create_channel", name: "werewolf-1", introduction: "狼人杀游戏主频道", author: "god" });
-  await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-1", targets: allHandlers, author: "god" });
-  console.log(`[runner] 创建 #werewolf-1，拉入 ${allHandlers.length} 名玩家`);
-
-  await callDaemon(godSocket, { method: "create_channel", name: "werewolf-wolves-1", introduction: "狼人私聊频道", author: "god" });
-  await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-wolves-1", targets: wolfHandlers, author: "god" });
-  console.log(`[runner] 创建 #werewolf-wolves-1，拉入 ${wolfHandlers.length} 名狼人`);
+  console.log(`[runner] God daemon 注册 ${players.length} 名玩家`);
 
   // 6. Spawn all player agents
   for (const p of players) {
