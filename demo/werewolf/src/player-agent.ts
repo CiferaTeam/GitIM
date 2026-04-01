@@ -48,20 +48,29 @@ function determineTask(handler: string, changes: PollChange[]): string {
     const msgs = ch.entries.filter((e) => e.type === "message" && e.body);
     if (msgs.length === 0) continue;
 
-    // God DM takes highest priority
+    // God DM takes highest priority — must reply via DM
     if (ch.channel === godDm) {
       const last = msgs[msgs.length - 1];
-      return `上帝通过私信联系了你："${last.body}"。请通过 DM 回复上帝。`;
+      return `上帝通过私信联系了你："${last.body}"。你必须调用 send_message 工具，channel 填 "${godDm}" 来回复上帝。`;
     }
-    // Wolf channel (only visible if you're a wolf member)
-    if (ch.channel === "wolves") {
-      return "狼人频道有新消息，请与同伴讨论。";
+    // Wolf channel: werewolf-wolves-N
+    if (ch.channel.startsWith("werewolf-wolves")) {
+      return `狼人频道 #${ch.channel} 有新消息，请调用 send_message 工具在 #${ch.channel} 与同伴讨论。`;
+    }
+    // Game channel: werewolf-N (but not werewolf-wolves-N)
+    if (ch.channel.startsWith("werewolf-")) {
+      for (const m of msgs) {
+        if (m.body?.includes(`@${handler}`)) {
+          return `你在 #${ch.channel} 被 @mention 了："${m.body}"。请调用 send_message 工具在 #${ch.channel} 发言。`;
+        }
+      }
+      return `游戏频道 #${ch.channel} 有新消息，请根据讨论内容调用 send_message 工具在 #${ch.channel} 发言或行动。`;
     }
     // General channel
     if (ch.channel === "general") {
       for (const m of msgs) {
         if (m.body?.includes(`@${handler}`)) {
-          return `你在 #general 被 @mention 了："${m.body}"。请在 #general 发言。`;
+          return `你在 #general 被 @mention 了："${m.body}"。请调用 send_message 工具在 #general 发言。`;
         }
       }
       return "请根据 #general 频道的讨论内容思考并行动。";
