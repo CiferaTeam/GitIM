@@ -108,6 +108,19 @@ export const gitimTools: Anthropic.Messages.Tool[] = [
     },
   },
   {
+    name: "create_channel",
+    description:
+      "创建一个新频道。创建后频道为空，需要用 join_channel 拉人入群。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "频道名称（小写字母、数字、连字符）" },
+        introduction: { type: "string", description: "频道简介" },
+      },
+      required: ["name", "introduction"],
+    },
+  },
+  {
     name: "join_channel",
     description:
       "将用户加入指定频道。targets 为空时表示自己加入，非空时表示拉其他用户入群。",
@@ -167,6 +180,15 @@ export async function executeTool(
         method: "thread",
         channel: input.channel,
         line_number: input.line_number,
+      });
+      return JSON.stringify(data);
+    }
+    case "create_channel": {
+      const data = await callDaemon(socketPath, {
+        method: "create_channel",
+        name: input.name,
+        introduction: input.introduction ?? "",
+        author,
       });
       return JSON.stringify(data);
     }
