@@ -113,6 +113,7 @@ async function main() {
         system: GOD_SYSTEM_PROMPT,
         tools: gitimTools,
         messages,
+        stream: false,
       });
     } catch (err) {
       console.error("[god] LLM error:", err);

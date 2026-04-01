@@ -242,7 +242,7 @@ async function callLLM(
   messages: Anthropic.Messages.MessageParam[],
   tools: Anthropic.Messages.Tool[]
 ): Promise<Anthropic.Messages.Message> {
-  return client.messages.create({ model, max_tokens: 1024, system, tools, messages });
+  return client.messages.create({ model, max_tokens: 1024, system, tools, messages, stream: false });
 }
 
 function sleep(ms: number): Promise<void> {
