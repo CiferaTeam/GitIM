@@ -264,13 +264,20 @@ async function main(): Promise<void> {
   const wolfHandlers = players.filter((p) => p.role === Role.Wolf).map((p) => p.handler);
 
   for (const p of players) {
-    await callDaemon(godSocket, {
-      method: "register_user",
-      handler: p.handler,
-      display_name: p.displayName,
-    });
+    try {
+      await callDaemon(godSocket, {
+        method: "register_user",
+        handler: p.handler,
+        display_name: p.displayName,
+      });
+      console.log(`[runner] God daemon 注册 ${p.handler} 成功`);
+    } catch (err) {
+      console.log(`[runner] God daemon 注册 ${p.handler} 失败: ${err instanceof Error ? err.message : err}`);
+    }
   }
-  console.log(`[runner] God daemon 注册 ${players.length} 名玩家`);
+  // Verify users
+  const users = await callDaemon(godSocket, { method: "users" });
+  console.log(`[runner] God daemon 已知用户: ${JSON.stringify(users)}`);
 
   await callDaemon(godSocket, { method: "create_channel", name: "werewolf-1", introduction: "狼人杀游戏主频道", author: "god" });
   await callDaemon(godSocket, { method: "join_channel", channel: "werewolf-1", targets: allHandlers, author: "god" });

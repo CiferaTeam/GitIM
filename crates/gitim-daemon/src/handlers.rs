@@ -468,8 +468,13 @@ async fn handle_register_user(
     std::fs::create_dir_all(&users_dir).ok();
     let meta_path = users_dir.join(format!("{}.meta.yaml", handler));
 
-    // If already exists, return success with exists=true
+    // If already exists, ensure user is in memory list and return success
     if meta_path.exists() {
+        let mut users = state.users.write().await;
+        if !users.contains(&handler) {
+            users.push(handler.clone());
+            users.sort();
+        }
         return Response::success(serde_json::json!({
             "handler": handler,
             "exists": true
