@@ -51,7 +51,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const handleSelectUser = (user: string) => {
     setDmSearchOpen(false);
     setDmSearchFilter('');
-    onStartDm(user);
+    onStartDm?.(user);
   };
 
   const handleSearchKeyDown = (e: React.KeyboardEvent) => {

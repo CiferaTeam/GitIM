@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { Role, dmChannel } from "../types.js";
+import { dmChannel } from "../types.js";
 import { formatPollChanges, type PollChange } from "../context-manager.js";
-import { makePlayerPrompt, GOD_SYSTEM_PROMPT } from "../prompts.js";
+import { makePlayerSystemPrompt, makeGodSystemPrompt } from "../prompts.js";
 
 describe("E2E mock: full pipeline without LLM", () => {
   describe("poll changes → context injection", () => {
@@ -48,35 +48,48 @@ describe("E2E mock: full pipeline without LLM", () => {
   });
 
   describe("prompts", () => {
-    it("God prompt contains setup phase and game rules", () => {
-      expect(GOD_SYSTEM_PROMPT).toContain("第一阶段：游戏设置");
-      expect(GOD_SYSTEM_PROMPT).toContain("第二阶段：游戏流程");
-      expect(GOD_SYSTEM_PROMPT).toContain('回复"收到"');
-      expect(GOD_SYSTEM_PROMPT).toContain("#wolves");
-      expect(GOD_SYSTEM_PROMPT).toContain("join_channel");
-      expect(GOD_SYSTEM_PROMPT).toContain("【游戏结束】");
+    it("God prompt contains setup phase, game rules, and CLI tools", () => {
+      const prompt = makeGodSystemPrompt(1);
+      expect(prompt).toContain("第一阶段：游戏设置");
+      expect(prompt).toContain("第二阶段：游戏流程");
+      expect(prompt).toContain("【游戏结束】");
+      expect(prompt).toContain("gitim send");
+      expect(prompt).toContain("gitim dm send");
+      expect(prompt).toContain("gitim create-channel");
+      expect(prompt).toContain("通信机制");
+      expect(prompt).toContain("werewolf-1");
     });
 
-    it("player prompt is generic — no role information", () => {
-      const prompt = makePlayerPrompt({
+    it("player prompt contains handler, personality, CLI tools, and guidelines", () => {
+      const prompt = makePlayerSystemPrompt({
         handler: "alice",
         personality: "你很聪明。",
+        gameId: 1,
       });
       expect(prompt).toContain("@alice");
       expect(prompt).toContain("你很聪明");
-      expect(prompt).toContain("还不知道自己的角色");
-      expect(prompt).toContain("send_message");
-      expect(prompt).not.toContain("你的身份");
-      expect(prompt).not.toContain("预言家");
+      expect(prompt).toContain("gitim send");
+      expect(prompt).toContain("gitim dm send");
+      expect(prompt).toContain("-a alice");
+      expect(prompt).toContain("通信机制");
+      expect(prompt).toContain("不要主动读取");
     });
 
-    it("player prompt instructs to confirm role receipt", () => {
-      const prompt = makePlayerPrompt({
+    it("player prompt does not contain god-only tools", () => {
+      const prompt = makePlayerSystemPrompt({
         handler: "bob",
         personality: "你很直率。",
+        gameId: 1,
       });
-      expect(prompt).toContain("收到");
-      expect(prompt).toContain("@god");
+      expect(prompt).not.toContain("gitim create-channel");
+    });
+
+    it("god prompt forbids read but mentions it as prohibited", () => {
+      const prompt = makeGodSystemPrompt(1);
+      expect(prompt).toContain("不要主动读取");
+      // God's tool list should not include read as an available command
+      const toolSection = prompt.split("# 通信工具")[1]?.split("# ")[0] ?? "";
+      expect(toolSection).not.toMatch(/^## 读取消息/m);
     });
   });
 });

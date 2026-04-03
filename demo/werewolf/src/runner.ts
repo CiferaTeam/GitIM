@@ -193,22 +193,29 @@ function cloneRepo(remoteUrl: string, repoDir: string): void {
 
 // ── Spawn Agent Processes ─────────────────────────────────
 
-function spawnGod(socketPath: string, players: ResolvedPlayer[], gid: number): ChildProcess {
+function spawnGod(socketPath: string, repoDir: string, players: ResolvedPlayer[], gid: number): ChildProcess {
   const playersArg = players.map((p) => `${p.handler}:${p.role}`).join(",");
-  return spawn("npx", ["tsx", "src/god-agent.ts", "--players", playersArg, "--socket-path", socketPath, "--game-id", String(gid)], {
+  return spawn("npx", [
+    "tsx", "src/god-agent.ts",
+    "--players", playersArg,
+    "--socket-path", socketPath,
+    "--repo-dir", repoDir,
+    "--game-id", String(gid),
+  ], {
     stdio: ["ignore", "inherit", "inherit"],
     cwd: process.cwd(),
     env: process.env,
   });
 }
 
-function spawnPlayer(p: ResolvedPlayer, socketPath: string, gid: number): ChildProcess {
+function spawnPlayer(p: ResolvedPlayer, socketPath: string, repoDir: string, gid: number): ChildProcess {
   return spawn("npx", [
     "tsx", "src/player-agent.ts",
     "--handler", p.handler,
     "--display-name", p.displayName,
     "--personality", p.personality,
     "--socket-path", socketPath,
+    "--repo-dir", repoDir,
     "--game-id", String(gid),
   ], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -307,7 +314,8 @@ async function main(): Promise<void> {
 
   // Spawn all player agents
   for (const p of players) {
-    const proc = spawnPlayer(p, playerSockets[p.handler], gameId);
+    const playerDir = path.join(workDir, p.handler);
+    const proc = spawnPlayer(p, playerSockets[p.handler], playerDir, gameId);
     agentProcs.push(proc);
   }
   console.log("[runner] 所有 player agent 已启动");
@@ -315,7 +323,7 @@ async function main(): Promise<void> {
   await sleep(1000);
 
   // Spawn God agent LAST
-  const godProc = spawnGod(godSocket, players, gameId);
+  const godProc = spawnGod(godSocket, godDir, players, gameId);
   agentProcs.push(godProc);
   console.log(`[runner] God agent 已启动，第 ${gameId} 局游戏开始`);
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env tsx
 /**
- * player-agent.ts — 狼人杀通用玩家进程
+ * player-agent.ts — 狼人杀玩家进程（claude -p 薄壳）
  *
- * 启动时不知道角色，等 God 通过 DM 通知。
- * 每个玩家有自己的 daemon 和 socket，poll 拉取消息。
+ * 壳的职责：poll GitIM → 格式化消息 → claude -p --resume
+ * Claude 通过 Bash 调用 gitim CLI 完成所有游戏操作。
  */
 
-import Anthropic from "@anthropic-ai/sdk";
-import { dmChannel } from "./types.js";
+import { spawnSync } from "node:child_process";
+import { callDaemon } from "./tools.js";
 import { formatPollChanges, type PollChange, type PollResult } from "./context-manager.js";
-import { makePlayerPrompt } from "./prompts.js";
-import { gitimTools, executeTool, callDaemon } from "./tools.js";
+import { makePlayerSystemPrompt } from "./prompts.js";
+import { dmChannel } from "./types.js";
 
 // ── CLI Args ──────────────────────────────────────────────
 
@@ -25,93 +25,105 @@ function parsePlayerArgs(argv: string[]) {
   const displayName = get("--display-name");
   const personality = get("--personality");
   const socketPath = get("--socket-path");
+  const repoDir = get("--repo-dir");
   const gameId = parseInt(get("--game-id") ?? "1", 10);
 
-  if (!handler || !displayName || !personality || !socketPath) {
-    console.error("用法: --handler <h> --display-name <n> --personality <p> --socket-path <s> [--game-id N]");
+  if (!handler || !displayName || !personality || !socketPath || !repoDir) {
+    console.error("用法: --handler <h> --display-name <n> --personality <p> --socket-path <s> --repo-dir <d> [--game-id N]");
     process.exit(1);
   }
 
-  return { handler, displayName, personality, socketPath, gameId };
+  return { handler, displayName, personality, socketPath, repoDir, gameId };
 }
 
-// ── Player Tools (subset) ─────────────────────────────────
+// ── Claude -p Wrapper ────────────────────────────────────
 
-const PLAYER_TOOL_NAMES = new Set(["send_message", "list_users"]);
-const playerTools = gitimTools.filter((t) => PLAYER_TOOL_NAMES.has(t.name));
+interface ClaudeResult {
+  result: string;
+  session_id: string;
+  is_error?: boolean;
+}
+
+function callClaude(prompt: string, systemPrompt: string, repoDir: string, sessionId?: string): ClaudeResult {
+  const args = [
+    "-p", prompt,
+    "--system-prompt", systemPrompt,
+    "--output-format", "json",
+    "--allowedTools", "Bash(gitim *)",
+    "--max-turns", "500",
+  ];
+  if (sessionId) {
+    args.push("--resume", sessionId);
+  }
+
+  const result = spawnSync("claude", args, {
+    cwd: repoDir,
+    encoding: "utf-8",
+    timeout: 300_000, // 5 min
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4096" },
+  });
+
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = result.stderr || result.stdout || "(no output)";
+    throw new Error(`claude exited with ${result.status}: ${detail.slice(0, 500)}`);
+  }
+
+  return parseClaudeOutput(result.stdout.trim());
+}
+
+function parseClaudeOutput(raw: string): ClaudeResult {
+  const events = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const init = events.find((e) => e.type === "system" && e.subtype === "init");
+  const resultEvent = events.findLast((e) => e.type === "result");
+  return {
+    session_id: (init?.session_id ?? resultEvent?.session_id ?? "") as string,
+    result: (resultEvent?.result ?? "") as string,
+    is_error: (resultEvent?.is_error ?? false) as boolean,
+  };
+}
 
 // ── Determine Task from Poll Changes ─────────────────────
 
-function determineTask(handler: string, changes: PollChange[], gameId: number): string {
+function describeChanges(handler: string, changes: PollChange[], gameId: number): string {
   const godDm = dmChannel(handler, "god");
   const gameChannel = `werewolf-${gameId}`;
   const wolvesChannel = `werewolf-wolves-${gameId}`;
+
+  const parts: string[] = [];
 
   for (const ch of changes) {
     const msgs = ch.entries.filter((e) => e.type === "message" && e.body);
     if (msgs.length === 0) continue;
 
-    // God DM takes highest priority — must reply via DM
     if (ch.channel === godDm) {
-      const last = msgs[msgs.length - 1];
-      return `上帝通过私信联系了你："${last.body}"。你必须调用 send_message 工具，channel 填 "${godDm}" 来回复上帝。`;
-    }
-    // Wolf channel for this game
-    if (ch.channel === wolvesChannel) {
-      return `狼人频道 #${ch.channel} 有新消息，请调用 send_message 工具在 #${ch.channel} 与同伴讨论。`;
-    }
-    // Game channel for this game
-    if (ch.channel === gameChannel) {
-      for (const m of msgs) {
-        if (m.body?.includes(`@${handler}`)) {
-          return `你在 #${ch.channel} 被 @mention 了："${m.body}"。请调用 send_message 工具在 #${ch.channel} 发言。`;
-        }
+      parts.push("上帝通过私信联系了你，请通过 DM 回复上帝。");
+    } else if (ch.channel === wolvesChannel) {
+      parts.push("狼人频道有新消息，请在狼人频道与同伴讨论。");
+    } else if (ch.channel === gameChannel) {
+      const mentioned = msgs.some((m) => m.body?.includes(`@${handler}`));
+      if (mentioned) {
+        parts.push("你在游戏频道被 @mention 了，请在游戏频道发言。");
+      } else {
+        parts.push("游戏频道有新消息，请根据讨论内容决定是否行动。");
       }
-      return `游戏频道 #${ch.channel} 有新消息，请根据讨论内容调用 send_message 工具在 #${ch.channel} 发言或行动。`;
-    }
-    // Ignore other games' channels
-    if (ch.channel.startsWith("werewolf-")) continue;
-    // General channel
-    if (ch.channel === "general") {
-      for (const m of msgs) {
-        if (m.body?.includes(`@${handler}`)) {
-          return `你在 #general 被 @mention 了："${m.body}"。请调用 send_message 工具在 #general 发言。`;
-        }
-      }
-      return "请根据 #general 频道的讨论内容思考并行动。";
     }
   }
 
-  return "请等待上帝的指示。";
+  return parts.length > 0 ? parts.join("\n") : "有新消息，请根据内容思考和行动。";
 }
 
 // ── Main Loop ─────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { handler, displayName, personality, socketPath, gameId } = parsePlayerArgs(process.argv);
+  const { handler, displayName, personality, socketPath, repoDir, gameId } = parsePlayerArgs(process.argv);
 
   const tag = `[${handler}]`;
-  console.log(`${tag} 启动 — 显示名: ${displayName}`);
+  console.log(`${tag} 启动 — 显示名: ${displayName}, repo: ${repoDir}`);
 
-  // LLM client
-  const llmApiKey = process.env.LLM_API_KEY ?? process.env.ANTHROPIC_API_KEY;
-  if (!llmApiKey) {
-    console.error(`${tag} 缺少 LLM_API_KEY 或 ANTHROPIC_API_KEY`);
-    process.exit(1);
-  }
-  const llmBaseURL = process.env.LLM_BASE_URL;
-  const llmModel = process.env.LLM_MODEL ?? "claude-sonnet-4-20250514";
-
-  const client = new Anthropic({
-    apiKey: llmApiKey,
-    baseURL: llmBaseURL || undefined,
-    defaultHeaders: llmBaseURL ? { Authorization: `Bearer ${llmApiKey}` } : undefined,
-  });
-
-  const systemPrompt = makePlayerPrompt({ handler, personality });
+  const systemPrompt = makePlayerSystemPrompt({ handler, personality, gameId });
   const thinkingChannel = dmChannel(handler, handler);
-  const messages: Anthropic.Messages.MessageParam[] = [];
-  const thinkingHistory: string[] = [];
 
   // Poll cursor
   let pollCursor: string | null = null;
@@ -123,7 +135,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`${tag} 思考频道: ${thinkingChannel}`);
+  let sessionId: string | undefined;
 
   while (true) {
     let pollResult: PollResult;
@@ -136,12 +148,11 @@ async function main(): Promise<void> {
 
     pollCursor = pollResult.commit_id;
 
-    // Filter: only changes with messages, exclude own thinking channel and other games
+    // Filter relevant changes
     const gameChannel = `werewolf-${gameId}`;
     const wolvesChannel = `werewolf-wolves-${gameId}`;
     const relevant = pollResult.changes.filter((ch) => {
       if (ch.channel === thinkingChannel) return false;
-      // Ignore other games' channels
       if (ch.channel.startsWith("werewolf-") && ch.channel !== gameChannel && ch.channel !== wolvesChannel) return false;
       return ch.entries.some((e) => e.type === "message" && e.body);
     });
@@ -155,108 +166,39 @@ async function main(): Promise<void> {
     for (const ch of relevant) {
       for (const e of ch.entries) {
         if (e.body?.includes("【游戏结束】")) {
-          console.log(`${tag} 检测到游戏结束`);
-          await executeTool(socketPath, "send_message", {
-            channel: thinkingChannel,
-            body: `游戏结束了。最终消息: ${e.body}`,
-          }, handler);
-          console.log(`${tag} 写入最终反思，退出`);
+          console.log(`${tag} 检测到游戏结束，退出`);
           process.exit(0);
         }
       }
     }
 
-    // Build injection and call LLM
-    const task = determineTask(handler, relevant, gameId);
-    const injection = formatPollChanges(
-      relevant,
-      task,
-      thinkingHistory.length > 0 ? thinkingHistory.slice(-5) : undefined
-    );
+    // Build prompt from poll changes
+    const task = describeChanges(handler, relevant, gameId);
+    const injection = formatPollChanges(relevant, task);
 
-    messages.push({ role: "user", content: injection });
+    console.log(`${tag} 收到新消息，调用 claude -p ...`);
 
-    let response: Anthropic.Messages.Message;
     try {
-      response = await callLLM(client, llmModel, systemPrompt, messages, playerTools);
+      const result = callClaude(injection, systemPrompt, repoDir, sessionId);
+      sessionId = result.session_id;
+
+      if (result.is_error) {
+        console.error(`${tag} claude -p 错误: ${result.result}`);
+      } else {
+        console.log(`${tag} claude -p 完成 (session: ${sessionId})`);
+      }
     } catch (err) {
-      console.error(`${tag} LLM 错误，5s 后重试:`, err);
-      await sleep(5000);
-      try {
-        response = await callLLM(client, llmModel, systemPrompt, messages, playerTools);
-      } catch {
-        messages.pop();
-        await sleep(2000);
-        continue;
-      }
-    }
-
-    messages.push({ role: "assistant", content: response.content });
-    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-
-    for (const block of response.content) {
-      if (block.type === "text" && block.text.trim()) {
-        const thinking = block.text.trim();
-        thinkingHistory.push(thinking);
-        if (thinkingHistory.length > 20) thinkingHistory.shift();
-        console.log(`${tag} thinking...`);
-        await executeTool(socketPath, "send_message", { channel: thinkingChannel, body: thinking }, handler);
-      } else if (block.type === "tool_use") {
-        console.log(`${tag} ${block.name}(${JSON.stringify(block.input)})`);
-        try {
-          const result = await executeTool(socketPath, block.name, block.input as Record<string, unknown>, handler);
-          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: errorMsg, is_error: true });
-        }
-      }
-    }
-
-    if (toolResults.length > 0) {
-      messages.push({ role: "user", content: toolResults });
-    }
-
-    if (response.stop_reason === "tool_use" && toolResults.length > 0) {
-      try {
-        const followUp = await callLLM(client, llmModel, systemPrompt, messages, playerTools);
-        messages.push({ role: "assistant", content: followUp.content });
-        for (const block of followUp.content) {
-          if (block.type === "text" && block.text.trim()) {
-            thinkingHistory.push(block.text.trim());
-            if (thinkingHistory.length > 20) thinkingHistory.shift();
-            await executeTool(socketPath, "send_message", { channel: thinkingChannel, body: block.text.trim() }, handler);
-          } else if (block.type === "tool_use") {
-            try {
-              const result = await executeTool(socketPath, block.name, block.input as Record<string, unknown>, handler);
-              messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: block.id, content: result }] });
-            } catch (err) {
-              messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: block.id, content: String(err), is_error: true }] });
-            }
-          }
-        }
-      } catch (err) {
-        console.error(`${tag} follow-up LLM 错误:`, err);
-      }
+      console.error(`${tag} claude -p 调用失败:`, err instanceof Error ? err.message : err);
+      // session 可能已损坏，重置
+      sessionId = undefined;
     }
 
     await sleep(1000);
   }
 }
 
-async function callLLM(
-  client: Anthropic,
-  model: string,
-  system: string,
-  messages: Anthropic.Messages.MessageParam[],
-  tools: Anthropic.Messages.Tool[]
-): Promise<Anthropic.Messages.Message> {
-  const stream = client.messages.stream({ model, max_tokens: 1024, system, tools, messages });
-  return stream.finalMessage();
-}
-
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 main().catch((err) => {
