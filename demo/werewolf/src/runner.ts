@@ -59,6 +59,11 @@ const PERSONALITY_POOL = [
   "你是个逻辑怪，喜欢用排除法和概率分析来推理。",
   "你是个演技派，说话时喜欢带入角色，表现得非常真诚。",
   "你比较安静内向，但一旦发言必有关键信息，善于在关键时刻一击致命。",
+  "你是老好人，总想调和矛盾，但关键时刻会坚定站队。",
+  "你疑心很重，对所有人都保持警惕，喜欢反复确认信息。",
+  "你很果断，一旦形成判断就坚持到底，不轻易被人说服。",
+  "你是个跟风派，喜欢观察多数人的意见再做决定，但偶尔会有自己的独到见解。",
+  "你很幽默，喜欢用玩笑缓解紧张气氛，但推理的时候非常认真。",
 ];
 
 // ── Load & Validate Config ────────────────────────────────
@@ -71,8 +76,8 @@ function loadConfig(configPath: string): GameConfig {
   if (!config.players || typeof config.players !== "object") throw new Error("config 缺少 players");
 
   const handlers = Object.keys(config.players);
-  if (handlers.length < 5 || handlers.length > 7) {
-    throw new Error(`玩家数必须在 5-7 之间，当前 ${handlers.length}`);
+  if (handlers.length < 5 || handlers.length > 12) {
+    throw new Error(`玩家数必须在 5-12 之间，当前 ${handlers.length}`);
   }
 
   const validRoles: Set<string> = new Set(Object.values(Role).filter((r) => r !== Role.God));
@@ -85,8 +90,8 @@ function loadConfig(configPath: string): GameConfig {
     roleCounts[pc.role] = (roleCounts[pc.role] ?? 0) + 1;
   }
 
-  // Validate role composition
-  if ((roleCounts["wolf"] ?? 0) !== 2) throw new Error("必须恰好 2 个狼人");
+  // Validate basic role composition
+  if ((roleCounts["wolf"] ?? 0) < 2) throw new Error("至少需要 2 个狼人");
   if ((roleCounts["seer"] ?? 0) !== 1) throw new Error("必须恰好 1 个预言家");
   if ((roleCounts["witch"] ?? 0) !== 1) throw new Error("必须恰好 1 个女巫");
 
@@ -274,8 +279,20 @@ async function main(): Promise<void> {
     await ensureDaemon(godDir, "god");
     for (const p of players) {
       const playerDir = path.join(workDir, p.handler);
-      await ensureDaemon(playerDir, p.handler);
-      playerSockets[p.handler] = socketPathFor(playerDir);
+      if (!fs.existsSync(playerDir)) {
+        // New player — clone and onboard
+        console.log(`[runner] ${p.handler} 是新玩家，创建 repo...`);
+        cloneRepo(remoteUrl, playerDir);
+        const daemon = await startDaemon(playerDir);
+        daemonProcs.push(daemon);
+        const sock = socketPathFor(playerDir);
+        await onboard(sock, p.handler, p.displayName);
+        playerSockets[p.handler] = sock;
+        console.log(`[runner] ${p.handler} daemon 就绪`);
+      } else {
+        await ensureDaemon(playerDir, p.handler);
+        playerSockets[p.handler] = socketPathFor(playerDir);
+      }
     }
   } else {
     // Fresh setup
