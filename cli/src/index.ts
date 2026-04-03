@@ -13,6 +13,7 @@ import { webuiCommand } from './commands/webui.js';
 import { searchCommand } from './commands/search.js';
 import { reindexCommand } from './commands/reindex.js';
 import { createChannelCommand } from './commands/create-channel.js';
+import { joinChannelCommand } from './commands/join-channel.js';
 import { archiveChannelCommand } from './commands/archive-channel.js';
 import { archivedChannelsCommand } from './commands/archived-channels.js';
 
@@ -73,6 +74,14 @@ program
   .option('--introduction <text>', '频道简介')
   .action(async (name: string, options: { displayName?: string; introduction?: string }) => {
     await createChannelCommand(name, options);
+  });
+
+program
+  .command('join-channel <channel>')
+  .description('加入频道或拉人入群')
+  .option('-t, --targets <handlers...>', '要拉入的用户（不指定则自己加入）')
+  .action(async (channel: string, options: { targets?: string[] }) => {
+    await joinChannelCommand(channel, options);
   });
 
 program

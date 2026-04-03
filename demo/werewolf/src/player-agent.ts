@@ -6,7 +6,7 @@
  * Claude 通过 Bash 调用 gitim CLI 完成所有游戏操作。
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { callDaemon } from "./tools.js";
 import { formatPollChanges, type PollChange, type PollResult } from "./context-manager.js";
 import { makePlayerSystemPrompt } from "./prompts.js";
@@ -46,9 +46,8 @@ interface ClaudeResult {
 
 function callClaude(prompt: string, systemPrompt: string, repoDir: string, sessionId?: string): ClaudeResult {
   const args = [
-    "claude", "-p", JSON.stringify(prompt),
-    "--bare",
-    "--system-prompt", JSON.stringify(systemPrompt),
+    "-p", prompt,
+    "--system-prompt", systemPrompt,
     "--output-format", "json",
     "--allowedTools", "Bash(gitim *)",
     "--max-turns", "500",
@@ -57,7 +56,7 @@ function callClaude(prompt: string, systemPrompt: string, repoDir: string, sessi
     args.push("--resume", sessionId);
   }
 
-  const result = execSync(args.join(" "), {
+  const result = spawnSync("claude", args, {
     cwd: repoDir,
     encoding: "utf-8",
     timeout: 300_000, // 5 min
@@ -65,7 +64,24 @@ function callClaude(prompt: string, systemPrompt: string, repoDir: string, sessi
     env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4096" },
   });
 
-  return JSON.parse(result.trim());
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = result.stderr || result.stdout || "(no output)";
+    throw new Error(`claude exited with ${result.status}: ${detail.slice(0, 500)}`);
+  }
+
+  return parseClaudeOutput(result.stdout.trim());
+}
+
+function parseClaudeOutput(raw: string): ClaudeResult {
+  const events = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const init = events.find((e) => e.type === "system" && e.subtype === "init");
+  const resultEvent = events.findLast((e) => e.type === "result");
+  return {
+    session_id: (init?.session_id ?? resultEvent?.session_id ?? "") as string,
+    result: (resultEvent?.result ?? "") as string,
+    is_error: (resultEvent?.is_error ?? false) as boolean,
+  };
 }
 
 // ── Determine Task from Poll Changes ─────────────────────

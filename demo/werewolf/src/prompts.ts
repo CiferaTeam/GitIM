@@ -55,6 +55,12 @@ gitim dm send <target_handler> "<body>" -a god
 gitim create-channel <name> --introduction "<简介>"
 \`\`\`
 
+## 拉人入群
+\`\`\`bash
+gitim join-channel <channel> -t <handler1> <handler2> ...
+\`\`\`
+创建频道后必须用此命令将玩家拉入，否则他们收不到频道消息。
+
 ## 查看频道列表
 \`\`\`bash
 gitim channels

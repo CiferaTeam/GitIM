@@ -9,7 +9,7 @@
  * 后续通过 poll 推送玩家回复。
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { Role } from "./types.js";
 import { makeGodSystemPrompt } from "./prompts.js";
@@ -58,9 +58,8 @@ interface ClaudeResult {
 
 function callClaude(prompt: string, systemPrompt: string, sessionId?: string): ClaudeResult {
   const args = [
-    "claude", "-p", JSON.stringify(prompt),
-    "--bare",
-    "--system-prompt", JSON.stringify(systemPrompt),
+    "-p", prompt,
+    "--system-prompt", systemPrompt,
     "--output-format", "json",
     "--allowedTools", "Bash(gitim *)",
     "--max-turns", "1000",
@@ -69,7 +68,7 @@ function callClaude(prompt: string, systemPrompt: string, sessionId?: string): C
     args.push("--resume", sessionId);
   }
 
-  const result = execSync(args.join(" "), {
+  const result = spawnSync("claude", args, {
     cwd: repoDir,
     encoding: "utf-8",
     timeout: 600_000, // 10 min — God turns can be long
@@ -77,7 +76,24 @@ function callClaude(prompt: string, systemPrompt: string, sessionId?: string): C
     env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192" },
   });
 
-  return JSON.parse(result.trim());
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = result.stderr || result.stdout || "(no output)";
+    throw new Error(`claude exited with ${result.status}: ${detail.slice(0, 500)}`);
+  }
+
+  return parseClaudeOutput(result.stdout.trim());
+}
+
+function parseClaudeOutput(raw: string): ClaudeResult {
+  const events = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const init = events.find((e) => e.type === "system" && e.subtype === "init");
+  const resultEvent = events.findLast((e) => e.type === "result");
+  return {
+    session_id: (init?.session_id ?? resultEvent?.session_id ?? "") as string,
+    result: (resultEvent?.result ?? "") as string,
+    is_error: (resultEvent?.is_error ?? false) as boolean,
+  };
 }
 
 // ── Build kickoff message ──────────────────────────────────
@@ -126,7 +142,7 @@ async function main() {
     sessionId = result.session_id;
     console.log(`[god] kickoff 完成 (session: ${sessionId})`);
 
-    if (result.result.includes("【游戏结束】")) {
+    if (result.result?.includes("【游戏结束】")) {
       console.log("[god] 游戏结束。");
       process.exit(0);
     }
@@ -169,6 +185,16 @@ async function main() {
       await sleep(POLL_INTERVAL);
     }
 
+    // Check if God already sent game end in previous turn
+    for (const ch of allChanges) {
+      for (const e of ch.entries) {
+        if (e.body?.includes("【游戏结束】")) {
+          console.log("[god] 检测到游戏结束消息，退出。");
+          process.exit(0);
+        }
+      }
+    }
+
     let prompt: string;
     if (allChanges.length > 0) {
       prompt = formatPollChanges(allChanges, "以上是新收到的玩家消息，请根据游戏进度继续推进。");
@@ -188,7 +214,7 @@ async function main() {
         console.log(`[god] claude -p 完成`);
       }
 
-      if (result.result.includes("【游戏结束】")) {
+      if (result.result?.includes("【游戏结束】")) {
         console.log("[god] 游戏结束。");
         process.exit(0);
       }
