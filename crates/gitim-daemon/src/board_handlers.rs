@@ -569,6 +569,11 @@ pub async fn handle_update_card(
         Err(e) => return Response::error(format!("invalid board name: {}", e)),
     };
 
+    // 2.5. Check at least one field to update
+    if status.is_none() && assignee.is_none() {
+        return Response::error("must provide at least one field to update (status or assignee)");
+    }
+
     // 3. Read board meta (for status validation)
     let board_dir = state.repo_root.join("boards").join(board_name.to_string());
     let board_meta_path = board_dir.join("board.meta.yaml");
