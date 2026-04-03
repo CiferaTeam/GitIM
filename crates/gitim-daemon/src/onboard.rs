@@ -115,6 +115,11 @@ pub async fn handle_onboard(
         info!("onboard: admin mode enabled");
     }
 
+    // Clear guest mode if upgrading from guest to authenticated user
+    state
+        .is_guest
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
     Response::success(serde_json::json!({
         "handler": handler,
         "created": created,
