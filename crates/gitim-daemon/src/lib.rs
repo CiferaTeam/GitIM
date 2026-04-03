@@ -1,4 +1,5 @@
 pub mod api;
+pub mod board_handlers;
 pub mod error;
 pub mod handlers;
 pub mod http;
@@ -7,3 +8,4 @@ pub mod lifecycle;
 pub mod onboard;
 pub mod server;
 pub mod state;
+pub mod thread_io;
