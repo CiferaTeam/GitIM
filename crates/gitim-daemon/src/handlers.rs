@@ -292,6 +292,14 @@ async fn handle_send(
                 }
             }
         } else {
+            let archive_meta = state
+                .repo_root
+                .join("archive")
+                .join("channels")
+                .join(format!("{}.meta.yaml", channel));
+            if archive_meta.exists() {
+                return Response::error(format!("channel '{}' is archived", channel));
+            }
             return Response::error(format!("channel '{}' does not exist", channel));
         }
     };
@@ -1136,6 +1144,14 @@ async fn write_channel_event(
             Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
         }
     } else {
+        let archive_meta = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(format!("{}.meta.yaml", channel));
+        if archive_meta.exists() {
+            return Response::error(format!("channel '{}' is archived", channel));
+        }
         return Response::error(format!("channel '{}' does not exist", channel));
     };
 
