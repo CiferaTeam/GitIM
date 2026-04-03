@@ -13,7 +13,34 @@ pub async fn handle_onboard(
     git_server: String,
     auth: serde_json::Value,
     admin: bool,
+    guest: bool,
 ) -> Response {
+    // --- Guest mode: write me.json and start sync, skip everything else ---
+    if guest {
+        if let Err(resp) = write_guest_me_json(&state) {
+            return resp;
+        }
+        info!("onboard: guest mode — me.json written");
+
+        // Start sync loop (pull-only, no local commits to push)
+        AppState::spawn_sync_loop(state.clone());
+
+        // Initialize search index
+        if state.index.read().unwrap().is_none() {
+            if let Err(e) = AppState::initialize_index(&state) {
+                warn!("index initialization after guest onboard failed: {}", e);
+            }
+        }
+
+        state
+            .is_guest
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        return Response::success(serde_json::json!({
+            "guest": true,
+        }));
+    }
+
     // --- Step A: Infer identity ---
     let identity = match infer(git_server.clone(), auth) {
         Ok(id) => id,
@@ -142,6 +169,26 @@ fn write_me_json(
         "handler": handler,
         "git_server": git_server,
         "display_name": display_name,
+        "inferred_at": now,
+    });
+
+    let me_path = gitim_dir.join("me.json");
+    let content = serde_json::to_string_pretty(&me).unwrap();
+    std::fs::write(&me_path, &content)
+        .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
+
+    Ok(())
+}
+
+fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
+    let gitim_dir = state.repo_root.join(".gitim");
+    std::fs::create_dir_all(&gitim_dir)
+        .map_err(|e| Response::error(format!("failed to create .gitim dir: {}", e)))?;
+
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let me = serde_json::json!({
+        "handler": null,
+        "guest": true,
         "inferred_at": now,
     });
 
@@ -551,7 +598,7 @@ mod tests {
             "handler": "alice",
             "display_name": "Alice"
         });
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, false).await;
+        let resp = handle_onboard(state.clone(), "git".to_string(), auth, false, false).await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
 
         let data = resp.data.unwrap();
@@ -578,7 +625,7 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
         let auth2 = serde_json::json!({"handler": "alice", "display_name": "Alice"});
-        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth2, false).await;
+        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth2, false, false).await;
         assert!(resp2.ok);
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
     }
@@ -660,6 +707,7 @@ mod tests {
             "git".to_string(),
             serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
             false,
+            false,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -671,6 +719,7 @@ mod tests {
             "git".to_string(),
             serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
             false,
+            false,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -681,6 +730,7 @@ mod tests {
             state_c.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-c", "display_name": "Bot C"}),
+            false,
             false,
         )
         .await;
@@ -837,6 +887,7 @@ mod tests {
             "git".to_string(),
             serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
             false,
+            false,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -850,6 +901,7 @@ mod tests {
             state_b.clone(),
             "git".to_string(),
             serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            false,
             false,
         )
         .await;
@@ -886,11 +938,54 @@ mod tests {
         let state = setup_test_state(tmp.path());
 
         let auth = serde_json::json!({"handler": "admin-user", "display_name": "Admin"});
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, true).await;
+        let resp = handle_onboard(state.clone(), "git".to_string(), auth, true, false).await;
         assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
         assert!(
             state.is_admin.load(std::sync::atomic::Ordering::SeqCst),
             "is_admin should be true"
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_guest_mode_writes_me_json_and_skips_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            serde_json::json!({}),
+            false,
+            true,
+        )
+        .await;
+        assert!(resp.ok, "guest onboard should succeed: {:?}", resp.error);
+
+        let data = resp.data.unwrap();
+        assert_eq!(data["guest"], true);
+
+        let me_path = state.repo_root.join(".gitim/me.json");
+        assert!(me_path.exists(), "me.json should be written");
+        let me: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+        assert_eq!(me["guest"], true);
+        assert!(me["handler"].is_null(), "handler should be null for guest");
+
+        assert!(
+            !state.repo_root.join("users").exists()
+                || std::fs::read_dir(state.repo_root.join("users"))
+                    .unwrap()
+                    .count()
+                    == 0,
+            "no user files should be created"
+        );
+
+        let current = state.current_user.read().await;
+        assert!(current.is_none(), "current_user should be None for guest");
+
+        assert!(
+            state.is_guest.load(std::sync::atomic::Ordering::SeqCst),
+            "is_guest should be true"
         );
     }
 }
