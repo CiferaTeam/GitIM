@@ -642,6 +642,20 @@ async fn handle_get_thread(state: SharedState, channel: String, line_number: u64
         .repo_root
         .join("channels")
         .join(format!("{}.thread", channel));
+    let thread_path = if !thread_path.exists() {
+        let archive_path = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(format!("{}.thread", channel));
+        if archive_path.exists() {
+            archive_path
+        } else {
+            thread_path
+        }
+    } else {
+        thread_path
+    };
     let content = std::fs::read_to_string(&thread_path).unwrap_or_default();
     let file = match parse_thread(&content) {
         Ok(f) => f,
@@ -918,6 +932,14 @@ async fn handle_create_channel(
     if meta_path.exists() {
         return Response::error(format!("channel '{}' already exists", name));
     }
+    let archive_meta = state
+        .repo_root
+        .join("archive")
+        .join("channels")
+        .join(format!("{}.meta.yaml", channel_name));
+    if archive_meta.exists() {
+        return Response::error(format!("channel '{}' exists in archive", name));
+    }
 
     // 4. Create channels/ dir
     if let Err(e) = std::fs::create_dir_all(&channels_dir) {
@@ -1054,6 +1076,7 @@ async fn handle_archive_channel(
         return Response::error(format!("git mv thread failed: {}", e));
     }
     if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
+        let _ = state.git_storage.mv(&thread_to, &thread_from);
         return Response::error(format!("git mv meta failed: {}", e));
     }
 

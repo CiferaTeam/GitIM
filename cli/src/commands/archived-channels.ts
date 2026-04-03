@@ -13,12 +13,12 @@ export async function archivedChannelsCommand(): Promise<void> {
   const res = await client.listArchivedChannels();
 
   if (res.ok) {
-    const channels: string[] = res.data.channels;
+    const channels = res.data.channels as Array<{ name: string; kind: string; members: string[] }>;
     if (channels.length === 0) {
       console.log('暂无已归档频道');
     } else {
       for (const ch of channels) {
-        console.log(ch);
+        console.log(`#${ch.name}`);
       }
     }
   } else {
