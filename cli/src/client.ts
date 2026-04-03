@@ -74,8 +74,8 @@ export class GitimClient {
     });
   }
 
-  async onboard(gitServer: string, auth: Record<string, string>, admin?: boolean): Promise<ApiResponse> {
-    return this.request('onboard', { git_server: gitServer, auth, admin: admin ?? false });
+  async onboard(gitServer: string, auth: Record<string, string>, admin?: boolean, guest?: boolean): Promise<ApiResponse> {
+    return this.request('onboard', { git_server: gitServer, auth, admin: admin ?? false, guest: guest ?? false });
   }
 
   async joinChannel(channel: string, targets?: string[]): Promise<ApiResponse> {

@@ -19,6 +19,7 @@ interface OnboardOptions {
   webuiPort?: string;
   webuiDev?: boolean;
   admin?: boolean;
+  guest?: boolean;
 }
 
 function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string, string> {
@@ -175,9 +176,17 @@ export async function onboardCommand(
 ): Promise<void> {
   const gitServer: GitServer = (options.gitServer || 'github') as GitServer;
 
+  // --guest 和 --admin 互斥
+  if (options.guest && options.admin) {
+    console.error('Error: --guest 和 --admin 不能同时使用');
+    process.exit(1);
+  }
+
   // --refresh mode: send Onboard request to running daemon
   if (options.refresh) {
-    validateParams(gitServer, options);
+    if (!options.guest) {
+      validateParams(gitServer, options);
+    }
     const cwd = process.cwd();
     const gitimDir = path.join(cwd, '.gitim');
     if (!fs.existsSync(gitimDir)) {
@@ -196,14 +205,18 @@ export async function onboardCommand(
     }
     await ensureDaemon(cwd);
     const client = new GitimClient(cwd);
-    const auth = buildAuth(gitServer, options);
-    const res = await client.onboard(gitServer, auth, options.admin);
+    const auth = options.guest ? {} : buildAuth(gitServer, options);
+    const res = await client.onboard(gitServer, auth, options.admin, options.guest);
     if (!res.ok) {
       console.error(`身份刷新失败：${res.error}`);
       process.exit(1);
     }
-    const adminTag = options.admin ? ' [ADMIN]' : '';
-    console.log(`身份已刷新：@${res.data?.handler}${adminTag}`);
+    if (options.guest) {
+      console.log('游客模式已刷新');
+    } else {
+      const adminTag = options.admin ? ' [ADMIN]' : '';
+      console.log(`身份已刷新：@${res.data?.handler}${adminTag}`);
+    }
     if (options.withWebui) {
       await launchWebui(cwd, options);
     }
@@ -216,7 +229,9 @@ export async function onboardCommand(
   }
 
   // 1. Validate params
-  validateParams(gitServer, options);
+  if (!options.guest) {
+    validateParams(gitServer, options);
+  }
 
   // 2. Clone or create repo
   const repoDir = cloneOrCreateRepo(repoName, org, gitServer, options);
@@ -234,18 +249,22 @@ export async function onboardCommand(
 
   // 5. Send Onboard request
   const client = new GitimClient(repoDir);
-  const auth = buildAuth(gitServer, options);
-  const res = await client.onboard(gitServer, auth, options.admin);
+  const auth = options.guest ? {} : buildAuth(gitServer, options);
+  const res = await client.onboard(gitServer, auth, options.admin, options.guest);
   if (!res.ok) {
     console.error(`Onboard 失败：${res.error}`);
     process.exit(1);
   }
 
   // 6. Report result
-  const handler = res.data?.handler ?? '(unknown)';
-  const created = res.data?.created ? '（新建）' : '（已加入）';
-  const adminTag = options.admin ? ' [ADMIN]' : '';
-  console.log(`成功 ${created}：@${handler}${adminTag} @ ${repoName}`);
+  if (options.guest) {
+    console.log(`游客模式已启动 @ ${repoName}`);
+  } else {
+    const handler = res.data?.handler ?? '(unknown)';
+    const created = res.data?.created ? '（新建）' : '（已加入）';
+    const adminTag = options.admin ? ' [ADMIN]' : '';
+    console.log(`成功 ${created}：@${handler}${adminTag} @ ${repoName}`);
+  }
 
   // 7. Optional: start WebUI
   if (options.withWebui) {
