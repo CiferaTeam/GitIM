@@ -184,9 +184,9 @@ export function App() {
 
   return (
     <div className="app-layout">
-      <Header onStartDm={handleStartDm} />
+      <Header onStartDm={isGuest ? undefined : handleStartDm} />
       <div className="app-body">
-        <Sidebar onChannelSelect={handleChannelSelect} onStartDm={handleStartDm} />
+        <Sidebar onChannelSelect={handleChannelSelect} onStartDm={isGuest ? undefined : handleStartDm} />
         <div className="main-content">
           <MessageList onReply={handleReply} onShowThread={handleShowThread} />
           {!isGuest && <InputArea onSend={handleSend} />}

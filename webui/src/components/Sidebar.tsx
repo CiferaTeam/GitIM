@@ -3,7 +3,7 @@ import { useStore } from '../hooks/useStore.js';
 
 interface SidebarProps {
   onChannelSelect: (name: string) => void;
-  onStartDm: (targetUser: string) => void;
+  onStartDm?: (targetUser: string) => void;
 }
 
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
@@ -82,7 +82,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       )}
 
       <div className="sidebar-section-title">私信</div>
-      {!dmSearchOpen && (
+      {onStartDm && !dmSearchOpen && (
         <div
           className="sidebar-item dm-new-btn"
           onClick={() => setDmSearchOpen(true)}
@@ -91,7 +91,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         </div>
       )}
 
-      {dmSearchOpen && (
+      {onStartDm && dmSearchOpen && (
         <div className="dm-search">
           <input
             className="dm-search-input"

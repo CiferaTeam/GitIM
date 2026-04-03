@@ -22,6 +22,15 @@ pub async fn handle_onboard(
         }
         info!("onboard: guest mode — me.json written");
 
+        // Clear any previous identity
+        {
+            let mut current = state.current_user.write().await;
+            *current = None;
+        }
+        state
+            .is_admin
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
         // Start sync loop (pull-only, no local commits to push)
         AppState::spawn_sync_loop(state.clone());
 
