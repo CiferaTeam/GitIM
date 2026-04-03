@@ -56,15 +56,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read identity from .gitim/me.json (written by CLI onboard)
     // Absence is normal on first startup before onboard — not an error
     let me_path = repo_root.join(".gitim").join("me.json");
-    let current_user: Option<String> = if me_path.exists() {
+    let (current_user, is_guest_from_me) = if me_path.exists() {
         let me_content = std::fs::read_to_string(&me_path)?;
         let me_json: serde_json::Value = serde_json::from_str(&me_content)?;
-        me_json
+        let handler = me_json
             .get("handler")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(|s| s.to_string());
+        let guest = me_json
+            .get("guest")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        (handler, guest)
     } else {
-        None
+        (None, false)
     };
 
     if let Some(ref user) = current_user {
@@ -84,6 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut u = app_state.users.write().await;
         *u = users;
+    }
+
+    if is_guest_from_me {
+        app_state
+            .is_guest
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tracing::info!("daemon identity: guest mode");
     }
 
     lifecycle.ensure_run_dir()?;
@@ -115,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start sync loop only if identity is already configured (restart scenario).
     // On first startup (no me.json), the sync loop is deferred until after onboard.
-    if app_state.current_user.read().await.is_some() {
+    if app_state.current_user.read().await.is_some() || is_guest_from_me {
         state::AppState::spawn_sync_loop(app_state.clone());
     } else {
         info!("no identity configured — sync loop deferred until onboard");

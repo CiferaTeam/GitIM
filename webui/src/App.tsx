@@ -35,6 +35,8 @@ export function App() {
     markPendingFailed,
   } = useStore();
 
+  const isGuest = useStore((s) => s.isGuest);
+
   // 切换频道
   const handleChannelSelect = useCallback(
     async (name: string) => {
@@ -182,12 +184,12 @@ export function App() {
 
   return (
     <div className="app-layout">
-      <Header onStartDm={handleStartDm} />
+      <Header onStartDm={isGuest ? undefined : handleStartDm} />
       <div className="app-body">
-        <Sidebar onChannelSelect={handleChannelSelect} onStartDm={handleStartDm} />
+        <Sidebar onChannelSelect={handleChannelSelect} onStartDm={isGuest ? undefined : handleStartDm} />
         <div className="main-content">
           <MessageList onReply={handleReply} onShowThread={handleShowThread} />
-          <InputArea onSend={handleSend} />
+          {!isGuest && <InputArea onSend={handleSend} />}
         </div>
         <ThreadPanel onReplyInThread={handleReply} />
       </div>

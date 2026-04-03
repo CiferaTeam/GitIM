@@ -35,6 +35,7 @@ pub struct AppState {
     pub has_remote: bool,
     pub sync_started: AtomicBool,
     pub is_admin: AtomicBool,
+    pub is_guest: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
 }
 
@@ -60,6 +61,7 @@ impl AppState {
             has_remote,
             sync_started: AtomicBool::new(false),
             is_admin: AtomicBool::new(false),
+            is_guest: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
         }
     }

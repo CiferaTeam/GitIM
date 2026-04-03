@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../hooks/useStore.js';
 
 interface HeaderProps {
-  onStartDm: (targetUser: string) => void;
+  onStartDm?: (targetUser: string) => void;
 }
 
 export function Header({ onStartDm }: HeaderProps) {
@@ -42,17 +42,19 @@ export function Header({ onStartDm }: HeaderProps) {
                   <div key={u} className="members-dropdown-item">
                     <span className="members-dot" />
                     <span className="members-name">@ {u}{u === currentUser ? ' (我)' : ''}</span>
-                    <button
-                      className="members-dm-btn"
-                      title={`发起私信: ${u}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowMembers(false);
-                        onStartDm(u);
-                      }}
-                    >
-                      💬
-                    </button>
+                    {onStartDm && (
+                      <button
+                        className="members-dm-btn"
+                        title={`发起私信: ${u}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowMembers(false);
+                          onStartDm(u);
+                        }}
+                      >
+                        💬
+                      </button>
+                    )}
                   </div>
                 ))}
                 {members.length === 0 && (
