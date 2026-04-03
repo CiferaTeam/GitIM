@@ -138,9 +138,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             };
             handle_archive_channel(state, channel, resolved_author).await
         }
-        Request::ListArchivedChannels => {
-            Response::error("archived_channels not yet implemented")
-        }
+        Request::ListArchivedChannels => handle_list_archived_channels(state).await,
     }
 }
 
@@ -563,6 +561,36 @@ async fn handle_list_channels(state: SharedState) -> Response {
                     channels.push(serde_json::json!({
                         "name": name,
                         "kind": "dm",
+                        "members": members,
+                    }));
+                }
+            }
+        }
+    }
+
+    channels.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Response::success(serde_json::json!({ "channels": channels }))
+}
+
+async fn handle_list_archived_channels(state: SharedState) -> Response {
+    let mut channels: Vec<serde_json::Value> = Vec::new();
+
+    // 扫描 archive/channels/*.meta.yaml — 读取 members 字段
+    let arch_ch_dir = state.repo_root.join("archive").join("channels");
+    if arch_ch_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&arch_ch_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".meta.yaml") {
+                    let name = fname.trim_end_matches(".meta.yaml").to_string();
+                    let members: Vec<String> = std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
+                        .map(|m| m.members)
+                        .unwrap_or_default();
+                    channels.push(serde_json::json!({
+                        "name": name,
+                        "kind": "archived_channel",
                         "members": members,
                     }));
                 }
