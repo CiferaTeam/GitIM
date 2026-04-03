@@ -94,6 +94,14 @@ export class GitimClient {
     });
   }
 
+  async archiveChannel(channel: string): Promise<ApiResponse> {
+    return this.request('archive_channel', { channel });
+  }
+
+  async listArchivedChannels(): Promise<ApiResponse> {
+    return this.request('archived_channels');
+  }
+
   async stop(): Promise<ApiResponse> {
     return this.request('stop');
   }
