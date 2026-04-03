@@ -9,6 +9,8 @@ interface Store {
   // 当前用户
   currentUser: string;
   setCurrentUser: (u: string) => void;
+  isGuest: boolean;
+  setIsGuest: (v: boolean) => void;
 
   // 用户列表
   users: string[];
@@ -52,6 +54,8 @@ export const useStore = create<Store>((set) => ({
 
   currentUser: '',
   setCurrentUser: (u) => set({ currentUser: u }),
+  isGuest: false,
+  setIsGuest: (v) => set({ isGuest: v }),
 
   users: [],
   setUsers: (u) => set({ users: u }),

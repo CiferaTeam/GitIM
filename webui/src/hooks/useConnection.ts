@@ -49,6 +49,7 @@ export function useConnection() {
   const {
     setConnected,
     setCurrentUser,
+    setIsGuest,
     setUsers,
     setChannels,
     currentChannel,
@@ -130,7 +131,11 @@ export function useConnection() {
       }
 
       if (meRes.ok && meRes.data) {
-        setCurrentUser(meRes.data.handler as string);
+        if (meRes.data.guest) {
+          setIsGuest(true);
+        } else {
+          setCurrentUser(meRes.data.handler as string);
+        }
       }
 
       if (chRes.ok && chRes.data) {
