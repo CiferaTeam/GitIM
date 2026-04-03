@@ -131,6 +131,12 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             offset,
         } => handle_search(state, query, author, channel, channel_type, limit, offset).await,
         Request::Reindex => handle_reindex(state).await,
+        Request::ArchiveChannel { channel, author } => {
+            Response::error(format!("archive_channel not yet implemented: channel={channel}, author={author:?}"))
+        }
+        Request::ListArchivedChannels => {
+            Response::error("archived_channels not yet implemented")
+        }
     }
 }
 

@@ -122,6 +122,14 @@ pub enum Request {
     },
     #[serde(rename = "reindex")]
     Reindex,
+    #[serde(rename = "archive_channel")]
+    ArchiveChannel {
+        channel: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "archived_channels")]
+    ListArchivedChannels,
 }
 
 fn default_limit() -> usize {
