@@ -7,6 +7,18 @@ use tracing::{info, warn};
 
 const MAX_PUSH_RETRIES: u32 = 3;
 
+fn validate_card_id(card_id: &str) -> Result<(), String> {
+    if card_id.is_empty() || card_id.len() > 20 {
+        return Err("card_id length out of range".into());
+    }
+    for ch in card_id.chars() {
+        if !matches!(ch, '0'..='9' | 'a'..='f' | '-') {
+            return Err(format!("invalid character in card_id: '{}'", ch));
+        }
+    }
+    Ok(())
+}
+
 fn generate_card_id() -> String {
     let now = chrono::Utc::now();
     let ts = now.format("%Y%m%d-%H%M%S").to_string();
@@ -54,18 +66,19 @@ pub async fn handle_create_board(
 
     // 5. Write board.meta.yaml
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    // Validate statuses is non-empty
+    let statuses = statuses.unwrap_or_else(|| {
+        vec!["todo".to_string(), "in-progress".to_string(), "done".to_string()]
+    });
+    if statuses.is_empty() {
+        return Response::error("statuses list cannot be empty");
+    }
     let meta = BoardMeta {
         name: name.clone(),
         display_name: display_name.unwrap_or_else(|| name.clone()),
         created_by: author.clone(),
         created_at: now,
-        statuses: statuses.unwrap_or_else(|| {
-            vec![
-                "todo".to_string(),
-                "in-progress".to_string(),
-                "done".to_string(),
-            ]
-        }),
+        statuses,
     };
     let meta_str = serde_yaml::to_string(&meta).unwrap();
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
@@ -161,8 +174,18 @@ pub async fn handle_create_card(
         Err(_) => return Response::error(format!("board '{}' does not exist", board)),
     };
 
+    // Validate assignee if provided
+    if let Some(ref a) = assignee {
+        let users = state.users.read().await;
+        if !users.contains(a) {
+            return Response::error(format!("assignee '{}' is not a registered user", a));
+        }
+    }
+
     // 4. Validate status
-    let card_status = status.unwrap_or_else(|| board_meta.statuses[0].clone());
+    let card_status = status.unwrap_or_else(|| {
+        board_meta.statuses.first().cloned().unwrap_or_else(|| "todo".to_string())
+    });
     if !board_meta.statuses.contains(&card_status) {
         return Response::error(format!(
             "invalid status '{}', allowed: {:?}",
@@ -359,6 +382,11 @@ pub async fn handle_read_card(
         Err(e) => return Response::error(format!("invalid board name: {}", e)),
     };
 
+    // Validate card_id
+    if let Err(e) = validate_card_id(&card_id) {
+        return Response::error(format!("invalid card_id: {}", e));
+    }
+
     let card_dir = state
         .repo_root
         .join("boards")
@@ -427,6 +455,11 @@ pub async fn handle_send_card_message(
         Ok(n) => n,
         Err(e) => return Response::error(format!("invalid board name: {}", e)),
     };
+
+    // Validate card_id
+    if let Err(e) = validate_card_id(&card_id) {
+        return Response::error(format!("invalid card_id: {}", e));
+    }
 
     // 3. Check card exists
     let card_dir = state
@@ -569,6 +602,11 @@ pub async fn handle_update_card(
         Err(e) => return Response::error(format!("invalid board name: {}", e)),
     };
 
+    // Validate card_id
+    if let Err(e) = validate_card_id(&card_id) {
+        return Response::error(format!("invalid card_id: {}", e));
+    }
+
     // 2.5. Check at least one field to update
     if status.is_none() && assignee.is_none() {
         return Response::error("must provide at least one field to update (status or assignee)");
@@ -611,6 +649,14 @@ pub async fn handle_update_card(
             ));
         }
         card_meta.status = new_status.clone();
+    }
+
+    // Validate assignee if provided
+    if let Some(ref new_assignee) = assignee {
+        let users = state.users.read().await;
+        if !users.contains(new_assignee) {
+            return Response::error(format!("assignee '{}' is not a registered user", new_assignee));
+        }
     }
 
     // 6. Apply assignee change

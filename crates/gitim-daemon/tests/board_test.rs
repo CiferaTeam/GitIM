@@ -346,7 +346,7 @@ async fn test_send_card_message_card_not_found() {
     let req: Request = serde_json::from_value(serde_json::json!({
         "method": "send_card_message",
         "board": "proj",
-        "card_id": "nonexistent-card",
+        "card_id": "00000000-000000-000",
         "body": "hi",
         "author": "alice"
     }))
@@ -365,7 +365,7 @@ async fn test_read_card_not_found() {
     let req: Request = serde_json::from_value(serde_json::json!({
         "method": "read_card",
         "board": "proj",
-        "card_id": "no-such-card"
+        "card_id": "00000000-000000-001"
     }))
     .unwrap();
     let resp = handle_request(req, state).await;
@@ -474,7 +474,7 @@ async fn test_update_card_not_found() {
     let req: Request = serde_json::from_value(serde_json::json!({
         "method": "update_card",
         "board": "proj",
-        "card_id": "ghost-card",
+        "card_id": "00000000-000000-002",
         "status": "done",
         "author": "alice"
     }))
@@ -731,4 +731,28 @@ async fn test_read_card_with_limit_and_since() {
         "since=2 should return 1 entry (line 3): {:?}",
         entries
     );
+}
+
+#[tokio::test]
+async fn test_card_id_path_traversal_rejected() {
+    let (_tmp, state) = setup_test_repo().await;
+    let req = serde_json::from_str::<Request>(r#"{"method":"create_board","name":"sprint-1"}"#).unwrap();
+    handle_request(req, state.clone()).await;
+    let req = serde_json::from_str::<Request>(r#"{"method":"read_card","board":"sprint-1","card_id":"../../users"}"#).unwrap();
+    let resp = handle_request(req, state.clone()).await;
+    assert!(!resp.ok);
+    assert!(resp.error.unwrap().contains("invalid card_id"));
+}
+
+#[tokio::test]
+async fn test_create_board_empty_statuses_rejected() {
+    let (_tmp, state) = setup_test_repo().await;
+    let req = serde_json::from_value::<Request>(serde_json::json!({
+        "method": "create_board",
+        "name": "sprint-1",
+        "statuses": [],
+    })).unwrap();
+    let resp = handle_request(req, state.clone()).await;
+    assert!(!resp.ok);
+    assert!(resp.error.unwrap().contains("cannot be empty"));
 }

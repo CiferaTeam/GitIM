@@ -55,6 +55,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::JoinChannel { .. }
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
+                | Request::ArchiveChannel { .. }
                 | Request::CreateBoard { .. }
                 | Request::CreateCard { .. }
                 | Request::SendCardMessage { .. }
