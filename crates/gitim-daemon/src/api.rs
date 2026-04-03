@@ -26,6 +26,21 @@ pub enum Event {
         author: String,
         targets: Vec<String>,
     },
+
+    #[serde(rename = "card_created")]
+    CardCreated {
+        board: String,
+        card_id: String,
+    },
+
+    #[serde(rename = "card_status_changed")]
+    CardStatusChanged {
+        board: String,
+        card_id: String,
+        old_status: String,
+        new_status: String,
+        author: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +147,65 @@ pub enum Request {
     },
     #[serde(rename = "archived_channels")]
     ListArchivedChannels,
+    #[serde(rename = "create_board")]
+    CreateBoard {
+        name: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        statuses: Option<Vec<String>>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "create_card")]
+    CreateCard {
+        board: String,
+        title: String,
+        #[serde(default)]
+        assignee: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "list_boards")]
+    ListBoards,
+    #[serde(rename = "list_cards")]
+    ListCards {
+        board: String,
+        #[serde(default)]
+        status: Option<String>,
+    },
+    #[serde(rename = "read_card")]
+    ReadCard {
+        board: String,
+        card_id: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        since: Option<u64>,
+    },
+    #[serde(rename = "send_card_message")]
+    SendCardMessage {
+        board: String,
+        card_id: String,
+        body: String,
+        #[serde(default)]
+        reply_to: Option<u64>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "update_card")]
+    UpdateCard {
+        board: String,
+        card_id: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        assignee: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
 }
 
 fn default_limit() -> usize {

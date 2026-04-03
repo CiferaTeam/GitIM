@@ -159,6 +159,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_archive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => handle_list_archived_channels(state).await,
+        Request::CreateBoard { .. } | Request::CreateCard { .. } | Request::ListBoards | Request::ListCards { .. } | Request::ReadCard { .. } | Request::SendCardMessage { .. } | Request::UpdateCard { .. } => {
+            todo!("board handlers not yet implemented")
+        }
     }
 }
 
