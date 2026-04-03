@@ -46,11 +46,30 @@ fn link_to_json(link: &Link) -> serde_json::Value {
 }
 
 pub async fn handle_request(req: Request, state: SharedState) -> Response {
+    // Guest mode guard: reject all write operations
+    if state.is_guest.load(std::sync::atomic::Ordering::SeqCst) {
+        let is_write = matches!(
+            req,
+            Request::Send { .. }
+                | Request::RegisterUser { .. }
+                | Request::JoinChannel { .. }
+                | Request::LeaveChannel { .. }
+                | Request::CreateChannel { .. }
+        );
+        if is_write {
+            return Response::error("guest mode: write operations are not allowed");
+        }
+    }
+
     match req {
-        Request::Status => Response::success(serde_json::json!({
-            "version": "0.1.0",
-            "status": "running",
-        })),
+        Request::Status => {
+            let is_guest = state.is_guest.load(std::sync::atomic::Ordering::SeqCst);
+            Response::success(serde_json::json!({
+                "version": "0.1.0",
+                "status": "running",
+                "guest": is_guest,
+            }))
+        }
         Request::Send {
             channel,
             body,
@@ -686,10 +705,12 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
 
     let current_user_snapshot = state.current_user.read().await.clone();
     let is_admin = state.is_admin.load(std::sync::atomic::Ordering::SeqCst);
+    let is_guest = state.is_guest.load(std::sync::atomic::Ordering::SeqCst);
+    let skip_filter = is_admin || is_guest;
 
     // Step 1: Build channel membership cache (admin skips — never checked)
     let mut channel_membership: HashMap<String, bool> = HashMap::new();
-    if !is_admin {
+    if !skip_filter {
         for (path, _) in &diff {
             let path_str = path.to_string_lossy();
             if let Some(ch_name) = path_str.strip_prefix("channels/").and_then(|s| {
@@ -721,7 +742,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 channel_membership.insert(ch_name.to_string(), is_member);
             }
         }
-    } // end if !is_admin
+    } // end if !skip_filter
 
     // Step 2: Process diff entries with membership filter
     for (path, added_content) in &diff {
@@ -732,7 +753,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 (ch_name.to_string(), "channel")
             } else if let Some(ch_name) = name.strip_suffix(".meta.yaml") {
                 // Meta change — only push if user is (now) a member
-                if !is_admin && !channel_membership.get(ch_name).copied().unwrap_or(true) {
+                if !skip_filter && !channel_membership.get(ch_name).copied().unwrap_or(true) {
                     continue;
                 }
                 changes.push(serde_json::json!({
@@ -752,14 +773,14 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         };
 
         // Channel membership filter
-        if kind == "channel" && !is_admin {
+        if kind == "channel" && !skip_filter {
             if !channel_membership.get(&channel).copied().unwrap_or(true) {
                 continue;
             }
         }
 
         // DM visibility filter — skip DMs not involving current user
-        if kind == "dm" && !is_admin {
+        if kind == "dm" && !skip_filter {
             if let Some(stem) = path_str
                 .strip_prefix("dm/")
                 .and_then(|s| s.strip_suffix(".thread"))
@@ -2052,6 +2073,96 @@ mod tests {
         )
         .await;
         assert!(send_resp.ok, "send to new channel failed: {:?}", send_resp.error);
+    }
+
+    fn make_guest_state(tmp: &std::path::Path) -> SharedState {
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(repo, Config::default(), tx, None));
+        state
+            .is_guest
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+    }
+
+    #[tokio::test]
+    async fn guest_send_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: None,
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest send should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_create_channel_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "test-ch".to_string(),
+                display_name: None,
+                introduction: None,
+                author: None,
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest create_channel should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_read_operations_are_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(Request::Status, state.clone()).await;
+        assert!(resp.ok, "guest status should succeed");
+
+        let resp = handle_request(Request::ListChannels, state.clone()).await;
+        assert!(resp.ok, "guest list_channels should succeed");
+
+        let resp = handle_request(Request::ListUsers, state.clone()).await;
+        assert!(resp.ok, "guest list_users should succeed");
     }
 }
 
