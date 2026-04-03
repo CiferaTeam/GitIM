@@ -132,7 +132,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         } => handle_search(state, query, author, channel, channel_type, limit, offset).await,
         Request::Reindex => handle_reindex(state).await,
         Request::ArchiveChannel { channel, author } => {
-            Response::error(format!("archive_channel not yet implemented: channel={channel}, author={author:?}"))
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_archive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => {
             Response::error("archived_channels not yet implemented")
@@ -939,6 +943,119 @@ async fn handle_create_channel(
     Response::success(serde_json::json!({
         "channel": name,
         "created_by": author,
+    }))
+}
+
+async fn handle_archive_channel(
+    state: SharedState,
+    channel: String,
+    author: String,
+) -> Response {
+    // 1. Validate channel name
+    let channel_name = match ChannelName::new(&channel) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+    };
+
+    // 2. Validate author is registered
+    {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {}", author));
+        }
+    }
+
+    // 3. Read channel meta, confirm channel exists
+    let meta_path = state
+        .repo_root
+        .join(format!("channels/{}.meta.yaml", channel_name));
+    let meta_str = match std::fs::read_to_string(&meta_path) {
+        Ok(s) => s,
+        Err(_) => {
+            return Response::error(format!("channel '{}' does not exist", channel));
+        }
+    };
+    let meta: ChannelMeta = match serde_yaml::from_str(&meta_str) {
+        Ok(m) => m,
+        Err(e) => return Response::error(format!("failed to parse channel meta: {}", e)),
+    };
+
+    // 4. Check permission: only creator can archive
+    if meta.created_by != author {
+        return Response::error("only channel creator can archive");
+    }
+
+    // 5. Create archive/channels/ directory
+    let archive_dir = state.repo_root.join("archive/channels");
+    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+        return Response::error(format!("failed to create archive dir: {}", e));
+    }
+
+    // 6. git mv both files to archive/channels/
+    let thread_from = format!("channels/{}.thread", channel_name);
+    let thread_to = format!("archive/channels/{}.thread", channel_name);
+    let meta_from = format!("channels/{}.meta.yaml", channel_name);
+    let meta_to = format!("archive/channels/{}.meta.yaml", channel_name);
+
+    if let Err(e) = state.git_storage.mv(&thread_from, &thread_to) {
+        return Response::error(format!("git mv thread failed: {}", e));
+    }
+    if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
+        return Response::error(format!("git mv meta failed: {}", e));
+    }
+
+    // 7. git add + commit
+    let commit_msg = format!("archive: #{} by @{}", channel, author);
+    if let Err(e) = state
+        .git_storage
+        .add_and_commit_as(&[&thread_to, &meta_to], &commit_msg, Some(&author))
+    {
+        return Response::error(format!("archive commit failed: {}", e));
+    }
+
+    // 8. Push with retry
+    if state.git_storage.has_remote() {
+        let mut pushed = false;
+        for attempt in 1..=MAX_PUSH_RETRIES {
+            match state.git_storage.push() {
+                Ok(()) => {
+                    pushed = true;
+                    break;
+                }
+                Err(GitError::PushConflict) => {
+                    warn!(
+                        "archive_channel: push conflict (attempt {}/{}), rebasing",
+                        attempt, MAX_PUSH_RETRIES
+                    );
+                    if let Err(e) = state.git_storage.fetch() {
+                        return Response::error(format!("archive_channel fetch failed: {}", e));
+                    }
+                    if let Err(e) = state.git_storage.rebase_onto_origin() {
+                        return Response::error(format!("archive_channel rebase failed: {}", e));
+                    }
+                }
+                Err(e) => {
+                    return Response::error(format!("archive_channel push failed: {}", e));
+                }
+            }
+        }
+        if !pushed {
+            return Response::error(format!(
+                "archive_channel: push still conflicting after {} retries",
+                MAX_PUSH_RETRIES
+            ));
+        }
+    }
+
+    // 9. Remove channel from thread_cache
+    state.thread_cache.write().await.remove(&channel);
+
+    info!("channel '{}' archived by @{}", channel, author);
+
+    // 10. Return success
+    Response::success(serde_json::json!({
+        "channel": channel,
+        "archived_by": author,
     }))
 }
 
