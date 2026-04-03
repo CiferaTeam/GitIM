@@ -63,7 +63,7 @@ export const useStore = create<Store>((set) => ({
   channels: [],
   setChannels: (c) => set({ channels: c }),
   currentChannel: null,
-  selectChannel: (name) => set({ currentChannel: name }),
+  selectChannel: (name) => set({ currentChannel: name, replyTo: null }),
   incrementUnread: (channel) =>
     set((s) => ({
       channels: s.channels.map((c) =>
