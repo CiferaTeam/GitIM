@@ -87,20 +87,28 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
 
   return (
     <div className="message-list" ref={listRef}>
-      {messages.map((msg) => (
-        <MessageItem
-          key={msg._pendingId ?? msg.line_number}
-          message={msg}
-          replyTarget={msg.point_to > 0 ? msgByLine.get(msg.point_to) ?? null : null}
-          onReply={onReply}
-          onShowThread={onShowThread}
-          isReplying={replyTo?.line_number === msg.line_number}
-          highlight={highlightLine === msg.line_number}
-          onScrollTo={handleScrollTo}
-          onCopy={handleCopy}
-          copied={copiedLine === msg.line_number}
-        />
-      ))}
+      {messages.map((msg) =>
+        msg.type === 'event' ? (
+          <div key={msg.line_number} className="message-event" data-line={msg.line_number}>
+            <span className="message-author">@{msg.author}</span>
+            {' '}
+            {msg.event_type === 'join' ? '加入了频道' : msg.event_type === 'leave' ? '离开了频道' : msg.event_type}
+          </div>
+        ) : (
+          <MessageItem
+            key={msg._pendingId ?? msg.line_number}
+            message={msg}
+            replyTarget={msg.point_to > 0 ? msgByLine.get(msg.point_to) ?? null : null}
+            onReply={onReply}
+            onShowThread={onShowThread}
+            isReplying={replyTo?.line_number === msg.line_number}
+            highlight={highlightLine === msg.line_number}
+            onScrollTo={handleScrollTo}
+            onCopy={handleCopy}
+            copied={copiedLine === msg.line_number}
+          />
+        ),
+      )}
     </div>
   );
 }

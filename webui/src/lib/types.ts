@@ -3,11 +3,14 @@ export type MessageStatus = 'sending' | 'sent' | 'synced' | 'failed';
 
 /** GitIM 消息 */
 export interface Message {
+  type?: 'message' | 'event';
   line_number: number;
   point_to: number;  // 0=根消息, >0=回复目标行号
   author: string;
   timestamp: string; // 20260317T120000Z
   body: string;
+  /** event 类型（仅 type=event 时存在） */
+  event_type?: string;
   /** 前端本地状态（daemon 返回的消息无此字段） */
   _status?: MessageStatus;
   /** 前端临时 ID（pending 消息用） */

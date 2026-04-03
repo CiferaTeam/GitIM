@@ -322,6 +322,16 @@ body {
 }
 
 /* 消息项 */
+.message-event {
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.message-event .message-author {
+  font-size: 13px;
+}
+
 .message-item {
   padding: 6px 8px;
   border-radius: 4px;
