@@ -239,6 +239,19 @@ impl GitStorage {
             .collect())
     }
 
+    pub fn mv(&self, from: &str, to: &str) -> Result<(), GitError> {
+        let output = Command::new("git")
+            .args(["mv", from, to])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Discard all unpushed local changes, reset to remote state.
     /// Encapsulates rebase_abort + reset_hard_origin.
     pub fn discard_unpushed(&self) -> Result<(), GitError> {
