@@ -13,6 +13,8 @@ import { webuiCommand } from './commands/webui.js';
 import { searchCommand } from './commands/search.js';
 import { reindexCommand } from './commands/reindex.js';
 import { createChannelCommand } from './commands/create-channel.js';
+import { archiveChannelCommand } from './commands/archive-channel.js';
+import { archivedChannelsCommand } from './commands/archived-channels.js';
 
 const program = new Command();
 
@@ -70,6 +72,20 @@ program
   .option('--introduction <text>', '频道简介')
   .action(async (name: string, options: { displayName?: string; introduction?: string }) => {
     await createChannelCommand(name, options);
+  });
+
+program
+  .command('archive-channel <name>')
+  .description('归档频道')
+  .action(async (name: string) => {
+    await archiveChannelCommand(name);
+  });
+
+program
+  .command('archived-channels')
+  .description('列出已归档频道')
+  .action(async () => {
+    await archivedChannelsCommand();
   });
 
 program
