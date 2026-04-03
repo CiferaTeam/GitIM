@@ -78,6 +78,8 @@ pub enum Request {
         auth: serde_json::Value,
         #[serde(default)]
         admin: bool,
+        #[serde(default)]
+        guest: bool,
     },
     #[serde(rename = "join_channel")]
     JoinChannel {
