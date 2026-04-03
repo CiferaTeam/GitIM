@@ -437,9 +437,25 @@ async fn handle_read(
     limit: Option<usize>,
     since: Option<u64>,
 ) -> Response {
-    let (thread_path, _) = match resolve_thread_path(&state, &channel) {
+    let (thread_path, name) = match resolve_thread_path(&state, &channel) {
         Ok(v) => v,
         Err(resp) => return resp,
+    };
+
+    // For non-DM channels, fall back to archive path if the primary path doesn't exist
+    let (thread_path, is_archived) = if !channel.starts_with("dm:") && !thread_path.exists() {
+        let archive_path = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(format!("{}.thread", name));
+        if archive_path.exists() {
+            (archive_path, true)
+        } else {
+            (thread_path, false)
+        }
+    } else {
+        (thread_path, false)
     };
 
     let content = std::fs::read_to_string(&thread_path).unwrap_or_default();
@@ -465,6 +481,7 @@ async fn handle_read(
     Response::success(serde_json::json!({
         "channel": channel,
         "entries": json_entries,
+        "archived": is_archived,
     }))
 }
 
