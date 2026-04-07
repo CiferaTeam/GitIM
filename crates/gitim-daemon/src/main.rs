@@ -165,6 +165,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Idle watchdog: exit silently if no client connects for 24 hours
+    let idle_lc = lifecycle::DaemonLifecycle::new(&repo_root);
+    let idle_state = app_state.clone();
+    tokio::spawn(async move {
+        const IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+        const CHECK_INTERVAL_SECS: u64 = 60 * 60;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+            let last = idle_state
+                .last_client_activity
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now.saturating_sub(last) >= IDLE_TIMEOUT_SECS {
+                info!("no client activity for 24h — shutting down");
+                idle_lc.cleanup();
+                std::process::exit(0);
+            }
+        }
+    });
+
     let socket_path = lifecycle.socket_path();
     server::start_unix_socket(&socket_path, app_state).await?;
 

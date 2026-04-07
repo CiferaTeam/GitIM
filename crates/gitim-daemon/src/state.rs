@@ -3,7 +3,7 @@ use gitim_core::types::{Config, ThreadFile};
 use gitim_sync::git::GitStorage;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify, RwLock};
 
@@ -37,6 +37,8 @@ pub struct AppState {
     pub is_admin: AtomicBool,
     pub is_guest: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
+    /// Epoch seconds of last client connection. Used by idle watchdog.
+    pub last_client_activity: AtomicU64,
 }
 
 impl AppState {
@@ -63,6 +65,12 @@ impl AppState {
             is_admin: AtomicBool::new(false),
             is_guest: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
+            last_client_activity: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
         }
     }
 

@@ -3,6 +3,7 @@ use crate::state::SharedState;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
 
 pub async fn start_unix_socket(
@@ -16,6 +17,13 @@ pub async fn start_unix_socket(
 
     loop {
         let (stream, _) = listener.accept().await?;
+        state.last_client_activity.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
+        );
         let state = state.clone();
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
