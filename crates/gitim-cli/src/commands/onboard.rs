@@ -7,6 +7,7 @@ use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
@@ -264,16 +265,12 @@ fn ensure_config_debug_http(repo_dir: &Path, enabled: bool) {
     if config_path.exists() {
         let mut content = fs::read_to_string(&config_path).unwrap_or_default();
         if content.contains("debug_http:") {
-            // Replace existing value
-            let re_pattern = "debug_http: true";
-            let re_pattern2 = "debug_http: false";
-            if content.contains(re_pattern) {
-                content = content.replace(re_pattern, &format!("debug_http: {value}"));
-            } else if content.contains(re_pattern2) {
-                content = content.replace(re_pattern2, &format!("debug_http: {value}"));
-            }
+            // Replace existing value using regex to handle variable whitespace
+            let re = Regex::new(r"debug_http:\s*(true|false)").unwrap();
+            content = re.replace(&content, format!("debug_http: {value}")).to_string();
         } else if content.contains("daemon:") {
-            content = content.replace("daemon:", &format!("daemon:\n  debug_http: {value}"));
+            // Replace only the first occurrence of "daemon:"
+            content = content.replacen("daemon:", &format!("daemon:\n  debug_http: {value}"), 1);
         } else {
             content.push_str(&format!("\ndaemon:\n  debug_http: {value}\n"));
         }
