@@ -62,6 +62,7 @@ pub async fn cmd_users(client: &GitimClient, mode: &OutputMode) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_search(
     client: &GitimClient,
     mode: &OutputMode,
