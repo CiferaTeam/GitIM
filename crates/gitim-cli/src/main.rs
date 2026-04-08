@@ -52,6 +52,47 @@ enum Commands {
         #[arg(short, long)]
         since: Option<u64>,
     },
+
+    /// Direct message commands
+    Dm {
+        #[command(subcommand)]
+        command: DmCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DmCommands {
+    /// Send a direct message
+    Send {
+        /// Target handler
+        handler: String,
+        /// Message body
+        body: String,
+        /// Author handler (defaults to current user)
+        #[arg(short, long)]
+        author: Option<String>,
+        /// Line number to reply to
+        #[arg(short, long)]
+        reply_to: Option<u64>,
+    },
+
+    /// Read direct messages with a user
+    Read {
+        /// Target handler
+        handler: String,
+        /// Author handler (defaults to current user)
+        #[arg(short, long)]
+        author: Option<String>,
+        /// Maximum number of messages to return
+        #[arg(short, long)]
+        limit: Option<u64>,
+        /// Only return messages after this line number
+        #[arg(short, long)]
+        since: Option<u64>,
+    },
+
+    /// List DM conversations
+    List,
 }
 
 #[tokio::main]
@@ -86,6 +127,41 @@ async fn main() {
         } => {
             commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await
         }
+        Commands::Dm { command } => match command {
+            DmCommands::Send {
+                handler,
+                body,
+                author,
+                reply_to,
+            } => {
+                commands::dm::cmd_dm_send(
+                    &client,
+                    &mode,
+                    &handler,
+                    &body,
+                    author.as_deref(),
+                    reply_to,
+                )
+                .await
+            }
+            DmCommands::Read {
+                handler,
+                author,
+                limit,
+                since,
+            } => {
+                commands::dm::cmd_dm_read(
+                    &client,
+                    &mode,
+                    &handler,
+                    author.as_deref(),
+                    limit,
+                    since,
+                )
+                .await
+            }
+            DmCommands::List => commands::dm::cmd_dm_list(&mode),
+        },
     }
 }
 
