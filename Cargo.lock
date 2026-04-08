@@ -436,9 +436,11 @@ dependencies = [
 name = "gitim-client"
 version = "0.3.1"
 dependencies = [
+ "libc",
  "pretty_assertions",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
