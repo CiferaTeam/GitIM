@@ -53,6 +53,39 @@ enum Commands {
         since: Option<u64>,
     },
 
+    /// List all channels
+    Channels,
+
+    /// Create a new channel
+    CreateChannel {
+        /// Channel name
+        name: String,
+        /// Display name
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Channel introduction
+        #[arg(long)]
+        introduction: Option<String>,
+    },
+
+    /// Join a channel or invite users
+    JoinChannel {
+        /// Channel name
+        channel: String,
+        /// Target handlers to invite
+        #[arg(short, long, num_args = 1..)]
+        targets: Vec<String>,
+    },
+
+    /// Archive a channel
+    ArchiveChannel {
+        /// Channel name
+        name: String,
+    },
+
+    /// List archived channels
+    ArchivedChannels,
+
     /// Direct message commands
     Dm {
         #[command(subcommand)]
@@ -126,6 +159,30 @@ async fn main() {
             since,
         } => {
             commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await
+        }
+        Commands::Channels => commands::channels::cmd_channels(&client, &mode).await,
+        Commands::CreateChannel {
+            name,
+            display_name,
+            introduction,
+        } => {
+            commands::channels::cmd_create_channel(
+                &client,
+                &mode,
+                &name,
+                display_name.as_deref(),
+                introduction.as_deref(),
+            )
+            .await
+        }
+        Commands::JoinChannel { channel, targets } => {
+            commands::channels::cmd_join_channel(&client, &mode, &channel, &targets).await
+        }
+        Commands::ArchiveChannel { name } => {
+            commands::channels::cmd_archive_channel(&client, &mode, &name).await
+        }
+        Commands::ArchivedChannels => {
+            commands::channels::cmd_archived_channels(&client, &mode).await
         }
         Commands::Dm { command } => match command {
             DmCommands::Send {
