@@ -63,12 +63,12 @@ fi
 # ---------- Publish daemon package first (CLI depends on it) ----------
 echo "==> Publishing @gitim-runtime/daemon-darwin-arm64@$VERSION..."
 cd "$DAEMON_PKG"
-npm publish --access public
+npm publish --access public --registry=https://registry.npmjs.org
 
 # ---------- Publish CLI package ----------
 echo "==> Publishing @gitim-runtime/cli@$VERSION..."
 cd "$ROOT/cli"
-npm publish --access public
+npm publish --access public --registry=https://registry.npmjs.org
 
 echo ""
 echo "==> Published v$VERSION"
