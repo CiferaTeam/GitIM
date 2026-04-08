@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+mod commands;
 mod output;
 
 use std::env;
@@ -25,6 +26,32 @@ struct Cli {
 enum Commands {
     /// Show daemon status
     Status,
+
+    /// Send a message to a channel
+    Send {
+        /// Channel name
+        channel: String,
+        /// Message body
+        body: String,
+        /// Author handler (defaults to current user)
+        #[arg(short, long)]
+        author: Option<String>,
+        /// Line number to reply to
+        #[arg(short, long)]
+        reply_to: Option<u64>,
+    },
+
+    /// Read messages from a channel
+    Read {
+        /// Channel name
+        channel: String,
+        /// Maximum number of messages to return
+        #[arg(short, long)]
+        limit: Option<u64>,
+        /// Only return messages after this line number
+        #[arg(short, long)]
+        since: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -32,12 +59,37 @@ async fn main() {
     let cli = Cli::parse();
     let mode = OutputMode::from_flag(cli.json);
 
+    let client = init_client();
+
     match cli.command {
-        Commands::Status => cmd_status(&mode).await,
+        Commands::Status => cmd_status(&client, &mode).await,
+        Commands::Send {
+            channel,
+            body,
+            author,
+            reply_to,
+        } => {
+            commands::messaging::cmd_send(
+                &client,
+                &mode,
+                &channel,
+                &body,
+                author.as_deref(),
+                reply_to,
+            )
+            .await
+        }
+        Commands::Read {
+            channel,
+            limit,
+            since,
+        } => {
+            commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await
+        }
     }
 }
 
-async fn cmd_status(mode: &OutputMode) {
+fn init_client() -> GitimClient {
     let cwd = env::current_dir().unwrap_or_else(|e| {
         eprintln!("Error: cannot read current directory: {e}");
         process::exit(1);
@@ -56,7 +108,10 @@ async fn cmd_status(mode: &OutputMode) {
         process::exit(1);
     }
 
-    let client = GitimClient::new(&repo_root);
+    GitimClient::new(&repo_root)
+}
+
+async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
     match client.status().await {
         Ok(resp) => {
             let code = mode.print(&resp);
