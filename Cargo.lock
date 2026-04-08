@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "gitim-core",
  "notify",
