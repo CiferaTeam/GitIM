@@ -1,5 +1,5 @@
 {
-  "name": "@gitim/daemon-darwin-arm64",
+  "name": "@gitim-ai/daemon-darwin-arm64",
   "version": "0.1.0",
   "description": "GitIM daemon binary for macOS arm64",
   "license": "Apache-2.0",
