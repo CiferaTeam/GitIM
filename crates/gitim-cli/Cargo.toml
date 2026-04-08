@@ -1,0 +1,14 @@
+[package]
+name = "gitim-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gitim"
+path = "src/main.rs"
+
+[dependencies]
+gitim-client = { path = "../gitim-client" }
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+serde_json.workspace = true
