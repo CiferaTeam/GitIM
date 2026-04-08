@@ -122,6 +122,41 @@ enum Commands {
     /// Rebuild the search index
     Reindex,
 
+    /// Onboard: clone/create repo, start daemon, register identity
+    Onboard {
+        /// Repository name
+        repo_name: Option<String>,
+        /// Organization / owner
+        org: Option<String>,
+        /// Git server type: git, github, gitea, gitlab
+        #[arg(short = 'g', long = "git-server", default_value = "github")]
+        git_server: String,
+        /// Auth token for GitHub/Gitea/GitLab
+        #[arg(short, long)]
+        token: Option<String>,
+        /// Handler (required for git local mode)
+        #[arg(long)]
+        handler: Option<String>,
+        /// Display name (required for git local mode)
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Server URL for Gitea/GitLab
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Re-infer identity on running daemon
+        #[arg(long)]
+        refresh: bool,
+        /// Enable HTTP debug port
+        #[arg(long)]
+        debug_http: bool,
+        /// Admin mode
+        #[arg(long)]
+        admin: bool,
+        /// Guest mode (read-only)
+        #[arg(long)]
+        guest: bool,
+    },
+
     /// Board (kanban) commands
     Board {
         #[command(subcommand)]
@@ -266,10 +301,43 @@ async fn main() {
         return;
     }
 
+    // Onboard manages its own repo directory and daemon lifecycle
+    if let Commands::Onboard {
+        repo_name,
+        org,
+        git_server,
+        token,
+        handler,
+        display_name,
+        url,
+        refresh,
+        debug_http,
+        admin,
+        guest,
+    } = cli.command
+    {
+        commands::onboard::cmd_onboard(commands::onboard::OnboardArgs {
+            repo_name,
+            org,
+            git_server,
+            token,
+            handler,
+            display_name,
+            url,
+            refresh,
+            debug_http,
+            admin,
+            guest,
+        })
+        .await;
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
         Commands::Stop => unreachable!(),
+        Commands::Onboard { .. } => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
