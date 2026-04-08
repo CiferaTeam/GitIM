@@ -91,6 +91,18 @@ enum Commands {
         #[command(subcommand)]
         command: DmCommands,
     },
+
+    /// Board (kanban) commands
+    Board {
+        #[command(subcommand)]
+        command: BoardCommands,
+    },
+
+    /// Card commands
+    Card {
+        #[command(subcommand)]
+        command: CardCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -126,6 +138,91 @@ enum DmCommands {
 
     /// List DM conversations
     List,
+}
+
+#[derive(Subcommand)]
+enum BoardCommands {
+    /// Create a new board
+    Create {
+        /// Board name
+        name: String,
+        /// Display name
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Comma-separated list of statuses
+        #[arg(long)]
+        statuses: Option<String>,
+    },
+
+    /// List all boards
+    Ls,
+}
+
+#[derive(Subcommand)]
+enum CardCommands {
+    /// Create a new card
+    Create {
+        /// Board name
+        board: String,
+        /// Card title
+        title: String,
+        /// Assignee handler
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Initial status
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// List cards in a board
+    Ls {
+        /// Board name
+        board: String,
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Read card discussion
+    Read {
+        /// Board name
+        board: String,
+        /// Card ID
+        card_id: String,
+        /// Maximum number of entries
+        #[arg(short, long)]
+        limit: Option<u64>,
+        /// Only return entries after this line number
+        #[arg(short, long)]
+        since: Option<u64>,
+    },
+
+    /// Send a message to a card
+    Send {
+        /// Board name
+        board: String,
+        /// Card ID
+        card_id: String,
+        /// Message body
+        body: String,
+        /// Line number to reply to
+        #[arg(short, long)]
+        reply_to: Option<u64>,
+    },
+
+    /// Update card status or assignee
+    Update {
+        /// Board name
+        board: String,
+        /// Card ID
+        card_id: String,
+        /// New status
+        #[arg(long)]
+        status: Option<String>,
+        /// New assignee handler
+        #[arg(long)]
+        assignee: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -218,6 +315,86 @@ async fn main() {
                 .await
             }
             DmCommands::List => commands::dm::cmd_dm_list(&mode),
+        },
+        Commands::Board { command } => match command {
+            BoardCommands::Create {
+                name,
+                display_name,
+                statuses,
+            } => {
+                let status_vec: Option<Vec<String>> = statuses
+                    .map(|s| s.split(',').map(|s| s.trim().to_string()).collect());
+                commands::board::cmd_create_board(
+                    &client,
+                    &mode,
+                    &name,
+                    display_name.as_deref(),
+                    status_vec.as_deref(),
+                )
+                .await
+            }
+            BoardCommands::Ls => commands::board::cmd_list_boards(&client, &mode).await,
+        },
+        Commands::Card { command } => match command {
+            CardCommands::Create {
+                board,
+                title,
+                assignee,
+                status,
+            } => {
+                commands::card::cmd_create_card(
+                    &client,
+                    &mode,
+                    &board,
+                    &title,
+                    assignee.as_deref(),
+                    status.as_deref(),
+                )
+                .await
+            }
+            CardCommands::Ls { board, status } => {
+                commands::card::cmd_list_cards(&client, &mode, &board, status.as_deref()).await
+            }
+            CardCommands::Read {
+                board,
+                card_id,
+                limit,
+                since,
+            } => {
+                commands::card::cmd_read_card(&client, &mode, &board, &card_id, limit, since).await
+            }
+            CardCommands::Send {
+                board,
+                card_id,
+                body,
+                reply_to,
+            } => {
+                commands::card::cmd_send_card_message(
+                    &client,
+                    &mode,
+                    &board,
+                    &card_id,
+                    &body,
+                    reply_to,
+                )
+                .await
+            }
+            CardCommands::Update {
+                board,
+                card_id,
+                status,
+                assignee,
+            } => {
+                commands::card::cmd_update_card(
+                    &client,
+                    &mode,
+                    &board,
+                    &card_id,
+                    status.as_deref(),
+                    assignee.as_deref(),
+                )
+                .await
+            }
         },
     }
 }
