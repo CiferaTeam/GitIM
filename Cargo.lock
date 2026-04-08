@@ -433,6 +433,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitim-client"
+version = "0.3.1"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "gitim-core"
 version = "0.3.1"
 dependencies = [
