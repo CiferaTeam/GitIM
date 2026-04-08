@@ -131,4 +131,56 @@ export class GitimClient {
   async reindex(): Promise<ApiResponse> {
     return this.request('reindex');
   }
+
+  async createBoard(name: string, displayName?: string, statuses?: string[]): Promise<ApiResponse> {
+    return this.request('create_board', {
+      name,
+      display_name: displayName,
+      statuses: statuses ?? null,
+    });
+  }
+
+  async createCard(board: string, title: string, assignee?: string, status?: string): Promise<ApiResponse> {
+    return this.request('create_card', {
+      board,
+      title,
+      assignee: assignee ?? null,
+      status: status ?? null,
+    });
+  }
+
+  async listBoards(): Promise<ApiResponse> {
+    return this.request('list_boards');
+  }
+
+  async listCards(board: string, status?: string): Promise<ApiResponse> {
+    return this.request('list_cards', { board, status: status ?? null });
+  }
+
+  async readCard(board: string, cardId: string, limit?: number, since?: number): Promise<ApiResponse> {
+    return this.request('read_card', {
+      board,
+      card_id: cardId,
+      limit: limit ?? null,
+      since: since ?? null,
+    });
+  }
+
+  async sendCardMessage(board: string, cardId: string, body: string, replyTo?: number): Promise<ApiResponse> {
+    return this.request('send_card_message', {
+      board,
+      card_id: cardId,
+      body,
+      reply_to: replyTo ?? null,
+    });
+  }
+
+  async updateCard(board: string, cardId: string, status?: string, assignee?: string): Promise<ApiResponse> {
+    return this.request('update_card', {
+      board,
+      card_id: cardId,
+      status: status ?? null,
+      assignee: assignee ?? null,
+    });
+  }
 }

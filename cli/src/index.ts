@@ -16,6 +16,13 @@ import { createChannelCommand } from './commands/create-channel.js';
 import { joinChannelCommand } from './commands/join-channel.js';
 import { archiveChannelCommand } from './commands/archive-channel.js';
 import { archivedChannelsCommand } from './commands/archived-channels.js';
+import { boardCreateCommand } from './commands/board-create.js';
+import { boardListCommand } from './commands/board-list.js';
+import { cardCreateCommand } from './commands/card-create.js';
+import { cardListCommand } from './commands/card-list.js';
+import { cardReadCommand } from './commands/card-read.js';
+import { cardSendCommand } from './commands/card-send.js';
+import { cardUpdateCommand } from './commands/card-update.js';
 
 const program = new Command();
 
@@ -159,5 +166,33 @@ program
   .action(async (options) => {
     await webuiCommand({ port: parseInt(options.port, 10), dev: options.dev });
   });
+
+const board = program.command('board').description('Board management');
+board.command('create <name>').description('Create a new board')
+  .option('--display-name <name>', 'Display name')
+  .option('--statuses <list>', 'Comma-separated statuses')
+  .action(async (name: string, options: any) => { await boardCreateCommand(name, options); });
+board.command('ls').description('List all boards')
+  .action(async () => { await boardListCommand(); });
+
+const card = program.command('card').description('Card management');
+card.command('create <board> <title>').description('Create a new card')
+  .option('--assignee <handler>', 'Assign to user')
+  .option('--status <status>', 'Initial status')
+  .action(async (board: string, title: string, options: any) => { await cardCreateCommand(board, title, options); });
+card.command('ls <board>').description('List cards in a board')
+  .option('--status <status>', 'Filter by status')
+  .action(async (board: string, options: any) => { await cardListCommand(board, options); });
+card.command('read <board> <card-id>').description('Read card messages')
+  .option('--limit <n>', 'Limit messages')
+  .option('--since <line>', 'Messages since line number')
+  .action(async (board: string, cardId: string, options: any) => { await cardReadCommand(board, cardId, options); });
+card.command('send <board> <card-id> <body>').description('Send a message to a card')
+  .option('--reply-to <line>', 'Reply to line number')
+  .action(async (board: string, cardId: string, body: string, options: any) => { await cardSendCommand(board, cardId, body, options); });
+card.command('update <board> <card-id>').description('Update card status or assignee')
+  .option('--status <status>', 'New status')
+  .option('--assignee <handler>', 'New assignee')
+  .action(async (board: string, cardId: string, options: any) => { await cardUpdateCommand(board, cardId, options); });
 
 program.parse();

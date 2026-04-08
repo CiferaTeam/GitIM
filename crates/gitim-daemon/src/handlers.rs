@@ -55,6 +55,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::JoinChannel { .. }
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
+                | Request::ArchiveChannel { .. }
+                | Request::CreateBoard { .. }
+                | Request::CreateCard { .. }
+                | Request::SendCardMessage { .. }
+                | Request::UpdateCard { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -159,6 +164,98 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_archive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => handle_list_archived_channels(state).await,
+        Request::CreateBoard {
+            name,
+            display_name,
+            statuses,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_create_board(
+                state,
+                name,
+                display_name,
+                statuses,
+                resolved_author,
+            )
+            .await
+        }
+        Request::CreateCard {
+            board,
+            title,
+            assignee,
+            status,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_create_card(
+                state,
+                board,
+                title,
+                assignee,
+                status,
+                resolved_author,
+            )
+            .await
+        }
+        Request::ListBoards => crate::board_handlers::handle_list_boards(state).await,
+        Request::ListCards { board, status } => {
+            crate::board_handlers::handle_list_cards(state, board, status).await
+        }
+        Request::ReadCard {
+            board,
+            card_id,
+            limit,
+            since,
+        } => crate::board_handlers::handle_read_card(state, board, card_id, limit, since).await,
+        Request::SendCardMessage {
+            board,
+            card_id,
+            body,
+            reply_to,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_send_card_message(
+                state,
+                board,
+                card_id,
+                body,
+                reply_to,
+                resolved_author,
+            )
+            .await
+        }
+        Request::UpdateCard {
+            board,
+            card_id,
+            status,
+            assignee,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_update_card(
+                state,
+                board,
+                card_id,
+                status,
+                assignee,
+                resolved_author,
+            )
+            .await
+        }
     }
 }
 
