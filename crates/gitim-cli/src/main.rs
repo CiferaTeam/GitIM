@@ -92,6 +92,36 @@ enum Commands {
         command: DmCommands,
     },
 
+    /// Stop the daemon
+    Stop,
+
+    /// List all users
+    Users,
+
+    /// Search messages
+    Search {
+        /// Search query
+        query: Option<String>,
+        /// Filter by author handler
+        #[arg(short, long)]
+        author: Option<String>,
+        /// Filter by channel name
+        #[arg(short, long)]
+        channel: Option<String>,
+        /// Filter by channel type (channel or dm)
+        #[arg(short = 't', long = "type")]
+        channel_type: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "50")]
+        limit: u64,
+        /// Offset for pagination
+        #[arg(long, default_value = "0")]
+        offset: u64,
+    },
+
+    /// Rebuild the search index
+    Reindex,
+
     /// Board (kanban) commands
     Board {
         #[command(subcommand)]
@@ -230,9 +260,16 @@ async fn main() {
     let cli = Cli::parse();
     let mode = OutputMode::from_flag(cli.json);
 
+    // Stop handles daemon detection itself — no init_client needed
+    if let Commands::Stop = &cli.command {
+        commands::admin::cmd_stop(&mode).await;
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
+        Commands::Stop => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
@@ -281,6 +318,28 @@ async fn main() {
         Commands::ArchivedChannels => {
             commands::channels::cmd_archived_channels(&client, &mode).await
         }
+        Commands::Users => commands::admin::cmd_users(&client, &mode).await,
+        Commands::Search {
+            query,
+            author,
+            channel,
+            channel_type,
+            limit,
+            offset,
+        } => {
+            commands::admin::cmd_search(
+                &client,
+                &mode,
+                query.as_deref(),
+                author.as_deref(),
+                channel.as_deref(),
+                channel_type.as_deref(),
+                limit,
+                offset,
+            )
+            .await
+        }
+        Commands::Reindex => commands::admin::cmd_reindex(&client, &mode).await,
         Commands::Dm { command } => match command {
             DmCommands::Send {
                 handler,
