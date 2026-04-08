@@ -53,23 +53,23 @@ npm run build
 if $DRY_RUN; then
   echo ""
   echo "==> Dry run complete. Would publish:"
-  echo "    @gitim-ai/daemon-darwin-arm64@$VERSION"
-  echo "    @gitim-ai/cli@$VERSION"
+  echo "    @gitim-runtime/daemon-darwin-arm64@$VERSION"
+  echo "    @gitim-runtime/cli@$VERSION"
   echo ""
   echo "    Run without --dry-run to publish."
   exit 0
 fi
 
 # ---------- Publish daemon package first (CLI depends on it) ----------
-echo "==> Publishing @gitim-ai/daemon-darwin-arm64@$VERSION..."
+echo "==> Publishing @gitim-runtime/daemon-darwin-arm64@$VERSION..."
 cd "$DAEMON_PKG"
 npm publish --access public
 
 # ---------- Publish CLI package ----------
-echo "==> Publishing @gitim-ai/cli@$VERSION..."
+echo "==> Publishing @gitim-runtime/cli@$VERSION..."
 cd "$ROOT/cli"
 npm publish --access public
 
 echo ""
 echo "==> Published v$VERSION"
-echo "    npm install -g @gitim-ai/cli"
+echo "    npm install -g @gitim-runtime/cli"
