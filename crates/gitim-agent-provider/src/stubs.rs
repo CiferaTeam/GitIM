@@ -16,7 +16,7 @@ impl CodexProvider {
 #[async_trait]
 impl Provider for CodexProvider {
     async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
-        unimplemented!("codex provider not yet implemented")
+        Err(ProviderError::NotImplemented("codex".to_string()))
     }
 }
 
@@ -34,7 +34,7 @@ impl CursorProvider {
 #[async_trait]
 impl Provider for CursorProvider {
     async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
-        unimplemented!("cursor provider not yet implemented")
+        Err(ProviderError::NotImplemented("cursor".to_string()))
     }
 }
 
@@ -52,6 +52,6 @@ impl OpencodeProvider {
 #[async_trait]
 impl Provider for OpencodeProvider {
     async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
-        unimplemented!("opencode provider not yet implemented")
+        Err(ProviderError::NotImplemented("opencode".to_string()))
     }
 }

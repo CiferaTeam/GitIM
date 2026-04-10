@@ -10,4 +10,7 @@ pub enum ProviderError {
 
     #[error("unknown provider type: {0}")]
     UnknownProvider(String),
+
+    #[error("provider not implemented: {0}")]
+    NotImplemented(String),
 }

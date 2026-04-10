@@ -136,7 +136,7 @@ async fn drive_session(
             match parsed {
                 ParsedMessage::System { session_id: sid } => {
                     session_id = sid;
-                    let _ = event_tx.try_send(Event::Status {
+                    try_send_event(&event_tx, Event::Status {
                         status: "running".to_string(),
                     });
                 }
@@ -145,7 +145,7 @@ async fn drive_session(
                         if let Event::Text { ref content } = event {
                             output.push_str(content);
                         }
-                        let _ = event_tx.try_send(event);
+                        try_send_event(&event_tx, event);
                     }
                 }
                 ParsedMessage::Result {
@@ -180,6 +180,9 @@ async fn drive_session(
     if read_result.is_err() {
         final_status = ExecStatus::Timeout;
         final_error = Some(format!("claude timed out after {timeout:?}"));
+        // Kill the child process — kill_on_drop only fires on Drop,
+        // but we still hold the Child reference.
+        let _ = child.start_kill();
     }
 
     if final_status != ExecStatus::Timeout {
@@ -212,6 +215,12 @@ async fn drive_session(
             Some(session_id)
         },
     });
+}
+
+fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
+    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+        warn!("event channel full, dropping event");
+    }
 }
 
 fn build_auto_approve_response(request_id: &str, input: &Value) -> Value {
