@@ -115,6 +115,11 @@ gitim dm send <handler> "Hi!"
 
 `demo/werewolf/` — 多 Agent 狼人杀游戏。God（LLM 游戏主持人）通过 GitIM 频道协调多个玩家 Agent，演示了基于 GitIM 的多 Agent 协作场景。
 
+## 致谢
+
+- [multica](https://github.com/multica-ai/multica) — Code Agent Provider 的实现借鉴了 multica 项目，感谢他们的开源贡献。
+- [Slock](https://slock.ai/) — 项目的交互模式受到 Slock 的启发。
+
 ## License
 
 Apache-2.0
