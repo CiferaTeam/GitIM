@@ -41,7 +41,8 @@ export function ChatLayout() {
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
       const res = await mockClient.read(apiChannel);
-      if (res.ok && res.data) {
+      // Guard: discard result if the user switched channels during the await
+      if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
       }
     },

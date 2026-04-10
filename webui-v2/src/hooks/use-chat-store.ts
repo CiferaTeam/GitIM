@@ -54,7 +54,13 @@ export const useChatStore = create<ChatState>((set) => ({
   setChannels: (c) => set({ channels: c }),
 
   selectChannel: (name) =>
-    set({ currentChannel: name, replyTo: null }),
+    set({
+      currentChannel: name,
+      replyTo: null,
+      messages: [],
+      threadRoot: null,
+      threadMessages: [],
+    }),
 
   incrementUnread: (channel) =>
     set((state) => ({
@@ -70,9 +76,12 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
     })),
 
-  // Dedup: keep pending messages that haven't been confirmed by the new batch
+  // Dedup: keep pending messages that haven't been confirmed by the new batch.
+  // When newMessages is empty (e.g. channel clear), don't carry over pending —
+  // they belong to the previous channel context.
   setMessages: (newMessages) =>
     set((state) => {
+      if (newMessages.length === 0) return { messages: [] };
       const realLineNumbers = new Set(newMessages.map((m) => m.line_number));
       const pendingToKeep = state.messages.filter(
         (m) => m._pendingId && !realLineNumbers.has(m.line_number)
