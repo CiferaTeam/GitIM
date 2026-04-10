@@ -1,16 +1,62 @@
-import './App.css'
-import { Button } from '@/components/ui/button'
+import { useEffect } from "react";
+import { Navigate, Route, Routes } from "react-router";
+import { AppShell } from "./components/layout/app-shell";
+import { useAgentStore } from "./hooks/use-agent-store";
+import { useChatStore } from "./hooks/use-chat-store";
+import type { Agent, Channel } from "./lib/types";
+import * as mockClient from "./lib/mock/client";
+import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
 
-function App() {
-  return (
-    <div className="flex min-h-svh items-center justify-center">
-      <div className="text-center space-y-4">
-        <h1 className="text-2xl font-semibold">GitIM webui-v2</h1>
-        <p className="text-muted-foreground">Scaffold ready. Build starts here.</p>
-        <Button>Get Started</Button>
-      </div>
-    </div>
-  )
+function ManagementPage() {
+  return <div>Management placeholder</div>;
 }
 
-export default App
+function ChatPage() {
+  return <div>Chat placeholder</div>;
+}
+
+export default function App() {
+  const setCurrentUser = useChatStore((s) => s.setCurrentUser);
+  const setChannels = useChatStore((s) => s.setChannels);
+  const setUsers = useChatStore((s) => s.setUsers);
+  const setConnected = useChatStore((s) => s.setConnected);
+  const setAgents = useAgentStore((s) => s.setAgents);
+
+  useEffect(() => {
+    async function init() {
+      const [meRes, channelsRes, usersRes, agentsRes] = await Promise.all([
+        mockClient.me(),
+        mockClient.channels(),
+        mockClient.users(),
+        mockClient.listAgents(),
+      ]);
+
+      if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
+      if (channelsRes.ok && channelsRes.data)
+        setChannels(channelsRes.data.channels as Channel[]);
+      if (usersRes.ok && usersRes.data)
+        setUsers(usersRes.data.users as string[]);
+      if (agentsRes.ok && agentsRes.data)
+        setAgents(agentsRes.data.agents as Agent[]);
+
+      setConnected(true);
+      startMockTimer();
+    }
+
+    init();
+
+    return () => {
+      stopMockTimer();
+    };
+  }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected]);
+
+  return (
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<Navigate to="/management" replace />} />
+        <Route path="/management" element={<ManagementPage />} />
+        <Route path="/chat" element={<ChatPage />} />
+      </Route>
+    </Routes>
+  );
+}
