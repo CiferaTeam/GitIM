@@ -93,6 +93,7 @@ impl Provider for ClaudeProvider {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_session(
     mut child: tokio::process::Child,
     stdout: tokio::process::ChildStdout,

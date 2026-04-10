@@ -5,21 +5,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 /// Configuration for creating a provider instance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderConfig {
     /// Path to the CLI executable. If None, uses the default for the provider.
     pub executable_path: Option<String>,
     /// Extra environment variables for the child process.
     pub env: HashMap<String, String>,
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            executable_path: None,
-            env: HashMap::new(),
-        }
-    }
 }
 
 /// Options for a single execution.
