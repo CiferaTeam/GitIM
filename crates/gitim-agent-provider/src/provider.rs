@@ -24,6 +24,9 @@ pub fn create(
             // Placeholder — will be replaced with real ClaudeProvider in Task 5
             todo!("claude provider not yet implemented")
         }
+        "codex" => Ok(Box::new(crate::stubs::CodexProvider::new(config))),
+        "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
+        "opencode" => Ok(Box::new(crate::stubs::OpencodeProvider::new(config))),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),
     }
 }
