@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
@@ -6,9 +6,19 @@ import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
-import type { Agent, Channel } from "./lib/types";
+import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as mockClient from "./lib/mock/client";
 import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
+
+const POLL_INTERVAL_MS = 3000;
+
+/** "dm:alice,lewis" -> "alice--lewis"; passthrough for channels */
+function apiToDisplay(channel: string): string {
+  if (channel.startsWith("dm:")) {
+    return channel.slice(3).replace(",", "--");
+  }
+  return channel;
+}
 
 function ManagementPage() {
   return <AgentList />;
@@ -23,8 +33,76 @@ export default function App() {
   const setChannels = useChatStore((s) => s.setChannels);
   const setUsers = useChatStore((s) => s.setUsers);
   const setConnected = useChatStore((s) => s.setConnected);
+  const setMessages = useChatStore((s) => s.setMessages);
+  const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
 
+  // Mutable refs for poll loop — avoids stale closures
+  const sinceRef = useRef<string | undefined>(undefined);
+  const currentChannelRef = useRef<string | null>(null);
+  const channelsRef = useRef<Channel[]>([]);
+
+  // Keep refs in sync with store
+  useEffect(() => {
+    return useChatStore.subscribe((state) => {
+      currentChannelRef.current = state.currentChannel;
+      channelsRef.current = state.channels;
+    });
+  }, []);
+
+  const runPoll = useCallback(async () => {
+    try {
+      const pollRes = await mockClient.poll(sinceRef.current);
+      if (!pollRes.ok || !pollRes.data) return;
+
+      sinceRef.current = pollRes.data.commit_id as string;
+      const changes = (pollRes.data.changes ?? []) as PollChange[];
+
+      let needChannelRefresh = false;
+
+      for (const change of changes) {
+        const displayName = apiToDisplay(change.channel);
+        const knownChannel = channelsRef.current.some(
+          (c) => c.name === displayName
+        );
+
+        if (!knownChannel) {
+          needChannelRefresh = true;
+          continue;
+        }
+
+        if (displayName === currentChannelRef.current) {
+          // Reload messages for the active channel
+          const apiCh = change.channel.startsWith("dm:")
+            ? change.channel
+            : displayName;
+          const readRes = await mockClient.read(apiCh);
+          if (readRes.ok && readRes.data) {
+            setMessages(readRes.data.entries as Message[]);
+          }
+        } else {
+          incrementUnread(displayName);
+        }
+      }
+
+      if (needChannelRefresh) {
+        const chRes = await mockClient.channels();
+        if (chRes.ok && chRes.data) {
+          setChannels(chRes.data.channels as Channel[]);
+        }
+      }
+
+      // Periodically refresh agents
+      const agentsRes = await mockClient.listAgents();
+      if (agentsRes.ok && agentsRes.data) {
+        setAgents(agentsRes.data.agents as Agent[]);
+      }
+    } catch {
+      // Silently skip failed polls
+    }
+  }, [setMessages, incrementUnread, setChannels, setAgents]);
+
+  // Init + poll loop
   useEffect(() => {
     async function init() {
       const [meRes, channelsRes, usersRes, agentsRes] = await Promise.all([
@@ -48,10 +126,13 @@ export default function App() {
 
     init();
 
+    const pollHandle = setInterval(runPoll, POLL_INTERVAL_MS);
+
     return () => {
+      clearInterval(pollHandle);
       stopMockTimer();
     };
-  }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected]);
+  }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
   return (
     <Routes>

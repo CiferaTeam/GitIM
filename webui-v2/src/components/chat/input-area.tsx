@@ -1,4 +1,4 @@
-import { useRef, useState, KeyboardEvent } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { ApiResponse } from "../../lib/types";
 import { MentionPopup } from "./mention-popup";
@@ -117,22 +117,22 @@ export function InputArea({ onSend }: InputAreaProps) {
   }
 
   return (
-    <div className="border-t p-3 shrink-0">
+    <div className="border-t border-border/60 px-4 py-3 shrink-0">
       {/* Reply bar */}
       {replyTo && (
-        <div className="mb-2 flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="mb-2 flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
           <span className="flex-1 truncate">
             <span className="font-medium">Reply to @{replyTo.author}: </span>
             {replyTo.body.length > 40
-              ? replyTo.body.slice(0, 40) + "…"
+              ? replyTo.body.slice(0, 40) + "..."
               : replyTo.body}
           </span>
           <button
             onClick={() => setReplyTo(null)}
-            className="ml-1 shrink-0 hover:text-foreground transition-colors"
+            className="ml-1 shrink-0 hover:text-foreground transition-colors text-base leading-none"
             aria-label="Clear reply"
           >
-            ×
+            x
           </button>
         </div>
       )}
@@ -156,7 +156,7 @@ export function InputArea({ onSend }: InputAreaProps) {
           onKeyDown={handleKeyDown}
           disabled={sending}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
-          className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          className="w-full resize-none rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 disabled:opacity-50 transition-colors"
         />
 
         {sending && (

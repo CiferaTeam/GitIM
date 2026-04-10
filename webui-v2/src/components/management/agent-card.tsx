@@ -70,7 +70,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   return (
     <>
       <Card
-        className="cursor-pointer hover:shadow-md transition-shadow"
+        className="cursor-pointer hover:shadow-md transition-all duration-150 hover:border-border/80 bg-card/50"
         onClick={() => navigate(`/management/${agent.id}`)}
       >
         <CardHeader className="pb-2">

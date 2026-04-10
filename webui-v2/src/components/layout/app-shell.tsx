@@ -14,14 +14,14 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       {/* Top bar */}
-      <header className="h-14 border-b flex items-center px-4 justify-between shrink-0">
+      <header className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0 bg-background/95 backdrop-blur-sm">
         {/* Left: logo + connection status */}
-        <div className="flex items-center gap-2 min-w-[120px]">
-          <span className="font-bold text-sm">GitIM</span>
+        <div className="flex items-center gap-2.5 min-w-[120px]">
+          <span className="font-bold text-sm tracking-tight">GitIM</span>
           <span
             className={[
-              "inline-block w-2 h-2 rounded-full",
-              connected ? "bg-green-500" : "bg-red-500",
+              "inline-block w-1.5 h-1.5 rounded-full",
+              connected ? "bg-green-500 shadow-[0_0_4px_hsl(142_76%_45%/0.5)]" : "bg-red-500",
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
@@ -32,7 +32,7 @@ export function AppShell({ children }: AppShellProps) {
 
         {/* Right: current user */}
         <div className="flex items-center justify-end min-w-[120px]">
-          <span className="text-sm text-muted-foreground">
+          <span className="text-xs text-muted-foreground font-mono">
             {currentUser ? `@${currentUser}` : ""}
           </span>
         </div>

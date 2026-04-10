@@ -80,10 +80,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   return (
-    <div className="w-60 shrink-0 border-r bg-muted/50 flex flex-col overflow-y-auto">
+    <div className="w-56 shrink-0 border-r border-border/60 bg-muted/30 flex flex-col overflow-y-auto">
       {/* Channels section */}
       <div className="px-3 pt-4 pb-2">
-        <p className="text-xs font-semibold uppercase text-muted-foreground tracking-wider mb-1">
+        <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest mb-2 px-2">
           Channels
         </p>
         <ul className="space-y-0.5">
@@ -100,9 +100,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       </div>
 
       {/* DMs section */}
-      <div className="px-3 pt-2 pb-4">
-        <div className="flex items-center justify-between mb-1">
-          <p className="text-xs font-semibold uppercase text-muted-foreground tracking-wider">
+      <div className="px-3 pt-3 pb-4">
+        <div className="flex items-center justify-between mb-2 px-2">
+          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
             Direct Messages
           </p>
           <Button
@@ -110,6 +110,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             size="icon-xs"
             title="New DM"
             onClick={openDmSearch}
+            className="text-muted-foreground hover:text-foreground"
           >
             <span className="text-base leading-none">+</span>
           </Button>
@@ -117,7 +118,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
         {/* Inline search */}
         {dmSearchOpen && (
-          <div className="mb-2 relative">
+          <div className="mb-2 relative px-1">
             <Input
               ref={inputRef}
               placeholder="Search users..."
@@ -127,11 +128,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               className="h-7 text-xs"
             />
             {filteredUsers.length > 0 && (
-              <ul className="absolute z-50 top-full left-0 right-0 mt-1 rounded-md border bg-popover shadow-md max-h-40 overflow-y-auto">
+              <ul className="absolute z-50 top-full left-0 right-0 mt-1 rounded-md border bg-popover shadow-lg max-h-40 overflow-y-auto">
                 {filteredUsers.map((u) => (
                   <li
                     key={u}
-                    className="px-3 py-1.5 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground"
+                    className="px-3 py-1.5 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
                     onMouseDown={() => handleUserSelect(u)}
                   >
                     @{u}
@@ -175,15 +176,16 @@ function ChannelItem({ label, unread, active, onClick }: ChannelItemProps) {
         type="button"
         onClick={onClick}
         className={[
-          "w-full flex items-center justify-between rounded-md px-2 py-1 text-sm text-left transition-colors",
+          "w-full flex items-center justify-between rounded-md px-2 py-1.5 text-[13px] text-left transition-colors",
           active
             ? "bg-accent text-accent-foreground font-medium"
-            : "hover:bg-accent/50 text-foreground",
+            : "hover:bg-accent/40 text-muted-foreground hover:text-foreground",
+          unread > 0 && !active ? "text-foreground font-medium" : "",
         ].join(" ")}
       >
         <span className="truncate">{label}</span>
         {unread > 0 && (
-          <Badge variant="default" className="ml-1 text-[10px] px-1.5 py-0 h-4 min-w-4">
+          <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 min-w-4 font-mono">
             {unread}
           </Badge>
         )}

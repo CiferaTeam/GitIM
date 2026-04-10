@@ -66,7 +66,7 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
   if (!currentChannel) {
     return (
       <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
-        <p className="text-muted-foreground text-sm">
+        <p className="text-muted-foreground/60 text-sm">
           Select a channel to start chatting
         </p>
       </div>
@@ -76,7 +76,7 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
   if (messages.length === 0) {
     return (
       <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
-        <p className="text-muted-foreground text-sm">No messages yet</p>
+        <p className="text-muted-foreground/60 text-sm">No messages yet</p>
       </div>
     );
   }
@@ -84,15 +84,15 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
   return (
     <div
       ref={scrollRef}
-      className="flex-1 overflow-y-auto p-4 space-y-1"
+      className="flex-1 overflow-y-auto px-4 py-2 space-y-0.5"
     >
       {messages.map((msg) => {
         const key = msg._pendingId ?? msg.line_number;
 
         if (msg.type === "event") {
           return (
-            <div key={key} className="flex justify-center py-1">
-              <span className="text-xs text-muted-foreground italic">
+            <div key={key} className="flex justify-center py-2">
+              <span className="text-[11px] text-muted-foreground/60 italic">
                 {msg.body}
               </span>
             </div>

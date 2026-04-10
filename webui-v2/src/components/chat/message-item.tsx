@@ -64,19 +64,20 @@ export function MessageItem({
     <div
       data-line={message.line_number}
       className={cn(
-        "group relative rounded-md px-3 py-1.5 transition-all",
-        isPending && "opacity-50",
-        isFailed && "border border-destructive text-destructive",
-        isReplying && "border-l-2 border-primary/60 pl-2",
-        highlight && "bg-accent/20 ring-1 ring-accent/40"
+        "group relative rounded-md px-3 py-2 transition-all duration-150",
+        "hover:bg-muted/30",
+        isPending && "opacity-40",
+        isFailed && "border border-destructive/50 bg-destructive/5",
+        isReplying && "border-l-2 border-ring/60 bg-muted/20",
+        highlight && "bg-accent/30 ring-1 ring-ring/30"
       )}
     >
       {/* Hover actions bar */}
       {!isPending && (
-        <div className="absolute right-2 top-1.5 hidden group-hover:flex items-center gap-1 bg-background/95 border rounded-md shadow-sm px-1 py-0.5 z-10">
+        <div className="absolute right-2 top-1 hidden group-hover:flex items-center gap-0.5 bg-background border border-border/80 rounded-md shadow-md px-1 py-0.5 z-10">
           <button
             onClick={() => onReply(message)}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
             title="Reply"
           >
             <MessageSquare className="h-3 w-3" />
@@ -84,7 +85,7 @@ export function MessageItem({
           </button>
           <button
             onClick={() => onShowThread(message)}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
             title="Thread"
           >
             <GitBranch className="h-3 w-3" />
@@ -92,7 +93,7 @@ export function MessageItem({
           </button>
           <button
             onClick={() => onCopy(message.body, message.line_number)}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
             title="Copy"
           >
             {copied ? (
@@ -107,14 +108,14 @@ export function MessageItem({
 
       {/* Message header */}
       <div className="flex items-baseline gap-2 mb-0.5">
-        <span className="font-medium text-sm">@{message.author}</span>
-        <span className="text-xs text-muted-foreground">
+        <span className="font-semibold text-sm text-foreground">@{message.author}</span>
+        <span className="text-[11px] text-muted-foreground font-mono">
           {formatTimestamp(message.timestamp)}
         </span>
         {statusLabel && (
           <span
             className={cn(
-              "text-xs",
+              "text-[11px]",
               isFailed ? "text-destructive" : "text-muted-foreground"
             )}
           >
@@ -129,11 +130,11 @@ export function MessageItem({
           onClick={() => onScrollTo(message.point_to)}
           className="mb-1 flex items-start gap-1.5 text-left w-full"
         >
-          <div className="border-l-2 border-muted-foreground/40 pl-2 text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <div className="border-l-2 border-muted-foreground/30 pl-2 text-xs text-muted-foreground hover:text-foreground transition-colors">
             <span className="font-medium">@{replyTarget.author}: </span>
             <span>
               {replyTarget.body.length > 60
-                ? replyTarget.body.slice(0, 60) + "…"
+                ? replyTarget.body.slice(0, 60) + "..."
                 : replyTarget.body}
             </span>
           </div>
@@ -142,7 +143,7 @@ export function MessageItem({
 
       {/* Message body */}
       <p
-        className="text-sm cursor-pointer select-text leading-relaxed"
+        className="text-sm cursor-pointer select-text leading-relaxed text-foreground/90"
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >

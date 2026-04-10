@@ -67,7 +67,7 @@ export function ChatLayout() {
 
   const handleSend = useCallback(
     async (body: string, pointTo: number = 0) => {
-      if (!currentChannel) return;
+      if (!currentChannel) return { ok: false, error: "No channel selected" };
       const pendingId = `pending-${Date.now()}`;
       const pending: Message = {
         line_number: -1,
@@ -95,6 +95,7 @@ export function ChatLayout() {
       } else {
         markPendingFailed(pendingId);
       }
+      return res;
     },
     [currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
   );

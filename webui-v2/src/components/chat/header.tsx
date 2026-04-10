@@ -21,7 +21,7 @@ export function ChatHeader({ onStartDm }: ChatHeaderProps) {
 
   if (!currentChannel) {
     return (
-      <div className="h-12 border-b flex items-center px-4 shrink-0">
+      <div className="h-12 border-b border-border/60 flex items-center px-4 shrink-0">
         <span className="text-sm text-muted-foreground">
           Select a channel or DM
         </span>
@@ -49,9 +49,9 @@ export function ChatHeader({ onStartDm }: ChatHeaderProps) {
   const members = channel?.members ?? [];
 
   return (
-    <div className="h-12 border-b flex items-center px-4 justify-between shrink-0">
+    <div className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0">
       {/* Left: channel name */}
-      <span className="font-semibold text-sm">{displayName}</span>
+      <span className="font-semibold text-sm tracking-tight">{displayName}</span>
 
       {/* Right: member list (channels only) */}
       {!isDm && members.length > 0 && (
