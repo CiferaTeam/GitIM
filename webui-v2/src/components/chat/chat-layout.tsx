@@ -6,6 +6,7 @@ import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
+import { ThreadPanel } from "./thread-panel";
 
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
@@ -20,7 +21,6 @@ export function ChatLayout() {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
-  const threadRoot = useChatStore((s) => s.threadRoot);
 
   const selectChannel = useChatStore((s) => s.selectChannel);
   const clearUnread = useChatStore((s) => s.clearUnread);
@@ -139,17 +139,8 @@ export function ChatLayout() {
         <InputArea onSend={handleSend} />
       </div>
 
-      {/* Right: thread panel — placeholder until Task 12 */}
-      {threadRoot && (
-        <div className="w-80 shrink-0 border-l flex flex-col">
-          <div className="h-12 border-b flex items-center px-4 text-sm font-medium">
-            Thread
-          </div>
-          <div className="flex-1 overflow-y-auto p-4 text-sm text-muted-foreground">
-            Thread panel (Task 12)
-          </div>
-        </div>
-      )}
+      {/* Right: thread panel */}
+      <ThreadPanel onReplyInThread={handleReply} />
     </div>
   );
 }
