@@ -3,6 +3,7 @@ import { useChatStore } from "../../hooks/use-chat-store";
 import * as mockClient from "../../lib/mock/client";
 import type { Message } from "../../lib/types";
 import { ChatHeader } from "./header";
+import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
 
@@ -65,7 +66,7 @@ export function ChatLayout() {
   );
 
   const handleSend = useCallback(
-    async (body: string, pointTo?: number) => {
+    async (body: string, pointTo: number = 0) => {
       if (!currentChannel) return;
       const pendingId = `pending-${Date.now()}`;
       const pending: Message = {
@@ -120,9 +121,6 @@ export function ChatLayout() {
     [currentChannel, setThreadRoot, setThreadMessages]
   );
 
-  // handleSend is consumed by Task 11 (input area)
-  void handleSend;
-
   return (
     <div className="flex h-full overflow-hidden">
       {/* Left: sidebar */}
@@ -138,12 +136,7 @@ export function ChatLayout() {
         {/* Message area */}
         <MessageList onReply={handleReply} onShowThread={handleShowThread} />
 
-        {/* Input area — placeholder until Task 11 */}
-        <div className="border-t p-3">
-          <div className="h-10 rounded-md border bg-muted/30 flex items-center px-3 text-sm text-muted-foreground">
-            Message input (Task 11)
-          </div>
-        </div>
+        <InputArea onSend={handleSend} />
       </div>
 
       {/* Right: thread panel — placeholder until Task 12 */}
