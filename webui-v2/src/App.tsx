@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { AppShell } from "./components/layout/app-shell";
+import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
@@ -56,6 +57,7 @@ export default function App() {
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/management" replace />} />
         <Route path="/management" element={<ManagementPage />} />
+        <Route path="/management/:agentId" element={<AgentDetail />} />
         <Route path="/chat" element={<ChatPage />} />
       </Route>
     </Routes>

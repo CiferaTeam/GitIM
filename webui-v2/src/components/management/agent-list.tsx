@@ -1,6 +1,5 @@
-import { Button } from "@/components/ui/button";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import { Plus } from "lucide-react";
+import { AddAgentDialog } from "./add-agent-dialog";
 import { AgentCard } from "./agent-card";
 
 export function AgentList() {
@@ -10,10 +9,7 @@ export function AgentList() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Agents</h1>
-        <Button onClick={() => {}}>
-          <Plus className="size-4 mr-1" />
-          Add Agent
-        </Button>
+        <AddAgentDialog />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
