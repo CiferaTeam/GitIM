@@ -26,6 +26,9 @@ export function MessageList({
   const highlightLine = useChatStore((s) => s.highlightLine);
   const setHighlightLine = useChatStore((s) => s.setHighlightLine);
 
+  const pendingScrollLine = useChatStore((s) => s.pendingScrollLine);
+  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(messages.length);
 
@@ -40,14 +43,32 @@ export function MessageList({
     return map;
   }, [messages]);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive, UNLESS we have a pending scroll target
   useEffect(() => {
     const prev = prevLengthRef.current;
     prevLengthRef.current = messages.length;
+
+    // If we have a pending scroll target and messages just loaded, scroll to it
+    if (pendingScrollLine !== null && messages.length > 0) {
+      requestAnimationFrame(() => {
+        if (!scrollRef.current) return;
+        const el = scrollRef.current.querySelector(
+          `[data-line="${pendingScrollLine}"]`
+        ) as HTMLElement | null;
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          setHighlightLine(pendingScrollLine);
+        }
+        setPendingScrollLine(null);
+      });
+      return;
+    }
+
+    // Normal auto-scroll to bottom
     if (messages.length > prev && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, pendingScrollLine, setHighlightLine, setPendingScrollLine]);
 
   // Clear highlight after 1500ms
   useEffect(() => {
@@ -95,6 +116,7 @@ export function MessageList({
   return (
     <div
       ref={scrollRef}
+      data-message-scroll
       className="flex-1 overflow-y-auto px-4 py-2 space-y-0.5"
     >
       {messages.map((msg) => {

@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import type { Channel, Message } from "../lib/types";
 
+interface NavEntry {
+  channel: string;
+  scrollTop: number;
+}
+
 interface ChatState {
   connected: boolean;
   currentUser: string;
@@ -11,8 +16,10 @@ interface ChatState {
   messages: Message[];
   replyTo: Message | null;
   highlightLine: number | null;
+  pendingScrollLine: number | null;
   threadRoot: Message | null;
   threadMessages: Message[];
+  navHistory: NavEntry[];
 
   setConnected: (v: boolean) => void;
   setCurrentUser: (u: string) => void;
@@ -30,8 +37,11 @@ interface ChatState {
   removePendingMessage: (pendingId: string) => void;
   setReplyTo: (m: Message | null) => void;
   setHighlightLine: (line: number | null) => void;
+  setPendingScrollLine: (line: number | null) => void;
   setThreadRoot: (m: Message | null) => void;
   setThreadMessages: (m: Message[]) => void;
+  pushNav: (entry: NavEntry) => void;
+  popNav: () => NavEntry | null;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -44,8 +54,10 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   replyTo: null,
   highlightLine: null,
+  pendingScrollLine: null,
   threadRoot: null,
   threadMessages: [],
+  navHistory: [],
 
   setConnected: (v) => set({ connected: v }),
   setCurrentUser: (u) => set({ currentUser: u }),
@@ -58,6 +70,8 @@ export const useChatStore = create<ChatState>((set) => ({
       currentChannel: name,
       replyTo: null,
       messages: [],
+      highlightLine: null,
+      pendingScrollLine: null,
       threadRoot: null,
       threadMessages: [],
     }),
@@ -122,6 +136,17 @@ export const useChatStore = create<ChatState>((set) => ({
 
   setReplyTo: (m) => set({ replyTo: m }),
   setHighlightLine: (line) => set({ highlightLine: line }),
+  setPendingScrollLine: (line) => set({ pendingScrollLine: line }),
   setThreadRoot: (m) => set({ threadRoot: m }),
   setThreadMessages: (m) => set({ threadMessages: m }),
+
+  pushNav: (entry) =>
+    set((state) => ({ navHistory: [...state.navHistory, entry] })),
+  popNav: (): NavEntry | null => {
+    const s = useChatStore.getState() as ChatState;
+    if (s.navHistory.length === 0) return null;
+    const last: NavEntry = s.navHistory[s.navHistory.length - 1];
+    useChatStore.setState({ navHistory: s.navHistory.slice(0, -1) });
+    return last;
+  },
 }));

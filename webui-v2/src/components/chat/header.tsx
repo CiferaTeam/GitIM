@@ -12,9 +12,10 @@ import {
 
 interface ChatHeaderProps {
   onStartDm: (targetUser: string) => void;
+  children?: React.ReactNode;
 }
 
-export function ChatHeader({ onStartDm }: ChatHeaderProps) {
+export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
@@ -50,8 +51,11 @@ export function ChatHeader({ onStartDm }: ChatHeaderProps) {
 
   return (
     <div className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0">
-      {/* Left: channel name */}
-      <span className="font-semibold text-sm tracking-tight">{displayName}</span>
+      {/* Left: back button + channel name */}
+      <div className="flex items-center">
+        {children}
+        <span className="font-semibold text-sm tracking-tight">{displayName}</span>
+      </div>
 
       {/* Right: member list (channels only) */}
       {!isDm && members.length > 0 && (

@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as mockClient from "../../lib/mock/client";
 import type { Message } from "../../lib/types";
@@ -33,7 +34,9 @@ export function ChatLayout() {
   const setThreadRoot = useChatStore((s) => s.setThreadRoot);
   const setThreadMessages = useChatStore((s) => s.setThreadMessages);
   const setChannels = useChatStore((s) => s.setChannels);
-  const setHighlightLine = useChatStore((s) => s.setHighlightLine);
+  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
+  const pushNav = useChatStore((s) => s.pushNav);
+  const navHistory = useChatStore((s) => s.navHistory);
 
   // UserCard popover state
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
@@ -147,23 +150,53 @@ export function ChatLayout() {
     []
   );
 
+  const getScrollTop = useCallback(() => {
+    const el = document.querySelector("[data-message-scroll]");
+    return el ? el.scrollTop : 0;
+  }, []);
+
   const handleChannelClick = useCallback(
     (channel: string) => {
+      // Push current location onto nav stack before jumping
+      if (currentChannel) {
+        pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
+      }
       handleChannelSelect(channel);
     },
-    [handleChannelSelect]
+    [currentChannel, pushNav, getScrollTop, handleChannelSelect]
   );
 
   const handleMessageLinkClick = useCallback(
     (channel: string, line: number) => {
+      // Push current location onto nav stack before jumping
+      if (currentChannel) {
+        pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
+      }
+      // Set pending scroll target BEFORE switching channel
+      setPendingScrollLine(line);
       handleChannelSelect(channel);
-      // Wait for messages to load from mock client, then scroll + highlight
-      setTimeout(() => {
-        setHighlightLine(line);
-      }, 300);
     },
-    [handleChannelSelect, setHighlightLine]
+    [currentChannel, pushNav, getScrollTop, setPendingScrollLine, handleChannelSelect]
   );
+
+  const handleNavBack = useCallback(async () => {
+    const entry = useChatStore.getState().popNav();
+    if (!entry) return;
+    selectChannel(entry.channel);
+    clearUnread(entry.channel);
+    setMessages([]);
+    setThreadRoot(null);
+    const apiChannel = toApiChannel(entry.channel);
+    const res = await mockClient.read(apiChannel);
+    if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
+      setMessages(res.data.entries as Message[]);
+    }
+    // Restore scroll position after messages render
+    requestAnimationFrame(() => {
+      const el = document.querySelector("[data-message-scroll]");
+      if (el) el.scrollTop = entry.scrollTop;
+    });
+  }, [selectChannel, clearUnread, setMessages, setThreadRoot]);
 
   const handleCloseUserCard = useCallback(() => {
     setUserCardHandler(null);
@@ -180,7 +213,18 @@ export function ChatLayout() {
 
       {/* Center: main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ChatHeader onStartDm={handleStartDm} />
+        <ChatHeader onStartDm={handleStartDm}>
+          {navHistory.length > 0 && (
+            <button
+              onClick={handleNavBack}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors mr-2"
+              title="Back"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>Back</span>
+            </button>
+          )}
+        </ChatHeader>
 
         {/* Message area */}
         <MessageList
