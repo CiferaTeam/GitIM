@@ -27,6 +27,14 @@ impl Poller {
         }
     }
 
+    /// Create a Poller with a saved cursor (for restart recovery).
+    pub fn with_cursor(client: GitimClient, cursor: String) -> Self {
+        Self {
+            client,
+            cursor: Some(cursor),
+        }
+    }
+
     /// Poll the daemon for new changes since the last cursor.
     ///
     /// First call initializes the cursor and returns empty changes.

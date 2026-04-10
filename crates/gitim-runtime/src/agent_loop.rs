@@ -1,10 +1,13 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gitim_client::GitimClient;
 use tracing::info;
 
 use crate::claude::ClaudeSession;
 use crate::error::RuntimeError;
 use crate::poller::{ChannelChange, Poller};
+use crate::state::AgentState;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "\
 你是一个 GitIM agent。你通过 GitIM 消息系统与其他参与者交流。
@@ -24,30 +27,58 @@ pub struct AgentLoop {
     poller: Poller,
     claude: ClaudeSession,
     poll_interval: Duration,
+    repo_root: PathBuf,
 }
 
 impl AgentLoop {
-    pub fn new(poller: Poller, claude: ClaudeSession, poll_interval: Duration) -> Self {
+    pub fn new(
+        poller: Poller,
+        claude: ClaudeSession,
+        poll_interval: Duration,
+        repo_root: &Path,
+    ) -> Self {
         Self {
             poller,
             claude,
             poll_interval,
+            repo_root: repo_root.to_path_buf(),
         }
     }
 
-    /// Build an AgentLoop with default system prompt and allowed tools.
-    pub fn with_defaults(
-        poller: Poller,
-        working_dir: &std::path::Path,
-    ) -> Self {
-        let claude = ClaudeSession::new(
+    /// Build an AgentLoop with default settings. Restores state from disk if available.
+    pub fn with_defaults(repo_root: &Path) -> Result<Self, RuntimeError> {
+        let state = AgentState::load(repo_root)?;
+
+        let poller = match state.cursor {
+            Some(cursor) => {
+                info!(cursor = %cursor, "restored cursor from state");
+                Poller::with_cursor(GitimClient::new(repo_root), cursor)
+            }
+            None => Poller::new(GitimClient::new(repo_root)),
+        };
+
+        let mut claude = ClaudeSession::new(
             DEFAULT_SYSTEM_PROMPT.to_string(),
             ALLOWED_TOOLS,
-            working_dir,
+            repo_root,
         )
         .with_model("claude-sonnet-4-6");
 
-        Self::new(poller, claude, Duration::from_secs(2))
+        if let Some(session_id) = state.session_id {
+            info!(session_id = %session_id, "restored session from state");
+            claude = claude.with_session_id(session_id);
+        }
+
+        Ok(Self::new(poller, claude, Duration::from_secs(2), repo_root))
+    }
+
+    /// Save current state to disk.
+    fn save_state(&self) -> Result<(), RuntimeError> {
+        let state = AgentState {
+            cursor: self.poller.cursor().map(|s| s.to_string()),
+            session_id: self.claude.session_id().map(|s| s.to_string()),
+        };
+        state.save(&self.repo_root)
     }
 
     /// Run one poll-and-process cycle. Returns true if messages were processed.
@@ -55,6 +86,8 @@ impl AgentLoop {
         let result = self.poller.poll().await?;
 
         if result.changes.is_empty() {
+            // Save cursor even when no messages (init case)
+            self.save_state()?;
             return Ok(false);
         }
 
@@ -68,14 +101,20 @@ impl AgentLoop {
             "claude responded"
         );
 
+        self.save_state()?;
         Ok(true)
     }
 
     /// Run the agent loop indefinitely.
     pub async fn run(&mut self) -> Result<(), RuntimeError> {
-        // First poll initializes cursor
-        self.poller.poll().await?;
-        info!("agent loop started, cursor initialized");
+        // Initialize cursor if not restored from state
+        if self.poller.cursor().is_none() {
+            self.poller.poll().await?;
+            self.save_state()?;
+            info!("agent loop started, cursor initialized");
+        } else {
+            info!("agent loop started, cursor restored from state");
+        }
 
         loop {
             match self.run_once().await {

@@ -39,6 +39,12 @@ impl ClaudeSession {
         self
     }
 
+    /// Restore a previous session_id (for restart recovery).
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }

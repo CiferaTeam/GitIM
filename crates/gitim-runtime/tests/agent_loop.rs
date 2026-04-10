@@ -1,7 +1,7 @@
 mod common;
 
 use gitim_client::GitimClient;
-use gitim_runtime::{provision_agent, AgentConfig, AgentLoop, Poller};
+use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
 use common::{ensure_daemon_in_path, setup_bare_remote, short_tempdir, stop_daemon};
 
@@ -17,7 +17,6 @@ async fn test_agent_loop_end_to_end() {
     let agents_dir = tmp.path().join("agents");
     std::fs::create_dir(&agents_dir).unwrap();
 
-    // Provision agent
     let config = AgentConfig {
         handler: "loop-agent".into(),
         display_name: "Loop Agent".into(),
@@ -27,16 +26,14 @@ async fn test_agent_loop_end_to_end() {
     let client = GitimClient::new(&handle.repo_root);
     eprintln!("[setup] agent provisioned at {}", handle.repo_root.display());
 
-    // Create agent loop
-    let poller = Poller::new(GitimClient::new(&handle.repo_root));
-    let mut agent_loop = AgentLoop::with_defaults(poller, &handle.repo_root);
+    let mut agent_loop = AgentLoop::with_defaults(&handle.repo_root).unwrap();
 
-    // Initialize cursor (first poll)
+    // Initialize cursor
     let processed = agent_loop.run_once().await.unwrap();
     assert!(!processed, "first run should have no messages");
     eprintln!("[setup] cursor initialized");
 
-    // Send a trigger message (as the agent itself — just validating the pipeline)
+    // Send trigger message
     let send_resp = client
         .send("general", "This is a test. Please reply with: test-reply-ok", None, None)
         .await
@@ -44,7 +41,6 @@ async fn test_agent_loop_end_to_end() {
     assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
     eprintln!("[trigger] sent message to general");
 
-    // Wait for sync loop to push
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Agent loop processes the message
@@ -52,10 +48,9 @@ async fn test_agent_loop_end_to_end() {
     assert!(processed, "should have detected and processed the message");
     eprintln!("[agent] processed message via claude");
 
-    // Wait for agent's gitim send to commit + sync
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // Read general channel to verify agent replied
+    // Verify agent replied
     let read_resp = client.read("general", Some(20), None).await.unwrap();
     assert!(read_resp.ok, "read failed: {:?}", read_resp.error);
 
@@ -68,13 +63,11 @@ async fn test_agent_loop_end_to_end() {
         eprintln!("  @{}: {}", author, body);
     }
 
-    // Should have more messages than just the trigger (claude added a reply via gitim send)
     assert!(
         messages.len() >= 2,
         "expected at least 2 messages (trigger + agent reply), got {}",
         messages.len()
     );
-    eprintln!("[verify] pipeline validated: {} messages total", messages.len());
 
     stop_daemon(&handle.repo_root).await;
 }
