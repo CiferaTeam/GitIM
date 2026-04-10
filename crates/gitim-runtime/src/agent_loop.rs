@@ -138,10 +138,9 @@ impl AgentLoop {
                 error = ?exec_result.error,
                 "provider execution failed"
             );
-        }
-
-        // Save session_token for resume
-        if let Some(token) = exec_result.session_token {
+            // Clear session_token to avoid resuming a broken session
+            self.session_token = None;
+        } else if let Some(token) = exec_result.session_token {
             self.session_token = Some(token);
         }
 
@@ -149,7 +148,7 @@ impl AgentLoop {
         Ok(true)
     }
 
-    /// Run the agent loop indefinitely.
+    /// Run the agent loop indefinitely with exponential backoff on errors.
     pub async fn run(&mut self) -> Result<(), RuntimeError> {
         if self.poller.cursor().is_none() {
             self.poller.poll().await?;
@@ -159,12 +158,31 @@ impl AgentLoop {
             info!("agent loop started, cursor restored from state");
         }
 
+        let mut consecutive_errors: u32 = 0;
+        const MAX_BACKOFF_SECS: u64 = 60;
+
         loop {
             match self.run_once().await {
-                Ok(true) => info!("processed messages"),
-                Ok(false) => {}
+                Ok(true) => {
+                    consecutive_errors = 0;
+                    info!("processed messages");
+                }
+                Ok(false) => {
+                    consecutive_errors = 0;
+                }
                 Err(e) => {
-                    tracing::error!(error = %e, "agent loop error");
+                    consecutive_errors += 1;
+                    let backoff = Duration::from_secs(
+                        (2u64.saturating_pow(consecutive_errors)).min(MAX_BACKOFF_SECS),
+                    );
+                    tracing::error!(
+                        error = %e,
+                        consecutive = consecutive_errors,
+                        backoff_secs = backoff.as_secs(),
+                        "agent loop error, backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
                 }
             }
             tokio::time::sleep(self.poll_interval).await;

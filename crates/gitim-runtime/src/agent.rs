@@ -51,7 +51,11 @@ pub async fn provision_agent(
 
     // Start daemon (idempotent — skips if already running)
     let root = repo_root.clone();
-    tokio::task::spawn_blocking(move || ensure_daemon(&root)).await.unwrap()?;
+    tokio::task::spawn_blocking(move || ensure_daemon(&root))
+        .await
+        .map_err(|e| RuntimeError::DaemonStartFailed(
+            gitim_client::ClientError::ConnectionFailed(format!("task panicked: {e}"))
+        ))??;
     info!(handler = %config.handler, "daemon running");
 
     // Onboard (idempotent — daemon handles repeat calls)

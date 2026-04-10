@@ -5,18 +5,23 @@ use gitim_client::GitimClient;
 use tempfile::{Builder, TempDir};
 
 /// Ensure `gitim-daemon` binary is findable by adding target/debug to PATH.
+/// Uses Once to avoid UB from concurrent set_var in multi-threaded test runner.
 pub fn ensure_daemon_in_path() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = PathBuf::from(manifest_dir).join("../..");
-    let target_debug = workspace_root.join("target/debug").canonicalize().unwrap();
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = PathBuf::from(manifest_dir).join("../..");
+        let target_debug = workspace_root.join("target/debug").canonicalize().unwrap();
 
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    if !current_path.contains(target_debug.to_str().unwrap()) {
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", target_debug.display(), current_path),
-        );
-    }
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        if !current_path.contains(target_debug.to_str().unwrap()) {
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", target_debug.display(), current_path),
+            );
+        }
+    });
 }
 
 /// Create a temp dir under /tmp to keep Unix socket paths under SUN_LEN (104 bytes on macOS).
