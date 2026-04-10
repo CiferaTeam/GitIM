@@ -3,6 +3,7 @@ import { MessageSquare, GitBranch, Copy, Check } from "lucide-react";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { MessageBody } from "./message-body";
 
 interface MessageItemProps {
   message: Message;
@@ -148,13 +149,13 @@ export function MessageItem({
       )}
 
       {/* Message body */}
-      <p
+      <div
         className="text-sm cursor-pointer select-text leading-relaxed text-foreground/90"
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >
-        {message.body}
-      </p>
+        <MessageBody body={message.body} />
+      </div>
     </div>
   );
 }
