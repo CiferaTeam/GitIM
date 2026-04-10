@@ -4,6 +4,7 @@ import { useChatStore } from "../../hooks/use-chat-store";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { MessageBody } from "./message-body";
 
 interface ThreadPanelProps {
   onReplyInThread: (msg: Message) => void;
@@ -85,7 +86,7 @@ export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
               </div>
 
               {/* Body */}
-              <p className="leading-relaxed text-foreground">{msg.body}</p>
+              <div className="leading-relaxed text-foreground"><MessageBody body={msg.body} /></div>
 
               {/* Reply button */}
               <div className="mt-1.5 hidden group-hover:flex">

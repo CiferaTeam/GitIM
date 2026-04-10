@@ -150,6 +150,34 @@ export const mockMessages: Record<string, Message[]> = {
       timestamp: "20260410T100000Z",
       body: "Starting stand-up now.",
     },
+    {
+      line_number: 11,
+      point_to: 0,
+      author: "alice",
+      timestamp: "20260410T101500Z",
+      body: "Hey <@lewis>, the sync refactor looks good",
+    },
+    {
+      line_number: 12,
+      point_to: 11,
+      author: "lewis",
+      timestamp: "20260410T101800Z",
+      body: "Thanks! Moved the detailed discussion to <#dev-tasks>",
+    },
+    {
+      line_number: 13,
+      point_to: 0,
+      author: "bob",
+      timestamp: "20260410T102000Z",
+      body: "See <#general:L000003> for the original announcement",
+    },
+    {
+      line_number: 14,
+      point_to: 0,
+      author: "lewis",
+      timestamp: "20260410T102500Z",
+      body: "Assigned to <~bob> for review",
+    },
   ],
 
   "dev-tasks": [
@@ -232,6 +260,27 @@ export const mockMessages: Record<string, Message[]> = {
       timestamp: "20260410T110000Z",
       body: "Mid-morning check: types task done, API client in progress. On track.",
     },
+    {
+      line_number: 12,
+      point_to: 0,
+      author: "alice",
+      timestamp: "20260410T111000Z",
+      body: "Check the API docs <!https://gitim.dev/docs|GitIM Protocol Docs> before implementing the push handler",
+    },
+    {
+      line_number: 13,
+      point_to: 0,
+      author: "bob",
+      timestamp: "20260410T111500Z",
+      body: "The `sync_loop` function needs a retry backoff",
+    },
+    {
+      line_number: 14,
+      point_to: 13,
+      author: "code-reviewer",
+      timestamp: "20260410T112000Z",
+      body: "Found the issue:\n```rust\nfn push(&self) -> Result<()> {\n    // missing retry logic\n    self.remote.push()\n}\n```",
+    },
   ],
 
   "bug-reports": [
@@ -307,6 +356,13 @@ export const mockMessages: Record<string, Message[]> = {
       author: "bob",
       timestamp: "20260410T092800Z",
       body: "On it. Will open the PR myself.",
+    },
+    {
+      line_number: 11,
+      point_to: 0,
+      author: "lewis",
+      timestamp: "20260410T093500Z",
+      body: "This is **critical** — the daemon crashes on *empty* messages",
     },
   ],
 
