@@ -23,7 +23,7 @@ fn parse_assistant_text() {
     .to_string();
     let msg = parse_line(&line).unwrap();
     match msg {
-        ParsedMessage::Events(events) => {
+        ParsedMessage::AssistantEvents(events) => {
             assert_eq!(events.len(), 1);
             assert!(
                 matches!(&events[0], Event::Text { content } if content == "Hello world")
@@ -45,7 +45,7 @@ fn parse_assistant_thinking() {
     .to_string();
     let msg = parse_line(&line).unwrap();
     match msg {
-        ParsedMessage::Events(events) => {
+        ParsedMessage::AssistantEvents(events) => {
             assert_eq!(events.len(), 1);
             assert!(
                 matches!(&events[0], Event::Thinking { content } if content == "Let me think...")
@@ -72,7 +72,7 @@ fn parse_assistant_tool_use() {
     .to_string();
     let msg = parse_line(&line).unwrap();
     match msg {
-        ParsedMessage::Events(events) => {
+        ParsedMessage::AssistantEvents(events) => {
             assert_eq!(events.len(), 1);
             assert!(
                 matches!(&events[0], Event::ToolUse { tool, call_id, .. } if tool == "Bash" && call_id == "call-1")
@@ -98,13 +98,13 @@ fn parse_user_tool_result() {
     .to_string();
     let msg = parse_line(&line).unwrap();
     match msg {
-        ParsedMessage::Events(events) => {
+        ParsedMessage::UserEvents(events) => {
             assert_eq!(events.len(), 1);
             assert!(
                 matches!(&events[0], Event::ToolResult { call_id, .. } if call_id == "call-1")
             );
         }
-        _ => panic!("expected Events"),
+        _ => panic!("expected UserEvents"),
     }
 }
 
@@ -173,7 +173,7 @@ fn parse_log_message() {
     .to_string();
     let msg = parse_line(&line).unwrap();
     match msg {
-        ParsedMessage::Events(events) => {
+        ParsedMessage::AssistantEvents(events) => {
             assert_eq!(events.len(), 1);
             assert!(matches!(
                 &events[0],

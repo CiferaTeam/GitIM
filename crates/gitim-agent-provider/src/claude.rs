@@ -109,6 +109,7 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
+    let mut saw_result = false;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
@@ -140,11 +141,16 @@ async fn drive_session(
                         status: "running".to_string(),
                     });
                 }
-                ParsedMessage::Events(events) => {
+                ParsedMessage::AssistantEvents(events) => {
                     for event in events {
                         if let Event::Text { ref content } = event {
                             output.push_str(content);
                         }
+                        try_send_event(&event_tx, event);
+                    }
+                }
+                ParsedMessage::UserEvents(events) => {
+                    for event in events {
                         try_send_event(&event_tx, event);
                     }
                 }
@@ -153,6 +159,7 @@ async fn drive_session(
                     output: result_text,
                     is_error,
                 } => {
+                    saw_result = true;
                     session_id = sid;
                     if !result_text.is_empty() {
                         output = result_text;
@@ -183,6 +190,10 @@ async fn drive_session(
         // Kill the child process — kill_on_drop only fires on Drop,
         // but we still hold the Child reference.
         let _ = child.start_kill();
+    } else if !saw_result && final_status == ExecStatus::Completed {
+        // Stream ended without a result message — truncated or protocol error
+        final_status = ExecStatus::Failed;
+        final_error = Some("claude stream ended without a result message".to_string());
     }
 
     if final_status != ExecStatus::Timeout {
@@ -263,8 +274,10 @@ fn which(name: &str) -> Result<std::path::PathBuf, ()> {
 pub enum ParsedMessage {
     /// System init message with session ID.
     System { session_id: String },
-    /// One or more events extracted from an assistant/user message.
-    Events(Vec<Event>),
+    /// Events from an assistant message (text contributes to output).
+    AssistantEvents(Vec<Event>),
+    /// Events from a user message (tool results, not accumulated into output).
+    UserEvents(Vec<Event>),
     /// Final result.
     Result {
         session_id: String,
@@ -289,13 +302,22 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
         "system" => Some(ParsedMessage::System {
             session_id: raw.session_id.unwrap_or_default(),
         }),
-        "assistant" | "user" => {
+        "assistant" => {
             let content: MessageContent = serde_json::from_value(raw.message?).ok()?;
             let events = parse_content_blocks(&content);
             if events.is_empty() {
                 None
             } else {
-                Some(ParsedMessage::Events(events))
+                Some(ParsedMessage::AssistantEvents(events))
+            }
+        }
+        "user" => {
+            let content: MessageContent = serde_json::from_value(raw.message?).ok()?;
+            let events = parse_content_blocks(&content);
+            if events.is_empty() {
+                None
+            } else {
+                Some(ParsedMessage::UserEvents(events))
             }
         }
         "result" => Some(ParsedMessage::Result {
@@ -305,7 +327,7 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
         }),
         "log" => {
             let log = raw.log?;
-            Some(ParsedMessage::Events(vec![Event::Log {
+            Some(ParsedMessage::AssistantEvents(vec![Event::Log {
                 level: log.level,
                 content: log.message,
             }]))
