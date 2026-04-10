@@ -1,3 +1,4 @@
+pub mod claude;
 mod error;
 mod provider;
 mod stubs;
