@@ -53,7 +53,15 @@ impl Session {
         }
     }
 
-    /// Abort the running execution. The child process will be killed.
+    /// Abort the running execution. The child process will be killed via kill_on_drop.
+    ///
+    /// KNOWN LIMITATION: abort() cancels the tokio task immediately, so
+    /// result_tx never sends an ExecResult. The caller gets RecvError from
+    /// session.result.await, not ExecResult { status: Aborted }. To fix this,
+    /// replace AbortHandle with CancellationToken (tokio_util) and use
+    /// tokio::select! in the drive loop to send a proper Aborted result
+    /// before exiting. Deferred to M1 when graceful per-agent shutdown
+    /// is needed.
     pub fn abort(&self) {
         self.abort_handle.abort();
     }
