@@ -25,13 +25,13 @@ export function statusBadge(status: AgentStatus) {
   switch (status) {
     case "running":
       return (
-        <Badge className="bg-green-500 text-white hover:bg-green-500">
+        <Badge className="bg-success text-white hover:bg-success">
           Running
         </Badge>
       );
     case "idle":
       return (
-        <Badge className="bg-amber-400 text-white hover:bg-amber-400">
+        <Badge className="bg-warning text-white hover:bg-warning">
           Idle
         </Badge>
       );
