@@ -86,7 +86,7 @@ export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
               </div>
 
               {/* Body */}
-              <p className="leading-relaxed text-foreground"><MessageBody body={msg.body} /></p>
+              <div className="leading-relaxed text-foreground"><MessageBody body={msg.body} /></div>
 
               {/* Reply button */}
               <div className="mt-1.5 hidden group-hover:flex">

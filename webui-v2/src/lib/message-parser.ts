@@ -29,7 +29,7 @@ function isValidChannel(s: string): boolean {
 // 3. Bold: **text**
 // 4. Italic: *text* (not part of **)
 const INLINE_RE =
-  /<([#~!@])([^>\n]+)>|`([^`]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+  /<([#~!@])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
 
 function parseGitimLink(prefix: string, content: string): Fragment | null {
   if (prefix === "@") {
