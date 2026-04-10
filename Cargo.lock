@@ -606,6 +606,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitim-runtime"
+version = "0.3.1"
+dependencies = [
+ "gitim-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gitim-sync"
 version = "0.3.1"
 dependencies = [
