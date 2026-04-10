@@ -1,7 +1,252 @@
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, warn};
 
-use crate::Event;
+use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const EVENT_CHANNEL_BUFFER: usize = 256;
+
+pub struct ClaudeProvider {
+    config: ProviderConfig,
+}
+
+impl ClaudeProvider {
+    pub fn new(config: ProviderConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait]
+impl Provider for ClaudeProvider {
+    async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
+        let exec_path = self
+            .config
+            .executable_path
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
+
+        which(&exec_path).map_err(|_| ProviderError::ExecutableNotFound {
+            path: exec_path.clone(),
+        })?;
+
+        let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
+
+        let mut args = vec![
+            "--output-format".to_string(),
+            "stream-json".to_string(),
+            "--verbose".to_string(),
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ];
+        if let Some(model) = &opts.model {
+            args.extend(["--model".to_string(), model.clone()]);
+        }
+        if let Some(max_turns) = opts.max_turns {
+            args.extend(["--max-turns".to_string(), max_turns.to_string()]);
+        }
+        if let Some(system_prompt) = &opts.system_prompt {
+            args.extend(["--append-system-prompt".to_string(), system_prompt.clone()]);
+        }
+        if let Some(resume_token) = &opts.resume_token {
+            args.extend(["--resume".to_string(), resume_token.clone()]);
+        }
+        args.extend(["-p".to_string(), prompt.to_string()]);
+
+        let mut cmd = Command::new(&exec_path);
+        cmd.args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(cwd) = &opts.cwd {
+            cmd.current_dir(cwd);
+        }
+        for (k, v) in &self.config.env {
+            cmd.env(k, v);
+        }
+
+        let mut child = cmd.spawn()?;
+        let pid = child.id().unwrap_or(0);
+        info!(pid, cwd = ?opts.cwd, model = ?opts.model, "claude started");
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let join_handle = tokio::spawn(async move {
+            drive_session(child, stdout, stdin, stderr, event_tx, result_tx, timeout, pid).await;
+        });
+
+        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle()))
+    }
+}
+
+async fn drive_session(
+    mut child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stdin: tokio::process::ChildStdin,
+    stderr: tokio::process::ChildStderr,
+    event_tx: mpsc::Sender<Event>,
+    result_tx: oneshot::Sender<ExecResult>,
+    timeout: Duration,
+    pid: u32,
+) {
+    let start = Instant::now();
+    let mut output = String::new();
+    let mut session_id = String::new();
+    let mut final_status = ExecStatus::Completed;
+    let mut final_error: Option<String> = None;
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut stdin = stdin;
+
+    // Log stderr in background
+    let stderr_handle = tokio::spawn(async move {
+        let mut r = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = r.next_line().await {
+            debug!(target: "claude:stderr", "{}", line);
+        }
+    });
+
+    let read_result = tokio::time::timeout(timeout, async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            let parsed = match parse_line(&line) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            match parsed {
+                ParsedMessage::System { session_id: sid } => {
+                    session_id = sid;
+                    let _ = event_tx.try_send(Event::Status {
+                        status: "running".to_string(),
+                    });
+                }
+                ParsedMessage::Events(events) => {
+                    for event in events {
+                        if let Event::Text { ref content } = event {
+                            output.push_str(content);
+                        }
+                        let _ = event_tx.try_send(event);
+                    }
+                }
+                ParsedMessage::Result {
+                    session_id: sid,
+                    output: result_text,
+                    is_error,
+                } => {
+                    session_id = sid;
+                    if !result_text.is_empty() {
+                        output = result_text;
+                    }
+                    if is_error {
+                        final_status = ExecStatus::Failed;
+                        final_error = Some(output.clone());
+                    }
+                }
+                ParsedMessage::ControlRequest { request_id, input } => {
+                    let response = build_auto_approve_response(&request_id, &input);
+                    if let Ok(data) = serde_json::to_vec(&response) {
+                        let mut buf = data;
+                        buf.push(b'\n');
+                        if let Err(e) = stdin.write_all(&buf).await {
+                            warn!("failed to write control response: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    if read_result.is_err() {
+        final_status = ExecStatus::Timeout;
+        final_error = Some(format!("claude timed out after {timeout:?}"));
+    }
+
+    if final_status != ExecStatus::Timeout {
+        match child.wait().await {
+            Ok(status) if !status.success() && final_status == ExecStatus::Completed => {
+                final_status = ExecStatus::Failed;
+                final_error = Some(format!("claude exited with status: {status}"));
+            }
+            Err(e) if final_status == ExecStatus::Completed => {
+                final_status = ExecStatus::Failed;
+                final_error = Some(format!("failed to wait for claude: {e}"));
+            }
+            _ => {}
+        }
+    }
+
+    let duration = start.elapsed();
+    info!(pid, ?final_status, ?duration, "claude finished");
+
+    stderr_handle.abort();
+
+    let _ = result_tx.send(ExecResult {
+        status: final_status,
+        output,
+        error: final_error,
+        duration_ms: duration.as_millis() as u64,
+        session_token: if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id)
+        },
+    });
+}
+
+fn build_auto_approve_response(request_id: &str, input: &Value) -> Value {
+    let updated_input = if input.is_object() {
+        input.clone()
+    } else {
+        Value::Object(Default::default())
+    };
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "allow",
+                "updatedInput": updated_input
+            }
+        }
+    })
+}
+
+fn which(name: &str) -> Result<std::path::PathBuf, ()> {
+    let path = Path::new(name);
+    if path.is_absolute() && path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let full = Path::new(dir).join(name);
+            if full.exists() {
+                return Ok(full);
+            }
+        }
+    }
+    Err(())
+}
 
 /// Parsed result from a single line of Claude stream-json output.
 #[derive(Debug)]

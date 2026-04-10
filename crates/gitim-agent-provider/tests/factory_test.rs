@@ -1,6 +1,11 @@
 use gitim_agent_provider::create;
 
 #[test]
+fn create_claude_returns_ok() {
+    assert!(create("claude", Default::default()).is_ok());
+}
+
+#[test]
 fn create_codex_returns_ok() {
     assert!(create("codex", Default::default()).is_ok());
 }

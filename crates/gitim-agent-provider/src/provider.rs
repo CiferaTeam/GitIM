@@ -20,10 +20,7 @@ pub fn create(
     config: ProviderConfig,
 ) -> Result<Box<dyn Provider>, ProviderError> {
     match provider_type {
-        "claude" => {
-            // Placeholder — will be replaced with real ClaudeProvider in Task 5
-            todo!("claude provider not yet implemented")
-        }
+        "claude" => Ok(Box::new(crate::claude::ClaudeProvider::new(config))),
         "codex" => Ok(Box::new(crate::stubs::CodexProvider::new(config))),
         "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
         "opencode" => Ok(Box::new(crate::stubs::OpencodeProvider::new(config))),
