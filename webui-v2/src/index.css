@@ -1,27 +1,44 @@
 @import "tailwindcss";
 
 @theme {
-  /* Dark theme as default — matched to shadcn dark palette */
-  --color-background: hsl(240 10% 3.9%);
-  --color-foreground: hsl(0 0% 98%);
-  --color-card: hsl(240 10% 3.9%);
-  --color-card-foreground: hsl(0 0% 98%);
-  --color-popover: hsl(240 10% 3.9%);
-  --color-popover-foreground: hsl(0 0% 98%);
-  --color-primary: hsl(0 0% 98%);
-  --color-primary-foreground: hsl(240 5.9% 10%);
-  --color-secondary: hsl(240 3.7% 15.9%);
-  --color-secondary-foreground: hsl(0 0% 98%);
-  --color-muted: hsl(240 3.7% 15.9%);
-  --color-muted-foreground: hsl(240 5% 64.9%);
-  --color-accent: hsl(240 3.7% 15.9%);
-  --color-accent-foreground: hsl(0 0% 98%);
-  --color-destructive: hsl(0 62.8% 30.6%);
-  --color-destructive-foreground: hsl(0 0% 98%);
-  --color-border: hsl(240 3.7% 15.9%);
-  --color-input: hsl(240 3.7% 15.9%);
-  --color-ring: hsl(240 4.9% 83.9%);
+  /* DESIGN.md — warm dark palette, soft blue accent */
+  --color-background: #1c1c1e;
+  --color-foreground: #e4e4e7;
+  --color-card: #232326;
+  --color-card-foreground: #e4e4e7;
+  --color-popover: #232326;
+  --color-popover-foreground: #e4e4e7;
+  --color-primary: #60a5fa;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #232326;
+  --color-secondary-foreground: #e4e4e7;
+  --color-muted: #232326;
+  --color-muted-foreground: #71717a;
+  --color-accent: #60a5fa18;
+  --color-accent-foreground: #60a5fa;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #2c2c30;
+  --color-input: #2c2c30;
+  --color-ring: #60a5fa;
   --radius: 0.5rem;
+
+  /* Design system semantic extras */
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-error: #f87171;
+  --color-info: #60a5fa;
+  --color-surface: #232326;
+  --color-surface-hover: #2a2a2e;
+  --color-border-strong: #3c3c40;
+  --color-text-secondary: #a1a1aa;
+  --color-text-muted: #71717a;
+  --color-text-faint: #52525b;
+  --color-accent-muted: #60a5fa18;
+
+  /* Typography */
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
 @layer base {
@@ -29,25 +46,31 @@
     border-color: var(--color-border);
   }
   body {
+    font-family: var(--font-sans);
+    font-size: 15px;
     background-color: var(--color-background);
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Subtle scrollbars */
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Subtle scrollbars — warm dark palette */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: transparent;
+    background: #2c2c30;
   }
   ::-webkit-scrollbar-thumb {
-    background: hsl(240 3.7% 22%);
+    background: #3c3c40;
     border-radius: 3px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: hsl(240 3.7% 30%);
+    background: #52525b;
   }
 }

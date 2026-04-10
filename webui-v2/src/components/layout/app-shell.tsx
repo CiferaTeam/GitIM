@@ -21,7 +21,7 @@ export function AppShell({ children }: AppShellProps) {
           <span
             className={[
               "inline-block w-1.5 h-1.5 rounded-full",
-              connected ? "bg-green-500 shadow-[0_0_4px_hsl(142_76%_45%/0.5)]" : "bg-red-500",
+              connected ? "bg-success shadow-[0_0_4px_rgba(74,222,128,0.5)]" : "bg-error",
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
