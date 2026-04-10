@@ -6,9 +6,20 @@ import { MessageItem } from "./message-item";
 interface MessageListProps {
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
+  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onChannelClick?: (channel: string) => void;
+  onMessageLinkClick?: (channel: string, line: number) => void;
+  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
-export function MessageList({ onReply, onShowThread }: MessageListProps) {
+export function MessageList({
+  onReply,
+  onShowThread,
+  onMentionClick,
+  onChannelClick,
+  onMessageLinkClick,
+  onUserProfileClick,
+}: MessageListProps) {
   const messages = useChatStore((s) => s.messages);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const replyTo = useChatStore((s) => s.replyTo);
@@ -113,6 +124,10 @@ export function MessageList({ onReply, onShowThread }: MessageListProps) {
             onScrollTo={handleScrollTo}
             onCopy={handleCopy}
             copied={copiedLine === msg.line_number}
+            onMentionClick={onMentionClick}
+            onChannelClick={onChannelClick}
+            onMessageLinkClick={onMessageLinkClick}
+            onUserProfileClick={onUserProfileClick}
           />
         );
       })}

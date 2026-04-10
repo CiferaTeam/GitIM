@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as mockClient from "../../lib/mock/client";
 import type { Message } from "../../lib/types";
@@ -7,6 +7,7 @@ import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
+import { UserCard } from "./user-card";
 
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
@@ -32,6 +33,11 @@ export function ChatLayout() {
   const setThreadRoot = useChatStore((s) => s.setThreadRoot);
   const setThreadMessages = useChatStore((s) => s.setThreadMessages);
   const setChannels = useChatStore((s) => s.setChannels);
+  const setHighlightLine = useChatStore((s) => s.setHighlightLine);
+
+  // UserCard popover state
+  const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
+  const [userCardPosition, setUserCardPosition] = useState<{ x: number; y: number } | null>(null);
 
   const handleChannelSelect = useCallback(
     async (name: string) => {
@@ -123,6 +129,47 @@ export function ChatLayout() {
     [currentChannel, setThreadRoot, setThreadMessages]
   );
 
+  // --- Interactive fragment handlers ---
+
+  const handleMentionClick = useCallback(
+    (handler: string, event: React.MouseEvent) => {
+      setUserCardHandler(handler);
+      setUserCardPosition({ x: event.clientX, y: event.clientY });
+    },
+    []
+  );
+
+  const handleUserProfileClick = useCallback(
+    (handler: string, event: React.MouseEvent) => {
+      setUserCardHandler(handler);
+      setUserCardPosition({ x: event.clientX, y: event.clientY });
+    },
+    []
+  );
+
+  const handleChannelClick = useCallback(
+    (channel: string) => {
+      handleChannelSelect(channel);
+    },
+    [handleChannelSelect]
+  );
+
+  const handleMessageLinkClick = useCallback(
+    (channel: string, line: number) => {
+      handleChannelSelect(channel);
+      // Wait for messages to load from mock client, then scroll + highlight
+      setTimeout(() => {
+        setHighlightLine(line);
+      }, 300);
+    },
+    [handleChannelSelect, setHighlightLine]
+  );
+
+  const handleCloseUserCard = useCallback(() => {
+    setUserCardHandler(null);
+    setUserCardPosition(null);
+  }, []);
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Left: sidebar */}
@@ -136,13 +183,36 @@ export function ChatLayout() {
         <ChatHeader onStartDm={handleStartDm} />
 
         {/* Message area */}
-        <MessageList onReply={handleReply} onShowThread={handleShowThread} />
+        <MessageList
+          onReply={handleReply}
+          onShowThread={handleShowThread}
+          onMentionClick={handleMentionClick}
+          onChannelClick={handleChannelClick}
+          onMessageLinkClick={handleMessageLinkClick}
+          onUserProfileClick={handleUserProfileClick}
+        />
 
         <InputArea onSend={handleSend} />
       </div>
 
       {/* Right: thread panel */}
-      <ThreadPanel onReplyInThread={handleReply} />
+      <ThreadPanel
+        onReplyInThread={handleReply}
+        onMentionClick={handleMentionClick}
+        onChannelClick={handleChannelClick}
+        onMessageLinkClick={handleMessageLinkClick}
+        onUserProfileClick={handleUserProfileClick}
+      />
+
+      {/* UserCard popover */}
+      {userCardHandler && userCardPosition && (
+        <UserCard
+          handler={userCardHandler}
+          position={userCardPosition}
+          onClose={handleCloseUserCard}
+          onStartDm={handleStartDm}
+        />
+      )}
     </div>
   );
 }

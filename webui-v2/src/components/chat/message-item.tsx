@@ -15,6 +15,10 @@ interface MessageItemProps {
   onScrollTo: (lineNumber: number) => void;
   onCopy: (body: string, lineNumber: number) => void;
   copied: boolean;
+  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onChannelClick?: (channel: string) => void;
+  onMessageLinkClick?: (channel: string, line: number) => void;
+  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -33,6 +37,10 @@ export function MessageItem({
   onScrollTo,
   onCopy,
   copied,
+  onMentionClick,
+  onChannelClick,
+  onMessageLinkClick,
+  onUserProfileClick,
 }: MessageItemProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isPending = !!message._pendingId && message._status === "sending";
@@ -154,7 +162,13 @@ export function MessageItem({
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >
-        <MessageBody body={message.body} />
+        <MessageBody
+          body={message.body}
+          onMentionClick={onMentionClick}
+          onChannelClick={onChannelClick}
+          onMessageLinkClick={onMessageLinkClick}
+          onUserProfileClick={onUserProfileClick}
+        />
       </div>
     </div>
   );

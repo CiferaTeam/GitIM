@@ -8,9 +8,19 @@ import { MessageBody } from "./message-body";
 
 interface ThreadPanelProps {
   onReplyInThread: (msg: Message) => void;
+  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onChannelClick?: (channel: string) => void;
+  onMessageLinkClick?: (channel: string, line: number) => void;
+  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
-export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
+export function ThreadPanel({
+  onReplyInThread,
+  onMentionClick,
+  onChannelClick,
+  onMessageLinkClick,
+  onUserProfileClick,
+}: ThreadPanelProps) {
   const threadRoot = useChatStore((s) => s.threadRoot);
   const threadMessages = useChatStore((s) => s.threadMessages);
   const setThreadRoot = useChatStore((s) => s.setThreadRoot);
@@ -86,7 +96,15 @@ export function ThreadPanel({ onReplyInThread }: ThreadPanelProps) {
               </div>
 
               {/* Body */}
-              <div className="leading-relaxed text-foreground"><MessageBody body={msg.body} /></div>
+              <div className="leading-relaxed text-foreground">
+                <MessageBody
+                  body={msg.body}
+                  onMentionClick={onMentionClick}
+                  onChannelClick={onChannelClick}
+                  onMessageLinkClick={onMessageLinkClick}
+                  onUserProfileClick={onUserProfileClick}
+                />
+              </div>
 
               {/* Reply button */}
               <div className="mt-1.5 hidden group-hover:flex">
