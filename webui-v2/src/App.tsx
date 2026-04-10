@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router";
+import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
@@ -14,7 +15,7 @@ function ManagementPage() {
 }
 
 function ChatPage() {
-  return <div>Chat placeholder</div>;
+  return <ChatLayout />;
 }
 
 export default function App() {
