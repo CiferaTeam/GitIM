@@ -3,6 +3,7 @@ import { useChatStore } from "../../hooks/use-chat-store";
 import * as mockClient from "../../lib/mock/client";
 import type { Message } from "../../lib/types";
 import { ChatHeader } from "./header";
+import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
 
 /** "alice--lewis" → "dm:alice,lewis" */
@@ -18,7 +19,6 @@ export function ChatLayout() {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
-  const messages = useChatStore((s) => s.messages);
   const threadRoot = useChatStore((s) => s.threadRoot);
 
   const selectChannel = useChatStore((s) => s.selectChannel);
@@ -120,11 +120,8 @@ export function ChatLayout() {
     [currentChannel, setThreadRoot, setThreadMessages]
   );
 
-  // Expose handlers via context or pass as props; for now they're available
-  // to children via direct composition (Tasks 10-12 will consume them)
+  // handleSend is consumed by Task 11 (input area)
   void handleSend;
-  void handleReply;
-  void handleShowThread;
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -138,24 +135,8 @@ export function ChatLayout() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <ChatHeader onStartDm={handleStartDm} />
 
-        {/* Message area — placeholder until Task 10 */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {messages.length === 0 && currentChannel ? (
-            <p className="text-muted-foreground text-sm">
-              No messages in {currentChannel}.
-            </p>
-          ) : (
-            <ul className="space-y-1">
-              {messages.map((m) => (
-                <li key={m._pendingId ?? m.line_number} className="text-sm">
-                  <span className="font-medium">{m.author}</span>
-                  {": "}
-                  {m.body}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        {/* Message area */}
+        <MessageList onReply={handleReply} onShowThread={handleShowThread} />
 
         {/* Input area — placeholder until Task 11 */}
         <div className="border-t p-3">
