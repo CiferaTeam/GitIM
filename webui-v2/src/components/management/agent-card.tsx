@@ -21,7 +21,7 @@ export function relativeTime(isoString: string): string {
   return `${Math.floor(diff / 86400)} days ago`;
 }
 
-function statusBadge(status: AgentStatus) {
+export function statusBadge(status: AgentStatus) {
   switch (status) {
     case "running":
       return (

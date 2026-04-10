@@ -54,11 +54,11 @@ export function ChatLayout() {
       const displayName = parts.join("--");
       const exists = channels.some((c) => c.name === displayName);
       if (!exists) {
-        // Add a new DM channel to the store so it appears in the sidebar
-        setChannels([
-          ...channels,
-          { name: displayName, kind: "dm", unreadCount: 0, members: parts },
-        ]);
+        const newChannel = { name: displayName, kind: "dm" as const, unreadCount: 0, members: parts };
+        // Register in the mock client so the poll loop doesn't overwrite it
+        mockClient.addChannel(newChannel);
+        // Add to the store so it appears in the sidebar immediately
+        setChannels([...channels, newChannel]);
       }
       await handleChannelSelect(displayName);
     },

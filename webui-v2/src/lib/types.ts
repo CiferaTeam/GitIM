@@ -55,3 +55,13 @@ export function formatTimestamp(ts: string): string {
   if (!match) return "??:??";
   return `${match[1]}:${match[2]}`;
 }
+
+/** Current UTC time as a compact timestamp: "20260317T120000Z" */
+export function nowTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return (
+    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
+  );
+}

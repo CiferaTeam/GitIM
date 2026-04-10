@@ -1,4 +1,5 @@
-import type { Agent, ApiResponse, Message, PollChange } from "../types";
+import type { Agent, ApiResponse, Channel, Message, PollChange } from "../types";
+import { nowTimestamp } from "../types";
 import {
   mockAgents as initialAgents,
   mockChannels,
@@ -13,6 +14,9 @@ const messages: Record<string, Message[]> = Object.fromEntries(
 );
 
 const agents: Agent[] = initialAgents.map((a) => ({ ...a }));
+
+// Channels are mutable so new DMs survive the poll loop.
+const channelList: Channel[] = mockChannels.map((c) => ({ ...c }));
 
 let pollCommitCounter = 0;
 const changeQueue: PollChange[] = [];
@@ -29,15 +33,6 @@ function dmApiToKey(channel: string): string {
     return channel.slice(3).replace(",", "--");
   }
   return channel;
-}
-
-function nowTimestamp(): string {
-  const d = new Date();
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  return (
-    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  );
 }
 
 function findAgent(id: string): Agent | undefined {
@@ -82,13 +77,20 @@ export async function channels(): Promise<ApiResponse> {
   return {
     ok: true,
     data: {
-      channels: mockChannels.map(({ name, kind, members }) => ({
+      channels: channelList.map(({ name, kind, members }) => ({
         name,
         kind,
         members,
       })),
     },
   };
+}
+
+/** Add a channel to the mutable list (e.g. a new DM). No-op if already present. */
+export function addChannel(channel: Channel): void {
+  if (!channelList.some((c) => c.name === channel.name)) {
+    channelList.push({ ...channel });
+  }
 }
 
 export async function users(): Promise<ApiResponse> {

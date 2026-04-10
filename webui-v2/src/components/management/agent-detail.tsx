@@ -1,12 +1,11 @@
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as mockClient from "@/lib/mock/client";
-import type { Agent, AgentStatus } from "@/lib/types";
+import type { Agent } from "@/lib/types";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
-import { relativeTime } from "./agent-card";
+import { relativeTime, statusBadge } from "./agent-card";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { useState } from "react";
 
@@ -20,27 +19,6 @@ const MOCK_LOG = [
   { time: "10:45", text: "Started scheduled task: daily standup digest" },
   { time: "10:46", text: "Standup digest posted to #standup" },
 ];
-
-function statusBadge(status: AgentStatus) {
-  switch (status) {
-    case "running":
-      return (
-        <Badge className="bg-green-500 text-white hover:bg-green-500">
-          Running
-        </Badge>
-      );
-    case "idle":
-      return (
-        <Badge className="bg-amber-400 text-white hover:bg-amber-400">
-          Idle
-        </Badge>
-      );
-    case "error":
-      return <Badge variant="destructive">Error</Badge>;
-    case "offline":
-      return <Badge variant="secondary">Offline</Badge>;
-  }
-}
 
 function Field({
   label,

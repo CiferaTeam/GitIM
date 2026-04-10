@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { MessageSquare, GitBranch, Copy, Check } from "lucide-react";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
@@ -35,6 +35,12 @@ export function MessageItem({
 }: MessageItemProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isPending = !!message._pendingId && message._status === "sending";
+
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+    };
+  }, []);
   const isFailed = message._status === "failed";
 
   function handleClick() {

@@ -1,4 +1,5 @@
 import type { Message, PollChange } from "../types";
+import { nowTimestamp } from "../types";
 import { getMockAgents, getMockMessages, pushChange } from "./client";
 
 const MESSAGE_POOL: string[] = [
@@ -35,15 +36,6 @@ function rand(min: number, max: number): number {
 
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function nowTimestamp(): string {
-  const d = new Date();
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  return (
-    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  );
 }
 
 function scheduleMessage(): void {
@@ -145,6 +137,9 @@ function updateAgentStatus(): void {
 }
 
 export function startMockTimer(): void {
+  // Idempotent guard — stop any running timers before starting new ones.
+  // Prevents duplicate timers when React StrictMode mounts effects twice.
+  stopMockTimer();
   scheduleMessage();
   scheduleAgentUpdate();
 }
