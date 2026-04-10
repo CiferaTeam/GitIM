@@ -13,3 +13,4 @@ cli/dist/webui/
 .agents/
 .gitim/
 __pycache__/
+.playwright-mcp/
