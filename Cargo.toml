@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gitim-core", "crates/gitim-daemon", "crates/gitim-sync", "crates/gitim-index", "crates/gitim-client", "crates/gitim-cli", "crates/gitim-runtime"]
+members = ["crates/gitim-core", "crates/gitim-daemon", "crates/gitim-sync", "crates/gitim-index", "crates/gitim-client", "crates/gitim-cli", "crates/gitim-agent-provider", "crates/gitim-runtime"]
 resolver = "2"
 
 [workspace.package]
