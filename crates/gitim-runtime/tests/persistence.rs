@@ -28,14 +28,14 @@ async fn test_state_save_and_load() {
     // Save state
     let state = AgentState {
         cursor: Some(cursor.clone()),
-        session_id: Some("test-session-123".into()),
+        session_token: Some("test-session-123".into()),
     };
     state.save(&handle.repo_root).unwrap();
 
     // Load state in a fresh context
     let loaded = AgentState::load(&handle.repo_root).unwrap();
     assert_eq!(loaded.cursor.as_deref(), Some(cursor.as_str()));
-    assert_eq!(loaded.session_id.as_deref(), Some("test-session-123"));
+    assert_eq!(loaded.session_token.as_deref(), Some("test-session-123"));
 
     stop_daemon(&handle.repo_root).await;
 }
@@ -73,7 +73,7 @@ async fn test_cursor_restore_skips_old_messages() {
     let saved_cursor = poller1.cursor().unwrap().to_string();
     let state = AgentState {
         cursor: Some(saved_cursor.clone()),
-        session_id: None,
+        session_token: None,
     };
     state.save(&handle.repo_root).unwrap();
 
@@ -98,5 +98,5 @@ async fn test_load_missing_state_returns_default() {
 
     let state = AgentState::load(tmp.path()).unwrap();
     assert!(state.cursor.is_none());
-    assert!(state.session_id.is_none());
+    assert!(state.session_token.is_none());
 }

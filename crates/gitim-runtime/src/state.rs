@@ -9,7 +9,7 @@ pub struct AgentState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub session_token: Option<String>,
 }
 
 impl AgentState {

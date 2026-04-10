@@ -655,6 +655,7 @@ name = "gitim-runtime"
 version = "0.3.1"
 dependencies = [
  "dirs",
+ "gitim-agent-provider",
  "gitim-client",
  "serde",
  "serde_json",

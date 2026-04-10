@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gitim_agent_provider::{ExecOptions, ExecStatus, Provider, ProviderConfig, create};
 use gitim_client::GitimClient;
 use tracing::info;
 
-use crate::claude::ClaudeSession;
 use crate::error::RuntimeError;
 use crate::poller::{ChannelChange, Poller};
 use crate::state::AgentState;
@@ -21,30 +21,16 @@ const DEFAULT_SYSTEM_PROMPT: &str = "\
 - 每条回复独立调用一次 gitim send
 ";
 
-const ALLOWED_TOOLS: &str = "Bash(gitim *),Read";
-
 pub struct AgentLoop {
     poller: Poller,
-    claude: ClaudeSession,
+    provider: Box<dyn Provider>,
+    session_token: Option<String>,
     poll_interval: Duration,
     repo_root: PathBuf,
+    model: Option<String>,
 }
 
 impl AgentLoop {
-    pub fn new(
-        poller: Poller,
-        claude: ClaudeSession,
-        poll_interval: Duration,
-        repo_root: &Path,
-    ) -> Self {
-        Self {
-            poller,
-            claude,
-            poll_interval,
-            repo_root: repo_root.to_path_buf(),
-        }
-    }
-
     /// Build an AgentLoop with default settings. Restores state from disk if available.
     pub fn with_defaults(repo_root: &Path) -> Result<Self, RuntimeError> {
         let state = AgentState::load(repo_root)?;
@@ -57,28 +43,45 @@ impl AgentLoop {
             None => Poller::new(GitimClient::new(repo_root)),
         };
 
-        let mut claude = ClaudeSession::new(
-            DEFAULT_SYSTEM_PROMPT.to_string(),
-            ALLOWED_TOOLS,
-            repo_root,
-        )
-        .with_model("claude-sonnet-4-6");
+        let provider = create("claude", ProviderConfig::default())
+            .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
-        if let Some(session_id) = state.session_id {
-            info!(session_id = %session_id, "restored session from state");
-            claude = claude.with_session_id(session_id);
+        if state.session_token.is_some() {
+            info!("restored session_token from state");
         }
 
-        Ok(Self::new(poller, claude, Duration::from_secs(2), repo_root))
+        Ok(Self {
+            poller,
+            provider,
+            session_token: state.session_token,
+            poll_interval: Duration::from_secs(2),
+            repo_root: repo_root.to_path_buf(),
+            model: Some("claude-sonnet-4-6".to_string()),
+        })
     }
 
-    /// Save current state to disk.
     fn save_state(&self) -> Result<(), RuntimeError> {
         let state = AgentState {
             cursor: self.poller.cursor().map(|s| s.to_string()),
-            session_id: self.claude.session_id().map(|s| s.to_string()),
+            session_token: self.session_token.clone(),
         };
         state.save(&self.repo_root)
+    }
+
+    fn build_exec_options(&self) -> ExecOptions {
+        ExecOptions {
+            cwd: Some(self.repo_root.clone()),
+            model: self.model.clone(),
+            // Only pass system_prompt on first call; resume inherits it
+            system_prompt: if self.session_token.is_none() {
+                Some(DEFAULT_SYSTEM_PROMPT.to_string())
+            } else {
+                None
+            },
+            max_turns: Some(5),
+            resume_token: self.session_token.clone(),
+            ..Default::default()
+        }
     }
 
     /// Run one poll-and-process cycle. Returns true if messages were processed.
@@ -86,20 +89,61 @@ impl AgentLoop {
         let result = self.poller.poll().await?;
 
         if result.changes.is_empty() {
-            // Save cursor even when no messages (init case)
             self.save_state()?;
             return Ok(false);
         }
 
         let prompt = format_changes_as_prompt(&result.changes);
-        info!(prompt_len = prompt.len(), "sending to claude");
+        info!(prompt_len = prompt.len(), "sending to provider");
 
-        let response = self.claude.send(&prompt).await?;
+        let opts = self.build_exec_options();
+        let session = self
+            .provider
+            .execute(&prompt, opts)
+            .await
+            .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
+
+        // Drain events (log them)
+        let mut events = session.events;
+        while let Some(event) = events.recv().await {
+            match &event {
+                gitim_agent_provider::Event::Text { content } => {
+                    tracing::debug!(text_len = content.len(), "agent text");
+                }
+                gitim_agent_provider::Event::ToolUse { tool, .. } => {
+                    info!(tool = %tool, "agent tool use");
+                }
+                gitim_agent_provider::Event::Error { content } => {
+                    tracing::warn!(error = %content, "agent error event");
+                }
+                _ => {}
+            }
+        }
+
+        // Await final result
+        let exec_result = session
+            .result
+            .await
+            .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
+
         info!(
-            response_len = response.text.len(),
-            session_id = %response.session_id,
-            "claude responded"
+            status = ?exec_result.status,
+            output_len = exec_result.output.len(),
+            duration_ms = exec_result.duration_ms,
+            "provider finished"
         );
+
+        if exec_result.status == ExecStatus::Failed {
+            tracing::error!(
+                error = ?exec_result.error,
+                "provider execution failed"
+            );
+        }
+
+        // Save session_token for resume
+        if let Some(token) = exec_result.session_token {
+            self.session_token = Some(token);
+        }
 
         self.save_state()?;
         Ok(true)
@@ -107,7 +151,6 @@ impl AgentLoop {
 
     /// Run the agent loop indefinitely.
     pub async fn run(&mut self) -> Result<(), RuntimeError> {
-        // Initialize cursor if not restored from state
         if self.poller.cursor().is_none() {
             self.poller.poll().await?;
             self.save_state()?;
