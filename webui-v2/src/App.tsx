@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { AppShell } from "./components/layout/app-shell";
+import { AgentList } from "./components/management/agent-list";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel } from "./lib/types";
@@ -8,7 +9,7 @@ import * as mockClient from "./lib/mock/client";
 import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
 
 function ManagementPage() {
-  return <div>Management placeholder</div>;
+  return <AgentList />;
 }
 
 function ChatPage() {
