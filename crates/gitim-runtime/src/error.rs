@@ -11,6 +11,9 @@ pub enum RuntimeError {
     #[error("onboard failed: {0}")]
     OnboardFailed(String),
 
+    #[error("poll failed: {0}")]
+    PollFailed(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
