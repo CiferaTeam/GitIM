@@ -98,12 +98,78 @@ async fn set_workspace(
     Json(serde_json::json!({ "ok": true }))
 }
 
+#[derive(Deserialize)]
+struct GitInitRequest {
+    provider: String,
+}
+
+async fn git_init(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<GitInitRequest>,
+) -> Json<serde_json::Value> {
+    if req.provider != "local" {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("provider not supported yet: {}", req.provider)
+        }));
+    }
+
+    let workspace = {
+        let s = state.lock().unwrap();
+        match &s.workspace {
+            Some(p) => p.clone(),
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "workspace not set"
+                }));
+            }
+        }
+    };
+
+    let repo_path = workspace.join("repo.git");
+    if let Err(e) = std::fs::create_dir_all(&repo_path) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to create repo directory: {e}")
+        }));
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .current_dir(&repo_path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            Json(serde_json::json!({
+                "ok": true,
+                "repo_path": repo_path.to_string_lossy()
+            }))
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            Json(serde_json::json!({
+                "ok": false,
+                "error": format!("git init failed: {stderr}")
+            }))
+        }
+        Err(e) => {
+            Json(serde_json::json!({
+                "ok": false,
+                "error": format!("failed to run git: {e}")
+            }))
+        }
+    }
+}
+
 pub fn create_router() -> Router {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
     Router::new()
         .route("/health", get(health))
         .route("/workspace", post(set_workspace))
+        .route("/git/init", post(git_init))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

@@ -1,10 +1,11 @@
 import { create } from "zustand";
 
 export type ConnectionStatus =
-  | "checking"     // trying stored port
-  | "disconnected" // no runtime found, show port form
-  | "connected"    // health OK, need workspace
-  | "ready";       // workspace set, app can proceed
+  | "checking"       // trying stored port
+  | "disconnected"   // no runtime found, show port form
+  | "connected"      // health OK, need workspace
+  | "workspace_set"  // workspace configured, need git provider
+  | "ready";         // git initialized, app can proceed
 
 const STORAGE_KEY = "gitim-runtime-port";
 

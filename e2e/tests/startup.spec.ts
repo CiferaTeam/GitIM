@@ -129,8 +129,19 @@ test.describe("startup flow", () => {
     await page.getByTestId("workspace-input").fill(workspaceDir);
     await page.getByTestId("workspace-button").click();
 
-    // Should transition to the main app (any element from AppShell)
-    // The AppShell has a "GitIM" header text — wait for it
+    // Should transition to git provider selection
+    await expect(page.getByTestId("git-provider-local")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // GitHub and GitLab should be disabled
+    await expect(page.getByTestId("git-provider-github")).toBeDisabled();
+    await expect(page.getByTestId("git-provider-gitlab")).toBeDisabled();
+
+    // Select local git
+    await page.getByTestId("git-provider-local").click();
+
+    // Should transition to the main app
     await expect(page.locator("header")).toContainText("GitIM", {
       timeout: 5000,
     });
@@ -142,6 +153,10 @@ test.describe("startup flow", () => {
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     expect(config.workspace).toBe(workspaceDir);
     expect(config.created_at).toBeDefined();
+
+    // Verify bare repo was created
+    const headFile = path.join(workspaceDir, "repo.git", "HEAD");
+    expect(fs.existsSync(headFile)).toBe(true);
   });
 
   test("shows error for invalid port", async ({ page }) => {
@@ -180,13 +195,20 @@ test.describe("startup flow", () => {
     await page.getByTestId("workspace-input").fill(newDir);
     await page.getByTestId("workspace-button").click();
 
-    // Should succeed — directory gets created
+    // Should transition to git provider selection
+    await expect(page.getByTestId("git-provider-local")).toBeVisible({
+      timeout: 5000,
+    });
+    await page.getByTestId("git-provider-local").click();
+
+    // Should succeed — directory gets created and git initialized
     await expect(page.locator("header")).toContainText("GitIM", {
       timeout: 5000,
     });
 
-    // Verify directory and marker were created
+    // Verify directory, marker, and bare repo were created
     expect(fs.existsSync(path.join(newDir, ".gitim-runtime", "config.json"))).toBe(true);
+    expect(fs.existsSync(path.join(newDir, "repo.git", "HEAD"))).toBe(true);
 
     // Cleanup
     fs.rmSync(newDir, { recursive: true, force: true });
@@ -220,6 +242,12 @@ test.describe("startup flow", () => {
 
     // Confirm
     await page.getByTestId("workspace-confirm-button").click();
+
+    // Should proceed to git provider selection
+    await expect(page.getByTestId("git-provider-local")).toBeVisible({
+      timeout: 5000,
+    });
+    await page.getByTestId("git-provider-local").click();
 
     // Should proceed to main app
     await expect(page.locator("header")).toContainText("GitIM", {

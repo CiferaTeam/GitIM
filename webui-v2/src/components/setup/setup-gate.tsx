@@ -4,6 +4,7 @@ import {
   type ConnectionStatus,
 } from "../../hooks/use-connection-store";
 import { ConnectForm } from "./connect-form";
+import { GitProviderForm } from "./git-provider-form";
 import { WorkspaceForm } from "./workspace-form";
 
 interface SetupGateProps {
@@ -57,6 +58,7 @@ export function SetupGate({ children }: SetupGateProps) {
     ),
     disconnected: <ConnectForm />,
     connected: <WorkspaceForm />,
+    workspace_set: <GitProviderForm />,
     ready: <>{children}</>,
   };
 

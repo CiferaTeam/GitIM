@@ -37,7 +37,7 @@ export function WorkspaceForm() {
       }
 
       setWorkspacePath(path);
-      setStatus("ready");
+      setStatus("workspace_set");
     } catch {
       setError("Failed to connect to runtime");
     } finally {
