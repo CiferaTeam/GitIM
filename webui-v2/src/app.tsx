@@ -9,6 +9,7 @@ import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as mockClient from "./lib/mock/client";
 import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
+import { SetupGate } from "./components/setup/setup-gate";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -135,13 +136,15 @@ export default function App() {
   }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
   return (
-    <Routes>
-      <Route element={<AppShell />}>
-        <Route index element={<Navigate to="/management" replace />} />
-        <Route path="/management" element={<ManagementPage />} />
-        <Route path="/management/:agentId" element={<AgentDetail />} />
-        <Route path="/chat" element={<ChatPage />} />
-      </Route>
-    </Routes>
+    <SetupGate>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<Navigate to="/management" replace />} />
+          <Route path="/management" element={<ManagementPage />} />
+          <Route path="/management/:agentId" element={<AgentDetail />} />
+          <Route path="/chat" element={<ChatPage />} />
+        </Route>
+      </Routes>
+    </SetupGate>
   );
 }
