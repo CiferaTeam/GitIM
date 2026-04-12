@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod codex;
 mod error;
 mod provider;
 mod stubs;
