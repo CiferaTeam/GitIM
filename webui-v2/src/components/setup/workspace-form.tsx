@@ -11,27 +11,27 @@ export function WorkspaceForm() {
 
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [needsConfirm, setNeedsConfirm] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const path = input.trim();
-    if (!path) {
-      setError("Please enter a workspace path");
-      return;
-    }
-
+  async function submitWorkspace(path: string, confirm: boolean) {
     setSubmitting(true);
     setError(null);
+    setNeedsConfirm(false);
 
     try {
       const res = await fetch(`${baseUrl()}/workspace`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
+        body: JSON.stringify({ path, confirm }),
       });
       const data = await res.json();
 
       if (!data.ok) {
+        if (data.needs_confirm) {
+          setNeedsConfirm(true);
+          setError(data.error);
+          return;
+        }
         setError(data.error ?? "Failed to set workspace");
         return;
       }
@@ -43,6 +43,16 @@ export function WorkspaceForm() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const path = input.trim();
+    if (!path) {
+      setError("Please enter a workspace path");
+      return;
+    }
+    await submitWorkspace(path, false);
   }
 
   return (
@@ -86,14 +96,35 @@ export function WorkspaceForm() {
             </p>
           )}
 
-          <button
-            data-testid="workspace-button"
-            type="submit"
-            disabled={submitting}
-            className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-          >
-            {submitting ? "Setting up..." : "Open Workspace"}
-          </button>
+          {needsConfirm ? (
+            <div className="flex gap-2">
+              <button
+                data-testid="workspace-confirm-button"
+                type="button"
+                disabled={submitting}
+                onClick={() => submitWorkspace(input.trim(), true)}
+                className="flex-1 h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                onClick={() => { setNeedsConfirm(false); setError(null); }}
+                className="flex-1 h-9 rounded-md border border-input text-sm font-medium hover:bg-muted transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              data-testid="workspace-button"
+              type="submit"
+              disabled={submitting}
+              className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              {submitting ? "Setting up..." : "Open Workspace"}
+            </button>
+          )}
         </form>
       </div>
     </div>

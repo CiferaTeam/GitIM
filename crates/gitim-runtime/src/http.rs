@@ -13,6 +13,8 @@ struct HealthResponse {
 #[derive(Deserialize)]
 struct WorkspaceRequest {
     path: String,
+    #[serde(default)]
+    confirm: bool,
 }
 
 #[derive(Default)]
@@ -35,11 +37,38 @@ async fn set_workspace(
 ) -> Json<serde_json::Value> {
     let path = PathBuf::from(&req.path);
 
-    if !path.is_dir() {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("directory does not exist: {}", req.path)
-        }));
+    if path.exists() {
+        if !path.is_dir() {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("path exists but is not a directory: {}", req.path)
+            }));
+        }
+        // Non-empty directory: ask for confirmation
+        let is_empty = match std::fs::read_dir(&path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(e) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("cannot read directory: {e}")
+                }));
+            }
+        };
+        if !is_empty && !req.confirm {
+            return Json(serde_json::json!({
+                "ok": false,
+                "needs_confirm": true,
+                "error": format!("directory is not empty: {}", req.path)
+            }));
+        }
+    } else {
+        // Create directory if it doesn't exist
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("failed to create directory: {e}")
+            }));
+        }
     }
 
     // Create marker directory and write config

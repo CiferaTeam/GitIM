@@ -162,7 +162,9 @@ test.describe("startup flow", () => {
     });
   });
 
-  test("shows error for nonexistent workspace path", async ({ page }) => {
+  test("creates workspace directory if it does not exist", async ({ page }) => {
+    const newDir = path.join(os.tmpdir(), `gitim-e2e-new-${Date.now()}`);
+
     await page.goto(`http://127.0.0.1:${vitePort}`);
     await page.evaluate(() => localStorage.clear());
     await page.reload();
@@ -174,13 +176,57 @@ test.describe("startup flow", () => {
       timeout: 5000,
     });
 
-    // Enter nonexistent path
-    await page.getByTestId("workspace-input").fill("/tmp/does-not-exist-xyz-123");
+    // Enter a path that doesn't exist yet
+    await page.getByTestId("workspace-input").fill(newDir);
     await page.getByTestId("workspace-button").click();
 
-    // Should show error
+    // Should succeed — directory gets created
+    await expect(page.locator("header")).toContainText("GitIM", {
+      timeout: 5000,
+    });
+
+    // Verify directory and marker were created
+    expect(fs.existsSync(path.join(newDir, ".gitim-runtime", "config.json"))).toBe(true);
+
+    // Cleanup
+    fs.rmSync(newDir, { recursive: true, force: true });
+  });
+
+  test("prompts confirmation for non-empty workspace directory", async ({ page }) => {
+    // Create a non-empty directory
+    const dirtyDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitim-e2e-dirty-"));
+    fs.writeFileSync(path.join(dirtyDir, "existing-file.txt"), "hello");
+
+    await page.goto(`http://127.0.0.1:${vitePort}`);
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+
+    // Connect first
+    await page.getByTestId("port-input").fill(String(runtimePort));
+    await page.getByTestId("connect-button").click();
+    await expect(page.getByTestId("workspace-input")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Enter non-empty directory
+    await page.getByTestId("workspace-input").fill(dirtyDir);
+    await page.getByTestId("workspace-button").click();
+
+    // Should show warning and confirm button
     await expect(page.getByTestId("workspace-error")).toBeVisible({
       timeout: 5000,
     });
+    await expect(page.getByTestId("workspace-confirm-button")).toBeVisible();
+
+    // Confirm
+    await page.getByTestId("workspace-confirm-button").click();
+
+    // Should proceed to main app
+    await expect(page.locator("header")).toContainText("GitIM", {
+      timeout: 5000,
+    });
+
+    // Cleanup
+    fs.rmSync(dirtyDir, { recursive: true, force: true });
   });
 });

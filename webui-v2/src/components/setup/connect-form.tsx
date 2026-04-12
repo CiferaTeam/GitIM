@@ -69,7 +69,7 @@ export function ConnectForm() {
               inputMode="numeric"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="7890"
+              placeholder="16868"
               className="w-full h-9 px-3 rounded-md border border-input bg-background text-sm font-mono placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-ring"
               autoFocus
             />
@@ -94,7 +94,7 @@ export function ConnectForm() {
         <p className="text-xs text-text-muted text-center leading-relaxed">
           Start the runtime first:{" "}
           <code className="text-text-secondary">
-            gitim-runtime --port 7890
+            gitim-runtime --port 16868
           </code>
         </p>
       </div>
