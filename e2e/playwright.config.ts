@@ -7,6 +7,9 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:5173",
     headless: true,
+    launchOptions: {
+      slowMo: parseInt(process.env.SLOWMO ?? "0", 10),
+    },
   },
   projects: [
     {
