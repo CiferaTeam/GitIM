@@ -8,6 +8,7 @@ import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-card";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { useState } from "react";
+import { toast } from "sonner";
 
 const MOCK_LOG = [
   { time: "10:23", text: "Received message in #dev-tasks" },
@@ -65,11 +66,15 @@ export function AgentDetail() {
       const res = await client.stopAgent(agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
+      } else if (!res.ok) {
+        toast.error(res.error ?? "Failed to stop agent");
       }
     } else {
       const res = await client.startAgent(agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
+      } else if (!res.ok) {
+        toast.error(res.error ?? "Failed to start agent");
       }
     }
   }

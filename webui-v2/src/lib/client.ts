@@ -22,6 +22,25 @@ function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
 }
 
+/** Sanitize a display name into a valid handler (a-z, 0-9, hyphens). */
+export function toHandler(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 39);
+}
+
+/** Validate a handler. Returns error message or null if valid. */
+export function validateHandler(name: string): string | null {
+  const handler = toHandler(name);
+  if (!handler) return "Name must contain at least one letter or digit";
+  if (handler === "system") return "\"system\" is reserved";
+  return null;
+}
+
 function mapBackendAgent(raw: Record<string, unknown>): Agent {
   return {
     id: (raw.id ?? raw.handler) as string,
@@ -65,7 +84,7 @@ export async function addAgent(
   systemPrompt: string,
 ): Promise<ApiResponse> {
   try {
-    const handler = name.toLowerCase().replace(/\s+/g, "-");
+    const handler = toHandler(name);
     const res = await fetch(`${baseUrl()}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

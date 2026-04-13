@@ -10,9 +10,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
+import { toHandler, validateHandler } from "@/lib/client";
 import type { Agent } from "@/lib/types";
 import { Plus } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 export function AddAgentDialog() {
   const addAgent = useAgentStore((s) => s.addAgent);
@@ -20,9 +22,12 @@ export function AddAgentDialog() {
   const [name, setName] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
 
+  const handler = toHandler(name.trim());
+  const validationError = name.trim() ? validateHandler(name.trim()) : null;
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || validationError) return;
 
     const res = await client.addAgent(name.trim(), systemPrompt.trim());
     if (res.ok && res.data?.agent) {
@@ -30,6 +35,8 @@ export function AddAgentDialog() {
       setName("");
       setSystemPrompt("");
       setOpen(false);
+    } else {
+      toast.error(res.error ?? "Failed to add agent");
     }
   }
 
@@ -58,6 +65,14 @@ export function AddAgentDialog() {
                 placeholder="e.g. Code Reviewer"
                 required
               />
+              {handler && !validationError && (
+                <p className="text-xs text-muted-foreground">
+                  Handler: <code>{handler}</code>
+                </p>
+              )}
+              {validationError && (
+                <p className="text-xs text-destructive">{validationError}</p>
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -81,7 +96,7 @@ export function AddAgentDialog() {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={!name.trim()}>
+              <Button type="submit" disabled={!name.trim() || !!validationError}>
                 Add
               </Button>
             </DialogFooter>

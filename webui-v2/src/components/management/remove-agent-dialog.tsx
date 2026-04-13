@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
+import { toast } from "sonner";
 
 interface RemoveAgentDialogProps {
   agentId: string;
@@ -33,6 +34,8 @@ export function RemoveAgentDialog({
       removeAgent(agentId);
       onOpenChange(false);
       onRemoved?.();
+    } else {
+      toast.error(res.error ?? "Failed to remove agent");
     }
   }
 

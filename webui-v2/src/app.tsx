@@ -11,6 +11,7 @@ import * as client from "./lib/client";
 import * as mockClient from "./lib/mock/client";
 import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
 import { SetupGate } from "./components/setup/setup-gate";
+import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -138,6 +139,7 @@ export default function App() {
 
   return (
     <SetupGate>
+      <Toaster position="top-right" richColors />
       <Routes>
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/management" replace />} />

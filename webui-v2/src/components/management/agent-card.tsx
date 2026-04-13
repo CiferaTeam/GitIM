@@ -11,6 +11,7 @@ import * as client from "@/lib/client";
 import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
 import { useNavigate } from "react-router";
+import { toast } from "sonner";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 
 export function relativeTime(isoString: string): string {
@@ -58,11 +59,15 @@ export function AgentCard({ agent }: AgentCardProps) {
       const res = await client.stopAgent(agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
+      } else if (!res.ok) {
+        toast.error(res.error ?? "Failed to stop agent");
       }
     } else {
       const res = await client.startAgent(agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
+      } else if (!res.ok) {
+        toast.error(res.error ?? "Failed to start agent");
       }
     }
   }
