@@ -468,6 +468,37 @@ async fn agents_start(
     Json(serde_json::json!({ "ok": true }))
 }
 
+// -- /agents/:id --
+
+async fn agents_get(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let s = state.lock().unwrap();
+    match s.agents.get(&id) {
+        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })),
+        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })),
+    }
+}
+
+// -- /agents/remove --
+
+async fn agents_remove(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<AgentIdRequest>,
+) -> Json<serde_json::Value> {
+    let mut s = state.lock().unwrap();
+    match s.agents.remove(&req.id) {
+        Some(info) => {
+            if let Some(handle) = &info.loop_handle {
+                handle.abort();
+            }
+            Json(serde_json::json!({ "ok": true }))
+        }
+        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })),
+    }
+}
+
 // -- /agents/stop --
 
 async fn agents_stop(
@@ -514,6 +545,8 @@ pub fn create_router() -> Router {
         .route("/agents/add", post(agents_add))
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
+        .route("/agents/remove", post(agents_remove))
+        .route("/agents/{id}", get(agents_get))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

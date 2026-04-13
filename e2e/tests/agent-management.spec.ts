@@ -126,6 +126,39 @@ test.describe("agent management API", () => {
     expect(data.error).toMatch(/not found/);
   });
 
+  test("/agents/:id returns agent detail", async () => {
+    await fetch(`${env.baseUrl}/agents/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handler: "detail-agent", display_name: "Detail Agent" }),
+    });
+
+    const res = await fetch(`${env.baseUrl}/agents/detail-agent`);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.agent.handler).toBe("detail-agent");
+    expect(data.agent.display_name).toBe("Detail Agent");
+  });
+
+  test("/agents/remove removes agent", async () => {
+    await fetch(`${env.baseUrl}/agents/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handler: "doomed-agent", display_name: "Doomed Agent" }),
+    });
+
+    const removeRes = await fetch(`${env.baseUrl}/agents/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "doomed-agent" }),
+    });
+    expect((await removeRes.json()).ok).toBe(true);
+
+    const getRes = await fetch(`${env.baseUrl}/agents/doomed-agent`);
+    const getData = await getRes.json();
+    expect(getData.ok).toBe(false);
+  });
+
   test("/agents/start on already-running agent returns error", async () => {
     await fetch(`${env.baseUrl}/agents/add`, {
       method: "POST",
