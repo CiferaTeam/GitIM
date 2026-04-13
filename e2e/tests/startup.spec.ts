@@ -73,7 +73,11 @@ test.describe("startup flow", () => {
     });
 
     // 2. Create temp workspace directory
-    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitim-e2e-"));
+    // Use /tmp directly (not os.tmpdir()) to keep paths short enough for
+    // Unix socket name limits (104 chars on macOS). os.tmpdir() on macOS
+    // returns /var/folders/... which makes the socket path too long.
+    const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+    workspaceDir = fs.mkdtempSync(path.join(tmpBase, "gitim-e2e-"));
 
     // 3. Start runtime on a free port
     runtimePort = await freePort();
@@ -178,7 +182,8 @@ test.describe("startup flow", () => {
   });
 
   test("creates workspace directory if it does not exist", async ({ page }) => {
-    const newDir = path.join(os.tmpdir(), `gitim-e2e-new-${Date.now()}`);
+    const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+    const newDir = path.join(tmpBase, `gitim-e2e-new-${Date.now()}`);
 
     await page.goto(`http://127.0.0.1:${vitePort}`);
     await page.evaluate(() => localStorage.clear());
@@ -216,7 +221,8 @@ test.describe("startup flow", () => {
 
   test("prompts confirmation for non-empty workspace directory", async ({ page }) => {
     // Create a non-empty directory
-    const dirtyDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitim-e2e-dirty-"));
+    const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+    const dirtyDir = fs.mkdtempSync(path.join(tmpBase, "gitim-e2e-dirty-"));
     fs.writeFileSync(path.join(dirtyDir, "existing-file.txt"), "hello");
 
     await page.goto(`http://127.0.0.1:${vitePort}`);

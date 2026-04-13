@@ -33,6 +33,11 @@ pub struct AgentLoop {
 impl AgentLoop {
     /// Build an AgentLoop with default settings. Restores state from disk if available.
     pub fn with_defaults(repo_root: &Path) -> Result<Self, RuntimeError> {
+        Self::with_provider(repo_root, "claude")
+    }
+
+    /// Build an AgentLoop with a specified provider type. Restores state from disk if available.
+    pub fn with_provider(repo_root: &Path, provider_type: &str) -> Result<Self, RuntimeError> {
         let state = AgentState::load(repo_root)?;
 
         let poller = match state.cursor {
@@ -43,7 +48,7 @@ impl AgentLoop {
             None => Poller::new(GitimClient::new(repo_root)),
         };
 
-        let provider = create("claude", ProviderConfig::default())
+        let provider = create(provider_type, ProviderConfig::default())
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
         if state.session_token.is_some() {
