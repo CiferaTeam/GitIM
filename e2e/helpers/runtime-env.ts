@@ -196,8 +196,14 @@ export async function startServers(): Promise<RuntimeEnv> {
 
 /** Kill processes and remove the temp workspace directory. */
 export function stopEnv(env: RuntimeEnv): void {
+  // Kill runtime first — it will gracefully stop all managed daemons on SIGTERM.
+  // Wait for it to exit before deleting workspace, otherwise pid files are gone
+  // before runtime can read them.
+  // Kill runtime first — its graceful shutdown handler kills managed daemons.
+  // Brief sleep lets the shutdown complete before we delete the workspace.
   env.runtimeProc?.kill();
   env.viteProc?.kill();
+  execSync("sleep 1");
 
   if (env.workspaceDir && fs.existsSync(env.workspaceDir)) {
     fs.rmSync(env.workspaceDir, { recursive: true, force: true });

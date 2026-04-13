@@ -53,11 +53,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let router = gitim_runtime::http::create_router();
+    let (router, state) = gitim_runtime::http::create_router();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     eprintln!("runtime shell listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Kill all managed daemons on shutdown
+    kill_managed_daemons(&state);
+    eprintln!("all daemons stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = sigterm.recv() => {},
+    }
+
+    eprintln!("\nshutting down...");
+}
+
+fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
+    let s = state.lock().unwrap();
+
+    // Collect all repo roots that have daemons
+    let mut repos: Vec<PathBuf> = Vec::new();
+    if let Some(ref human) = s.human_repo {
+        repos.push(human.clone());
+    }
+    for agent in s.agents.values() {
+        repos.push(agent.repo_root.clone());
+    }
+    drop(s);
+
+    for repo in &repos {
+        let pid_file = repo.join(".gitim/run/gitim.pid");
+        if let Ok(content) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                // Use `kill` command to send SIGTERM
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .output();
+                eprintln!("killed daemon pid {pid} at {}", repo.display());
+            }
+        }
+    }
 }

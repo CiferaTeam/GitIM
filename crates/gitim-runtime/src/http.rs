@@ -493,6 +493,13 @@ async fn agents_remove(
             if let Some(handle) = &info.loop_handle {
                 handle.abort();
             }
+            // Kill the agent's daemon process
+            let pid_file = info.repo_root.join(".gitim/run/gitim.pid");
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                }
+            }
             Json(serde_json::json!({ "ok": true }))
         }
         None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })),
@@ -529,10 +536,10 @@ async fn agents_stop(
     Json(serde_json::json!({ "ok": true }))
 }
 
-pub fn create_router() -> Router {
+pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/workspace", post(set_workspace))
         .route("/git/init", post(git_init))
@@ -548,5 +555,7 @@ pub fn create_router() -> Router {
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(state.clone());
+
+    (router, state)
 }
