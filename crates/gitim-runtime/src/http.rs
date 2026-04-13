@@ -408,7 +408,7 @@ async fn agents_start(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<AgentIdRequest>,
 ) -> Json<serde_json::Value> {
-    let repo_root = {
+    let (repo_root, handler) = {
         let s = state.lock().unwrap();
         match s.agents.get(&req.id) {
             None => {
@@ -423,11 +423,11 @@ async fn agents_start(
                     "error": format!("agent already running: {}", req.id)
                 }));
             }
-            Some(info) => info.repo_root.clone(),
+            Some(info) => (info.repo_root.clone(), info.handler.clone()),
         }
     };
 
-    let agent_loop = match AgentLoop::with_provider(&repo_root, "mock") {
+    let agent_loop = match AgentLoop::with_provider(&repo_root, "claude", &handler) {
         Ok(al) => al,
         Err(e) => {
             return Json(serde_json::json!({

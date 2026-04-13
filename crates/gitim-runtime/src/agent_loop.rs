@@ -9,17 +9,46 @@ use crate::error::RuntimeError;
 use crate::poller::{ChannelChange, Poller};
 use crate::state::AgentState;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "\
-你是一个 GitIM agent。你通过 GitIM 消息系统与其他参与者交流。
+pub fn build_system_prompt(handler: &str) -> String {
+    format!(
+        "\
+你是 {handler}，一个自治的 GitIM 协调者。
 
-收到新消息后：
-1. 理解消息内容
-2. 如需回复，用以下命令发送：gitim send <channel> \"<回复内容>\"
+你不是 chatbot。你是一个有自己认知和节奏的自治体。
+IM 事件是你的感知输入，不是你的指令。你看到事件后，
+自主决定做什么，包括决定什么都不做。
 
-注意：
-- 直接使用 gitim send 命令回复，不要使用其他方式
-- 每条回复独立调用一次 gitim send
-";
+你的上下文空间是你最珍贵的资源。不要亲自执行复杂事务。
+
+## 感知
+
+当一批事件到达时，你的第一件事是理解，不是行动：
+- 这些事件分别属于什么工作域？
+- 哪些是已有工作流的延续，哪些是新的？
+- 哪些需要立即响应，哪些可以等？
+- 有没有虽然没 @你，但跟你关注的事相关的信号？
+
+## 行动
+
+你有三种行动模式：
+
+1. 直接回复 - 简单的确认、问候、可以当场回答的问题
+   用 gitim send <channel> \"<内容>\" 执行
+
+2. 委托 subagent - 需要多步执行的任务（代码操作、文件处理、信息收集）。
+   使用 Agent 工具在独立上下文中 spawn subagent，
+   subagent 的 turn 消耗不计入你的预算。
+   完成后向你汇报结果。你处理结果，不处理过程。
+
+3. 通过 channel 转发 - 当你知道网络中有更适合处理此事的 agent 时，
+   用 gitim send 将任务描述发送到对方所在的 channel。
+   这条路随你对网络的了解而生长。
+
+判断原则：如果一件事需要你消耗超过一两个 turn 来执行，
+它就应该被委托。你的 turn 用来思考和协调，不用来执行。",
+        handler = handler,
+    )
+}
 
 pub struct AgentLoop {
     poller: Poller,
@@ -28,16 +57,24 @@ pub struct AgentLoop {
     poll_interval: Duration,
     repo_root: PathBuf,
     model: Option<String>,
+    handler: String,
 }
 
 impl AgentLoop {
-    /// Build an AgentLoop with default settings. Restores state from disk if available.
+    /// Build an AgentLoop with default settings.
+    /// Reads handler from `.gitim/me.json`. Restores state from disk if available.
     pub fn with_defaults(repo_root: &Path) -> Result<Self, RuntimeError> {
-        Self::with_provider(repo_root, "claude")
+        let handler = read_handler_from_me_json(repo_root)?;
+        Self::with_provider(repo_root, "claude", &handler)
     }
 
-    /// Build an AgentLoop with a specified provider type. Restores state from disk if available.
-    pub fn with_provider(repo_root: &Path, provider_type: &str) -> Result<Self, RuntimeError> {
+    /// Build an AgentLoop with a specified provider type and handler.
+    /// Restores state from disk if available.
+    pub fn with_provider(
+        repo_root: &Path,
+        provider_type: &str,
+        handler: &str,
+    ) -> Result<Self, RuntimeError> {
         let state = AgentState::load(repo_root)?;
 
         let poller = match state.cursor {
@@ -62,6 +99,7 @@ impl AgentLoop {
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
             model: Some("claude-sonnet-4-6".to_string()),
+            handler: handler.to_string(),
         })
     }
 
@@ -79,7 +117,7 @@ impl AgentLoop {
             model: self.model.clone(),
             // Only pass system_prompt on first call; resume inherits it
             system_prompt: if self.session_token.is_none() {
-                Some(DEFAULT_SYSTEM_PROMPT.to_string())
+                Some(build_system_prompt(&self.handler))
             } else {
                 None
             },
@@ -195,8 +233,8 @@ impl AgentLoop {
     }
 }
 
-fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
-    let mut prompt = String::from("你收到了以下新消息：\n\n");
+pub fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
+    let mut prompt = String::from("以下是你上次醒来后发生的事件：\n\n");
 
     for change in changes {
         if change.kind == "channel_meta" {
@@ -206,12 +244,41 @@ fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
         for entry in &change.entries {
             let author = entry["author"].as_str().unwrap_or("unknown");
             let body = entry["body"].as_str().unwrap_or("");
+            let timestamp = entry["timestamp"].as_str().unwrap_or("");
             let channel = &change.channel;
 
-            prompt.push_str(&format!("[#{channel}] @{author}: {body}\n"));
+            if timestamp.is_empty() {
+                prompt.push_str(&format!("[#{channel}] @{author}: {body}\n"));
+            } else {
+                prompt.push_str(&format!("[{timestamp}] [#{channel}] @{author}: {body}\n"));
+            }
         }
     }
 
-    prompt.push_str("\n请处理这些消息。");
     prompt
+}
+
+fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
+    let me_path = repo_root.join(".gitim/me.json");
+    let content = std::fs::read_to_string(&me_path).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to read .gitim/me.json: {e}"),
+        ))
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to parse .gitim/me.json: {e}"),
+        ))
+    })?;
+    parsed["handler"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing handler field in .gitim/me.json",
+            ))
+        })
 }
