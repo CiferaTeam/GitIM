@@ -7,6 +7,7 @@ import { AgentList } from "./components/management/agent-list";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
+import * as client from "./lib/client";
 import * as mockClient from "./lib/mock/client";
 import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
 import { SetupGate } from "./components/setup/setup-gate";
@@ -93,8 +94,8 @@ export default function App() {
         }
       }
 
-      // Periodically refresh agents
-      const agentsRes = await mockClient.listAgents();
+      // Periodically refresh agents (real backend)
+      const agentsRes = await client.listAgents();
       if (agentsRes.ok && agentsRes.data) {
         setAgents(agentsRes.data.agents as Agent[]);
       }
@@ -110,7 +111,7 @@ export default function App() {
         mockClient.me(),
         mockClient.channels(),
         mockClient.users(),
-        mockClient.listAgents(),
+        client.listAgents(),
       ]);
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);

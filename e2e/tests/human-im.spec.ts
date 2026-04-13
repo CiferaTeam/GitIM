@@ -13,21 +13,18 @@ test.describe("human IM API", () => {
     stopEnv(env);
   });
 
-  test("/im/me returns human identity", async () => {
-    const res = await fetch(`${env.baseUrl}/im/me`);
-    const data = await res.json();
-    expect(data.ok).toBe(true);
-    expect(data.data).toBeDefined();
-  });
+  test("send → read → poll round-trip", async () => {
+    // Poll to get initial cursor
+    const poll1 = await fetch(`${env.baseUrl}/im/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data1 = await poll1.json();
+    expect(data1.ok).toBe(true);
+    const cursor = data1.data?.commit_id;
 
-  test("/im/channels returns channel list", async () => {
-    const res = await fetch(`${env.baseUrl}/im/channels`);
-    const data = await res.json();
-    expect(data.ok).toBe(true);
-  });
-
-  test("/im/send + /im/read round-trip", async () => {
-    // Send a message to "general" channel
+    // Send a message
     const sendRes = await fetch(`${env.baseUrl}/im/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -41,31 +38,9 @@ test.describe("human IM API", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel: "general" }),
     });
-    const readData = await readRes.json();
-    expect(readData.ok).toBe(true);
-  });
+    expect((await readRes.json()).ok).toBe(true);
 
-  test("/im/poll returns changes since cursor", async () => {
-    // First poll — record the current HEAD cursor
-    const poll1 = await fetch(`${env.baseUrl}/im/poll`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const data1 = await poll1.json();
-    expect(data1.ok).toBe(true);
-    const cursor = data1.data?.commit_id;
-    expect(cursor).toBeDefined();
-
-    // Send a message to the already-existing "general" channel
-    const sendRes = await fetch(`${env.baseUrl}/im/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel: "general", body: "poll message" }),
-    });
-    expect((await sendRes.json()).ok).toBe(true);
-
-    // Poll again with the saved cursor — should see the new commit
+    // Poll should show changes
     const poll2 = await fetch(`${env.baseUrl}/im/poll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

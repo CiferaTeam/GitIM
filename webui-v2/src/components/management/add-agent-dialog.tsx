@@ -9,7 +9,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import * as mockClient from "@/lib/mock/client";
+import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
 import { Plus } from "lucide-react";
 import { useState } from "react";
@@ -24,7 +24,7 @@ export function AddAgentDialog() {
     e.preventDefault();
     if (!name.trim()) return;
 
-    const res = await mockClient.addAgent(name.trim(), systemPrompt.trim());
+    const res = await client.addAgent(name.trim(), systemPrompt.trim());
     if (res.ok && res.data?.agent) {
       addAgent(res.data.agent as Agent);
       setName("");
