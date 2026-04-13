@@ -1,10 +1,13 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
-use crate::agent::provision_human;
+use crate::agent::{provision_agent, provision_human, AgentConfig};
+use crate::agent_loop::AgentLoop;
 use gitim_client::GitimClient;
 
 #[derive(Serialize)]
@@ -20,11 +23,24 @@ struct WorkspaceRequest {
     confirm: bool,
 }
 
+#[derive(Clone, Serialize)]
+pub struct AgentInfo {
+    pub id: String,
+    pub handler: String,
+    pub display_name: String,
+    pub status: String, // "idle", "running", "error"
+    #[serde(skip)]
+    pub repo_root: PathBuf,
+    #[serde(skip)]
+    pub loop_handle: Option<AbortHandle>,
+}
+
 #[derive(Default)]
 pub struct RuntimeState {
     pub workspace: Option<PathBuf>,
     pub human_repo: Option<PathBuf>,
     pub poll_cursor: Option<String>,
+    pub agents: HashMap<String, AgentInfo>,
 }
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
@@ -303,6 +319,185 @@ async fn im_poll(
     api_response_to_json(result)
 }
 
+// -- /agents/add --
+
+#[derive(Deserialize)]
+struct AgentAddRequest {
+    handler: String,
+    display_name: String,
+}
+
+async fn agents_add(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<AgentAddRequest>,
+) -> Json<serde_json::Value> {
+    let (workspace, already_exists) = {
+        let s = state.lock().unwrap();
+        let ws = match &s.workspace {
+            Some(p) => p.clone(),
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "workspace not set"
+                }));
+            }
+        };
+        let exists = s.agents.contains_key(&req.handler);
+        (ws, exists)
+    };
+
+    if already_exists {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("agent already exists: {}", req.handler)
+        }));
+    }
+
+    let agents_dir = workspace.join(".gitim-runtime/agents");
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to create agents dir: {e}")
+        }));
+    }
+
+    let bare_repo = workspace.join("repo.git");
+    let config = AgentConfig {
+        handler: req.handler.clone(),
+        display_name: req.display_name.clone(),
+        remote_url: bare_repo.to_string_lossy().to_string(),
+    };
+
+    match provision_agent(&agents_dir, &config).await {
+        Ok(handle) => {
+            let info = AgentInfo {
+                id: req.handler.clone(),
+                handler: req.handler.clone(),
+                display_name: req.display_name.clone(),
+                status: "idle".to_string(),
+                repo_root: handle.repo_root,
+                loop_handle: None,
+            };
+            let mut s = state.lock().unwrap();
+            s.agents.insert(req.handler.clone(), info);
+            Json(serde_json::json!({ "ok": true, "id": req.handler }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("provision_agent failed: {e}")
+        })),
+    }
+}
+
+// -- /agents --
+
+async fn agents_list(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+    let s = state.lock().unwrap();
+    let agents: Vec<&AgentInfo> = s.agents.values().collect();
+    Json(serde_json::json!({ "ok": true, "agents": agents }))
+}
+
+// -- /agents/start --
+
+#[derive(Deserialize)]
+struct AgentIdRequest {
+    id: String,
+}
+
+async fn agents_start(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<AgentIdRequest>,
+) -> Json<serde_json::Value> {
+    let repo_root = {
+        let s = state.lock().unwrap();
+        match s.agents.get(&req.id) {
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("agent not found: {}", req.id)
+                }));
+            }
+            Some(info) if info.status == "running" => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("agent already running: {}", req.id)
+                }));
+            }
+            Some(info) => info.repo_root.clone(),
+        }
+    };
+
+    let agent_loop = match AgentLoop::with_provider(&repo_root, "mock") {
+        Ok(al) => al,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("failed to create agent loop: {e}")
+            }));
+        }
+    };
+
+    let agent_id = req.id.clone();
+    let state_clone = state.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut agent_loop = agent_loop;
+        let result = agent_loop.run().await;
+
+        // Update status when loop exits
+        let mut s = state_clone.lock().unwrap();
+        if let Some(info) = s.agents.get_mut(&agent_id) {
+            info.loop_handle = None;
+            info.status = match result {
+                Ok(()) => "idle".to_string(),
+                Err(_) => "error".to_string(),
+            };
+        }
+    });
+
+    let abort_handle = handle.abort_handle();
+
+    {
+        let mut s = state.lock().unwrap();
+        if let Some(info) = s.agents.get_mut(&req.id) {
+            info.loop_handle = Some(abort_handle);
+            info.status = "running".to_string();
+        }
+    }
+
+    Json(serde_json::json!({ "ok": true }))
+}
+
+// -- /agents/stop --
+
+async fn agents_stop(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<AgentIdRequest>,
+) -> Json<serde_json::Value> {
+    let abort_handle = {
+        let mut s = state.lock().unwrap();
+        match s.agents.get_mut(&req.id) {
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("agent not found: {}", req.id)
+                }));
+            }
+            Some(info) => {
+                let handle = info.loop_handle.take();
+                info.status = "idle".to_string();
+                handle
+            }
+        }
+    };
+
+    if let Some(handle) = abort_handle {
+        handle.abort();
+    }
+
+    Json(serde_json::json!({ "ok": true }))
+}
+
 pub fn create_router() -> Router {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
@@ -315,6 +510,10 @@ pub fn create_router() -> Router {
         .route("/im/send", post(im_send))
         .route("/im/read", post(im_read))
         .route("/im/poll", post(im_poll))
+        .route("/agents", get(agents_list))
+        .route("/agents/add", post(agents_add))
+        .route("/agents/start", post(agents_start))
+        .route("/agents/stop", post(agents_stop))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
