@@ -353,7 +353,7 @@ async fn agents_add(
         }));
     }
 
-    let agents_dir = workspace.join(".gitim-runtime/agents");
+    let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
         return Json(serde_json::json!({
             "ok": false,
