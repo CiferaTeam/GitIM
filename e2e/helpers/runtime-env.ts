@@ -80,7 +80,11 @@ export function buildRuntime(): void {
  * a RuntimeEnv ready for tests to use.
  */
 export async function startEnv(): Promise<RuntimeEnv> {
-  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "gitim-e2e-"));
+  // Use /tmp directly (not os.tmpdir()) to keep paths short enough for
+  // Unix socket name limits (104 chars on macOS). os.tmpdir() on macOS
+  // returns /var/folders/... which makes the socket path too long.
+  const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+  const workspaceDir = fs.mkdtempSync(path.join(tmpBase, "gitim-e2e-"));
 
   // Start runtime
   const runtimePort = await freePort();
