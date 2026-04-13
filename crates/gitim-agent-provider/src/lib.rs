@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod mock;
 mod error;
 mod provider;
 mod stubs;

@@ -22,6 +22,7 @@ pub fn create(
     match provider_type {
         "claude" => Ok(Box::new(crate::claude::ClaudeProvider::new(config))),
         "codex" => Ok(Box::new(crate::codex::CodexProvider::new(config))),
+        "mock" => Ok(Box::new(crate::mock::MockProvider::new(config))),
         "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
         "opencode" => Ok(Box::new(crate::stubs::OpencodeProvider::new(config))),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),

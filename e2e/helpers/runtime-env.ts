@@ -136,7 +136,7 @@ export async function startEnv(): Promise<RuntimeEnv> {
     workspaceDir,
     runtimeProc,
     viteProc,
-    baseUrl: `http://127.0.0.1:${vitePort}`,
+    baseUrl: runtimeBase,
   };
 }
 
