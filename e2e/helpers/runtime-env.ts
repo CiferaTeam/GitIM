@@ -66,9 +66,9 @@ export async function waitForHttp(
   throw new Error(`Server did not become available at ${url}`);
 }
 
-/** Build the gitim-runtime binary. */
+/** Build gitim-runtime and gitim-cli binaries. */
 export function buildRuntime(): void {
-  execSync("cargo build -p gitim-runtime", {
+  execSync("cargo build -p gitim-runtime -p gitim-cli", {
     cwd: ROOT,
     stdio: "inherit",
   });
@@ -89,8 +89,16 @@ export async function startEnv(): Promise<RuntimeEnv> {
   // Start runtime
   const runtimePort = await freePort();
   const runtimeBin = path.join(ROOT, "target/debug/gitim-runtime");
+  const debugBinDir = path.join(ROOT, "target/debug");
+  // Prepend target/debug to PATH so that MockProvider spawns the correct
+  // gitim binary (not an older system-installed version).
+  const runtimeEnv = {
+    ...process.env,
+    PATH: `${debugBinDir}:${process.env.PATH ?? ""}`,
+  };
   const runtimeProc = spawn(runtimeBin, ["--port", String(runtimePort)], {
     stdio: "pipe",
+    env: runtimeEnv,
   });
 
   // Start vite dev server
