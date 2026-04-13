@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 
+use crate::agent::provision_human;
+
 #[derive(Serialize)]
 struct HealthResponse {
     service: &'static str,
@@ -20,6 +22,7 @@ struct WorkspaceRequest {
 #[derive(Default)]
 pub struct RuntimeState {
     pub workspace: Option<PathBuf>,
+    pub human_repo: Option<PathBuf>,
 }
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
@@ -142,10 +145,22 @@ async fn git_init(
 
     match output {
         Ok(o) if o.status.success() => {
-            Json(serde_json::json!({
-                "ok": true,
-                "repo_path": repo_path.to_string_lossy()
-            }))
+            // Provision the human daemon after bare repo is ready
+            match provision_human(&workspace).await {
+                Ok(human_dir) => {
+                    let mut s = state.lock().unwrap();
+                    s.human_repo = Some(human_dir.clone());
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "repo_path": repo_path.to_string_lossy(),
+                        "human_repo": human_dir.to_string_lossy()
+                    }))
+                }
+                Err(e) => Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("provision_human failed: {e}")
+                })),
+            }
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
