@@ -8,7 +8,7 @@ pub mod poller;
 pub mod state;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};
-pub use agent_loop::AgentLoop;
+pub use agent_loop::{AgentLoop, build_system_prompt, format_changes_as_prompt};
 pub use error::RuntimeError;
 pub use poller::{ChannelChange, PollResult, Poller};
 pub use state::AgentState;
