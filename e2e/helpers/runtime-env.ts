@@ -152,6 +152,48 @@ export async function startEnv(): Promise<RuntimeEnv> {
   };
 }
 
+/**
+ * Start runtime + vite WITHOUT completing the startup flow.
+ * Use this when the UI test needs to drive the setup itself.
+ */
+export async function startServers(): Promise<RuntimeEnv> {
+  const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+  const workspaceDir = fs.mkdtempSync(path.join(tmpBase, "gitim-e2e-"));
+
+  const runtimePort = await freePort();
+  const runtimeBin = path.join(ROOT, "target/debug/gitim-runtime");
+  const debugBinDir = path.join(ROOT, "target/debug");
+  const runtimeProc = spawn(runtimeBin, ["--port", String(runtimePort)], {
+    stdio: "pipe",
+    env: { ...process.env, PATH: `${debugBinDir}:${process.env.PATH ?? ""}` },
+  });
+
+  const vitePort = await freePort();
+  const viteProc = spawn(
+    "npx",
+    ["vite", "--port", String(vitePort), "--strictPort", "--host", "127.0.0.1"],
+    {
+      cwd: WEBUI_DIR,
+      stdio: "pipe",
+      env: { ...process.env, BROWSER: "none" },
+    },
+  );
+
+  await Promise.all([
+    waitForHealth(`http://127.0.0.1:${runtimePort}/health`),
+    waitForHttp(`http://127.0.0.1:${vitePort}`),
+  ]);
+
+  return {
+    runtimePort,
+    vitePort,
+    workspaceDir,
+    runtimeProc,
+    viteProc,
+    baseUrl: `http://127.0.0.1:${runtimePort}`,
+  };
+}
+
 /** Kill processes and remove the temp workspace directory. */
 export function stopEnv(env: RuntimeEnv): void {
   env.runtimeProc?.kill();

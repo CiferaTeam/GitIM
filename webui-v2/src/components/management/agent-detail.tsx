@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import * as mockClient from "@/lib/mock/client";
+import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
@@ -62,12 +62,12 @@ export function AgentDetail() {
 
   async function handleToggle() {
     if (isRunning) {
-      const res = await mockClient.stopAgent(agent!.id);
+      const res = await client.stopAgent(agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
       }
     } else {
-      const res = await mockClient.startAgent(agent!.id);
+      const res = await client.startAgent(agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
       }

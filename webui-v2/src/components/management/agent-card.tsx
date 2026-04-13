@@ -7,7 +7,7 @@ import {
   CardHeader,
 } from "@/components/ui/card";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import * as mockClient from "@/lib/mock/client";
+import * as client from "@/lib/client";
 import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
 import { useNavigate } from "react-router";
@@ -55,12 +55,12 @@ export function AgentCard({ agent }: AgentCardProps) {
 
   async function handleToggle() {
     if (isRunning) {
-      const res = await mockClient.stopAgent(agent.id);
+      const res = await client.stopAgent(agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
       }
     } else {
-      const res = await mockClient.startAgent(agent.id);
+      const res = await client.startAgent(agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
       }

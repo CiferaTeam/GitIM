@@ -7,7 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import * as mockClient from "@/lib/mock/client";
+import * as client from "@/lib/client";
 
 interface RemoveAgentDialogProps {
   agentId: string;
@@ -28,7 +28,7 @@ export function RemoveAgentDialog({
   const removeAgent = useAgentStore((s) => s.removeAgent);
 
   async function handleConfirm() {
-    const res = await mockClient.removeAgent(agentId);
+    const res = await client.removeAgent(agentId);
     if (res.ok) {
       removeAgent(agentId);
       onOpenChange(false);
