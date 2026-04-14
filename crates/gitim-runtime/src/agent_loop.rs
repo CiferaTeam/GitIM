@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -265,6 +266,15 @@ pub fn build_system_prompt(handler: &str) -> String {
     .join("\n\n")
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AgentLoopConfig {
+    pub provider_type: String,
+    pub handler: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub env: HashMap<String, String>,
+}
+
 pub struct AgentLoop {
     poller: Poller,
     provider: Box<dyn Provider>,
@@ -272,6 +282,7 @@ pub struct AgentLoop {
     poll_interval: Duration,
     repo_root: PathBuf,
     model: Option<String>,
+    custom_system_prompt: Option<String>,
     handler: String,
     activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
 }
@@ -314,8 +325,48 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            custom_system_prompt: None,
             handler: handler.to_string(),
+            activity_tx: None,
+        })
+    }
+
+    /// Build an AgentLoop with full config (model, env, system_prompt).
+    pub fn with_config(
+        repo_root: &Path,
+        config: &AgentLoopConfig,
+    ) -> Result<Self, RuntimeError> {
+        let state = AgentState::load(repo_root)?;
+
+        let poller = match state.cursor {
+            Some(cursor) => {
+                info!(cursor = %cursor, "restored cursor from state");
+                Poller::with_cursor(GitimClient::new(repo_root), cursor)
+            }
+            None => Poller::new(GitimClient::new(repo_root)),
+        };
+
+        let provider_config = ProviderConfig {
+            executable_path: None,
+            env: config.env.clone(),
+        };
+        let provider = create(&config.provider_type, provider_config)
+            .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
+
+        if state.session_token.is_some() {
+            info!("restored session_token from state");
+        }
+
+        Ok(Self {
+            poller,
+            provider,
+            session_token: state.session_token,
+            poll_interval: Duration::from_secs(2),
+            repo_root: repo_root.to_path_buf(),
+            model: config.model.clone().or_else(|| Some("claude-sonnet-4-6".to_string())),
+            custom_system_prompt: config.system_prompt.clone(),
+            handler: config.handler.clone(),
             activity_tx: None,
         })
     }
@@ -345,15 +396,23 @@ impl AgentLoop {
     }
 
     fn build_exec_options(&self) -> ExecOptions {
+        let system_prompt = if self.session_token.is_none() {
+            let mut prompt = build_system_prompt(&self.handler);
+            if let Some(custom) = &self.custom_system_prompt {
+                if !custom.is_empty() {
+                    prompt.push_str("\n\n## 用户自定义指令\n\n");
+                    prompt.push_str(custom);
+                }
+            }
+            Some(prompt)
+        } else {
+            None
+        };
+
         ExecOptions {
             cwd: Some(self.repo_root.clone()),
             model: self.model.clone(),
-            // Only pass system_prompt on first call; resume inherits it
-            system_prompt: if self.session_token.is_none() {
-                Some(build_system_prompt(&self.handler))
-            } else {
-                None
-            },
+            system_prompt,
             max_turns: Some(20),
             resume_token: self.session_token.clone(),
             ..Default::default()
