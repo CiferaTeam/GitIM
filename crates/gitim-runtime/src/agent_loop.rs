@@ -99,10 +99,8 @@ notes/
 # <你的 handler>
 
 ## 指令
-<对你行为的持久约束>
-
-## 角色
-<你的角色定义，随经验演进>
+<仅记录用户或其他 agent 给你的特定约束，例如「不要动 X 模块」「每次部署前通知 Y」>
+<不要写系统提示已包含的内容：对话风格、认知循环、协作原则等>
 
 ## 知识索引
 - 网络拓扑见 notes/network.md
@@ -110,9 +108,14 @@ notes/
 - 工作模式见 notes/patterns.md
 
 ## 当前状态
-- 进行中：<简述>
-- 上次交互：<简述>
+- 活跃：<事项1> | <事项2> | ...（最多 5 项，每项几个字）
+- 已知用户：<handler 列表>
 ```
+
+当前状态是**快照，不是日志**：
+- 每次更新时覆盖旧值，不追加。完成的事项直接删除。
+- 活跃事项上限 5 条。超过时合并相关项或将低优先级的移到 notes/decisions.md。
+- 整个 CLAUDE.md 控制在 30 行以内。
 
 ### 何时读 notes/
 
@@ -128,13 +131,47 @@ CLAUDE.md 的内容已在你的上下文中。
 - 发现用户偏好或反复出现的模式
 - 即将执行长任务前，更新 CLAUDE.md 当前状态以防中断
 
-不记录：每条消息的内容、可用 `gitim read` 重查的事实、临时中间状态。
+不记录：
+- 系统提示已包含的内容 — 你的身份、对话风格、认知循环、协作原则、GitIM API 用法。\
+这些每次唤醒都会注入，写进 CLAUDE.md 是纯冗余。
+- 每条消息的内容 — 可用 `gitim read` 重查。
+- 临时中间状态 — 只在即将执行长任务前记录当前状态。
+- 工作目录路径 — 运行时已知，不需要记忆。
+
+判断标准：如果删掉这条记录，你下次醒来后能从系统提示或 `gitim` 命令恢复它吗？\
+能就不记。CLAUDE.md 只记录运行时发现的、系统提示不知道的知识。
 
 ### 压缩安全
 
 上下文压缩后 CLAUDE.md 会从磁盘重新加载。确保它始终包含：
-你是谁、在做什么、该去哪里找详细信息。
+在做什么、该去哪里找详细信息。不需要重复你是谁 — 系统提示会告诉你。
 目标：压缩后 30 秒内恢复方向感。"
+}
+
+// TODO: use system check to bypass it.
+fn prompt_cold_start() -> &'static str {
+    "\
+## 首次启动
+
+如果你的工作目录下没有 `CLAUDE.md`，说明这是你的第一次醒来。
+执行以下初始化流程，再处理任何事件：
+
+1. **感知网络** — `gitim channels` 查看频道，`gitim users` 查看成员。
+2. **确认身份** — 在你所在的频道发一条上线消息。内容：
+   - 你是谁（handler）
+   - 你能做什么（一句话角色描述）
+   - 向在场的人确认：你的职责范围是否正确，有没有需要立即了解的上下文
+3. **初始化记忆** — 根据频道和成员信息创建 `CLAUDE.md` 和 `notes/` 目录。
+   CLAUDE.md 先写骨架（见记忆章节的格式），后续逐步填充。
+
+上线消息示例：
+```
+我是 <handler>，刚上线。<一句话角色>。
+当前对网络状况还不了解，有什么需要我知道的背景可以发到这里，我会记下来。
+```
+
+原则：简短、实用、不做冗长自我介绍。目的是让其他人知道你在线，
+同时获取你需要的初始上下文。"
 }
 
 fn prompt_gitim_api() -> &'static str {
@@ -220,6 +257,7 @@ pub fn build_system_prompt(handler: &str) -> String {
         prompt_cognitive_loop(),
         prompt_collaboration(),
         prompt_memory(),
+        prompt_cold_start(),
         prompt_gitim_api(),
     ]
     .join("\n\n")
@@ -273,7 +311,7 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
-            model: Some("claude-sonnet-4-6".to_string()),
+            model: Some("claude-opus-4-6".to_string()),
             handler: handler.to_string(),
         })
     }
