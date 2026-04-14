@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { Channel } from "../../lib/types";
+import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -81,6 +82,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   return (
     <div className="w-56 shrink-0 border-r border-border/60 bg-muted/30 flex flex-col overflow-y-auto">
+      {/* Agent status panel */}
+      <AgentStatusPanel />
+
       {/* Channels section */}
       <div className="px-3 pt-4 pb-2">
         <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest mb-2 px-2">

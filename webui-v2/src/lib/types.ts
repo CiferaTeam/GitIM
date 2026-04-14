@@ -38,6 +38,13 @@ export interface UserInfo {
   display_name: string;
 }
 
+export interface AgentActivityEvent {
+  agent_id: string;
+  event_type: "tool_use" | "thinking" | "done" | "error";
+  detail: string;
+  timestamp: string; // ISO8601
+}
+
 export interface ApiResponse {
   ok: boolean;
   data?: Record<string, unknown>;
