@@ -144,14 +144,16 @@ fn infer(git_server: String, auth: serde_json::Value) -> Result<InferredIdentity
         serde_json::from_value(serde_json::Value::String(git_server.clone()))
             .map_err(|_| Response::error(format!("unknown git_server: {}", git_server)))?;
 
-    // Determine which AuthData variant to deserialize based on git_server string.
-    // The auth JSON must contain the fields for the matching variant (without the "type" tag),
-    // so we inject the tag before deserializing.
+    // Determine which AuthData variant to deserialize.
+    // If the auth payload contains handler + display_name (shared credential mode),
+    // route to the Git variant regardless of git_server — the identity is manually specified.
     let mut auth_obj = auth;
     if let Some(obj) = auth_obj.as_object_mut() {
+        let has_handler = obj.contains_key("handler") && obj.contains_key("display_name");
+        let auth_type = if has_handler { "git" } else { &git_server };
         obj.insert(
             "type".to_string(),
-            serde_json::Value::String(git_server.clone()),
+            serde_json::Value::String(auth_type.to_string()),
         );
     } else {
         return Err(Response::error("auth must be a JSON object"));
@@ -500,6 +502,18 @@ mod tests {
         let auth = serde_json::json!({});
         let result = infer("github".to_string(), auth);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn infer_github_with_handler_routes_to_git_variant() {
+        // Shared credential mode: git_server=github but auth has handler+display_name
+        let auth = serde_json::json!({
+            "handler": "bot-1",
+            "display_name": "Bot One"
+        });
+        let id = infer("github".to_string(), auth).unwrap();
+        assert_eq!(id.handler.as_str(), "bot-1");
+        assert_eq!(id.display_name, "Bot One");
     }
 
     #[tokio::test]
