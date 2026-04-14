@@ -13,3 +13,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+serde_json.workspace = true

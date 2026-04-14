@@ -63,28 +63,3 @@ pub fn format_event(
         width = width,
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_event_self_join() {
-        let author = Handler::new("nexus").unwrap();
-        let result = format_event(1, &author, "20250316T120000Z", "join", &serde_json::json!({}));
-        assert_eq!(
-            result,
-            "[L000001][P000000][@nexus][20250316T120000Z][E:join] {}\n"
-        );
-    }
-
-    #[test]
-    fn test_format_event_with_targets() {
-        let author = Handler::new("nexus").unwrap();
-        let meta = serde_json::json!({"targets": ["lewis", "coder"]});
-        let result = format_event(5, &author, "20250316T120000Z", "leave", &meta);
-        assert!(result.starts_with("[L000005][P000000][@nexus][20250316T120000Z][E:leave] "));
-        assert!(result.contains("\"targets\""));
-        assert!(result.ends_with('\n'));
-    }
-}
