@@ -8,8 +8,6 @@ import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
-import * as mockClient from "./lib/mock/client";
-import { startMockTimer, stopMockTimer } from "./lib/mock/timer";
 import { SetupGate } from "./components/setup/setup-gate";
 import { Toaster } from "sonner";
 
@@ -55,7 +53,7 @@ export default function App() {
 
   const runPoll = useCallback(async () => {
     try {
-      const pollRes = await mockClient.poll(sinceRef.current);
+      const pollRes = await client.poll(sinceRef.current);
       if (!pollRes.ok || !pollRes.data) return;
 
       sinceRef.current = pollRes.data.commit_id as string;
@@ -79,7 +77,7 @@ export default function App() {
           const apiCh = change.channel.startsWith("dm:")
             ? change.channel
             : displayName;
-          const readRes = await mockClient.read(apiCh);
+          const readRes = await client.read(apiCh);
           if (readRes.ok && readRes.data) {
             setMessages(readRes.data.entries as Message[]);
           }
@@ -89,7 +87,7 @@ export default function App() {
       }
 
       if (needChannelRefresh) {
-        const chRes = await mockClient.channels();
+        const chRes = await client.channels();
         if (chRes.ok && chRes.data) {
           setChannels(chRes.data.channels as Channel[]);
         }
@@ -109,9 +107,9 @@ export default function App() {
   useEffect(() => {
     async function init() {
       const [meRes, channelsRes, usersRes, agentsRes] = await Promise.all([
-        mockClient.me(),
-        mockClient.channels(),
-        mockClient.users(),
+        client.me(),
+        client.channels(),
+        client.users(),
         client.listAgents(),
       ]);
 
@@ -124,7 +122,6 @@ export default function App() {
         setAgents(agentsRes.data.agents as Agent[]);
 
       setConnected(true);
-      startMockTimer();
     }
 
     init();
@@ -133,7 +130,6 @@ export default function App() {
 
     return () => {
       clearInterval(pollHandle);
-      stopMockTimer();
     };
   }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
