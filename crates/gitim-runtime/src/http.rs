@@ -45,6 +45,12 @@ pub struct AgentInfo {
     pub display_name: String,
     pub status: String, // "idle", "running", "error"
     pub last_activity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
     #[serde(skip)]
     pub repo_root: PathBuf,
     #[serde(skip)]
@@ -419,6 +425,12 @@ async fn im_thread(
 struct AgentAddRequest {
     handler: String,
     display_name: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 async fn agents_add(
@@ -464,12 +476,32 @@ async fn agents_add(
 
     match provision_agent(&agents_dir, &config).await {
         Ok(handle) => {
+            // Persist model/system_prompt/env to me.json
+            let me_path = handle.repo_root.join(".gitim/me.json");
+            if let Ok(content) = std::fs::read_to_string(&me_path) {
+                if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(model) = &req.model {
+                        me["model"] = serde_json::Value::String(model.clone());
+                    }
+                    if let Some(sp) = &req.system_prompt {
+                        me["system_prompt"] = serde_json::Value::String(sp.clone());
+                    }
+                    if !req.env.is_empty() {
+                        me["env"] = serde_json::to_value(&req.env).unwrap_or_default();
+                    }
+                    let _ = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap());
+                }
+            }
+
             let info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),
                 display_name: req.display_name.clone(),
                 status: "idle".to_string(),
                 last_activity: None,
+                model: req.model.clone(),
+                system_prompt: req.system_prompt.clone(),
+                env: req.env.clone(),
                 repo_root: handle.repo_root,
                 loop_handle: None,
             };
@@ -767,12 +799,21 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
 
         {
             let mut s = state.lock().unwrap();
+            let model = me["model"].as_str().map(|s| s.to_string());
+            let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
+            let env: HashMap<String, String> = me.get("env")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
             s.agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
                 handler: handler.clone(),
                 display_name,
                 status: "idle".to_string(),
                 last_activity: None,
+                model,
+                system_prompt: custom_system_prompt,
+                env,
                 repo_root: dir,
                 loop_handle: None,
             });
