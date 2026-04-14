@@ -445,8 +445,16 @@ async fn agents_add(
                 repo_root: handle.repo_root,
                 loop_handle: None,
             };
-            let mut s = state.lock().unwrap();
-            s.agents.insert(req.handler.clone(), info);
+            {
+                let mut s = state.lock().unwrap();
+                s.agents.insert(req.handler.clone(), info);
+            }
+
+            // Auto-start the agent loop
+            if let Err(e) = start_agent_loop(&state, &req.handler) {
+                tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
+            }
+
             Json(serde_json::json!({ "ok": true, "id": req.handler }))
         }
         Err(e) => Json(serde_json::json!({
@@ -471,49 +479,31 @@ struct AgentIdRequest {
     id: String,
 }
 
-async fn agents_start(
-    State(state): State<SharedRuntimeState>,
-    Json(req): Json<AgentIdRequest>,
-) -> Json<serde_json::Value> {
+/// Start the agent loop for a given agent ID. Shared by add, start, and recover.
+fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), String> {
     let (repo_root, handler) = {
         let s = state.lock().unwrap();
-        match s.agents.get(&req.id) {
-            None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("agent not found: {}", req.id)
-                }));
-            }
+        match s.agents.get(agent_id) {
+            None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("agent already running: {}", req.id)
-                }));
+                return Err(format!("agent already running: {agent_id}"));
             }
             Some(info) => (info.repo_root.clone(), info.handler.clone()),
         }
     };
 
-    let agent_loop = match AgentLoop::with_provider(&repo_root, "claude", &handler) {
-        Ok(al) => al,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to create agent loop: {e}")
-            }));
-        }
-    };
+    let agent_loop = AgentLoop::with_provider(&repo_root, "claude", &handler)
+        .map_err(|e| format!("failed to create agent loop: {e}"))?;
 
-    let agent_id = req.id.clone();
+    let owned_id = agent_id.to_string();
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
         let mut agent_loop = agent_loop;
         let result = agent_loop.run().await;
 
-        // Update status when loop exits
         let mut s = state_clone.lock().unwrap();
-        if let Some(info) = s.agents.get_mut(&agent_id) {
+        if let Some(info) = s.agents.get_mut(&owned_id) {
             info.loop_handle = None;
             info.status = match result {
                 Ok(()) => "idle".to_string(),
@@ -523,16 +513,25 @@ async fn agents_start(
     });
 
     let abort_handle = handle.abort_handle();
-
     {
         let mut s = state.lock().unwrap();
-        if let Some(info) = s.agents.get_mut(&req.id) {
+        if let Some(info) = s.agents.get_mut(agent_id) {
             info.loop_handle = Some(abort_handle);
             info.status = "running".to_string();
         }
     }
 
-    Json(serde_json::json!({ "ok": true }))
+    Ok(())
+}
+
+async fn agents_start(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<AgentIdRequest>,
+) -> Json<serde_json::Value> {
+    match start_agent_loop(&state, &req.id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 // -- /agents/:id --
@@ -710,16 +709,23 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
             }
         }
 
-        let mut s = state.lock().unwrap();
-        s.agents.insert(handler.clone(), AgentInfo {
-            id: handler.clone(),
-            handler: handler.clone(),
-            display_name,
-            status: "idle".to_string(),
-            repo_root: dir,
-            loop_handle: None,
-        });
-        tracing::info!("agent @{handler} recovered");
+        {
+            let mut s = state.lock().unwrap();
+            s.agents.insert(handler.clone(), AgentInfo {
+                id: handler.clone(),
+                handler: handler.clone(),
+                display_name,
+                status: "idle".to_string(),
+                repo_root: dir,
+                loop_handle: None,
+            });
+        }
+
+        // Auto-start the agent loop on recovery
+        match start_agent_loop(&state, &handler) {
+            Ok(()) => tracing::info!("agent @{handler} recovered and started"),
+            Err(e) => tracing::warn!("agent @{handler} recovered but auto-start failed: {e}"),
+        }
     }
 }
 
