@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use gitim_agent_provider::{ExecOptions, ExecStatus, Provider, ProviderConfig, create};
 use gitim_client::GitimClient;
+use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::error::RuntimeError;
+use crate::http::AgentActivityEvent;
 use crate::poller::{ChannelChange, Poller};
 use crate::state::AgentState;
 
@@ -271,6 +273,7 @@ pub struct AgentLoop {
     repo_root: PathBuf,
     model: Option<String>,
     handler: String,
+    activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
 }
 
 impl AgentLoop {
@@ -313,7 +316,24 @@ impl AgentLoop {
             repo_root: repo_root.to_path_buf(),
             model: Some("claude-opus-4-6".to_string()),
             handler: handler.to_string(),
+            activity_tx: None,
         })
+    }
+
+    /// Attach a broadcast sender for agent activity events.
+    pub fn set_activity_tx(&mut self, tx: broadcast::Sender<AgentActivityEvent>) {
+        self.activity_tx = Some(tx);
+    }
+
+    fn emit_activity(&self, event_type: &str, detail: &str) {
+        if let Some(tx) = &self.activity_tx {
+            let _ = tx.send(AgentActivityEvent {
+                agent_id: self.handler.clone(),
+                event_type: event_type.to_string(),
+                detail: detail.to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+        }
     }
 
     fn save_state(&self) -> Result<(), RuntimeError> {
@@ -358,6 +378,7 @@ impl AgentLoop {
             }
         };
         info!(prompt = %prompt, "sending to provider");
+        self.emit_activity("thinking", "processing...");
 
         let opts = self.build_exec_options();
         let session = self
@@ -366,7 +387,7 @@ impl AgentLoop {
             .await
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
-        // Drain events (log them)
+        // Drain events (log + broadcast)
         let mut events = session.events;
         while let Some(event) = events.recv().await {
             match &event {
@@ -376,12 +397,14 @@ impl AgentLoop {
                 gitim_agent_provider::Event::ToolUse { tool, input, .. } => {
                     let snippet = summarize_tool_input(tool, input);
                     info!(tool = %tool, input = %snippet, "agent tool use");
+                    self.emit_activity("tool_use", &format!("{tool}: {snippet}"));
                 }
                 gitim_agent_provider::Event::ToolResult { call_id, output } => {
                     tracing::debug!(call_id = %call_id, output_len = output.len(), "tool result");
                 }
                 gitim_agent_provider::Event::Error { content } => {
                     tracing::warn!(error = %content, "agent error event");
+                    self.emit_activity("error", content);
                 }
                 _ => {}
             }
@@ -393,6 +416,7 @@ impl AgentLoop {
             .await
             .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
 
+        let duration_s = exec_result.duration_ms as f64 / 1000.0;
         if exec_result.status == ExecStatus::Failed {
             tracing::error!(
                 duration_ms = exec_result.duration_ms,
@@ -400,6 +424,7 @@ impl AgentLoop {
                 output = %exec_result.output.chars().take(300).collect::<String>(),
                 "provider failed"
             );
+            self.emit_activity("error", "execution failed");
             // Clear session_token to avoid resuming a broken session
             self.session_token = None;
         } else {
@@ -408,6 +433,7 @@ impl AgentLoop {
                 output = %exec_result.output.chars().take(100).collect::<String>(),
                 "provider ok"
             );
+            self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
             if let Some(token) = exec_result.session_token {
                 self.session_token = Some(token);
             }

@@ -4,6 +4,7 @@ import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
+import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
@@ -44,6 +45,9 @@ export default function App() {
   const workspaceRef = useRef<string | undefined>(undefined);
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
+
+  // Connect to agent activity SSE stream
+  useAgentActivitySSE();
 
   // Keep refs in sync with store
   useEffect(() => {

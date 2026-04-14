@@ -1,8 +1,12 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
@@ -25,24 +29,47 @@ struct WorkspaceRequest {
     confirm: bool,
 }
 
+/// Real-time agent activity event, broadcast via SSE.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentActivityEvent {
+    pub agent_id: String,
+    pub event_type: String, // "tool_use", "thinking", "done", "error"
+    pub detail: String,
+    pub timestamp: String, // ISO8601
+}
+
 #[derive(Clone, Serialize)]
 pub struct AgentInfo {
     pub id: String,
     pub handler: String,
     pub display_name: String,
     pub status: String, // "idle", "running", "error"
+    pub last_activity: Option<String>,
     #[serde(skip)]
     pub repo_root: PathBuf,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
 
-#[derive(Default)]
 pub struct RuntimeState {
     pub workspace: Option<PathBuf>,
     pub human_repo: Option<PathBuf>,
     pub poll_cursor: Option<String>,
     pub agents: HashMap<String, AgentInfo>,
+    pub activity_tx: broadcast::Sender<AgentActivityEvent>,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        let (activity_tx, _) = broadcast::channel(128);
+        Self {
+            workspace: None,
+            human_repo: None,
+            poll_cursor: None,
+            agents: HashMap::new(),
+            activity_tx,
+        }
+    }
 }
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
@@ -442,6 +469,7 @@ async fn agents_add(
                 handler: req.handler.clone(),
                 display_name: req.display_name.clone(),
                 status: "idle".to_string(),
+                last_activity: None,
                 repo_root: handle.repo_root,
                 loop_handle: None,
             };
@@ -492,14 +520,19 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
         }
     };
 
-    let agent_loop = AgentLoop::with_provider(&repo_root, "claude", &handler)
+    let mut agent_loop = AgentLoop::with_provider(&repo_root, "claude", &handler)
         .map_err(|e| format!("failed to create agent loop: {e}"))?;
+
+    // Wire up activity broadcast
+    {
+        let s = state.lock().unwrap();
+        agent_loop.set_activity_tx(s.activity_tx.clone());
+    }
 
     let owned_id = agent_id.to_string();
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_loop = agent_loop;
         let result = agent_loop.run().await;
 
         let mut s = state_clone.lock().unwrap();
@@ -600,6 +633,29 @@ async fn agents_stop(
     }
 
     Json(serde_json::json!({ "ok": true }))
+}
+
+// -- /agents/events (SSE) --
+
+async fn agents_events(
+    State(state): State<SharedRuntimeState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let rx = {
+        let s = state.lock().unwrap();
+        s.activity_tx.subscribe()
+    };
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
+        futures::future::ready(match result {
+            Ok(event) => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(SseEvent::default().data(data)))
+            }
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => None,
+        })
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 // -- persistence helpers --
@@ -716,6 +772,7 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 handler: handler.clone(),
                 display_name,
                 status: "idle".to_string(),
+                last_activity: None,
                 repo_root: dir,
                 loop_handle: None,
             });
@@ -744,6 +801,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/im/users", get(im_users))
         .route("/im/thread", post(im_thread))
         .route("/agents", get(agents_list))
+        .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
