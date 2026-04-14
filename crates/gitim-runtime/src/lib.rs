@@ -5,6 +5,7 @@ pub mod agent_loop;
 pub mod error;
 pub mod http;
 pub mod poller;
+pub mod preflight;
 pub mod state;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};
