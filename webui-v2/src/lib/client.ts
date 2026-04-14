@@ -1,25 +1,79 @@
 /**
- * Unified client — agent methods hit the real runtime HTTP API,
- * IM methods re-export from mock (temporary).
+ * Unified client — all methods hit the real runtime HTTP API.
+ * Agent methods fall back to mock if runtime is unreachable.
  */
 import type { Agent, ApiResponse } from "./types";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 
-// --- IM methods: re-export mock (temporary) ---
-
-export const me = mockClient.me;
-export const poll = mockClient.poll;
-export const channels = mockClient.channels;
-export const send = mockClient.send;
-export const read = mockClient.read;
-export const thread = mockClient.thread;
-export const users = mockClient.users;
-
 // --- Helpers ---
 
 function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
+}
+
+// --- IM methods: real runtime HTTP ---
+
+export async function me(): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/me`);
+  return await res.json();
+}
+
+export async function poll(since?: string): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/poll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ since }),
+  });
+  return await res.json();
+}
+
+export async function channels(): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/channels`);
+  return await res.json();
+}
+
+export async function send(
+  channel: string,
+  body: string,
+  _author?: string,
+  replyTo?: number,
+): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel, body, reply_to: replyTo }),
+  });
+  return await res.json();
+}
+
+export async function read(
+  channel: string,
+  limit?: number,
+): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/read`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel, limit }),
+  });
+  return await res.json();
+}
+
+export async function thread(
+  channel: string,
+  line: number,
+): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/thread`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel, line }),
+  });
+  return await res.json();
+}
+
+export async function users(): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/users`);
+  return await res.json();
 }
 
 /** Sanitize a display name into a valid handler (a-z, 0-9, hyphens). */
