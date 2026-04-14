@@ -23,7 +23,7 @@ fn test_format_changes_new_format() {
         })],
     }];
 
-    let prompt = format_changes_as_prompt(&changes);
+    let prompt = format_changes_as_prompt(&changes, "self-agent").unwrap();
     assert!(
         prompt.starts_with("以下是你上次醒来后发生的事件"),
         "should use neutral event header, got: {}",
@@ -49,7 +49,7 @@ fn test_format_changes_includes_timestamp() {
         })],
     }];
 
-    let prompt = format_changes_as_prompt(&changes);
+    let prompt = format_changes_as_prompt(&changes, "self-agent").unwrap();
     assert!(
         prompt.contains("2026-04-13T12:30:00Z"),
         "should include timestamp in output"
@@ -71,11 +71,52 @@ fn test_format_changes_missing_timestamp() {
         })],
     }];
 
-    let prompt = format_changes_as_prompt(&changes);
+    let prompt = format_changes_as_prompt(&changes, "self-agent").unwrap();
     assert!(prompt.contains("@carol"), "should still contain author");
     assert!(prompt.contains("hey there"), "should still contain body");
     assert!(
         prompt.contains("[#general] @carol: hey there"),
         "should fall back to format without timestamp"
+    );
+}
+
+#[test]
+fn test_format_changes_filters_self_authored() {
+    let changes = vec![ChannelChange {
+        channel: "general".to_string(),
+        kind: "channel".to_string(),
+        entries: vec![
+            serde_json::json!({
+                "author": "my-agent",
+                "body": "I said something",
+                "timestamp": "2026-04-14T01:00:00Z",
+            }),
+            serde_json::json!({
+                "author": "alice",
+                "body": "hello agent",
+                "timestamp": "2026-04-14T01:01:00Z",
+            }),
+        ],
+    }];
+
+    let prompt = format_changes_as_prompt(&changes, "my-agent").unwrap();
+    assert!(!prompt.contains("my-agent"), "should filter out self-authored messages");
+    assert!(prompt.contains("@alice"), "should keep external messages");
+}
+
+#[test]
+fn test_format_changes_returns_none_when_all_self() {
+    let changes = vec![ChannelChange {
+        channel: "general".to_string(),
+        kind: "channel".to_string(),
+        entries: vec![serde_json::json!({
+            "author": "my-agent",
+            "body": "talking to myself",
+        })],
+    }];
+
+    assert!(
+        format_changes_as_prompt(&changes, "my-agent").is_none(),
+        "should return None when all messages are self-authored"
     );
 }

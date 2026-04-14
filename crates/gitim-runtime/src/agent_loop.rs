@@ -349,7 +349,14 @@ impl AgentLoop {
             return Ok(false);
         }
 
-        let prompt = format_changes_as_prompt(&result.changes);
+        let prompt = match format_changes_as_prompt(&result.changes, &self.handler) {
+            Some(p) => p,
+            None => {
+                tracing::debug!("all changes are self-authored, skipping");
+                self.save_state()?;
+                return Ok(false);
+            }
+        };
         info!(prompt_len = prompt.len(), "sending to provider");
 
         let opts = self.build_exec_options();
@@ -366,8 +373,9 @@ impl AgentLoop {
                 gitim_agent_provider::Event::Text { content } => {
                     tracing::debug!(text_len = content.len(), "agent text");
                 }
-                gitim_agent_provider::Event::ToolUse { tool, .. } => {
-                    info!(tool = %tool, "agent tool use");
+                gitim_agent_provider::Event::ToolUse { tool, input, .. } => {
+                    let snippet = summarize_tool_input(tool, input);
+                    info!(tool = %tool, input = %snippet, "agent tool use");
                 }
                 gitim_agent_provider::Event::Error { content } => {
                     tracing::warn!(error = %content, "agent error event");
@@ -392,6 +400,7 @@ impl AgentLoop {
         if exec_result.status == ExecStatus::Failed {
             tracing::error!(
                 error = ?exec_result.error,
+                output = %exec_result.output.chars().take(200).collect::<String>(),
                 "provider execution failed"
             );
             // Clear session_token to avoid resuming a broken session
@@ -446,8 +455,33 @@ impl AgentLoop {
     }
 }
 
-pub fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
+/// Extract a short snippet from tool input for logging.
+fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
+    const MAX: usize = 60;
+    let raw = match tool {
+        "Bash" => input["command"].as_str().unwrap_or("").to_string(),
+        "Read" | "Write" => input["file_path"].as_str().unwrap_or("").to_string(),
+        "Edit" => {
+            let path = input["file_path"].as_str().unwrap_or("");
+            let old = input["old_string"].as_str().unwrap_or("");
+            format!("{path} :: {old}")
+        }
+        "Grep" => input["pattern"].as_str().unwrap_or("").to_string(),
+        "Glob" => input["pattern"].as_str().unwrap_or("").to_string(),
+        _ => input.to_string(),
+    };
+    if raw.len() <= MAX {
+        raw
+    } else {
+        format!("{}…", &raw[..raw.floor_char_boundary(MAX)])
+    }
+}
+
+/// Format channel changes into a prompt, filtering out self-authored messages.
+/// Returns `None` if no external events remain after filtering.
+pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -> Option<String> {
     let mut prompt = String::from("以下是你上次醒来后发生的事件：\n\n");
+    let mut has_external = false;
 
     for change in changes {
         if change.kind == "channel_meta" {
@@ -456,6 +490,12 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
 
         for entry in &change.entries {
             let author = entry["author"].as_str().unwrap_or("unknown");
+
+            if author == self_handler {
+                continue;
+            }
+
+            has_external = true;
             let body = entry["body"].as_str().unwrap_or("");
             let timestamp = entry["timestamp"].as_str().unwrap_or("");
             let channel = &change.channel;
@@ -483,7 +523,11 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange]) -> String {
         }
     }
 
-    prompt
+    if has_external {
+        Some(prompt)
+    } else {
+        None
+    }
 }
 
 fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {

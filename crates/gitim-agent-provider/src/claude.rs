@@ -114,11 +114,20 @@ async fn drive_session(
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
 
-    // Log stderr in background
+    // Collect stderr tail for error reporting
+    let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_tail_clone = stderr_tail.clone();
     let stderr_handle = tokio::spawn(async move {
+        const TAIL_LINES: usize = 20;
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "claude:stderr", "{}", line);
+            let mut tail = stderr_tail_clone.lock().unwrap();
+            tail.push(line);
+            if tail.len() > TAIL_LINES {
+                tail.remove(0);
+            }
         }
     });
 
@@ -214,6 +223,16 @@ async fn drive_session(
     info!(pid, ?final_status, ?duration, "claude finished");
 
     stderr_handle.abort();
+
+    // If failed with no error message, fall back to stderr tail
+    if final_status == ExecStatus::Failed
+        && final_error.as_ref().map_or(true, |e| e.is_empty())
+    {
+        let tail = stderr_tail.lock().unwrap();
+        if !tail.is_empty() {
+            final_error = Some(format!("(stderr) {}", tail.join("\n")));
+        }
+    }
 
     let _ = result_tx.send(ExecResult {
         status: final_status,
