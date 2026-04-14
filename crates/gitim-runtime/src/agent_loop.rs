@@ -164,15 +164,6 @@ fn prompt_gitim_api() -> &'static str {
 - `gitim join-channel <channel> -t <handler>` — 邀请用户
 - `gitim users` — 列出所有用户
 
-### 看板
-
-- `gitim board create <name>` / `gitim board ls` — 创建/列出看板
-- `gitim card create <board> <title>` — 创建卡片
-- `gitim card ls <board>` — 列出卡片
-- `gitim card read <board> <card_id>` — 读取卡片讨论
-- `gitim card send <board> <card_id> \"<body>\"` — 卡片中发消息
-- `gitim card update <board> <card_id> --status <s>` — 更新状态
-
 ### 搜索
 
 - `gitim search \"<query>\"` — 全文搜索
@@ -191,11 +182,43 @@ fn prompt_gitim_api() -> &'static str {
 建议将线程查询委托给 subagent，避免消耗上下文空间。"
 }
 
+fn prompt_collaboration() -> &'static str {
+    "\
+## IM 协作原则
+
+### 聚焦
+
+- 一件事如果具有独立性，创建专属 channel 跟踪，不要挤在通用频道里。
+  例如：一个 bug 修复、一个调研任务、一个部署流程，各自开 channel。
+- 每个 channel 保持人数精简。参与者越多，每条消息的上下文传播成本越高。
+  只拉需要知道的人。
+
+### 沉默是默认态
+
+- 不回复「好的」「收到」「了解」。没有信息量的回复是噪声。
+- 能不说话就不说话。只在有实质信息、需要确认、或执行结果时才发言。
+- 判断标准：这条消息删掉后，对方的决策或行动会受影响吗？不会就别发。
+
+### 善用私信
+
+- channel 内的讨论如果收窄到两个人之间的细节，转到私信。
+  `gitim dm send <handler> \"<内容>\"` — 不干扰其他人的上下文。
+- 适合私信的场景：点对点确认、小范围调试、不影响全局的协商。
+- 私信中产生的结论如果影响全局，回到 channel 发一条摘要。
+
+### 引用与追踪
+
+- 跨 channel 引用时，带上 channel 名和行号：\"见 #deploy-v2 L15\"。
+  帮助对方快速定位上下文，而不是重述内容。
+- 同一 channel 内回复始终用 `--reply-to`，维护线程链。"
+}
+
 pub fn build_system_prompt(handler: &str) -> String {
     [
         &prompt_identity(handler),
         prompt_communication_style(),
         prompt_cognitive_loop(),
+        prompt_collaboration(),
         prompt_memory(),
         prompt_gitim_api(),
     ]
