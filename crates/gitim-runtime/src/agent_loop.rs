@@ -334,7 +334,7 @@ impl AgentLoop {
             } else {
                 None
             },
-            max_turns: Some(5),
+            max_turns: Some(20),
             resume_token: self.session_token.clone(),
             ..Default::default()
         }
@@ -357,7 +357,7 @@ impl AgentLoop {
                 return Ok(false);
             }
         };
-        info!(prompt_len = prompt.len(), "sending to provider");
+        info!(prompt = %prompt, "sending to provider");
 
         let opts = self.build_exec_options();
         let session = self
@@ -377,6 +377,9 @@ impl AgentLoop {
                     let snippet = summarize_tool_input(tool, input);
                     info!(tool = %tool, input = %snippet, "agent tool use");
                 }
+                gitim_agent_provider::Event::ToolResult { call_id, output } => {
+                    tracing::debug!(call_id = %call_id, output_len = output.len(), "tool result");
+                }
                 gitim_agent_provider::Event::Error { content } => {
                     tracing::warn!(error = %content, "agent error event");
                 }
@@ -390,23 +393,24 @@ impl AgentLoop {
             .await
             .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
 
-        info!(
-            status = ?exec_result.status,
-            output_len = exec_result.output.len(),
-            duration_ms = exec_result.duration_ms,
-            "provider finished"
-        );
-
         if exec_result.status == ExecStatus::Failed {
             tracing::error!(
+                duration_ms = exec_result.duration_ms,
                 error = ?exec_result.error,
-                output = %exec_result.output.chars().take(200).collect::<String>(),
-                "provider execution failed"
+                output = %exec_result.output.chars().take(300).collect::<String>(),
+                "provider failed"
             );
             // Clear session_token to avoid resuming a broken session
             self.session_token = None;
-        } else if let Some(token) = exec_result.session_token {
-            self.session_token = Some(token);
+        } else {
+            info!(
+                duration_ms = exec_result.duration_ms,
+                output = %exec_result.output.chars().take(100).collect::<String>(),
+                "provider ok"
+            );
+            if let Some(token) = exec_result.session_token {
+                self.session_token = Some(token);
+            }
         }
 
         self.save_state()?;
@@ -430,10 +434,11 @@ impl AgentLoop {
             match self.run_once().await {
                 Ok(true) => {
                     consecutive_errors = 0;
-                    info!("processed messages");
+                    // provider finished/failed logs are already emitted in run_once
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
+                    tracing::trace!("idle");
                 }
                 Err(e) => {
                     consecutive_errors += 1;

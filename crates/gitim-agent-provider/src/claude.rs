@@ -170,12 +170,17 @@ async fn drive_session(
                 } => {
                     saw_result = true;
                     session_id = sid;
-                    if !result_text.is_empty() {
-                        output = result_text;
-                    }
                     if is_error {
                         final_status = ExecStatus::Failed;
-                        final_error = Some(output.clone());
+                        // Use result_text as error if available; don't fall back
+                        // to accumulated output (which is just agent thinking text)
+                        final_error = if result_text.is_empty() {
+                            None
+                        } else {
+                            Some(result_text)
+                        };
+                    } else if !result_text.is_empty() {
+                        output = result_text;
                     }
                 }
                 ParsedMessage::ControlRequest { request_id, input } => {
