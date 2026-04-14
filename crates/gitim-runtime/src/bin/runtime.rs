@@ -5,9 +5,21 @@ use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // --version: print and exit before anything else
+    if args.get(1).map(|s| s.as_str()) == Some("--version") {
+        println!("gitim-runtime {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt::init();
 
-    let args: Vec<String> = std::env::args().collect();
+    // Environment preflight: all three binaries must be version-aligned
+    if let Err(e) = gitim_runtime::preflight::check_env() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
 
     // Shell mode: gitim-runtime --port <PORT>
     if args.len() >= 3 && args[1] == "--port" {
