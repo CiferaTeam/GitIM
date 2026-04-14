@@ -65,7 +65,7 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 /// Run `<binary> --version`, parse the version string.
 /// Expected format: `<name> <version>` (e.g. "gitim 0.3.1").
-fn query_version(binary_path: &Path) -> Option<String> {
+pub fn query_version(binary_path: &Path) -> Option<String> {
     let output = Command::new(binary_path)
         .arg("--version")
         .output()
