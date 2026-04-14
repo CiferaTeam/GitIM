@@ -110,6 +110,8 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     name: (raw.display_name ?? raw.handler) as string,
     status: ((raw.status as string) === "idle" ? "offline" : raw.status) as Agent["status"],
     systemPrompt: (raw.system_prompt as string) ?? "",
+    model: (raw.model as string) ?? undefined,
+    env: (raw.env as Record<string, string>) ?? undefined,
     repoPath: (raw.repo_path as string) ?? "",
     messagesProcessed: (raw.messages_processed as number) ?? 0,
     lastActivity: raw.last_activity as string | undefined,
@@ -145,13 +147,21 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 export async function addAgent(
   name: string,
   systemPrompt: string,
+  model?: string,
+  env?: Record<string, string>,
 ): Promise<ApiResponse> {
   try {
     const handler = toHandler(name);
     const res = await fetch(`${baseUrl()}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ handler, display_name: name }),
+      body: JSON.stringify({
+        handler,
+        display_name: name,
+        model: model || undefined,
+        system_prompt: systemPrompt || undefined,
+        env: env && Object.keys(env).length > 0 ? env : undefined,
+      }),
     });
     const data = await res.json();
     if (!data.ok) return data;
@@ -160,6 +170,8 @@ export async function addAgent(
       name,
       status: "offline",
       systemPrompt,
+      model,
+      env,
       repoPath: "",
       messagesProcessed: 0,
     };
