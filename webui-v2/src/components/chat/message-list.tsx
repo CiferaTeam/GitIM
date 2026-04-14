@@ -123,10 +123,16 @@ export function MessageList({
         const key = msg._pendingId ?? msg.line_number;
 
         if (msg.type === "event") {
+          const eventText =
+            msg.event_type === "join"
+              ? `@${msg.author} joined the channel`
+              : msg.event_type === "leave"
+                ? `@${msg.author} left the channel`
+                : msg.body ?? `${msg.author}: ${msg.event_type}`;
           return (
             <div key={key} className="flex justify-center py-2">
               <span className="text-[11px] text-muted-foreground/60 italic">
-                {msg.body}
+                {eventText}
               </span>
             </div>
           );
