@@ -319,6 +319,35 @@ async fn im_poll(
     api_response_to_json(result)
 }
 
+// -- /im/users --
+
+async fn im_users(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    api_response_to_json(client.list_users().await)
+}
+
+// -- /im/thread --
+
+#[derive(Deserialize)]
+struct ThreadRequest {
+    channel: String,
+    line: u64,
+}
+
+async fn im_thread(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<ThreadRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    api_response_to_json(client.get_thread(&req.channel, req.line).await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -548,6 +577,8 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/im/send", post(im_send))
         .route("/im/read", post(im_read))
         .route("/im/poll", post(im_poll))
+        .route("/im/users", get(im_users))
+        .route("/im/thread", post(im_thread))
         .route("/agents", get(agents_list))
         .route("/agents/add", post(agents_add))
         .route("/agents/start", post(agents_start))
