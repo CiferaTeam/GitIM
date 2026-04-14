@@ -844,14 +844,20 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         Err(e) => return Response::error(format!("failed to get commit: {}", e)),
     };
 
-    // No cursor → return sync point
+    // No cursor → start from parent commit so the first poll picks up recent messages
     let since_commit = match since {
         Some(s) if !s.is_empty() => s,
         _ => {
-            return Response::success(serde_json::json!({
-                "commit_id": current_commit,
-                "changes": [],
-            }))
+            match state.git_storage.rev_parse(&format!("{}~1", ref_name)) {
+                Ok(parent) => parent,
+                Err(_) => {
+                    // No parent (initial commit) — return sync point with no changes
+                    return Response::success(serde_json::json!({
+                        "commit_id": current_commit,
+                        "changes": [],
+                    }));
+                }
+            }
         }
     };
 
