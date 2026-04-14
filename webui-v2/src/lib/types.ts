@@ -5,6 +5,8 @@ export interface Agent {
   name: string;
   status: AgentStatus;
   systemPrompt: string;
+  model?: string;
+  env?: Record<string, string>;
   repoPath: string;
   sessionId?: string;
   lastActivity?: string; // ISO8601
