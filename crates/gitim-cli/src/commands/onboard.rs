@@ -162,7 +162,7 @@ fn clone_or_create_repo(
                 None => repo_name.to_string(),
             };
 
-            // Try clone first
+            // Try gh CLI first (uses gh's own auth)
             let clone_ok = Command::new("gh")
                 .args(["repo", "clone", &gh_target, target_dir.to_str().unwrap_or(repo_name)])
                 .stdin(Stdio::null())
@@ -172,25 +172,84 @@ fn clone_or_create_repo(
                 .map(|s| s.success())
                 .unwrap_or(false);
 
-            if !clone_ok {
-                // Try create + clone
-                let parent = target_dir.parent().unwrap_or_else(|| Path::new("."));
-                let create_ok = Command::new("gh")
-                    .args(["repo", "create", &gh_target, "--private", "--clone"])
-                    .current_dir(parent)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-
-                if !create_ok {
-                    eprintln!("Error: 无法创建仓库 {gh_target}");
-                    eprintln!("  → 请确认 gh 已认证且 Token 有仓库创建权限");
-                    process::exit(1);
-                }
+            if clone_ok {
+                return target_dir;
             }
+
+            // gh clone failed — try gh create
+            let parent = target_dir.parent().unwrap_or_else(|| Path::new("."));
+            let create_ok = Command::new("gh")
+                .args(["repo", "create", &gh_target, "--private", "--clone"])
+                .current_dir(parent)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if create_ok {
+                return target_dir;
+            }
+
+            // gh not available or failed — fallback to git clone
+            let org_name = org.unwrap_or_else(|| {
+                eprintln!("Error: gh 不可用时，github 模式需要指定 org");
+                eprintln!("  → 用法: gitim onboard <repo> <org> --git-server github --handler ...");
+                process::exit(1);
+            });
+
+            let clone_url = if let Some(token) = &args.token {
+                format!("https://x-access-token:{token}@github.com/{org_name}/{repo_name}.git")
+            } else {
+                format!("git@github.com:{org_name}/{repo_name}.git")
+            };
+
+            let git_clone_ok = Command::new("git")
+                .args(["clone", &clone_url, target_dir.to_str().unwrap_or(repo_name)])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if git_clone_ok {
+                return target_dir;
+            }
+
+            // All clone attempts failed — init locally + add remote
+            eprintln!("Warning: 无法克隆远程仓库，创建本地 git 仓库");
+            fs::create_dir_all(&target_dir).unwrap_or_else(|e| {
+                eprintln!("Error: cannot create directory: {e}");
+                process::exit(1);
+            });
+            let init_ok = Command::new("git")
+                .args(["init"])
+                .current_dir(&target_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !init_ok {
+                eprintln!("Error: git init 失败");
+                process::exit(1);
+            }
+
+            let remote_url = if let Some(token) = &args.token {
+                format!("https://x-access-token:{token}@github.com/{org_name}/{repo_name}.git")
+            } else {
+                format!("git@github.com:{org_name}/{repo_name}.git")
+            };
+            let _ = Command::new("git")
+                .args(["remote", "add", "origin", &remote_url])
+                .current_dir(&target_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
 
             target_dir
         }
