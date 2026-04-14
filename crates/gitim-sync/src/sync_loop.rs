@@ -60,9 +60,15 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let mut next_delay = Duration::from_millis(base_ms);
 
     loop {
-        tokio::select! {
-            _ = tokio::time::sleep(next_delay) => {}
-            _ = push_notify.notified() => {}
+        if consecutive_rate_limits > 0 {
+            // During rate-limit backoff, ignore push_notify to avoid
+            // hammering the remote when local writers are active.
+            tokio::time::sleep(next_delay).await;
+        } else {
+            tokio::select! {
+                _ = tokio::time::sleep(next_delay) => {}
+                _ = push_notify.notified() => {}
+            }
         }
 
         let outcome = run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced, &on_cycle_done);
@@ -81,11 +87,14 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
                 consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
                 let backoff_ms = base_ms * 2u64.pow(consecutive_rate_limits.min(5));
                 let capped_ms = backoff_ms.min(120_000);
+                // Jitter on backoff too — prevent thundering herd when
+                // multiple agents get rate-limited simultaneously.
+                let backoff_jitter = rand::rng().random_range(0..capped_ms / 3 + 1);
                 warn!(
                     "sync: rate limited, backing off {}ms (consecutive: {})",
-                    capped_ms, consecutive_rate_limits
+                    capped_ms + backoff_jitter, consecutive_rate_limits
                 );
-                Duration::from_millis(capped_ms)
+                Duration::from_millis(capped_ms + backoff_jitter)
             }
         };
     }
