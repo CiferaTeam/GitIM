@@ -23,7 +23,7 @@ tokio-stream = "0.1"
 chrono.workspace = true
 futures = "0.3"
 async-stream = "0.3"
-rand = "0.8"
+rand = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
