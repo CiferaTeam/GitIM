@@ -134,10 +134,10 @@ enum Commands {
         /// Auth token for GitHub/Gitea/GitLab
         #[arg(short, long)]
         token: Option<String>,
-        /// Handler (required for git local mode)
+        /// Handler (git 必填; github 可选，配合 --display-name 替代 --token)
         #[arg(long)]
         handler: Option<String>,
-        /// Display name (required for git local mode)
+        /// Display name (git 必填; github 可选，配合 --handler 替代 --token)
         #[arg(long)]
         display_name: Option<String>,
         /// Server URL for Gitea/GitLab

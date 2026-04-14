@@ -68,6 +68,14 @@ fn validate_params(git_server: &GitServer, args: &OnboardArgs) {
                 process::exit(1);
             }
         }
+        GitServer::Github => {
+            let has_handler = args.handler.is_some() && args.display_name.is_some();
+            let has_token = args.token.is_some();
+            if !has_handler && !has_token {
+                eprintln!("Error: github 模式需要 --handler + --display-name 或 --token");
+                process::exit(1);
+            }
+        }
         other => {
             let name = other.as_str();
             if args.token.is_none() {
