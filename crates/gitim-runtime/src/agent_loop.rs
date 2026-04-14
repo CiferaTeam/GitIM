@@ -620,6 +620,30 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
     }
 }
 
+/// Check whether any change contains a steering trigger.
+///
+/// Trigger condition: message from another user that @mentions self_handler
+/// AND contains "急急急". Self-authored messages are ignored.
+pub fn detect_steering_trigger(changes: &[ChannelChange], self_handler: &str) -> bool {
+    let mention = format!("@{self_handler}");
+    for change in changes {
+        if change.kind == "channel_meta" {
+            continue;
+        }
+        for entry in &change.entries {
+            let author = entry["author"].as_str().unwrap_or("");
+            if author == self_handler {
+                continue;
+            }
+            let body = entry["body"].as_str().unwrap_or("");
+            if body.contains(&mention) && body.contains("急急急") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
     let me_path = repo_root.join(".gitim/me.json");
     let content = std::fs::read_to_string(&me_path).map_err(|e| {
