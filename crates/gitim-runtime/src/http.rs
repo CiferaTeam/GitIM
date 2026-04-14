@@ -46,6 +46,8 @@ pub struct AgentInfo {
     pub status: String, // "idle", "running", "error"
     pub last_activity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -426,6 +428,8 @@ struct AgentAddRequest {
     handler: String,
     display_name: String,
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
@@ -487,10 +491,13 @@ async fn agents_add(
                 }
             }
 
-            // Persist model/system_prompt/env to me.json
+            // Persist config to me.json
             let me_path = handle.repo_root.join(".gitim/me.json");
             if let Ok(content) = std::fs::read_to_string(&me_path) {
                 if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(provider) = &req.provider {
+                        me["provider"] = serde_json::Value::String(provider.clone());
+                    }
                     if let Some(model) = &req.model {
                         me["model"] = serde_json::Value::String(model.clone());
                     }
@@ -510,6 +517,7 @@ async fn agents_add(
                 display_name: req.display_name.clone(),
                 status: "idle".to_string(),
                 last_activity: None,
+                provider: req.provider.clone(),
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
@@ -552,16 +560,17 @@ struct AgentIdRequest {
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), String> {
-    let (repo_root, handler, model, system_prompt, env) = {
+    let (repo_root, handler, provider, model, system_prompt, env) = {
         let s = state.lock().unwrap();
         match s.agents.get(agent_id) {
             None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
-                return Err(format!("agent already running: {agent_id}"));
+                return Ok(()); // idempotent: already running is ok
             }
             Some(info) => (
                 info.repo_root.clone(),
                 info.handler.clone(),
+                info.provider.clone(),
                 info.model.clone(),
                 info.system_prompt.clone(),
                 info.env.clone(),
@@ -570,7 +579,7 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
     };
 
     let loop_config = crate::agent_loop::AgentLoopConfig {
-        provider_type: "claude".to_string(),
+        provider_type: provider.unwrap_or_else(|| "claude".to_string()),
         handler,
         model,
         system_prompt,
@@ -823,6 +832,7 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
 
         {
             let mut s = state.lock().unwrap();
+            let provider = me["provider"].as_str().map(|s| s.to_string());
             let model = me["model"].as_str().map(|s| s.to_string());
             let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
             let env: HashMap<String, String> = me.get("env")
@@ -835,6 +845,7 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 display_name,
                 status: "idle".to_string(),
                 last_activity: None,
+                provider,
                 model,
                 system_prompt: custom_system_prompt,
                 env,

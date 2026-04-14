@@ -18,7 +18,7 @@ test.describe("human-agent interaction", () => {
     const addRes = await fetch(`${env.baseUrl}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ handler: "mock-bot", display_name: "Mock Bot" }),
+      body: JSON.stringify({ handler: "mock-bot", display_name: "Mock Bot", provider: "mock" }),
     });
     expect((await addRes.json()).ok).toBe(true);
 

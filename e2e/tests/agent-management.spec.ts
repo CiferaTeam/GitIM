@@ -23,7 +23,7 @@ test.describe("agent management API", () => {
     const addRes = await fetch(`${env.baseUrl}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ handler: "lifecycle-bot", display_name: "Lifecycle Bot" }),
+      body: JSON.stringify({ handler: "lifecycle-bot", display_name: "Lifecycle Bot", provider: "mock" }),
     });
     const addData = await addRes.json();
     expect(addData.ok).toBe(true);

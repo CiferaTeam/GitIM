@@ -67,6 +67,7 @@ test.describe("UI agent CRUD (real backend)", () => {
     );
     expect(agent).toBeDefined();
     expect(agent.display_name).toBe("E2E Bot");
-    expect(agent.status).toBe("idle");
+    // Agent is auto-started on creation, so status should be "running"
+    expect(agent.status).toBe("running");
   });
 });
