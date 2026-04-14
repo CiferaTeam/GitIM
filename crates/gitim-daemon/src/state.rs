@@ -206,7 +206,26 @@ impl AppState {
                     }
                 },
                 move |head_commit| {
-                    // on_synced: update index after each sync cycle
+                    // on_synced: refresh users list from disk
+                    let users_dir = synced_state.repo_root.join("users");
+                    if let Ok(entries) = std::fs::read_dir(&users_dir) {
+                        let mut fresh: Vec<String> = entries
+                            .flatten()
+                            .filter_map(|e| {
+                                let name = e.file_name().to_string_lossy().to_string();
+                                name.strip_suffix(".meta.yaml").map(|h| h.to_string())
+                            })
+                            .collect();
+                        fresh.sort();
+                        if let Ok(mut users) = synced_state.users.try_write() {
+                            if *users != fresh {
+                                tracing::info!("on_synced: users list refreshed ({} users)", fresh.len());
+                                *users = fresh;
+                            }
+                        }
+                    }
+
+                    // update index after each sync cycle
                     let index_guard = synced_state.index.read().unwrap();
                     let index = match &*index_guard {
                         Some(idx) => idx.clone(),
