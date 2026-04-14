@@ -1,4 +1,5 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { ApiResponse } from "../../lib/types";
 import { MentionPopup } from "./mention-popup";
@@ -12,7 +13,15 @@ export function InputArea({ onSend }: InputAreaProps) {
   const replyTo = useChatStore((s) => s.replyTo);
   const setReplyTo = useChatStore((s) => s.setReplyTo);
   const users = useChatStore((s) => s.users);
+  const agents = useAgentStore((s) => s.agents);
   const isGuest = useChatStore((s) => s.isGuest);
+
+  // Merge human users + agent handlers for @mention
+  const mentionCandidates = useMemo(() => {
+    const agentIds = agents.map((a) => a.id);
+    const set = new Set([...users, ...agentIds]);
+    return [...set];
+  }, [users, agents]);
 
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -141,7 +150,7 @@ export function InputArea({ onSend }: InputAreaProps) {
       <div className="relative">
         {mentionOpen && (
           <MentionPopup
-            users={users}
+            users={mentionCandidates}
             filter={mentionFilter}
             onSelect={handleMentionSelect}
             onClose={() => setMentionOpen(false)}

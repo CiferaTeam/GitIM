@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
@@ -57,6 +57,15 @@ export function ChatLayout() {
     },
     [selectChannel, clearUnread, setMessages, setThreadRoot]
   );
+
+  // Auto-select "general" when entering chat with no channel focused
+  useEffect(() => {
+    if (currentChannel) return;
+    const general = channels.find((c) => c.name === "general");
+    if (general) {
+      handleChannelSelect("general");
+    }
+  }, [channels, currentChannel, handleChannelSelect]);
 
   const handleStartDm = useCallback(
     async (targetUser: string) => {
