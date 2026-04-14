@@ -3,6 +3,8 @@ import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
 import type { AgentActivityEvent } from "../../lib/types";
 
+const EMPTY_ACTIVITIES: AgentActivityEvent[] = [];
+
 function StatusDot({ status }: { status: string }) {
   const color =
     status === "running"
@@ -44,7 +46,7 @@ function ActivityLine({ event }: { event: AgentActivityEvent }) {
 function AgentRow({ agentId, name }: { agentId: string; name: string }) {
   const [expanded, setExpanded] = useState(false);
   const activities = useAgentActivityStore(
-    (s) => s.activities[agentId] ?? [],
+    (s) => s.activities[agentId] ?? EMPTY_ACTIVITIES,
   );
   const status =
     useAgentStore((s) => s.agents.find((a) => a.id === agentId)?.status) ??

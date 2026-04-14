@@ -464,6 +464,17 @@ async fn agents_add(
 
     match provision_agent(&agents_dir, &config).await {
         Ok(handle) => {
+            // Recheck after async provision to prevent duplicate loops from concurrent requests
+            {
+                let s = state.lock().unwrap();
+                if s.agents.contains_key(&req.handler) {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "id": req.handler,
+                    }));
+                }
+            }
+
             let info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),

@@ -21,22 +21,28 @@ export function AddAgentDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || validationError) return;
+    if (!name.trim() || validationError || submitting) return;
 
-    const res = await client.addAgent(name.trim(), systemPrompt.trim());
-    if (res.ok && res.data?.agent) {
-      addAgent(res.data.agent as Agent);
-      setName("");
-      setSystemPrompt("");
-      setOpen(false);
-    } else {
-      toast.error(res.error ?? "Failed to add agent");
+    setSubmitting(true);
+    try {
+      const res = await client.addAgent(name.trim(), systemPrompt.trim());
+      if (res.ok && res.data?.agent) {
+        addAgent(res.data.agent as Agent);
+        setName("");
+        setSystemPrompt("");
+        setOpen(false);
+      } else {
+        toast.error(res.error ?? "Failed to add agent");
+      }
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -96,7 +102,7 @@ export function AddAgentDialog() {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={!name.trim() || !!validationError}>
+              <Button type="submit" disabled={!name.trim() || !!validationError || submitting}>
                 Add
               </Button>
             </DialogFooter>
