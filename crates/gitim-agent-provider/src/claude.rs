@@ -9,6 +9,8 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -85,11 +87,14 @@ impl Provider for ClaudeProvider {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
 
+        let cancel_token = CancellationToken::new();
+        let cancel_token_inner = cancel_token.clone();
+
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stdin, stderr, event_tx, result_tx, timeout, pid).await;
+            drive_session(child, stdout, stdin, stderr, event_tx, result_tx, timeout, pid, cancel_token_inner).await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle()))
+        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
     }
 }
 
@@ -103,6 +108,7 @@ async fn drive_session(
     result_tx: oneshot::Sender<ExecResult>,
     timeout: Duration,
     pid: u32,
+    cancel_token: CancellationToken,
 ) {
     let start = Instant::now();
     let mut output = String::new();
@@ -133,75 +139,94 @@ async fn drive_session(
     });
 
     let read_result = tokio::time::timeout(timeout, async {
-        while let Ok(Some(line)) = reader.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
+        loop {
+            tokio::select! {
+                line = reader.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let line = line.trim().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
 
-            let parsed = match parse_line(&line) {
-                Some(p) => p,
-                None => {
-                    debug!(pid, line_len = line.len(), "unparsed line");
-                    continue;
-                }
-            };
+                            let parsed = match parse_line(&line) {
+                                Some(p) => p,
+                                None => {
+                                    debug!(pid, line_len = line.len(), "unparsed line");
+                                    continue;
+                                }
+                            };
 
-            match parsed {
-                ParsedMessage::System { session_id: sid } => {
-                    session_id = sid;
-                    try_send_event(&event_tx, Event::Status {
-                        status: "running".to_string(),
-                    });
-                }
-                ParsedMessage::AssistantEvents(events) => {
-                    num_turns += 1;
-                    for event in events {
-                        if let Event::Text { ref content } = event {
-                            output.push_str(content);
+                            match parsed {
+                                ParsedMessage::System { session_id: sid } => {
+                                    session_id = sid;
+                                    try_send_event(&event_tx, Event::Status {
+                                        status: "running".to_string(),
+                                    });
+                                }
+                                ParsedMessage::AssistantEvents(events) => {
+                                    num_turns += 1;
+                                    for event in events {
+                                        if let Event::Text { ref content } = event {
+                                            output.push_str(content);
+                                        }
+                                        try_send_event(&event_tx, event);
+                                    }
+                                }
+                                ParsedMessage::UserEvents(events) => {
+                                    for event in events {
+                                        try_send_event(&event_tx, event);
+                                    }
+                                }
+                                ParsedMessage::Result {
+                                    session_id: sid,
+                                    output: result_text,
+                                    is_error,
+                                } => {
+                                    saw_result = true;
+                                    session_id = sid;
+                                    info!(
+                                        pid,
+                                        is_error,
+                                        turns = num_turns,
+                                        result_len = result_text.len(),
+                                        "claude result received"
+                                    );
+                                    if is_error {
+                                        final_status = ExecStatus::Failed;
+                                        final_error = if result_text.is_empty() {
+                                            None
+                                        } else {
+                                            Some(result_text)
+                                        };
+                                    } else if !result_text.is_empty() {
+                                        output = result_text;
+                                    }
+                                }
+                                ParsedMessage::ControlRequest { request_id, input } => {
+                                    let response = build_auto_approve_response(&request_id, &input);
+                                    if let Ok(data) = serde_json::to_vec(&response) {
+                                        let mut buf = data;
+                                        buf.push(b'\n');
+                                        if let Err(e) = stdin.write_all(&buf).await {
+                                            warn!("failed to write control response: {e}");
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        try_send_event(&event_tx, event);
-                    }
-                }
-                ParsedMessage::UserEvents(events) => {
-                    for event in events {
-                        try_send_event(&event_tx, event);
-                    }
-                }
-                ParsedMessage::Result {
-                    session_id: sid,
-                    output: result_text,
-                    is_error,
-                } => {
-                    saw_result = true;
-                    session_id = sid;
-                    info!(
-                        pid,
-                        is_error,
-                        turns = num_turns,
-                        result_len = result_text.len(),
-                        "claude result received"
-                    );
-                    if is_error {
-                        final_status = ExecStatus::Failed;
-                        final_error = if result_text.is_empty() {
-                            None
-                        } else {
-                            Some(result_text)
-                        };
-                    } else if !result_text.is_empty() {
-                        output = result_text;
-                    }
-                }
-                ParsedMessage::ControlRequest { request_id, input } => {
-                    let response = build_auto_approve_response(&request_id, &input);
-                    if let Ok(data) = serde_json::to_vec(&response) {
-                        let mut buf = data;
-                        buf.push(b'\n');
-                        if let Err(e) = stdin.write_all(&buf).await {
-                            warn!("failed to write control response: {e}");
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!(pid, error = %e, "stdout read error");
+                            break;
                         }
                     }
+                }
+                _ = cancel_token.cancelled() => {
+                    info!(pid, "cancelled by steering");
+                    final_status = ExecStatus::Aborted;
+                    final_error = Some("cancelled by steering".to_string());
+                    break;
                 }
             }
         }
@@ -213,6 +238,8 @@ async fn drive_session(
         final_error = Some(format!("claude timed out after {timeout:?}"));
         // Kill the child process — kill_on_drop only fires on Drop,
         // but we still hold the Child reference.
+        let _ = child.start_kill();
+    } else if final_status == ExecStatus::Aborted {
         let _ = child.start_kill();
     } else if !saw_result && final_status == ExecStatus::Completed {
         // Stream ended without a result message — truncated or protocol error

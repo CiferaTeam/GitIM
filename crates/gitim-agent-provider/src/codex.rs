@@ -9,6 +9,8 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
 };
@@ -84,6 +86,7 @@ impl Provider for CodexProvider {
             event_rx,
             result_rx,
             join_handle.abort_handle(),
+            CancellationToken::new(),
         ))
     }
 }

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for creating a provider instance.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +39,7 @@ pub struct Session {
     /// Final result — receives exactly one value, then closes.
     pub result: oneshot::Receiver<ExecResult>,
     abort_handle: AbortHandle,
+    cancel_token: CancellationToken,
 }
 
 impl Session {
@@ -45,25 +47,29 @@ impl Session {
         events: mpsc::Receiver<Event>,
         result: oneshot::Receiver<ExecResult>,
         abort_handle: AbortHandle,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             events,
             result,
             abort_handle,
+            cancel_token,
         }
     }
 
-    /// Abort the running execution. The child process will be killed via kill_on_drop.
-    ///
-    /// KNOWN LIMITATION: abort() cancels the tokio task immediately, so
-    /// result_tx never sends an ExecResult. The caller gets RecvError from
-    /// session.result.await, not ExecResult { status: Aborted }. To fix this,
-    /// replace AbortHandle with CancellationToken (tokio_util) and use
-    /// tokio::select! in the drive loop to send a proper Aborted result
-    /// before exiting. Deferred to M1 when graceful per-agent shutdown
-    /// is needed.
+    /// Hard-kill the running execution. The tokio task is aborted immediately,
+    /// so result_tx never fires — the caller gets RecvError from session.result.await.
+    /// Use cancel() instead when you need a valid session_token in the ExecResult.
     pub fn abort(&self) {
         self.abort_handle.abort();
+    }
+
+    /// Gracefully cancel the running execution.
+    /// Signals the provider to stop at the next clean point.
+    /// The provider will send an ExecResult with status=Aborted and a valid
+    /// session_token for resumption. Prefer this over abort() for steering.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
     }
 }
 
