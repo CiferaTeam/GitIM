@@ -28,14 +28,14 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            sync_interval: 1,
+            sync_interval: 3,
             debug_http: false,
             debug_port: 3000,
         }
     }
 }
 
-fn default_sync_interval() -> u32 { 1 }
+fn default_sync_interval() -> u32 { 3 }
 fn default_debug_port() -> u16 { 3000 }
 
 impl Default for Config {
@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(c.version, 1);
         assert_eq!(c.endpoint, "github");
         assert_eq!(c.endpoint_url, "");
-        assert_eq!(c.daemon.sync_interval, 1);
+        assert_eq!(c.daemon.sync_interval, 3);
         assert!(!c.daemon.debug_http);
         assert_eq!(c.daemon.debug_port, 3000);
     }
