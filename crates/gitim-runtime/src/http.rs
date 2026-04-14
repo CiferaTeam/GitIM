@@ -541,18 +541,31 @@ struct AgentIdRequest {
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), String> {
-    let (repo_root, handler) = {
+    let (repo_root, handler, model, system_prompt, env) = {
         let s = state.lock().unwrap();
         match s.agents.get(agent_id) {
             None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
                 return Err(format!("agent already running: {agent_id}"));
             }
-            Some(info) => (info.repo_root.clone(), info.handler.clone()),
+            Some(info) => (
+                info.repo_root.clone(),
+                info.handler.clone(),
+                info.model.clone(),
+                info.system_prompt.clone(),
+                info.env.clone(),
+            ),
         }
     };
 
-    let mut agent_loop = AgentLoop::with_provider(&repo_root, "claude", &handler)
+    let loop_config = crate::agent_loop::AgentLoopConfig {
+        provider_type: "claude".to_string(),
+        handler,
+        model,
+        system_prompt,
+        env,
+    };
+    let mut agent_loop = AgentLoop::with_config(&repo_root, &loop_config)
         .map_err(|e| format!("failed to create agent loop: {e}"))?;
 
     // Wire up activity broadcast
