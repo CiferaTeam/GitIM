@@ -111,15 +111,7 @@ where
     let outcome = if has_unpushed {
         sync_with_push(repo, on_pushed, on_renumbered)
     } else {
-        // Nothing local to push, just pull
-        match repo.pull_rebase() {
-            Ok(()) => info!("sync: pull complete"),
-            Err(e) => {
-                warn!("sync: pull failed: {}", e);
-                let _ = repo.discard_unpushed();
-            }
-        }
-        SyncOutcome::Normal
+        sync_pull_only(repo)
     };
 
     match repo.rev_parse("HEAD") {
@@ -148,6 +140,10 @@ where
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
+            Err(crate::git::GitError::RateLimited) => {
+                warn!("sync: push rate limited (attempt {})", attempt);
+                return SyncOutcome::RateLimited;
+            }
             Err(crate::git::GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
@@ -158,9 +154,16 @@ where
         }
 
         // Fetch remote changes
-        if let Err(e) = repo.fetch() {
-            warn!("sync: fetch failed: {}", e);
-            return SyncOutcome::Normal;
+        match repo.fetch() {
+            Err(crate::git::GitError::RateLimited) => {
+                warn!("sync: fetch rate limited (attempt {})", attempt);
+                return SyncOutcome::RateLimited;
+            }
+            Err(e) => {
+                warn!("sync: fetch failed: {}", e);
+                return SyncOutcome::Normal;
+            }
+            Ok(()) => {}
         }
 
         // Capture local additions BEFORE attempting rebase
@@ -191,8 +194,13 @@ where
                         info!("sync: push complete after rebase (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
+                    Err(crate::git::GitError::RateLimited) => {
+                        warn!("sync: push rate limited after rebase (attempt {})", attempt);
+                        return SyncOutcome::RateLimited;
+                    }
                     Err(_) => {
                         warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
+                        std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
                     }
                 }
@@ -309,8 +317,13 @@ where
                         info!("sync: push complete after conflict resolution (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
+                    Err(crate::git::GitError::RateLimited) => {
+                        warn!("sync: push rate limited after conflict resolution (attempt {})", attempt);
+                        return SyncOutcome::RateLimited;
+                    }
                     Err(_) => {
                         warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                        std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
                     }
                 }
@@ -319,5 +332,28 @@ where
     }
 
     warn!("sync: push failed after {} retries, giving up", MAX_SYNC_RETRIES);
+    SyncOutcome::Normal
+}
+
+/// Pull-only path: fetch remote changes, then fast-forward via rebase.
+/// On failure, abort the rebase but preserve local state — next cycle retries.
+fn sync_pull_only(repo: &GitStorage) -> SyncOutcome {
+    match repo.fetch() {
+        Err(crate::git::GitError::RateLimited) => {
+            warn!("sync: fetch rate limited (pull-only)");
+            return SyncOutcome::RateLimited;
+        }
+        Err(e) => {
+            warn!("sync: fetch failed: {}", e);
+            return SyncOutcome::Normal;
+        }
+        Ok(()) => {}
+    }
+
+    if let Err(e) = repo.rebase_onto_origin() {
+        warn!("sync: rebase failed after fetch: {}", e);
+        let _ = repo.abort_rebase();
+    }
+
     SyncOutcome::Normal
 }
