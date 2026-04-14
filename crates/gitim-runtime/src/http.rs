@@ -226,11 +226,40 @@ fn api_response_to_json(result: Result<gitim_client::ApiResponse, gitim_client::
 // -- /im/me --
 
 async fn im_me(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
-        Ok(c) => c,
-        Err(e) => return e,
+    let human_repo = {
+        let s = state.lock().unwrap();
+        match &s.human_repo {
+            Some(p) => p.clone(),
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": "human daemon not initialized"
+                }));
+            }
+        }
     };
-    api_response_to_json(client.status().await)
+
+    let me_path = human_repo.join(".gitim/me.json");
+    match std::fs::read_to_string(&me_path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(me) => Json(serde_json::json!({
+                "ok": true,
+                "data": {
+                    "handler": me.get("handler").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                    "display_name": me.get("display_name").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+                    "guest": me.get("guest").and_then(|v| v.as_bool()).unwrap_or(false),
+                }
+            })),
+            Err(e) => Json(serde_json::json!({
+                "ok": false,
+                "error": format!("failed to parse me.json: {e}")
+            })),
+        },
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to read me.json: {e}")
+        })),
+    }
 }
 
 // -- /im/channels --
@@ -317,6 +346,35 @@ async fn im_poll(
     }
 
     api_response_to_json(result)
+}
+
+// -- /im/users --
+
+async fn im_users(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    api_response_to_json(client.list_users().await)
+}
+
+// -- /im/thread --
+
+#[derive(Deserialize)]
+struct ThreadRequest {
+    channel: String,
+    line: u64,
+}
+
+async fn im_thread(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<ThreadRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    api_response_to_json(client.get_thread(&req.channel, req.line).await)
 }
 
 // -- /agents/add --
@@ -548,6 +606,8 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/im/send", post(im_send))
         .route("/im/read", post(im_read))
         .route("/im/poll", post(im_poll))
+        .route("/im/users", get(im_users))
+        .route("/im/thread", post(im_thread))
         .route("/agents", get(agents_list))
         .route("/agents/add", post(agents_add))
         .route("/agents/start", post(agents_start))
