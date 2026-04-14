@@ -89,6 +89,9 @@ impl GitStorage {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if is_rate_limited(&stderr) {
+                return Err(GitError::RateLimited);
+            }
             if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
                 return Err(GitError::PushConflict);
             }
@@ -112,9 +115,11 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if is_rate_limited(&stderr) {
+                return Err(GitError::RateLimited);
+            }
+            return Err(GitError::CommandFailed(stderr));
         }
         Ok(())
     }
