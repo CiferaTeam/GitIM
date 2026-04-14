@@ -1,7 +1,7 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
@@ -14,6 +14,7 @@ use gitim_client::GitimClient;
 struct HealthResponse {
     service: &'static str,
     version: &'static str,
+    initialized: bool,
 }
 
 #[derive(Deserialize)]
@@ -45,10 +46,13 @@ pub struct RuntimeState {
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
 
-async fn health() -> Json<HealthResponse> {
+async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
+    let s = state.lock().unwrap();
+    let initialized = s.workspace.is_some() && s.human_repo.is_some();
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
+        initialized,
     })
 }
 
@@ -168,6 +172,8 @@ async fn git_init(
                 Ok(human_dir) => {
                     let mut s = state.lock().unwrap();
                     s.human_repo = Some(human_dir.clone());
+                    drop(s);
+                    save_runtime_config(&workspace);
                     Json(serde_json::json!({
                         "ok": true,
                         "repo_path": repo_path.to_string_lossy(),
@@ -592,6 +598,126 @@ async fn agents_stop(
     }
 
     Json(serde_json::json!({ "ok": true }))
+}
+
+// -- persistence helpers --
+
+fn runtime_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".gitim/runtime.json"))
+}
+
+fn save_runtime_config(workspace: &Path) {
+    if let Some(config_path) = runtime_config_path() {
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let config = serde_json::json!({ "workspace": workspace.to_string_lossy() });
+        let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap());
+    }
+}
+
+/// Recover workspace state from `~/.gitim/runtime.json` on startup.
+/// Restores workspace path, human daemon, and agent daemons.
+pub async fn recover_from_config(state: SharedRuntimeState) {
+    let config_path = match runtime_config_path() {
+        Some(p) if p.exists() => p,
+        _ => return,
+    };
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let config: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let workspace_str = match config["workspace"].as_str() {
+        Some(s) => s,
+        None => return,
+    };
+
+    let workspace = PathBuf::from(workspace_str);
+    if !workspace.exists() {
+        tracing::warn!("saved workspace {} no longer exists, skipping recovery", workspace_str);
+        return;
+    }
+
+    tracing::info!("recovering workspace from {}", workspace_str);
+    {
+        let mut s = state.lock().unwrap();
+        s.workspace = Some(workspace.clone());
+    }
+
+    // Recover human daemon
+    let human_dir = workspace.join(".gitim-runtime/human");
+    if human_dir.exists() {
+        match provision_human(&workspace).await {
+            Ok(dir) => {
+                let mut s = state.lock().unwrap();
+                s.human_repo = Some(dir);
+                tracing::info!("human daemon recovered");
+            }
+            Err(e) => tracing::warn!("failed to recover human daemon: {e}"),
+        }
+    }
+
+    // Scan for agent directories (have .gitim/me.json, not human or repo.git)
+    let entries = match std::fs::read_dir(&workspace) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "repo.git" || name.starts_with('.') { continue; }
+
+        let me_path = dir.join(".gitim/me.json");
+        if !me_path.exists() { continue; }
+
+        let me_content = match std::fs::read_to_string(&me_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let me: serde_json::Value = match serde_json::from_str(&me_content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let handler = match me["handler"].as_str() {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+        let display_name = me["display_name"]
+            .as_str()
+            .unwrap_or(&handler)
+            .to_string();
+
+        // Ensure agent daemon is running
+        let root = dir.clone();
+        match tokio::task::spawn_blocking(move || gitim_client::ensure_daemon(&root)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("failed to start daemon for @{handler}: {e}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("task panicked for @{handler}: {e}");
+                continue;
+            }
+        }
+
+        let mut s = state.lock().unwrap();
+        s.agents.insert(handler.clone(), AgentInfo {
+            id: handler.clone(),
+            handler: handler.clone(),
+            display_name,
+            status: "idle".to_string(),
+            repo_root: dir,
+            loop_handle: None,
+        });
+        tracing::info!("agent @{handler} recovered");
+    }
 }
 
 pub fn create_router() -> (Router, SharedRuntimeState) {
