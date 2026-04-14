@@ -39,9 +39,7 @@ export function ThreadPanel({
     <div className="w-80 shrink-0 border-l border-border/60 flex flex-col h-full bg-muted/20">
       {/* Header */}
       <div className="h-12 border-b border-border/60 flex items-center justify-between px-4">
-        <span className="text-sm font-medium">
-          Thread: L{threadRoot.line_number}
-        </span>
+        <span className="text-sm font-medium">{threadRoot.body}</span>
         <button
           onClick={() => setThreadRoot(null)}
           className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
