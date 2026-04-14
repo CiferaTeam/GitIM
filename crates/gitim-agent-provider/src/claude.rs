@@ -110,6 +110,7 @@ async fn drive_session(
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
     let mut saw_result = false;
+    let mut num_turns: u32 = 0;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
@@ -140,7 +141,10 @@ async fn drive_session(
 
             let parsed = match parse_line(&line) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    debug!(pid, line_len = line.len(), "unparsed line");
+                    continue;
+                }
             };
 
             match parsed {
@@ -151,6 +155,7 @@ async fn drive_session(
                     });
                 }
                 ParsedMessage::AssistantEvents(events) => {
+                    num_turns += 1;
                     for event in events {
                         if let Event::Text { ref content } = event {
                             output.push_str(content);
@@ -170,10 +175,15 @@ async fn drive_session(
                 } => {
                     saw_result = true;
                     session_id = sid;
+                    info!(
+                        pid,
+                        is_error,
+                        turns = num_turns,
+                        result_len = result_text.len(),
+                        "claude result received"
+                    );
                     if is_error {
                         final_status = ExecStatus::Failed;
-                        // Use result_text as error if available; don't fall back
-                        // to accumulated output (which is just agent thinking text)
                         final_error = if result_text.is_empty() {
                             None
                         } else {
@@ -225,7 +235,7 @@ async fn drive_session(
     }
 
     let duration = start.elapsed();
-    info!(pid, ?final_status, ?duration, "claude finished");
+    info!(pid, ?final_status, turns = num_turns, ?duration, "claude finished");
 
     stderr_handle.abort();
 
