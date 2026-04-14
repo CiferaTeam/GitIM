@@ -12,6 +12,15 @@ function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
 }
 
+// --- Health ---
+
+export async function health(): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/health`);
+  if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
+  const data = await res.json();
+  return { ok: true, data };
+}
+
 // --- IM methods: real runtime HTTP ---
 
 export async function me(): Promise<ApiResponse> {

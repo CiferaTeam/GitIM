@@ -8,6 +8,7 @@ import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
+import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
 import { Toaster } from "sonner";
 
@@ -34,12 +35,13 @@ export default function App() {
   const setChannels = useChatStore((s) => s.setChannels);
   const setUsers = useChatStore((s) => s.setUsers);
   const setConnected = useChatStore((s) => s.setConnected);
-  const setMessages = useChatStore((s) => s.setMessages);
+  const addMessages = useChatStore((s) => s.addMessages);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
 
   // Mutable refs for poll loop — avoids stale closures
   const sinceRef = useRef<string | undefined>(undefined);
+  const workspaceRef = useRef<string | undefined>(undefined);
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
 
@@ -54,9 +56,21 @@ export default function App() {
   const runPoll = useCallback(async () => {
     try {
       const pollRes = await client.poll(sinceRef.current);
-      if (!pollRes.ok || !pollRes.data) return;
+
+      if (!pollRes.ok || !pollRes.data) {
+        // Stale cursor recovery: discard and re-init
+        if (pollRes.error && workspaceRef.current) {
+          clearCursor(workspaceRef.current);
+          sinceRef.current = undefined;
+        }
+        return;
+      }
 
       sinceRef.current = pollRes.data.commit_id as string;
+      if (workspaceRef.current) {
+        saveCursor(workspaceRef.current, sinceRef.current);
+      }
+
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
       let needChannelRefresh = false;
@@ -73,13 +87,8 @@ export default function App() {
         }
 
         if (displayName === currentChannelRef.current) {
-          // Reload messages for the active channel
-          const apiCh = change.channel.startsWith("dm:")
-            ? change.channel
-            : displayName;
-          const readRes = await client.read(apiCh);
-          if (readRes.ok && readRes.data) {
-            setMessages(readRes.data.entries as Message[]);
+          if (change.entries?.length) {
+            addMessages(change.entries as Message[]);
           }
         } else {
           incrementUnread(displayName);
@@ -101,17 +110,25 @@ export default function App() {
     } catch {
       // Silently skip failed polls
     }
-  }, [setMessages, incrementUnread, setChannels, setAgents]);
+  }, [addMessages, incrementUnread, setChannels, setAgents]);
 
   // Init + poll loop
   useEffect(() => {
     async function init() {
-      const [meRes, channelsRes, usersRes, agentsRes] = await Promise.all([
-        client.me(),
-        client.channels(),
-        client.users(),
-        client.listAgents(),
-      ]);
+      const [healthRes, meRes, channelsRes, usersRes, agentsRes] =
+        await Promise.all([
+          client.health(),
+          client.me(),
+          client.channels(),
+          client.users(),
+          client.listAgents(),
+        ]);
+
+      // Restore cursor from localStorage keyed by workspace
+      if (healthRes.ok && healthRes.data?.workspace) {
+        workspaceRef.current = healthRes.data.workspace as string;
+        sinceRef.current = loadCursor(workspaceRef.current);
+      }
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data)
@@ -124,9 +141,10 @@ export default function App() {
       setConnected(true);
     }
 
-    init();
-
-    const pollHandle = setInterval(runPoll, POLL_INTERVAL_MS);
+    let pollHandle: ReturnType<typeof setInterval>;
+    init().then(() => {
+      pollHandle = setInterval(runPoll, POLL_INTERVAL_MS);
+    });
 
     return () => {
       clearInterval(pollHandle);

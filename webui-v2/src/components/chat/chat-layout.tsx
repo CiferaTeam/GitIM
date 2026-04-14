@@ -49,7 +49,7 @@ export function ChatLayout() {
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(apiChannel);
+      const res = await client.read(apiChannel, 50);
       // Guard: discard result if the user switched channels during the await
       if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
@@ -186,7 +186,7 @@ export function ChatLayout() {
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(apiChannel);
+    const res = await client.read(apiChannel, 50);
     if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
       setMessages(res.data.entries as Message[]);
     }

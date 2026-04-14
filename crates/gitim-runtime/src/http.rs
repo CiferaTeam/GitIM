@@ -15,6 +15,7 @@ struct HealthResponse {
     service: &'static str,
     version: &'static str,
     initialized: bool,
+    workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,10 +50,12 @@ pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = state.lock().unwrap();
     let initialized = s.workspace.is_some() && s.human_repo.is_some();
+    let workspace = s.workspace.as_ref().map(|p| p.to_string_lossy().into_owned());
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
         initialized,
+        workspace,
     })
 }
 
