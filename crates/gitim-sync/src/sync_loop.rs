@@ -2,12 +2,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use rand::Rng;
 use tokio::sync::Notify;
-use tokio::time;
 use tracing::{info, warn};
 
 use crate::conflict::{self, build_rebase_commit_msg};
 use crate::git::GitStorage;
+
+/// Outcome of a single sync cycle, used to determine backoff.
+pub enum SyncOutcome {
+    Normal,
+    RateLimited,
+}
 
 /// Start the sync loop with push-first strategy.
 ///
@@ -44,24 +50,49 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
         return;
     }
 
-    let interval = Duration::from_secs(interval_secs as u64);
-    info!("sync loop started, interval={}s", interval_secs);
+    let base_ms = interval_secs as u64 * 1000;
+    let jitter_range = base_ms / 3;
+    let mut consecutive_rate_limits: u32 = 0;
 
-    let mut ticker = time::interval(interval);
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    ticker.tick().await; // skip first immediate tick
+    info!("sync loop started, interval={}s (jitter ±{}ms)", interval_secs, jitter_range);
+
+    // Initial delay before first cycle (skip immediate fire)
+    let mut next_delay = Duration::from_millis(base_ms);
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {}
+            _ = tokio::time::sleep(next_delay) => {}
             _ = push_notify.notified() => {}
         }
-        run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced, &on_cycle_done);
+
+        let outcome = run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced, &on_cycle_done);
+
+        next_delay = match outcome {
+            SyncOutcome::Normal => {
+                consecutive_rate_limits = 0;
+                let jitter = if jitter_range > 0 {
+                    rand::rng().random_range(0..jitter_range)
+                } else {
+                    0
+                };
+                Duration::from_millis(base_ms + jitter)
+            }
+            SyncOutcome::RateLimited => {
+                consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
+                let backoff_ms = base_ms * 2u64.pow(consecutive_rate_limits.min(5));
+                let capped_ms = backoff_ms.min(120_000);
+                warn!(
+                    "sync: rate limited, backing off {}ms (consecutive: {})",
+                    capped_ms, consecutive_rate_limits
+                );
+                Duration::from_millis(capped_ms)
+            }
+        };
     }
 }
 
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
-fn run_sync_cycle<F1, F2, F3, F4>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3, on_cycle_done: &F4)
+fn run_sync_cycle<F1, F2, F3, F4>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3, on_cycle_done: &F4) -> SyncOutcome
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
@@ -73,12 +104,12 @@ where
         Err(e) => {
             warn!("sync: failed to check unpushed commits: {}", e);
             on_cycle_done();
-            return;
+            return SyncOutcome::Normal;
         }
     };
 
-    if has_unpushed {
-        sync_with_push(repo, on_pushed, on_renumbered);
+    let outcome = if has_unpushed {
+        sync_with_push(repo, on_pushed, on_renumbered)
     } else {
         // Nothing local to push, just pull
         match repo.pull_rebase() {
@@ -88,7 +119,8 @@ where
                 let _ = repo.discard_unpushed();
             }
         }
-    }
+        SyncOutcome::Normal
+    };
 
     match repo.rev_parse("HEAD") {
         Ok(head) => on_synced(head),
@@ -96,13 +128,14 @@ where
     }
 
     on_cycle_done();
+    outcome
 }
 
 /// Push-first strategy: try push, fallback to fetch+rebase, then conflict resolution.
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
 
-fn sync_with_push<F1, F2>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2)
+fn sync_with_push<F1, F2>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2) -> SyncOutcome
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
@@ -113,21 +146,21 @@ where
             Ok(()) => {
                 on_pushed();
                 info!("sync: push complete (attempt {})", attempt);
-                return;
+                return SyncOutcome::Normal;
             }
             Err(crate::git::GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
             Err(e) => {
                 warn!("sync: push failed (non-conflict): {}", e);
-                return;
+                return SyncOutcome::Normal;
             }
         }
 
         // Fetch remote changes
         if let Err(e) = repo.fetch() {
             warn!("sync: fetch failed: {}", e);
-            return;
+            return SyncOutcome::Normal;
         }
 
         // Capture local additions BEFORE attempting rebase
@@ -135,7 +168,7 @@ where
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
-                return;
+                return SyncOutcome::Normal;
             }
         };
 
@@ -156,7 +189,7 @@ where
                     Ok(()) => {
                         on_pushed();
                         info!("sync: push complete after rebase (attempt {})", attempt);
-                        return;
+                        return SyncOutcome::Normal;
                     }
                     Err(_) => {
                         warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
@@ -169,13 +202,13 @@ where
                 if local_additions.is_empty() && local_metas.is_empty() {
                     let _ = repo.discard_unpushed();
                     warn!("sync: non-thread/meta rebase conflict, aborted");
-                    return;
+                    return SyncOutcome::Normal;
                 }
 
                 // SyncLoop manages git state; resolve_content does pure content transform
                 if let Err(e) = repo.discard_unpushed() {
                     warn!("sync: discard_unpushed failed: {}", e);
-                    return;
+                    return SyncOutcome::Normal;
                 }
 
                 let mut modified_paths: Vec<String> = Vec::new();
@@ -188,7 +221,7 @@ where
                                 let abs_path = repo.root().join(&resolved.path);
                                 if let Err(e) = std::fs::write(&abs_path, &resolved.content) {
                                     warn!("sync: failed to write resolved file: {}", e);
-                                    return;
+                                    return SyncOutcome::Normal;
                                 }
                                 modified_paths.push(resolved.path.to_str().unwrap_or("").to_string());
                             }
@@ -196,7 +229,7 @@ where
                         }
                         Err(e) => {
                             warn!("sync: conflict resolution failed: {}", e);
-                            return;
+                            return SyncOutcome::Normal;
                         }
                     }
                 } else {
@@ -262,7 +295,7 @@ where
                     };
                     if let Err(e) = repo.add_and_commit(&path_refs, &commit_msg) {
                         warn!("sync: commit after conflict resolution failed: {}", e);
-                        return;
+                        return SyncOutcome::Normal;
                     }
                 }
 
@@ -274,7 +307,7 @@ where
                     Ok(()) => {
                         on_pushed();
                         info!("sync: push complete after conflict resolution (attempt {})", attempt);
-                        return;
+                        return SyncOutcome::Normal;
                     }
                     Err(_) => {
                         warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
@@ -286,4 +319,5 @@ where
     }
 
     warn!("sync: push failed after {} retries, giving up", MAX_SYNC_RETRIES);
+    SyncOutcome::Normal
 }
