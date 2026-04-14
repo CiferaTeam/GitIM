@@ -47,6 +47,7 @@ export interface ApiResponse {
 export interface PollChange {
   channel: string;
   kind: string;
+  entries?: Message[];
 }
 
 /** Format timestamp "20260317T120000Z" → "12:00" */
