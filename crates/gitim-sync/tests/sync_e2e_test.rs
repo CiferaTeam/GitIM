@@ -334,3 +334,75 @@ fn test_sync_resolves_concurrent_meta_changes() {
         "merged members should be union of both sides, sorted"
     );
 }
+
+#[test]
+fn test_pull_only_via_fetch_rebase() {
+    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let thread_a = clone_a_dir.path().join("channels/general.thread");
+    let thread_b = clone_b_dir.path().join("channels/general.thread");
+
+    let alice = Handler::new("alice").unwrap();
+
+    // Clone A: add content, commit, push
+    let content = format_message(1, 0, &alice, "20260317T100000Z", "hello from alice");
+    std::fs::write(&thread_a, &content).unwrap();
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    repo_a.add_and_commit(&["channels/general.thread"], "alice msg").unwrap();
+    repo_a.push().unwrap();
+
+    // Clone B: no local changes — use fetch + rebase (new pull-only path)
+    let repo_b = GitStorage::new(clone_b_dir.path());
+    assert!(!repo_b.has_unpushed_commits().unwrap());
+
+    repo_b.fetch().expect("fetch should succeed");
+    repo_b.rebase_onto_origin().expect("rebase should succeed (fast-forward)");
+
+    // Verify: clone_b now has the content from clone_a
+    let b_content = std::fs::read_to_string(&thread_b).unwrap();
+    let file = parse_thread(&b_content).unwrap();
+    assert_eq!(file.messages().len(), 1);
+    assert_eq!(file.messages()[0].author.as_str(), "alice");
+    assert_eq!(file.messages()[0].body, "hello from alice");
+}
+
+#[test]
+fn test_pull_only_abort_rebase_preserves_racing_commit() {
+    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let thread_a = clone_a_dir.path().join("channels/general.thread");
+    let thread_b = clone_b_dir.path().join("channels/general.thread");
+
+    let alice = Handler::new("alice").unwrap();
+    let bob = Handler::new("bob").unwrap();
+
+    // Clone A: add a message, push
+    let a_content = format_message(1, 0, &alice, "20260317T100000Z", "alice msg");
+    std::fs::write(&thread_a, &a_content).unwrap();
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    repo_a.add_and_commit(&["channels/general.thread"], "alice msg").unwrap();
+    repo_a.push().unwrap();
+
+    // Clone B: "racing" local commit (simulating handler write during pull-only window)
+    let b_content = format_message(1, 0, &bob, "20260317T100100Z", "bob msg");
+    std::fs::write(&thread_b, &b_content).unwrap();
+    let repo_b = GitStorage::new(clone_b_dir.path());
+    repo_b.add_and_commit(&["channels/general.thread"], "bob msg").unwrap();
+
+    // Clone B: fetch succeeds
+    repo_b.fetch().unwrap();
+
+    // Clone B: rebase fails (both wrote L000001 to same file)
+    let rebase_result = repo_b.rebase_onto_origin();
+    assert!(rebase_result.is_err(), "rebase should fail due to conflict");
+
+    // Clone B: abort_rebase (NOT discard_unpushed!)
+    repo_b.abort_rebase().unwrap();
+
+    // KEY: bob's local commit is preserved
+    let final_content = std::fs::read_to_string(&thread_b).unwrap();
+    assert!(final_content.contains("bob msg"), "local commit must survive abort_rebase");
+
+    // KEY: unpushed commits still detected — next cycle will use push path
+    assert!(repo_b.has_unpushed_commits().unwrap(), "unpushed commit should still exist");
+}
