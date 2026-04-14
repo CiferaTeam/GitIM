@@ -23,6 +23,14 @@ interface OnboardOptions {
 }
 
 function buildAuth(gitServer: GitServer, options: OnboardOptions): Record<string, string> {
+  // If handler + display_name provided, use Git-style auth (shared credentials)
+  if (options.handler && options.displayName) {
+    return {
+      handler: options.handler,
+      display_name: options.displayName,
+    };
+  }
+
   if (gitServer === 'git') {
     return {
       handler: options.handler!,
@@ -64,6 +72,13 @@ function validateParams(gitServer: GitServer, options: OnboardOptions): void {
       console.error('Error: git 本地模式需要 --display-name');
       process.exit(1);
     }
+  } else if (gitServer === 'github') {
+    const hasHandler = options.handler && options.displayName;
+    const hasToken = !!options.token;
+    if (!hasHandler && !hasToken) {
+      console.error('Error: github 模式需要 --handler + --display-name 或 --token');
+      process.exit(1);
+    }
   } else {
     if (!options.token) {
       console.error(`Error: ${gitServer} 模式需要 --token`);
@@ -101,27 +116,65 @@ function cloneOrCreateRepo(
   let cloneSucceeded = false;
 
   if (gitServer === 'github') {
-    // GitHub: use gh CLI which resolves owner automatically
     const ghTarget = org ? `${org}/${repoName}` : repoName;
+
+    // Try gh CLI first (uses gh's own auth)
     try {
       execFileSync('gh', ['repo', 'clone', ghTarget, targetDir], { stdio: 'ignore' });
-      cloneSucceeded = true;
+      return targetDir;
     } catch {
-      cloneSucceeded = false;
+      // gh clone failed
     }
 
-    if (!cloneSucceeded) {
-      try {
-        execFileSync('gh', ['repo', 'create', ghTarget, '--private', '--clone'], {
-          cwd: path.dirname(targetDir),
-          stdio: 'ignore',
-        });
-      } catch {
-        console.error(`Error: 无法创建仓库 ${ghTarget}`);
-        console.error('  → 请确认 gh 已认证且 Token 有仓库创建权限');
-        process.exit(1);
-      }
+    // gh clone failed — try gh create
+    try {
+      execFileSync('gh', ['repo', 'create', ghTarget, '--private', '--clone'], {
+        cwd: path.dirname(targetDir),
+        stdio: 'ignore',
+      });
+      return targetDir;
+    } catch {
+      // gh create failed
     }
+
+    // Fallback: git clone (needs org for URL construction)
+    if (!org) {
+      console.error('Error: gh 不可用时，github 模式需要指定 org');
+      console.error('  → 用法: gitim onboard <repo> <org> --git-server github --handler ...');
+      process.exit(1);
+    }
+
+    const cloneUrl = options.token
+      ? `https://x-access-token:${options.token}@github.com/${org}/${repoName}.git`
+      : `git@github.com:${org}/${repoName}.git`;
+
+    try {
+      execFileSync('git', ['clone', cloneUrl, targetDir], { stdio: 'ignore' });
+      return targetDir;
+    } catch {
+      // git clone also failed
+    }
+
+    // All clone attempts failed — init locally + add remote
+    console.error('Warning: 无法克隆远程仓库，创建本地 git 仓库');
+    fs.mkdirSync(targetDir, { recursive: true });
+    try {
+      execFileSync('git', ['init'], { cwd: targetDir, stdio: 'ignore' });
+    } catch {
+      console.error('Error: git init 失败');
+      process.exit(1);
+    }
+
+    const remoteUrl = options.token
+      ? `https://x-access-token:${options.token}@github.com/${org}/${repoName}.git`
+      : `git@github.com:${org}/${repoName}.git`;
+    try {
+      execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, stdio: 'ignore' });
+    } catch {
+      // remote might already exist
+    }
+
+    return targetDir;
   } else {
     // Gitea / GitLab: org is required for URL construction
     if (!org) {
