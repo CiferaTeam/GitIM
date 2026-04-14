@@ -111,6 +111,12 @@ export function AgentDetail() {
           </code>
         </Field>
 
+        <Field label="Model">
+          <code className="text-sm font-mono text-muted-foreground">
+            {agent.model ?? "claude-sonnet-4-6"}
+          </code>
+        </Field>
+
         <Field label="Session ID">
           <code className="text-sm font-mono text-muted-foreground">
             {agent.sessionId ?? "—"}
@@ -142,6 +148,23 @@ export function AgentDetail() {
           </div>
         </Field>
       </div>
+
+      {/* Environment Variables */}
+      {agent.env && Object.keys(agent.env).length > 0 && (
+        <div className="mb-6">
+          <Field label="Environment Variables">
+            <div className="mt-1 border rounded-md p-3 bg-muted/30 space-y-1">
+              {Object.entries(agent.env).map(([key, value]) => (
+                <div key={key} className="text-sm font-mono">
+                  <span className="text-muted-foreground">{key}</span>
+                  <span className="text-muted-foreground mx-1">=</span>
+                  <span>{value}</span>
+                </div>
+              ))}
+            </div>
+          </Field>
+        </div>
+      )}
 
       {/* Activity Log */}
       <div className="mb-6">
