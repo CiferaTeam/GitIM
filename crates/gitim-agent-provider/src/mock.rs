@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
 
@@ -106,6 +107,6 @@ impl Provider for MockProvider {
             });
         });
 
-        Ok(Session::new(event_rx, result_rx, task.abort_handle()))
+        Ok(Session::new(event_rx, result_rx, task.abort_handle(), CancellationToken::new()))
     }
 }

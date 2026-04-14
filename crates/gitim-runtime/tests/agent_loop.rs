@@ -1,5 +1,69 @@
 mod common;
 
+use gitim_runtime::agent_loop::detect_steering_trigger;
+use gitim_runtime::poller::ChannelChange;
+
+fn make_entry(author: &str, body: &str) -> serde_json::Value {
+    serde_json::json!({
+        "author": author,
+        "body": body,
+        "line_number": 1,
+        "point_to": 0,
+        "timestamp": "2026-04-14T00:00:00Z"
+    })
+}
+
+fn make_changes(entries: Vec<(&str, &str)>) -> Vec<ChannelChange> {
+    vec![ChannelChange {
+        channel: "general".to_string(),
+        kind: "message".to_string(),
+        entries: entries
+            .into_iter()
+            .map(|(author, body)| make_entry(author, body))
+            .collect(),
+    }]
+}
+
+#[test]
+fn test_steering_trigger_mention_and_keyword() {
+    let changes = make_changes(vec![("alice", "@bot 急急急! 快来看这个bug")]);
+    assert!(detect_steering_trigger(&changes, "bot"));
+}
+
+#[test]
+fn test_steering_trigger_mention_without_keyword() {
+    let changes = make_changes(vec![("alice", "@bot 你好，有空帮忙看看吗")]);
+    assert!(!detect_steering_trigger(&changes, "bot"));
+}
+
+#[test]
+fn test_steering_trigger_keyword_without_mention() {
+    let changes = make_changes(vec![("alice", "急急急! 有个紧急问题")]);
+    assert!(!detect_steering_trigger(&changes, "bot"));
+}
+
+#[test]
+fn test_steering_trigger_self_authored_ignored() {
+    let changes = make_changes(vec![("bot", "@bot 急急急!")]);
+    assert!(!detect_steering_trigger(&changes, "bot"));
+}
+
+#[test]
+fn test_steering_trigger_empty_changes() {
+    let changes: Vec<ChannelChange> = vec![];
+    assert!(!detect_steering_trigger(&changes, "bot"));
+}
+
+#[test]
+fn test_steering_trigger_channel_meta_skipped() {
+    let changes = vec![ChannelChange {
+        channel: "general".to_string(),
+        kind: "channel_meta".to_string(),
+        entries: vec![make_entry("alice", "@bot 急急急!")],
+    }];
+    assert!(!detect_steering_trigger(&changes, "bot"));
+}
+
 use gitim_client::GitimClient;
 use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 

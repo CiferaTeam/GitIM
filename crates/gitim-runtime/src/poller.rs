@@ -81,6 +81,47 @@ impl Poller {
         Ok(PollResult { changes })
     }
 
+    /// Check for new changes without advancing the cursor.
+    ///
+    /// Same as `poll()` but does not update the internal cursor.
+    /// Used by steering detection to check for urgent messages
+    /// while the provider is executing.
+    pub async fn peek(&self) -> Result<PollResult, RuntimeError> {
+        let resp = self
+            .client
+            .poll(self.cursor.as_deref())
+            .await
+            .map_err(|e| RuntimeError::PollFailed(e.to_string()))?;
+
+        if !resp.ok {
+            let msg = resp.error.unwrap_or_else(|| "poll failed".into());
+            return Err(RuntimeError::PollFailed(msg));
+        }
+
+        let data = resp.data.ok_or_else(|| {
+            RuntimeError::PollFailed("poll response missing data".into())
+        })?;
+
+        let changes = data["changes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let channel = c["channel"].as_str()?.to_string();
+                        let kind = c["kind"].as_str()?.to_string();
+                        let entries = c["entries"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        Some(ChannelChange { channel, kind, entries })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(PollResult { changes })
+    }
+
     /// Returns the current cursor value (commit hash), if initialized.
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
