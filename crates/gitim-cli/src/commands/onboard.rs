@@ -91,8 +91,18 @@ fn validate_params(git_server: &GitServer, args: &OnboardArgs) {
 }
 
 fn build_auth(git_server: &GitServer, args: &OnboardArgs) -> Value {
+    // If handler + display_name are provided, use Git-style auth
+    // (works for both git and github modes with shared credentials)
+    if let (Some(handler), Some(display_name)) = (&args.handler, &args.display_name) {
+        return json!({
+            "handler": handler,
+            "display_name": display_name,
+        });
+    }
+
     match git_server {
         GitServer::Git => {
+            // validate_params guarantees handler+display_name for git mode
             json!({
                 "handler": args.handler.as_ref().unwrap(),
                 "display_name": args.display_name.as_ref().unwrap(),
