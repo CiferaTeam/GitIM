@@ -54,6 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let (router, state) = gitim_runtime::http::create_router();
+
+    // Recover previous workspace from ~/.gitim/runtime.json
+    gitim_runtime::http::recover_from_config(state.clone()).await;
+
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     eprintln!("runtime shell listening on http://{addr}");
 

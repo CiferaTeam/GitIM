@@ -37,7 +37,7 @@ export function SetupGate({ children }: SetupGateProps) {
 
         if (data.service === "gitim-runtime") {
           if (data.version) setRuntimeVersion(data.version as string);
-          setStatus("connected");
+          setStatus(data.initialized ? "ready" : "connected");
         } else {
           setStatus("disconnected");
         }

@@ -14,3 +14,4 @@ cli/dist/webui/
 .gitim/
 __pycache__/
 .playwright-mcp/
+temp/
