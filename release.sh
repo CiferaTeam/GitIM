@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+RELEASES_REPO="CiferaTeam/gitim-releases"
 DRY_RUN=false
 
 if [ "${1:-}" = "--dry-run" ]; then
@@ -13,63 +14,74 @@ fi
 VERSION=$(grep 'version = "' "$ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 echo "==> Version: $VERSION"
 
-# ---------- Build daemon ----------
-echo "==> Building gitim-daemon (release)..."
-cargo build --release -p gitim-daemon
+# ---------- Detect platform ----------
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  aarch64) ARCH="arm64" ;;
+  x86_64)  ARCH="x86_64" ;;
+esac
+PLATFORM="${OS}-${ARCH}"
+echo "==> Platform: $PLATFORM"
 
-# ---------- Copy binary to platform package ----------
-DAEMON_PKG="$ROOT/packages/daemon-darwin-arm64"
-cp "$ROOT/target/release/gitim-daemon" "$DAEMON_PKG/gitim-daemon"
-chmod +x "$DAEMON_PKG/gitim-daemon"
-echo "    Copied binary to $DAEMON_PKG/gitim-daemon"
+# ---------- Build all binaries ----------
+echo "==> Building binaries (release)..."
+cargo build --release -p gitim-cli -p gitim-daemon -p gitim-runtime
 
-# ---------- Sync versions in all package.json ----------
-echo "==> Syncing version $VERSION to package.json files..."
-node -e "
-const fs = require('fs');
-const version = '$VERSION';
-const files = [
-  '$ROOT/cli/package.json',
-  '$DAEMON_PKG/package.json'
-];
-for (const f of files) {
-  const pkg = JSON.parse(fs.readFileSync(f, 'utf8'));
-  pkg.version = version;
-  if (pkg.optionalDependencies) {
-    for (const k of Object.keys(pkg.optionalDependencies)) {
-      pkg.optionalDependencies[k] = version;
-    }
-  }
-  fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
-  console.log('    ' + f.replace('$ROOT/', ''));
-}
-"
+# ---------- Package tarball ----------
+TAG="v${VERSION}"
+ARCHIVE_NAME="gitim-${TAG}-${PLATFORM}"
+STAGING="$ROOT/target/release/dist"
+rm -rf "$STAGING"
+mkdir -p "$STAGING/$ARCHIVE_NAME"
 
-# ---------- Build CLI ----------
-echo "==> Building CLI..."
-cd "$ROOT/cli"
-npm run build
+cp "$ROOT/target/release/gitim"         "$STAGING/$ARCHIVE_NAME/"
+cp "$ROOT/target/release/gitim-daemon"  "$STAGING/$ARCHIVE_NAME/"
+cp "$ROOT/target/release/gitim-runtime" "$STAGING/$ARCHIVE_NAME/"
+chmod +x "$STAGING/$ARCHIVE_NAME"/*
+
+cd "$STAGING"
+tar czf "${ARCHIVE_NAME}.tar.gz" "$ARCHIVE_NAME"
+echo "==> Packaged: $STAGING/${ARCHIVE_NAME}.tar.gz"
 
 if $DRY_RUN; then
   echo ""
   echo "==> Dry run complete. Would publish:"
-  echo "    @gitim-runtime/daemon-darwin-arm64@$VERSION"
-  echo "    @gitim-runtime/cli@$VERSION"
+  echo "    Tag:     $TAG"
+  echo "    Repo:    $RELEASES_REPO"
+  echo "    Archive: ${ARCHIVE_NAME}.tar.gz"
+  echo ""
+  echo "    Contents:"
+  tar tzf "${ARCHIVE_NAME}.tar.gz"
   echo ""
   echo "    Run without --dry-run to publish."
   exit 0
 fi
 
-# ---------- Publish daemon package first (CLI depends on it) ----------
-echo "==> Publishing @gitim-runtime/daemon-darwin-arm64@$VERSION..."
-cd "$DAEMON_PKG"
-npm publish --access public --registry=https://registry.npmjs.org
+# ---------- Check gh auth ----------
+if ! gh auth status > /dev/null 2>&1; then
+  echo "Error: gh not authenticated. Run: gh auth login"
+  exit 1
+fi
 
-# ---------- Publish CLI package ----------
-echo "==> Publishing @gitim-runtime/cli@$VERSION..."
-cd "$ROOT/cli"
-npm publish --access public --registry=https://registry.npmjs.org
+# ---------- Create release and upload ----------
+echo "==> Publishing ${TAG} to ${RELEASES_REPO}..."
+
+# Create release (or reuse existing tag)
+if gh release view "$TAG" --repo "$RELEASES_REPO" > /dev/null 2>&1; then
+  echo "    Release $TAG exists, uploading asset..."
+  gh release upload "$TAG" "${ARCHIVE_NAME}.tar.gz" \
+    --repo "$RELEASES_REPO" --clobber
+else
+  gh release create "$TAG" "${ARCHIVE_NAME}.tar.gz" \
+    --repo "$RELEASES_REPO" \
+    --title "GitIM ${TAG}" \
+    --notes "GitIM ${TAG} release for ${PLATFORM}"
+fi
 
 echo ""
-echo "==> Published v$VERSION"
-echo "    npm install -g @gitim-runtime/cli"
+echo "==> Published ${TAG}"
+echo "    https://github.com/${RELEASES_REPO}/releases/tag/${TAG}"
+echo ""
+echo "    Install:"
+echo "    curl -sSf https://raw.githubusercontent.com/${RELEASES_REPO}/main/install.sh | sh"
