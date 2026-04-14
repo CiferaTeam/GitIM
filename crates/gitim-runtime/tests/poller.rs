@@ -120,3 +120,41 @@ async fn test_poll_cursor_survives_empty() {
 
     stop_daemon(&repo_root).await;
 }
+
+#[tokio::test]
+async fn test_peek_does_not_advance_cursor() {
+    ensure_daemon_in_path();
+    let tmp = short_tempdir();
+    let (repo_root, client) = setup_agent(&tmp).await;
+
+    let mut poller = Poller::new(GitimClient::new(&repo_root));
+
+    // Init cursor
+    poller.poll().await.unwrap();
+    let cursor_before = poller.cursor().unwrap().to_string();
+
+    // Send a message
+    client
+        .send("general", "peek test message", None, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Peek: should see the message
+    let peek_result = poller.peek().await.unwrap();
+    assert!(!peek_result.changes.is_empty(), "peek should detect new message");
+
+    // Cursor should NOT have advanced
+    let cursor_after = poller.cursor().unwrap().to_string();
+    assert_eq!(cursor_before, cursor_after, "peek must not advance cursor");
+
+    // Poll: should also see the same message (cursor didn't move)
+    let poll_result = poller.poll().await.unwrap();
+    assert!(!poll_result.changes.is_empty(), "poll should still get the message");
+
+    // Now cursor has advanced
+    let cursor_final = poller.cursor().unwrap().to_string();
+    assert_ne!(cursor_before, cursor_final, "poll should advance cursor");
+
+    stop_daemon(&repo_root).await;
+}
