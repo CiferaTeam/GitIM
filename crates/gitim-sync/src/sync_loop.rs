@@ -54,7 +54,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let jitter_range = base_ms / 3;
     let mut consecutive_rate_limits: u32 = 0;
 
-    info!("sync loop started, interval={}s (jitter ±{}ms)", interval_secs, jitter_range);
+    info!("sync loop started, interval={}s (jitter +0..{}ms)", interval_secs, jitter_range);
 
     // Initial delay before first cycle (skip immediate fire)
     let mut next_delay = Duration::from_millis(base_ms);
@@ -200,6 +200,7 @@ where
                     }
                     Err(_) => {
                         warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
+                        // Blocking sleep OK: run_sync_cycle is already synchronous (git commands)
                         std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
                     }
@@ -323,6 +324,7 @@ where
                     }
                     Err(_) => {
                         warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                        // Blocking sleep OK: run_sync_cycle is already synchronous (git commands)
                         std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
                     }
