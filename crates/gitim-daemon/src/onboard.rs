@@ -183,7 +183,7 @@ fn write_me_json(
         "handler": handler,
         "git_server": git_server,
         "display_name": display_name,
-        "inferred_at": now,
+        "onboarded_at": now,
     });
 
     let me_path = gitim_dir.join("me.json");
@@ -203,7 +203,7 @@ fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
     let me = serde_json::json!({
         "handler": null,
         "guest": true,
-        "inferred_at": now,
+        "onboarded_at": now,
     });
 
     let me_path = gitim_dir.join("me.json");
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(content["handler"], "alice");
         assert_eq!(content["git_server"], "github");
         assert_eq!(content["display_name"], "Alice W");
-        assert!(content["inferred_at"].as_str().is_some());
+        assert!(content["onboarded_at"].as_str().is_some());
     }
 
     #[tokio::test]
