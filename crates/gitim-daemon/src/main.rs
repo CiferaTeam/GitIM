@@ -9,6 +9,13 @@ use gitim_daemon::{api, http, lifecycle, server, state};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // --version must come before tracing init to keep output clean
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("--version") {
+        println!("gitim-daemon {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt::init();
 
     let repo_root = std::env::current_dir()?;
