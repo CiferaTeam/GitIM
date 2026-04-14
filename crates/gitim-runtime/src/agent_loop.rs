@@ -440,32 +440,59 @@ impl AgentLoop {
         self.emit_activity("thinking", "processing...");
 
         let opts = self.build_exec_options();
-        let session = self
+        let mut session = self
             .provider
             .execute(&prompt, opts)
             .await
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
-        // Drain events (log + broadcast)
-        let mut events = session.events;
-        while let Some(event) = events.recv().await {
-            match &event {
-                gitim_agent_provider::Event::Text { content } => {
-                    tracing::debug!(text_len = content.len(), "agent text");
+        // Drain events with periodic steering check
+        let mut steering_check = tokio::time::interval(Duration::from_secs(5));
+        steering_check.tick().await; // consume the immediate first tick
+
+        loop {
+            tokio::select! {
+                event = session.events.recv() => {
+                    match event {
+                        Some(event) => {
+                            match &event {
+                                gitim_agent_provider::Event::Text { content } => {
+                                    tracing::debug!(text_len = content.len(), "agent text");
+                                }
+                                gitim_agent_provider::Event::ToolUse { tool, input, .. } => {
+                                    let snippet = summarize_tool_input(tool, input);
+                                    info!(tool = %tool, input = %snippet, "agent tool use");
+                                    self.emit_activity("tool_use", &format!("{tool}: {snippet}"));
+                                }
+                                gitim_agent_provider::Event::ToolResult { call_id, output } => {
+                                    tracing::debug!(call_id = %call_id, output_len = output.len(), "tool result");
+                                }
+                                gitim_agent_provider::Event::Error { content } => {
+                                    tracing::warn!(error = %content, "agent error event");
+                                    self.emit_activity("error", content);
+                                }
+                                _ => {}
+                            }
+                        }
+                        None => break, // event channel closed, normal completion
+                    }
                 }
-                gitim_agent_provider::Event::ToolUse { tool, input, .. } => {
-                    let snippet = summarize_tool_input(tool, input);
-                    info!(tool = %tool, input = %snippet, "agent tool use");
-                    self.emit_activity("tool_use", &format!("{tool}: {snippet}"));
+                _ = steering_check.tick() => {
+                    match self.poller.peek().await {
+                        Ok(peek_result) if !peek_result.changes.is_empty() => {
+                            if detect_steering_trigger(&peek_result.changes, &self.handler) {
+                                info!("steering trigger detected, cancelling session");
+                                self.emit_activity("steering", "urgent message detected, interrupting");
+                                session.cancel();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "steering peek failed, continuing");
+                        }
+                        _ => {}
+                    }
                 }
-                gitim_agent_provider::Event::ToolResult { call_id, output } => {
-                    tracing::debug!(call_id = %call_id, output_len = output.len(), "tool result");
-                }
-                gitim_agent_provider::Event::Error { content } => {
-                    tracing::warn!(error = %content, "agent error event");
-                    self.emit_activity("error", content);
-                }
-                _ => {}
             }
         }
 
@@ -476,25 +503,39 @@ impl AgentLoop {
             .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
 
         let duration_s = exec_result.duration_ms as f64 / 1000.0;
-        if exec_result.status == ExecStatus::Failed {
-            tracing::error!(
-                duration_ms = exec_result.duration_ms,
-                error = ?exec_result.error,
-                output = %exec_result.output.chars().take(300).collect::<String>(),
-                "provider failed"
-            );
-            self.emit_activity("error", "execution failed");
-            // Clear session_token to avoid resuming a broken session
-            self.session_token = None;
-        } else {
-            info!(
-                duration_ms = exec_result.duration_ms,
-                output = %exec_result.output.chars().take(100).collect::<String>(),
-                "provider ok"
-            );
-            self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
-            if let Some(token) = exec_result.session_token {
-                self.session_token = Some(token);
+        match exec_result.status {
+            ExecStatus::Failed => {
+                tracing::error!(
+                    duration_ms = exec_result.duration_ms,
+                    error = ?exec_result.error,
+                    output = %exec_result.output.chars().take(300).collect::<String>(),
+                    "provider failed"
+                );
+                self.emit_activity("error", "execution failed");
+                // Clear session_token to avoid resuming a broken session
+                self.session_token = None;
+            }
+            ExecStatus::Aborted => {
+                info!(
+                    duration_ms = exec_result.duration_ms,
+                    "provider aborted by steering"
+                );
+                self.emit_activity("steered", &format!("interrupted ({duration_s:.1}s)"));
+                // Keep session_token for resume in next cycle
+                if let Some(token) = exec_result.session_token {
+                    self.session_token = Some(token);
+                }
+            }
+            _ => {
+                info!(
+                    duration_ms = exec_result.duration_ms,
+                    output = %exec_result.output.chars().take(100).collect::<String>(),
+                    "provider ok"
+                );
+                self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
+                if let Some(token) = exec_result.session_token {
+                    self.session_token = Some(token);
+                }
             }
         }
 
