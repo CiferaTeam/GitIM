@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
-import * as mockClient from "../../lib/mock/client";
+import * as client from "../../lib/client";
 import type { Message } from "../../lib/types";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
@@ -49,7 +49,7 @@ export function ChatLayout() {
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await mockClient.read(apiChannel);
+      const res = await client.read(apiChannel);
       // Guard: discard result if the user switched channels during the await
       if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
@@ -65,9 +65,8 @@ export function ChatLayout() {
       const exists = channels.some((c) => c.name === displayName);
       if (!exists) {
         const newChannel = { name: displayName, kind: "dm" as const, unreadCount: 0, members: parts };
-        // Register in the mock client so the poll loop doesn't overwrite it
-        mockClient.addChannel(newChannel);
         // Add to the store so it appears in the sidebar immediately
+        // DM will be created on the backend when the first message is sent
         setChannels([...channels, newChannel]);
       }
       await handleChannelSelect(displayName);
@@ -94,7 +93,7 @@ export function ChatLayout() {
       addPendingMessage(pending);
 
       const apiChannel = toApiChannel(currentChannel);
-      const res = await mockClient.send(
+      const res = await client.send(
         apiChannel,
         body,
         currentUser,
@@ -121,7 +120,7 @@ export function ChatLayout() {
     async (msg: Message) => {
       if (!currentChannel) return;
       const apiChannel = toApiChannel(currentChannel);
-      const res = await mockClient.thread(apiChannel, msg.line_number);
+      const res = await client.thread(apiChannel, msg.line_number);
       if (res.ok && res.data) {
         const entries = res.data.entries as Message[];
         const root = entries[0] ?? msg;
@@ -187,7 +186,7 @@ export function ChatLayout() {
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await mockClient.read(apiChannel);
+    const res = await client.read(apiChannel);
     if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
       setMessages(res.data.entries as Message[]);
     }
