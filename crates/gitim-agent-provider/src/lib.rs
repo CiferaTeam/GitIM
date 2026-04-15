@@ -1,10 +1,15 @@
 pub mod claude;
 pub mod codex;
+pub mod gemini;
+pub mod hermes;
 pub mod mock;
+pub mod openclaw;
+pub mod opencode;
 mod error;
 mod provider;
 mod stubs;
 mod types;
+pub(crate) mod util;
 
 pub use error::ProviderError;
 pub use provider::{create, Provider};

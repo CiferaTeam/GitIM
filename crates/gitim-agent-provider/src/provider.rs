@@ -14,7 +14,7 @@ pub trait Provider: Send + Sync {
 
 /// Create a provider for the given type.
 ///
-/// Supported types: "claude", "codex", "cursor", "opencode".
+/// Supported types: "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "cursor", "mock".
 pub fn create(
     provider_type: &str,
     config: ProviderConfig,
@@ -22,9 +22,12 @@ pub fn create(
     match provider_type {
         "claude" => Ok(Box::new(crate::claude::ClaudeProvider::new(config))),
         "codex" => Ok(Box::new(crate::codex::CodexProvider::new(config))),
+        "gemini" => Ok(Box::new(crate::gemini::GeminiProvider::new(config))),
+        "hermes" => Ok(Box::new(crate::hermes::HermesProvider::new(config))),
+        "openclaw" => Ok(Box::new(crate::openclaw::OpenclawProvider::new(config))),
         "mock" => Ok(Box::new(crate::mock::MockProvider::new(config))),
         "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
-        "opencode" => Ok(Box::new(crate::stubs::OpencodeProvider::new(config))),
+        "opencode" => Ok(Box::new(crate::opencode::OpencodeProvider::new(config))),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),
     }
 }

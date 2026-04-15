@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -37,7 +36,7 @@ impl Provider for CodexProvider {
             .clone()
             .unwrap_or_else(|| "codex".to_string());
 
-        which(&exec_path).map_err(|_| ProviderError::ExecutableNotFound {
+        crate::util::which(&exec_path).map_err(|_| ProviderError::ExecutableNotFound {
             path: exec_path.clone(),
         })?;
 
@@ -262,22 +261,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
         "turn.completed" => Some(ParsedMessage::TurnCompleted),
         _ => None,
     }
-}
-
-fn which(name: &str) -> Result<std::path::PathBuf, ()> {
-    let path = Path::new(name);
-    if path.is_absolute() && path.exists() {
-        return Ok(path.to_path_buf());
-    }
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            let full = Path::new(dir).join(name);
-            if full.exists() {
-                return Ok(full);
-            }
-        }
-    }
-    Err(())
 }
 
 #[derive(Deserialize)]
