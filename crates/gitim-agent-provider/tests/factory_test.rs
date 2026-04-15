@@ -26,6 +26,11 @@ fn create_gemini_returns_ok() {
 }
 
 #[test]
+fn create_hermes_returns_ok() {
+    assert!(create("hermes", Default::default()).is_ok());
+}
+
+#[test]
 fn create_openclaw_returns_ok() {
     assert!(create("openclaw", Default::default()).is_ok());
 }
