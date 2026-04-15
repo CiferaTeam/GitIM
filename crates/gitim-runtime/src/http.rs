@@ -920,6 +920,19 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
     }
 }
 
+async fn preflight_claude() -> impl axum::response::IntoResponse {
+    match crate::preflight::check_claude().await {
+        Ok(version) => Json(serde_json::json!({
+            "available": true,
+            "version": version,
+        })),
+        Err(error) => Json(serde_json::json!({
+            "available": false,
+            "error": error,
+        })),
+    }
+}
+
 pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
@@ -942,6 +955,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
+        .route("/preflight/claude", get(preflight_claude))
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
 

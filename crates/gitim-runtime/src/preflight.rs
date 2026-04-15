@@ -108,3 +108,23 @@ pub fn check_env() -> Result<(), PreflightError> {
         Err(PreflightError { missing, mismatches })
     }
 }
+
+/// Check if Claude CLI is available and return its version.
+pub async fn check_claude() -> Result<String, String> {
+    let output = tokio::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| format!("claude not found: {e}"))?;
+
+    if !output.status.success() {
+        return Err("claude --version exited with non-zero status".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.trim().to_string();
+    if version.is_empty() {
+        return Err("claude --version returned empty output".to_string());
+    }
+    Ok(version)
+}
