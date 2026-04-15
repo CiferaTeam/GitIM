@@ -256,7 +256,7 @@ async fn drive_session(
     // Note: any session/update notifications arriving during handshake are intentionally
     // dropped. In practice hermes doesn't send them before the prompt response begins.
 
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+    let handshake_timeout = timeout.min(Duration::from_secs(30));
 
     let handshake = async {
         // Step 1: initialize
@@ -290,7 +290,7 @@ async fn drive_session(
         Ok::<String, String>(sid)
     };
 
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+    match tokio::time::timeout(handshake_timeout, handshake).await {
         Ok(Ok(sid)) => {
             session_id = sid;
             info!(pid, session_id = %session_id, "hermes session established");
@@ -303,10 +303,10 @@ async fn drive_session(
             return;
         }
         Err(_) => {
-            warn!(pid, "hermes handshake timed out after {HANDSHAKE_TIMEOUT:?}");
+            warn!(pid, "hermes handshake timed out after {handshake_timeout:?}");
             let _ = child.start_kill();
             send_result(result_tx, ExecStatus::Timeout, output,
-                Some(format!("hermes handshake timed out after {HANDSHAKE_TIMEOUT:?}")), start, &session_id);
+                Some(format!("hermes handshake timed out after {handshake_timeout:?}")), start, &session_id);
             stderr_handle.abort();
             return;
         }
