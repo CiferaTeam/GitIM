@@ -21,6 +21,11 @@ fn create_opencode_returns_ok() {
 }
 
 #[test]
+fn create_gemini_returns_ok() {
+    assert!(create("gemini", Default::default()).is_ok());
+}
+
+#[test]
 fn create_unknown_returns_error() {
     let result = create("not-a-real-provider", Default::default());
     match result {
