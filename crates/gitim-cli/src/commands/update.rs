@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
@@ -47,9 +49,11 @@ fn latest_release_api_url() -> String {
 fn confirm(prompt: &str) -> bool {
     use std::io::{self, Write};
     print!("{prompt} [y/N] ");
-    io::stdout().flush().unwrap();
+    let _ = io::stdout().flush();
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
@@ -102,10 +106,13 @@ fn replace_binaries(
             continue;
         };
         let dest = install_dir.join(bin_name);
+        // Rename-then-copy: if copy fails, the backup is still usable
+        let backup = dest.with_extension("old");
         if dest.exists() {
-            std::fs::remove_file(&dest)?;
+            std::fs::rename(&dest, &backup)?;
         }
         std::fs::copy(&src, &dest)?;
+        let _ = std::fs::remove_file(&backup);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
