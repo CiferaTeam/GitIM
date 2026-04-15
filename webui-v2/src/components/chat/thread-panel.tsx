@@ -36,10 +36,10 @@ export function ThreadPanel({
   if (!threadRoot) return null;
 
   return (
-    <div className="w-80 shrink-0 border-l border-border/60 flex flex-col h-full bg-muted/20">
+    <div className="w-80 shrink-0 border-l border-border/60 flex flex-col h-full bg-background">
       {/* Header */}
-      <div className="h-12 border-b border-border/60 flex items-center justify-between px-4">
-        <span className="text-sm font-medium">{threadRoot.body}</span>
+      <div className="h-12 border-b border-border/60 flex items-center justify-between px-4 overflow-hidden">
+        <span className="text-sm font-medium truncate mr-2">{threadRoot.body}</span>
         <button
           onClick={() => setThreadRoot(null)}
           className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
