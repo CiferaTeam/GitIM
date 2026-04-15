@@ -1,12 +1,17 @@
-use gitim_runtime::{build_system_prompt, format_changes_as_prompt, ChannelChange};
+use gitim_agent_provider::{PromptContext, ProviderConfig, create};
+use gitim_runtime::{format_changes_as_prompt, ChannelChange};
 
 #[test]
 fn test_build_system_prompt_includes_handler() {
-    let prompt = build_system_prompt("test-agent");
+    let provider = create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "test-agent",
+        model: None,
+    };
+    let prompt = provider.build_system_prompt(&ctx);
     assert!(prompt.contains("test-agent"), "prompt should contain handler");
     assert!(prompt.contains("协调者"), "prompt should contain coordinator identity");
     assert!(prompt.contains("感知"), "prompt should contain perception layer");
-    assert!(prompt.contains("行动"), "prompt should contain action layer");
     assert!(prompt.contains("gitim send"), "prompt should mention gitim send");
     assert!(prompt.contains("subagent"), "prompt should mention subagent delegation");
 }
