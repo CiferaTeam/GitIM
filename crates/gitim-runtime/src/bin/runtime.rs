@@ -74,9 +74,23 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("runtime shell listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, router).await
+    });
+
+    // Wait for shutdown signal; also bail if the server itself errors out
+    tokio::select! {
+        _ = shutdown_signal() => {},
+        result = &mut server => {
+            if let Err(e) = result? {
+                eprintln!("server error: {e}");
+            }
+        }
+    }
+
+    // SSE keep-alive connections block axum graceful shutdown indefinitely;
+    // abort the server task so the process can exit cleanly.
+    server.abort();
 
     // Kill all managed daemons on shutdown
     kill_managed_daemons(&state);
