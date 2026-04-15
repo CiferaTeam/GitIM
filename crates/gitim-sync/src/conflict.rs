@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gitim_core::parser::{parse_thread, ParseError};
 use gitim_core::types::ChannelMeta;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::renumber::{renumber_batch, RenumberError};
@@ -11,13 +12,14 @@ use crate::renumber::{renumber_batch, RenumberError};
 pub enum ConflictError {
     #[error("renumber error: {0}")]
     Renumber(#[from] RenumberError),
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenumberMapping {
     pub file: PathBuf,
     pub old_line: u64,
@@ -25,7 +27,7 @@ pub struct RenumberMapping {
 }
 
 /// Result of resolving conflicts for a single file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedFile {
     pub path: PathBuf,
     pub content: String,
@@ -89,11 +91,10 @@ pub fn build_rebase_commit_msg(
 }
 
 /// Pure content transformation: renumber local additions to fit after remote content.
-/// Does NOT touch git state — only reads files from repo_root and returns resolved content.
-/// The caller is responsible for git operations (discard, write files, commit).
-pub fn resolve_content(
+/// Takes already-read remote contents — no filesystem access.
+pub fn resolve_content_pure(
     local_additions: &HashMap<PathBuf, String>,
-    repo_root: &Path,
+    remote_contents: &HashMap<PathBuf, String>,
 ) -> Result<(Vec<ResolvedFile>, Vec<RenumberMapping>), ConflictError> {
     let mut all_mappings: Vec<RenumberMapping> = Vec::new();
     let mut resolved_files: Vec<ResolvedFile> = Vec::new();
@@ -102,21 +103,15 @@ pub fn resolve_content(
     sorted_files.sort();
     for rel_path in sorted_files {
         let local_content = &local_additions[rel_path];
-        let abs_path = repo_root.join(rel_path);
-
-        let remote_content = if abs_path.exists() {
-            std::fs::read_to_string(&abs_path)?
-        } else {
-            if let Some(parent) = abs_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            String::new()
-        };
+        let remote_content = remote_contents
+            .get(rel_path)
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
         let max_line = if remote_content.is_empty() {
             0
         } else {
-            let remote_file = parse_thread(&remote_content)?;
+            let remote_file = parse_thread(remote_content)?;
             remote_file.entries.iter().map(|e| e.line_number()).max().unwrap_or(0)
         };
 
@@ -136,7 +131,7 @@ pub fn resolve_content(
             });
         }
 
-        let mut final_content = remote_content;
+        let mut final_content = remote_content.to_string();
         if !final_content.is_empty() && !final_content.ends_with('\n') {
             final_content.push('\n');
         }
@@ -149,6 +144,28 @@ pub fn resolve_content(
     }
 
     Ok((resolved_files, all_mappings))
+}
+
+/// I/O wrapper: reads remote files from filesystem, then delegates to resolve_content_pure.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_content(
+    local_additions: &HashMap<PathBuf, String>,
+    repo_root: &std::path::Path,
+) -> Result<(Vec<ResolvedFile>, Vec<RenumberMapping>), ConflictError> {
+    let mut remote_contents: HashMap<PathBuf, String> = HashMap::new();
+
+    for rel_path in local_additions.keys() {
+        let abs_path = repo_root.join(rel_path);
+        if abs_path.exists() {
+            remote_contents.insert(rel_path.clone(), std::fs::read_to_string(&abs_path)?);
+        } else {
+            if let Some(parent) = abs_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+    }
+
+    resolve_content_pure(local_additions, &remote_contents)
 }
 
 /// Merge two ChannelMeta: members 取并集（排序去重），标量字段取 remote。
@@ -169,4 +186,3 @@ pub fn merge_channel_meta(local: &ChannelMeta, remote: &ChannelMeta) -> ChannelM
         members,
     }
 }
-

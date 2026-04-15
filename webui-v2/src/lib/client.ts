@@ -1,10 +1,26 @@
 /**
- * Unified client — all methods hit the real runtime HTTP API.
- * Agent methods fall back to mock if runtime is unreachable.
+ * Unified client — IM methods delegate to the active Backend instance.
+ * Agent methods always hit the runtime HTTP API (desktop only).
  */
 import type { Agent, ApiResponse } from "./types";
+import type { Backend } from "./backend";
+import { HttpBackend } from "./backend";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+
+// --- Backend management ---
+
+let activeBackend: Backend = new HttpBackend(
+  () => useConnectionStore.getState().baseUrl(),
+);
+
+export function setBackend(backend: Backend): void {
+  activeBackend = backend;
+}
+
+export function getBackend(): Backend {
+  return activeBackend;
+}
 
 // --- Helpers ---
 
@@ -12,34 +28,22 @@ function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
 }
 
-// --- Health ---
+// --- IM methods: delegate to active backend ---
 
 export async function health(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/health`);
-  if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
-  const data = await res.json();
-  return { ok: true, data };
+  return activeBackend.health();
 }
 
-// --- IM methods: real runtime HTTP ---
-
 export async function me(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/me`);
-  return await res.json();
+  return activeBackend.me();
 }
 
 export async function poll(since?: string): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/poll`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ since }),
-  });
-  return await res.json();
+  return activeBackend.poll(since);
 }
 
 export async function channels(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/channels`);
-  return await res.json();
+  return activeBackend.channels();
 }
 
 export async function send(
@@ -48,50 +52,29 @@ export async function send(
   _author?: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, body, reply_to: replyTo }),
-  });
-  return await res.json();
+  return activeBackend.send(channel, body, _author, replyTo);
 }
 
 export async function joinChannel(channel: string): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/join`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
-  });
-  return await res.json();
+  return activeBackend.joinChannel(channel);
 }
 
 export async function read(
   channel: string,
   limit?: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, limit }),
-  });
-  return await res.json();
+  return activeBackend.read(channel, limit);
 }
 
 export async function thread(
   channel: string,
   line: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/thread`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, line }),
-  });
-  return await res.json();
+  return activeBackend.thread(channel, line);
 }
 
 export async function users(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/users`);
-  return await res.json();
+  return activeBackend.users();
 }
 
 /** Sanitize a display name into a valid handler (a-z, 0-9, hyphens). */
@@ -109,7 +92,7 @@ export function toHandler(name: string): string {
 export function validateHandler(name: string): string | null {
   const handler = toHandler(name);
   if (!handler) return "Name must contain at least one letter or digit";
-  if (handler === "system") return "\"system\" is reserved";
+  if (handler === "system") return '"system" is reserved';
   return null;
 }
 
@@ -117,7 +100,9 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
   return {
     id: (raw.id ?? raw.handler) as string,
     name: (raw.display_name ?? raw.handler) as string,
-    status: ((raw.status as string) === "idle" ? "offline" : raw.status) as Agent["status"],
+    status: ((raw.status as string) === "idle"
+      ? "offline"
+      : raw.status) as Agent["status"],
     systemPrompt: (raw.system_prompt as string) ?? "",
     model: (raw.model as string) ?? undefined,
     env: (raw.env as Record<string, string>) ?? undefined,
@@ -127,7 +112,7 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
   };
 }
 
-// --- Agent API: real runtime HTTP ---
+// --- Agent API: always HTTP (desktop only) ---
 
 export async function listAgents(): Promise<ApiResponse> {
   try {
