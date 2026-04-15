@@ -15,3 +15,4 @@ cli/dist/webui/
 __pycache__/
 .playwright-mcp/
 temp/
+**/.env
