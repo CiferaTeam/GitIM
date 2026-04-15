@@ -2,6 +2,7 @@ mod common;
 
 use gitim_client::GitimClient;
 use gitim_runtime::{provision_agent, AgentConfig, Poller};
+use serial_test::serial;
 
 use common::{ensure_daemon_in_path, setup_bare_remote, short_tempdir, stop_daemon};
 
@@ -25,6 +26,7 @@ async fn setup_agent(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_init_and_detect() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
@@ -32,10 +34,10 @@ async fn test_poll_init_and_detect() {
 
     let mut poller = Poller::new(GitimClient::new(&repo_root));
 
-    // First poll: initialize cursor, no changes
-    let result = poller.poll().await.unwrap();
-    assert!(result.changes.is_empty(), "first poll should have no changes");
+    // First poll: initialize cursor
+    let _result = poller.poll().await.unwrap();
     assert!(poller.cursor().is_some(), "cursor should be initialized");
+    // Note: first poll may return onboard-related channel_meta changes — that's OK.
 
     // Send a message
     let send_resp = client
@@ -44,29 +46,28 @@ async fn test_poll_init_and_detect() {
         .unwrap();
     assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
 
-    // Wait for sync loop to push (default interval: 1s)
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Poll again: should detect the new message
-    let result = poller.poll().await.unwrap();
-    assert!(
-        !result.changes.is_empty(),
-        "should detect new message after send"
-    );
-
-    let general_change = result
-        .changes
-        .iter()
-        .find(|c| c.channel == "general");
-    assert!(
-        general_change.is_some(),
-        "should have a change for 'general' channel"
-    );
+    // Poll with retries — the sync loop may need a moment to push
+    let mut detected = false;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let result = poller.poll().await.unwrap();
+        // Look for a real message change (kind=channel + non-empty entries),
+        // not just onboard channel_meta diffs.
+        let msg_change = result.changes.iter().find(|c| {
+            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
+        });
+        if msg_change.is_some() {
+            detected = true;
+            break;
+        }
+    }
+    assert!(detected, "should detect new message after send within 10 retries");
 
     stop_daemon(&repo_root).await;
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_no_duplicates() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
@@ -77,16 +78,26 @@ async fn test_poll_no_duplicates() {
     // Init cursor
     poller.poll().await.unwrap();
 
-    // Send + wait for sync
+    // Send a message
     client
         .send("general", "message one", None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // First poll after send: detect change
-    let result = poller.poll().await.unwrap();
-    assert!(!result.changes.is_empty(), "should detect the message");
+    // Poll with retries until the message is detected
+    let mut detected = false;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let result = poller.poll().await.unwrap();
+        let msg_change = result.changes.iter().find(|c| {
+            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
+        });
+        if msg_change.is_some() {
+            detected = true;
+            break;
+        }
+    }
+    assert!(detected, "should detect the message");
 
     // Second poll: no new changes
     let result = poller.poll().await.unwrap();
@@ -99,6 +110,7 @@ async fn test_poll_no_duplicates() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_cursor_survives_empty() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();

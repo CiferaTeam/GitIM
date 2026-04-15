@@ -1,4 +1,4 @@
-use gitim_core::dm::dm_filename;
+use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::types::Handler;
 
 #[test]
@@ -21,4 +21,33 @@ fn test_dm_filename_prefix_match() {
     let a = Handler::new("alice").unwrap();
     let b = Handler::new("alice2").unwrap();
     assert_eq!(dm_filename(&a, &b), "alice--alice2");
+}
+
+#[test]
+fn test_parse_dm_filename_valid() {
+    let (first, second) = parse_dm_filename("lewis--nexus").unwrap();
+    assert_eq!(first, "lewis");
+    assert_eq!(second, "nexus");
+}
+
+#[test]
+fn test_parse_dm_filename_with_hyphens() {
+    let (first, second) = parse_dm_filename("cifera-nexus--lewis").unwrap();
+    assert_eq!(first, "cifera-nexus");
+    assert_eq!(second, "lewis");
+}
+
+#[test]
+fn test_parse_dm_filename_invalid_no_separator() {
+    assert!(parse_dm_filename("lewis").is_none());
+}
+
+#[test]
+fn test_parse_dm_filename_invalid_empty_first() {
+    assert!(parse_dm_filename("--nexus").is_none());
+}
+
+#[test]
+fn test_parse_dm_filename_invalid_empty_second() {
+    assert!(parse_dm_filename("lewis--").is_none());
 }
