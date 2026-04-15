@@ -279,7 +279,7 @@ pub struct AgentLoop {
     poller: Poller,
     provider: Box<dyn Provider>,
     session_token: Option<String>,
-    poll_interval: Duration,
+    pub poll_interval: Duration,
     repo_root: PathBuf,
     model: Option<String>,
     custom_system_prompt: Option<String>,
@@ -417,6 +417,19 @@ impl AgentLoop {
             resume_token: self.session_token.clone(),
             ..Default::default()
         }
+    }
+
+    /// Initialize the poller cursor if not already set.
+    /// Call this once before entering a manual run_once() loop.
+    pub async fn init(&mut self) -> Result<(), RuntimeError> {
+        if self.poller.cursor().is_none() {
+            self.poller.poll().await?;
+            self.save_state()?;
+            info!("agent loop started, cursor initialized");
+        } else {
+            info!("agent loop started, cursor restored from state");
+        }
+        Ok(())
     }
 
     /// Run one poll-and-process cycle. Returns true if messages were processed.

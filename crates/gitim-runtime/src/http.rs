@@ -45,6 +45,8 @@ pub struct AgentInfo {
     pub display_name: String,
     pub status: String, // "idle", "running", "error"
     pub last_activity: Option<String>,
+    pub messages_processed: u64,
+    pub repo_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,8 +55,6 @@ pub struct AgentInfo {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    #[serde(skip)]
-    pub repo_root: PathBuf,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -535,11 +535,12 @@ async fn agents_add(
                 display_name: req.display_name.clone(),
                 status: "idle".to_string(),
                 last_activity: None,
+                messages_processed: 0,
+                repo_path: handle.repo_root.display().to_string(),
                 provider: req.provider.clone(),
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
-                repo_root: handle.repo_root,
                 loop_handle: None,
             };
             {
@@ -586,7 +587,7 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
                 return Ok(()); // idempotent: already running is ok
             }
             Some(info) => (
-                info.repo_root.clone(),
+                PathBuf::from(&info.repo_path),
                 info.handler.clone(),
                 info.provider.clone(),
                 info.model.clone(),
@@ -616,15 +617,53 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        let result = agent_loop.run().await;
+        // Initialize poller cursor (same as run() does)
+        if let Err(e) = agent_loop.init().await {
+            tracing::error!(error = %e, "agent loop init failed");
+            let mut s = state_clone.lock().unwrap();
+            if let Some(info) = s.agents.get_mut(&owned_id) {
+                info.loop_handle = None;
+                info.status = "error".to_string();
+            }
+            return;
+        }
 
-        let mut s = state_clone.lock().unwrap();
-        if let Some(info) = s.agents.get_mut(&owned_id) {
-            info.loop_handle = None;
-            info.status = match result {
-                Ok(()) => "idle".to_string(),
-                Err(_) => "error".to_string(),
-            };
+        let poll_interval = agent_loop.poll_interval;
+        let mut consecutive_errors: u32 = 0;
+        const MAX_BACKOFF_SECS: u64 = 60;
+
+        loop {
+            match agent_loop.run_once().await {
+                Ok(true) => {
+                    consecutive_errors = 0;
+                    if let Ok(mut s) = state_clone.try_lock() {
+                        if let Some(info) = s.agents.get_mut(&owned_id) {
+                            info.messages_processed += 1;
+                            info.last_activity =
+                                Some(chrono::Utc::now().to_rfc3339());
+                        }
+                    }
+                }
+                Ok(false) => {
+                    consecutive_errors = 0;
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    let backoff = std::time::Duration::from_secs(
+                        (2u64.saturating_pow(consecutive_errors))
+                            .min(MAX_BACKOFF_SECS),
+                    );
+                    tracing::error!(
+                        error = %e,
+                        consecutive = consecutive_errors,
+                        backoff_secs = backoff.as_secs(),
+                        "agent loop error, backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
         }
     });
 
@@ -676,7 +715,7 @@ async fn agents_remove(
                 handle.abort();
             }
             // Kill the agent's daemon process
-            let pid_file = info.repo_root.join(".gitim/run/gitim.pid");
+            let pid_file = PathBuf::from(&info.repo_path).join(".gitim/run/gitim.pid");
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(pid) = content.trim().parse::<u32>() {
                     let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
@@ -863,11 +902,12 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 display_name,
                 status: "idle".to_string(),
                 last_activity: None,
+                messages_processed: 0,
+                repo_path: dir.display().to_string(),
                 provider,
                 model,
                 system_prompt: custom_system_prompt,
                 env,
-                repo_root: dir,
                 loop_handle: None,
             });
         }

@@ -120,7 +120,7 @@ fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
         repos.push(human.clone());
     }
     for agent in s.agents.values() {
-        repos.push(agent.repo_root.clone());
+        repos.push(PathBuf::from(&agent.repo_path));
     }
     drop(s);
 
