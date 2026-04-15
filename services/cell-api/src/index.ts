@@ -10,7 +10,12 @@ const app = new Hono<{ Bindings: Bindings }>();
 app.use(
   "*",
   cors({
-    origin: ["https://cell.gitim.io", "http://localhost:5173"],
+    origin: (origin) => {
+      const allowed = ["https://cell.gitim.io"];
+      // Allow any localhost port in development
+      if (origin.match(/^http:\/\/localhost:\d+$/)) return origin;
+      return allowed.includes(origin) ? origin : null;
+    },
     allowMethods: ["GET", "POST", "DELETE"],
     allowHeaders: ["Content-Type", "X-Admin-Secret"],
   })
