@@ -157,6 +157,15 @@ enum Commands {
         guest: bool,
     },
 
+    /// Update GitIM to the latest version (or a specified version)
+    Update {
+        /// Target version (e.g. "0.4.0"). Defaults to latest release.
+        version: Option<String>,
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Board (kanban) commands
     Board {
         #[command(subcommand)]
@@ -333,11 +342,17 @@ async fn main() {
         return;
     }
 
+    if let Commands::Update { version, yes } = &cli.command {
+        commands::update::cmd_update(version.as_deref(), *yes || cli.json).await;
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
         Commands::Stop => unreachable!(),
         Commands::Onboard { .. } => unreachable!(),
+        Commands::Update { .. } => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
