@@ -14,11 +14,6 @@ export function GuidePage({ onComplete }: GuidePageProps) {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState("");
 
-  const [claudeStatus, setClaudeStatus] = useState<
-    "idle" | "checking" | "ok" | "error"
-  >("idle");
-  const [claudeInfo, setClaudeInfo] = useState("");
-
   const handleConnect = async () => {
     const p = parseInt(portInput, 10);
     if (!Number.isFinite(p) || p < 1 || p > 65535) {
@@ -50,36 +45,6 @@ export function GuidePage({ onComplete }: GuidePageProps) {
       setConnectError(`无法连接 127.0.0.1:${p}，请确认 Runtime 已启动`);
     } finally {
       setConnecting(false);
-    }
-  };
-
-  const handleClaudeCheck = async () => {
-    const p = parseInt(portInput, 10);
-    if (!Number.isFinite(p) || p < 1 || p > 65535) {
-      setClaudeInfo("请先输入有效端口号");
-      setClaudeStatus("error");
-      return;
-    }
-
-    setClaudeStatus("checking");
-    setClaudeInfo("");
-
-    try {
-      const res = await fetch(`http://127.0.0.1:${p}/preflight/claude`, {
-        signal: AbortSignal.timeout(10000),
-      });
-      const data = await res.json();
-
-      if (data.available) {
-        setClaudeStatus("ok");
-        setClaudeInfo(data.version ? `Claude ${data.version}` : "可用");
-      } else {
-        setClaudeStatus("error");
-        setClaudeInfo(data.error ?? "Claude CLI 不可用");
-      }
-    } catch {
-      setClaudeStatus("error");
-      setClaudeInfo("无法连接 Runtime，请先启动");
     }
   };
 
@@ -145,28 +110,6 @@ export function GuidePage({ onComplete }: GuidePageProps) {
           )}
         </section>
 
-        {/* Step 4: Claude Check (optional) */}
-        <section className="space-y-2">
-          <h2 className="text-sm font-medium text-foreground">
-            4. 检测 Claude CLI
-            <span className="text-text-muted font-normal ml-1">（可选）</span>
-          </h2>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleClaudeCheck}
-              disabled={claudeStatus === "checking"}
-              className="h-9 px-4 rounded-md border border-input text-sm text-foreground hover:bg-surface-hover disabled:opacity-50 transition-colors"
-            >
-              {claudeStatus === "checking" ? "检测中..." : "检测"}
-            </button>
-            {claudeStatus === "ok" && (
-              <span className="text-xs text-success">{claudeInfo}</span>
-            )}
-            {claudeStatus === "error" && (
-              <span className="text-xs text-error">{claudeInfo}</span>
-            )}
-          </div>
-        </section>
       </div>
     </div>
   );
