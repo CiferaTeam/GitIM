@@ -51,12 +51,12 @@ async fn test_poll_init_and_detect() {
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let result = poller.poll().await.unwrap();
-        if !result.changes.is_empty() {
-            let general_change = result.changes.iter().find(|c| c.channel == "general");
-            assert!(
-                general_change.is_some(),
-                "should have a change for 'general' channel"
-            );
+        // Look for a real message change (kind=channel + non-empty entries),
+        // not just onboard channel_meta diffs.
+        let msg_change = result.changes.iter().find(|c| {
+            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
+        });
+        if msg_change.is_some() {
             detected = true;
             break;
         }
@@ -89,7 +89,10 @@ async fn test_poll_no_duplicates() {
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let result = poller.poll().await.unwrap();
-        if !result.changes.is_empty() {
+        let msg_change = result.changes.iter().find(|c| {
+            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
+        });
+        if msg_change.is_some() {
             detected = true;
             break;
         }
