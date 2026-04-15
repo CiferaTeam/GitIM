@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{ExecOptions, ProviderConfig, ProviderError, Session};
+use crate::{ExecOptions, PromptContext, ProviderConfig, ProviderError, Session};
 
 /// Unified interface for executing prompts via headless coding agents.
 #[async_trait]
@@ -10,6 +10,40 @@ pub trait Provider: Send + Sync {
     /// The caller should read from `session.events` (optional) and await
     /// `session.result` for the final outcome.
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError>;
+
+    fn prompt_identity(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_identity(ctx)
+    }
+    fn prompt_communication_style(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_communication_style(ctx)
+    }
+    fn prompt_cognitive_loop(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_cognitive_loop(ctx)
+    }
+    fn prompt_collaboration(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_collaboration(ctx)
+    }
+    fn prompt_memory(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_memory(ctx)
+    }
+    fn prompt_cold_start(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_cold_start(ctx)
+    }
+    fn prompt_gitim_api(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_gitim_api(ctx)
+    }
+    fn build_system_prompt(&self, ctx: &PromptContext) -> String {
+        [
+            self.prompt_identity(ctx),
+            self.prompt_communication_style(ctx),
+            self.prompt_cognitive_loop(ctx),
+            self.prompt_collaboration(ctx),
+            self.prompt_memory(ctx),
+            self.prompt_cold_start(ctx),
+            self.prompt_gitim_api(ctx),
+        ]
+        .join("\n\n")
+    }
 }
 
 /// Create a provider for the given type.

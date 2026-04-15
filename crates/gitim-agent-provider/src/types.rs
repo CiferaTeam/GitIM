@@ -119,3 +119,10 @@ pub enum ExecStatus {
     Aborted,
     Timeout,
 }
+
+/// Context passed to prompt generation methods.
+#[derive(Debug, Clone)]
+pub struct PromptContext<'a> {
+    pub handler: &'a str,
+    pub model: Option<&'a str>,
+}
