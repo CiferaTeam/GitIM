@@ -5,3 +5,4 @@ pub mod channels;
 pub mod dm;
 pub mod messaging;
 pub mod onboard;
+pub mod update;
