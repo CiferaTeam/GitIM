@@ -2,6 +2,7 @@ mod common;
 
 use gitim_client::GitimClient;
 use gitim_runtime::{provision_agent, AgentConfig, Poller};
+use serial_test::serial;
 
 use common::{ensure_daemon_in_path, setup_bare_remote, short_tempdir, stop_daemon};
 
@@ -25,6 +26,7 @@ async fn setup_agent(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_init_and_detect() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
@@ -65,6 +67,7 @@ async fn test_poll_init_and_detect() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_no_duplicates() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
@@ -97,6 +100,7 @@ async fn test_poll_no_duplicates() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_poll_cursor_survives_empty() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();

@@ -26,3 +26,4 @@ path = "src/bin/runtime.rs"
 
 [dev-dependencies]
 tempfile = "3"
+serial_test = "3"
