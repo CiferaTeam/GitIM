@@ -1,9 +1,13 @@
+// Helpers are private scaffolding for the full update flow (Task 4).
+// Suppress dead_code until they're wired into cmd_update.
+#[allow(dead_code)]
 const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
-#[allow(dead_code)] // Used in Task 4 full update flow
+#[allow(dead_code)]
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-#[allow(dead_code)] // Used in Task 4 full update flow
+#[allow(dead_code)]
 const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
 
+#[allow(dead_code)]
 fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let s = s.strip_prefix('v').unwrap_or(s);
     let mut parts = s.split('.');
@@ -13,6 +17,7 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+#[allow(dead_code)]
 fn is_newer(current: &str, remote: &str) -> bool {
     match (parse_version(current), parse_version(remote)) {
         (Some(c), Some(r)) => r > c,
@@ -20,6 +25,7 @@ fn is_newer(current: &str, remote: &str) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn detect_platform() -> Result<String, String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -36,18 +42,19 @@ fn detect_platform() -> Result<String, String> {
     Ok(format!("{os_name}-{arch_name}"))
 }
 
+#[allow(dead_code)]
 fn download_url(tag: &str, platform: &str) -> String {
     format!(
         "https://github.com/{RELEASES_REPO}/releases/download/{tag}/gitim-{tag}-{platform}.tar.gz"
     )
 }
 
+#[allow(dead_code)]
 fn latest_release_api_url() -> String {
     format!("https://api.github.com/repos/{RELEASES_REPO}/releases/latest")
 }
 
 // Temporary stub -- will be replaced in Task 4
-#[allow(dead_code)] // Wired in Task 3
 pub async fn cmd_update(_version: Option<&str>, _yes: bool) {
     eprintln!("update: not yet implemented");
     std::process::exit(1);
