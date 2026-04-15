@@ -78,16 +78,23 @@ async fn test_poll_no_duplicates() {
     // Init cursor
     poller.poll().await.unwrap();
 
-    // Send + wait for sync
+    // Send a message
     client
         .send("general", "message one", None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // First poll after send: detect change
-    let result = poller.poll().await.unwrap();
-    assert!(!result.changes.is_empty(), "should detect the message");
+    // Poll with retries until the message is detected
+    let mut detected = false;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let result = poller.poll().await.unwrap();
+        if !result.changes.is_empty() {
+            detected = true;
+            break;
+        }
+    }
+    assert!(detected, "should detect the message");
 
     // Second poll: no new changes
     let result = poller.poll().await.unwrap();
