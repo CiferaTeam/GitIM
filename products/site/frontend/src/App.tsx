@@ -2,7 +2,7 @@ import { Header } from "@/components/layout/Header"
 import { Hero } from "@/components/sections/Hero"
 import { ValueProps } from "@/components/sections/ValueProps"
 import { ProductDemo } from "@/components/sections/ProductDemo"
-import { AccessForm } from "@/components/sections/AccessForm"
+import { Credits } from "@/components/sections/Credits"
 import { Footer } from "@/components/layout/Footer"
 
 function App() {
@@ -13,7 +13,7 @@ function App() {
         <Hero />
         <ValueProps />
         <ProductDemo />
-        <AccessForm />
+        <Credits />
       </main>
       <Footer />
     </>
