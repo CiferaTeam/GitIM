@@ -85,9 +85,9 @@ export default function App() {
           (c) => c.name === displayName
         );
 
-        if (!knownChannel) {
+        if (!knownChannel || change.kind === "channel_meta") {
           needChannelRefresh = true;
-          continue;
+          if (!knownChannel) continue;
         }
 
         if (displayName === currentChannelRef.current) {
