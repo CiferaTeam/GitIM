@@ -224,7 +224,7 @@ async fn drive_session(
 
     // If failed with no error message, fall back to stderr tail
     if final_status == ExecStatus::Failed
-        && final_error.as_ref().map_or(true, |e| e.is_empty())
+        && final_error.as_ref().is_none_or(|e| e.is_empty())
     {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {

@@ -14,7 +14,7 @@ pub trait Provider: Send + Sync {
 
 /// Create a provider for the given type.
 ///
-/// Supported types: "claude", "codex", "cursor", "opencode".
+/// Supported types: "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "cursor", "mock".
 pub fn create(
     provider_type: &str,
     config: ProviderConfig,
