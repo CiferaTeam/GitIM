@@ -37,7 +37,7 @@ daemon 需要 Unix socket、文件系统、git CLI、SQLite、file watcher——
      gitim-runtime       Web Worker
      + daemon (Rust)     + daemon-web (TS)
      + git CLI           + isomorphic-git
-     + std::fs           + OPFS
+     + std::fs           + lightning-fs (IndexedDB)
             ↓                   ↓
           同一个 Git Remote (GitHub / Gitea / GitLab)
 ```
@@ -85,19 +85,34 @@ gitim-sync 中 renumber 和 conflict 的纯逻辑函数同样可以导出。
 
 ### 实现方式
 
-使用 `wasm-pack build --target web` 编译，通过 `wasm-bindgen` + `serde-wasm-bindgen` 导出 JS binding。复杂类型（ThreadFile, ChannelMeta）通过 serde-wasm-bindgen 自动转为 JS object，TS 类型定义手写（复用现有 `types.ts` 风格）。
+使用 `wasm-pack build --target web` 编译，通过 `wasm-bindgen` + `serde-wasm-bindgen` 导出 JS binding。TS 类型定义手写（复用现有 `types.ts` 风格）。
 
-WASM 产物集成到 webui-v2：手动 `wasm-pack build`，在 `package.json` 中以 `file:` 依赖引用 `pkg/` 目录。不用 vite-plugin-wasm-pack（维护状态不确定）。
+**WASM 导出需要 wrapper 层**：gitim-core 的内部类型（`ThreadFile`, `ThreadEntry`, `Link` 等）不直接 derive `Serialize`/`Deserialize`，不能原样穿越 WASM 边界。需要新建一个 `gitim-wasm` crate，写 `#[wasm_bindgen]` wrapper 函数，负责：
+- 入参：接收 `&str` / `JsValue`
+- 调用 gitim-core 纯函数
+- 出参：通过 serde-wasm-bindgen 或手动转换返回 JS-compatible 对象
+- 为需要跨边界的类型补 serde derives（或在 wrapper 层做 DTO 转换）
+
+WASM 产物集成到 webui-v2：手动 `wasm-pack build`，在 `package.json` 中以 `file:` 依赖引用 `pkg/` 目录。**注意**：`file:` 依赖要求 fresh checkout 时先跑 `wasm-pack build`，否则 `npm install` 会失败。需要在 webui-v2 的 `package.json` 加 `prebuild` 脚本，或在 README 说明构建顺序。Worker 内加载 WASM 需要处理 async init 和 asset URL（Vite 的 `?url` import 或 `new URL(..., import.meta.url)` 模式）。
 
 gitim-core 的改动：
-- `Cargo.toml` 添加 `crate-type = ["cdylib", "rlib"]`
-- chrono 依赖 per-crate override：`chrono = { workspace = true, default-features = false, features = ["serde"] }`（不改 workspace 级别，避免影响其他 crate）
+- `Cargo.toml` 确认 chrono 是否实际使用——如果未使用，移除依赖（比 per-crate override 更干净）
+- 如果 chrono 仍需保留：per-crate override `chrono = { workspace = true, default-features = false, features = ["serde"] }`
 
 gitim-sync 的改动：
-- 用 `#[cfg(not(target_arch = "wasm32"))]` 门控 I/O 模块（git.rs、watcher.rs、sync_loop.rs）
-- `conflict.rs` 中 `resolve_content()` 的文件读写逻辑提取到门控区域，纯合并逻辑保留
+- `#[cfg(not(target_arch = "wasm32"))]` 门控 I/O 模块（git.rs、watcher.rs、sync_loop.rs）
+- **Cargo.toml 需要 target-specific deps**——仅 cfg gate 源码不够，`tokio`、`notify`、`rand` 在 WASM 编译时仍会被拉入。需要：
+  ```toml
+  [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+  tokio = { workspace = true }
+  notify = "7"
+  ```
+- `conflict.rs` 中 `resolve_content()` 拆为纯函数 `resolve_content_from_remote(local_additions: &HashMap<PathBuf, String>, remote_contents: &HashMap<PathBuf, String>)` + I/O wrapper。纯函数接收已读取的远端内容，不碰文件系统。
 
-预计改动量：gitim-core 约 15 分钟，gitim-sync 约 1 小时。
+新增 `gitim-wasm` crate（预计工作量最大的一块）：
+- 依赖 gitim-core + gitim-sync（仅纯函数部分）
+- `#[wasm_bindgen]` wrapper 函数 + serde 转换
+- `wasm-pack build --target web` 入口
 
 ## daemon-web（TS 平台层）
 
@@ -147,8 +162,8 @@ webui-v2/src/daemon-web/
   → 检测本地是否有未 push 的 commit
   ├─ 无冲突 → fast-forward merge → done
   └─ 有冲突 →
-      1. 提取本地 additions（walk diff local..remote）
-      2. reset 本地到 remote HEAD
+      1. 提取本地 additions（diff origin/main..HEAD，注意方向）
+      2. reset 本地到 remote HEAD（isomorphic-git: 更新 ref + checkout worktree + 清 index）
       3. 调 WASM renumber_batch()：从 remote max_line + 1 开始重编号
       4. 调 WASM merge_channel_meta()：成员取并集
       5. 写入合并后的文件
@@ -174,9 +189,11 @@ webui-v2/src/daemon-web/
 | `channels()` | 扫描 channels/ 目录，解析 meta.yaml |
 | `read(channel, limit?)` | 解析 .thread 文件（调 WASM parse_thread） |
 | `send(channel, body, reply_to?)` | 格式化消息（调 WASM format_message）→ 追加文件 → commit |
-| `thread(channel, line)` | 从解析结果中提取线程树 |
+| `thread(channel, line)` | 从解析结果中提取线程树（注意：需支持 DM 路径，daemon 源码有 bug） |
 | `users()` | 扫描 users/ 目录 |
-不实现的 API：`search`（MVP 不含搜索，避免启动全量解析和内存压力）、`onboard`（手机端有独立的初始化流程）、agent 相关的 6 个端点、`reindex`、`subscribe`、`stop`。
+| `joinChannel(channel, targets?)` | 加入频道（chat UI 中的 join banner 依赖此 API） |
+
+不实现的 API：`search`（MVP 不含搜索）、`onboard`（手机端有独立的初始化流程）、agent 相关的 6 个端点、`reindex`、`subscribe`、`stop`。
 
 **state.ts** — 内存状态
 
@@ -209,8 +226,10 @@ interface DaemonWebState {
 
 当前 `client.ts` 的 18 个函数全部直接调 `fetch(baseUrl() + path)`。改为通过 backend interface 分发：
 
+**注意**：Backend interface 匹配的是 **gitim-runtime 的 HTTP 路由**（`/im/send`, `/im/channels` 等），不是 daemon 的 `api.rs`。因为 webui-v2 现在就是跟 runtime 通信，LocalBackend 要对齐的是 runtime 的响应格式。
+
 ```typescript
-// backend interface（与现有 client.ts 的 18 个函数签名一致）
+// backend interface — 匹配 runtime HTTP 路由的响应格式
 interface Backend {
   health(): Promise<ApiResponse>
   me(): Promise<ApiResponse>
@@ -220,13 +239,13 @@ interface Backend {
   send(channel: string, body: string, author?: string, replyTo?: number): Promise<ApiResponse>
   thread(channel: string, line: number): Promise<ApiResponse>
   users(): Promise<ApiResponse>
-  search(query: string): Promise<ApiResponse>
+  joinChannel(channel: string, targets?: string[]): Promise<ApiResponse>
   // agent 端点仅 HttpBackend 实现，LocalBackend 返回 not_supported
 }
 ```
 
 `HttpBackend`：现有的 fetch 逻辑原样搬入。
-`LocalBackend`：通过 `postMessage` 与 Web Worker 通信。
+`LocalBackend`：通过 `postMessage` 与 Web Worker 通信。app.tsx 中 `listAgents()` 等调用在 local 模式下需跳过（不只是 SSE 禁用，poll 循环里的 agent 刷新也要跳过）。
 
 ### use-connection-store.ts — 模式切换
 
@@ -330,6 +349,8 @@ local 模式下 `poll(since?)` 的语义与 Rust daemon 不同：
 
 即 local 模式的 poll = fetch + diff + 返回增量。每次 poll 都有网络开销，建议 local 模式下 poll 间隔适当拉长（5-10s，而非 remote 模式的 3s）。
 
+**注意**：fetch 只更新 remote refs，不更新 worktree。poll 的正确顺序是：fetch → diff（对比 old HEAD 与 new remote HEAD）→ fast-forward checkout → 更新 cursor。如果先 checkout 再 diff，会得到空 diff。
+
 ## Scope
 
 ### 包含
@@ -359,9 +380,26 @@ local 模式下 `poll(since?)` 的语义与 Rust daemon 不同：
 
 ### 产品层
 
-- **首次 clone 耗时**：仓库越大越慢。考虑支持 `--depth 1` shallow clone 减少初始数据量。
+- **首次 clone 耗时**：仓库越大越慢。考虑支持 `--depth 1` shallow clone 减少初始数据量。**注意**：shallow clone 与 commit-hash poll 和 conflict diff 有冲突——旧 cursor 对应的 commit 可能不存在。如果用 shallow clone，poll 必须用 tree-walk diff 而非 commit diff。
 - **双端同步冲突**：用户同时在手机和桌面发消息，两端各自 push 可能产生冲突。现有 renumber 机制可以处理，但用户可能看到消息行号跳变。这与多 agent 场景下的行为一致，不是新问题。
-- **Token 安全**：git token 存储在浏览器 localStorage 中。shared device 场景下有泄露风险。可考虑 session-scoped 存储（关闭标签页即清除）作为可选项。
+- **Token 安全**：git token 存储在浏览器 localStorage 中。同 origin 的任何 XSS 或被攻破的前端依赖都能窃取写权限 token。建议：使用最小权限 scope 的 token、提供 session-scoped 存储选项（关闭标签页即清除）、设置严格 CSP。
+- **冲突合并的边界情况**：
+  - 归档复活：桌面端归档/删除频道后，手机端离线期间仍有该频道的待发消息，冲突合并会重新创建该频道文件
+  - 踢人恢复：桌面端移除某成员后，手机端用过期的本地 meta 合并，`merge_channel_meta()` 的成员取并集会把被踢的人加回来
+  - 过期成员发送：用户被移出频道后，手机端用缓存的旧成员列表仍可通过 `validate_append()`，push 后消息留存
+  - 这些需要在 push 前重新验证远端状态（fetch 后对比），或接受最终一致性
+- **多标签页并发**：两个标签页可能同时实例化 Worker，竞争同一个 IndexedDB 仓库。需要 Web Locks API 或 BroadcastChannel leader election 保证单写者。
+- **隐私模型**：git clone 是 repo 级别的，即使 UI 只显示用户所属频道和 DM，IndexedDB 中存有完整仓库内容（包括其他用户的 DM）。GitIM 的隐私是展示层过滤，不是存储层隔离。如果仓库含敏感内容，需要分 repo 部署。
+
+### 实施注意事项
+
+以下问题在架构层面已知，需要在实施计划中具体解决：
+
+- **cursor 存储键**：当前 UI 用 `workspace` 路径做 cursor key，local 模式没有 workspace。需要改为 `remote URL + handler` 作为 key
+- **cursor reset 的 UI 契约**：当前 app.tsx 只处理增量 `changes`，没有 "全量重加载" 的事件类型。需要在 poll 响应中加 `{ reset: true }` 变体
+- **renumber 后的 pending 状态**：send 返回的 line_number 在冲突重编后失效，UI 中的 pending 消息标记和 thread 引用会指向错误行号。全量重加载时需清除 pending 和 selected thread 状态
+- **默认分支**：Rust 端硬编码 `origin/main`，手机端不能假设同样的默认分支。初始化时需检测实际默认分支
+- **git 错误分类**：Rust 端从 stderr 解析 push conflict / rate limit。浏览器端得到的是 HTTP 错误码。需要建立错误分类规则（401=auth, 429=rate limit, 409=non-fast-forward, 502/503=proxy 故障）
 
 ## 落地节奏
 
@@ -404,7 +442,8 @@ local 模式下 `poll(since?)` 的语义与 Rust daemon 不同：
 | `webui-v2/src/daemon-web/sync.ts` | 同步循环 |
 | `webui-v2/src/daemon-web/handlers.ts` | API 实现 |
 | `webui-v2/src/daemon-web/state.ts` | 内存状态 |
-| `webui-v2/src/daemon-web/storage.ts` | OPFS 封装 |
+| `webui-v2/src/daemon-web/storage.ts` | lightning-fs 封装 |
+| `crates/gitim-wasm/` | WASM 导出 crate（wasm-bindgen wrapper + serde 转换） |
 | `webui-v2/src/lib/backend/http-backend.ts` | 现有 fetch 逻辑 |
 | `webui-v2/src/lib/backend/local-backend.ts` | Worker RPC 封装 |
 
