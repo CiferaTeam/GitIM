@@ -690,6 +690,7 @@ version = "0.3.1"
 dependencies = [
  "gitim-core",
  "notify",
+ "rand",
  "serde",
  "serde_json",
  "serde_yaml",
