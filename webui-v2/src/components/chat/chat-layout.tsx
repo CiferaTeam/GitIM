@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, LogIn } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
-import type { Message } from "../../lib/types";
+import type { Channel, Message } from "../../lib/types";
+import { Button } from "../ui/button";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -38,6 +39,9 @@ export function ChatLayout() {
   const pushNav = useChatStore((s) => s.pushNav);
   const navHistory = useChatStore((s) => s.navHistory);
 
+  // Whether the backend rejected read with "not_member"
+  const [notMember, setNotMember] = useState(false);
+
   // UserCard popover state
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
   const [userCardPosition, setUserCardPosition] = useState<{ x: number; y: number } | null>(null);
@@ -47,12 +51,16 @@ export function ChatLayout() {
       selectChannel(name);
       clearUnread(name);
       setMessages([]);
+      setNotMember(false);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
       const res = await client.read(apiChannel, 50);
       // Guard: discard result if the user switched channels during the await
-      if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
+      if (useChatStore.getState().currentChannel !== name) return;
+      if (res.ok && res.data) {
         setMessages(res.data.entries as Message[]);
+      } else if (res.error === "not_member") {
+        setNotMember(true);
       }
     },
     [selectChannel, clearUnread, setMessages, setThreadRoot]
@@ -66,6 +74,24 @@ export function ChatLayout() {
       handleChannelSelect("general");
     }
   }, [channels, currentChannel, handleChannelSelect]);
+
+  const handleJoin = useCallback(async () => {
+    if (!currentChannel) return;
+    const res = await client.joinChannel(currentChannel);
+    if (!res.ok) return;
+    setNotMember(false);
+    // Refresh channel list to pick up updated members
+    const chRes = await client.channels();
+    if (chRes.ok && chRes.data) {
+      setChannels(chRes.data.channels as Channel[]);
+    }
+    // Now load messages
+    const apiChannel = toApiChannel(currentChannel);
+    const readRes = await client.read(apiChannel, 50);
+    if (readRes.ok && readRes.data) {
+      setMessages(readRes.data.entries as Message[]);
+    }
+  }, [currentChannel, setChannels, setMessages]);
 
   const handleStartDm = useCallback(
     async (targetUser: string) => {
@@ -234,17 +260,32 @@ export function ChatLayout() {
           )}
         </ChatHeader>
 
-        {/* Message area */}
-        <MessageList
-          onReply={handleReply}
-          onShowThread={handleShowThread}
-          onMentionClick={handleMentionClick}
-          onChannelClick={handleChannelClick}
-          onMessageLinkClick={handleMessageLinkClick}
-          onUserProfileClick={handleUserProfileClick}
-        />
-
-        <InputArea onSend={handleSend} />
+        {/* Message area — or join prompt for non-members */}
+        {!notMember ? (
+          <>
+            <MessageList
+              onReply={handleReply}
+              onShowThread={handleShowThread}
+              onMentionClick={handleMentionClick}
+              onChannelClick={handleChannelClick}
+              onMessageLinkClick={handleMessageLinkClick}
+              onUserProfileClick={handleUserProfileClick}
+            />
+            <InputArea onSend={handleSend} />
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center space-y-3">
+              <p className="text-sm text-muted-foreground">
+                You haven't joined #{currentChannel}
+              </p>
+              <Button onClick={handleJoin} size="sm" className="gap-1.5">
+                <LogIn className="size-4" />
+                Join Channel
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Right: thread panel */}

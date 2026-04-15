@@ -56,6 +56,15 @@ export async function send(
   return await res.json();
 }
 
+export async function joinChannel(channel: string): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/join`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel }),
+  });
+  return await res.json();
+}
+
 export async function read(
   channel: string,
   limit?: number,

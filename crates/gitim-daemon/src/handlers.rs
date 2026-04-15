@@ -559,6 +559,30 @@ async fn handle_read(
         Err(resp) => return resp,
     };
 
+    // Membership check: non-DM channels require the reader to be a member
+    // (admin and guest skip — admin has god-view, guest is a read-only observer)
+    if !channel.starts_with("dm:")
+        && !state.is_admin.load(std::sync::atomic::Ordering::SeqCst)
+        && !state.is_guest.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        let meta_path = state
+            .repo_root
+            .join("channels")
+            .join(format!("{}.meta.yaml", name));
+        if meta_path.exists() {
+            if let Some(ref current_user) = *state.current_user.read().await {
+                let is_member = std::fs::read_to_string(&meta_path)
+                    .ok()
+                    .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
+                    .map(|m| m.members.contains(current_user))
+                    .unwrap_or(true);
+                if !is_member {
+                    return Response::error("not_member");
+                }
+            }
+        }
+    }
+
     // For non-DM channels, fall back to archive path if the primary path doesn't exist
     let (thread_path, is_archived) = if !channel.starts_with("dm:") && !thread_path.exists() {
         let archive_path = state
