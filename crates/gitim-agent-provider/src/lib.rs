@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod mock;
+pub mod openclaw;
 mod error;
 mod provider;
 mod stubs;
