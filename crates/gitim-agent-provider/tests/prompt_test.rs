@@ -85,3 +85,21 @@ fn prompt_context_handler_is_interpolated() {
     let identity = provider.prompt_identity(&ctx);
     assert!(identity.contains("你是 my-agent"));
 }
+
+#[test]
+fn codex_provider_uses_agents_md() {
+    let provider =
+        gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "codex-bot",
+        model: None,
+    };
+
+    let memory = provider.prompt_memory(&ctx);
+    assert!(memory.contains("AGENTS.md"));
+    assert!(!memory.contains("CLAUDE.md"));
+
+    let cold_start = provider.prompt_cold_start(&ctx);
+    assert!(cold_start.contains("AGENTS.md"));
+    assert!(!cold_start.contains("CLAUDE.md"));
+}

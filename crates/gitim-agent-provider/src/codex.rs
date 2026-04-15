@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
+    ProviderError, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -29,6 +30,14 @@ impl CodexProvider {
 
 #[async_trait]
 impl Provider for CodexProvider {
+    fn prompt_memory(&self, _ctx: &PromptContext) -> String {
+        crate::prompts::default_memory(_ctx).replace("CLAUDE.md", "AGENTS.md")
+    }
+
+    fn prompt_cold_start(&self, _ctx: &PromptContext) -> String {
+        crate::prompts::default_cold_start(_ctx).replace("CLAUDE.md", "AGENTS.md")
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config
