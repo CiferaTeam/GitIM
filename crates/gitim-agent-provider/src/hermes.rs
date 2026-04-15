@@ -252,60 +252,64 @@ async fn drive_session(
         });
     }
 
-    // ── Handshake ──
+    // ── Handshake (30s timeout — separate from the main event loop timeout) ──
+    // Note: any session/update notifications arriving during handshake are intentionally
+    // dropped. In practice hermes doesn't send them before the prompt response begins.
 
-    // Step 1: initialize
-    if let Err(e) = rpc_call(&mut stdin, &mut reader, 0, "initialize", json!({
-        "protocolVersion": 1,
-        "clientInfo": {"name": "gitim-agent-sdk", "version": "0.1.0"},
-        "clientCapabilities": {},
-    })).await {
-        warn!(pid, error = %e, "hermes initialize failed");
-        let _ = child.start_kill();
-        send_result(result_tx, ExecStatus::Failed, output, Some(e), start, &session_id);
-        stderr_handle.abort();
-        return;
-    }
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-    // Step 2: session/new or session/resume
-    let (method, params) = if let Some(ref token) = resume_token {
-        ("session/resume", json!({"cwd": cwd_str, "sessionId": token}))
-    } else {
-        ("session/new", json!({"cwd": cwd_str, "mcpServers": []}))
+    let handshake = async {
+        // Step 1: initialize
+        rpc_call(&mut stdin, &mut reader, 0, "initialize", json!({
+            "protocolVersion": 1,
+            "clientInfo": {"name": "gitim-agent-sdk", "version": "0.1.0"},
+            "clientCapabilities": {},
+        })).await?;
+
+        // Step 2: session/new or session/resume
+        let (method, params) = if let Some(ref token) = resume_token {
+            ("session/resume", json!({"cwd": cwd_str, "sessionId": token}))
+        } else {
+            ("session/new", json!({"cwd": cwd_str, "mcpServers": []}))
+        };
+        let result = rpc_call(&mut stdin, &mut reader, 1, method, params).await?;
+        let sid = result.get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        // Step 3: send session/prompt (fire and forget — response arrives in event loop)
+        let prompt_req = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+            "params": {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]}
+        });
+        let mut buf = serde_json::to_vec(&prompt_req).map_err(|e| e.to_string())?;
+        buf.push(b'\n');
+        stdin.write_all(&buf).await.map_err(|e| format!("stdin write: {e}"))?;
+
+        Ok::<String, String>(sid)
     };
-    match rpc_call(&mut stdin, &mut reader, 1, method, params).await {
-        Ok(result) => {
-            session_id = result.get("sessionId")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+        Ok(Ok(sid)) => {
+            session_id = sid;
             info!(pid, session_id = %session_id, "hermes session established");
         }
-        Err(e) => {
-            warn!(pid, error = %e, "hermes session setup failed");
+        Ok(Err(e)) => {
+            warn!(pid, error = %e, "hermes handshake failed");
             let _ = child.start_kill();
             send_result(result_tx, ExecStatus::Failed, output, Some(e), start, &session_id);
             stderr_handle.abort();
             return;
         }
-    }
-
-    // Step 3: send session/prompt (fire and forget — response arrives in event loop)
-    let prompt_req = json!({
-        "jsonrpc": "2.0", "id": 2, "method": "session/prompt",
-        "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}
-    });
-    let write_result = async {
-        let mut buf = serde_json::to_vec(&prompt_req).map_err(|e| e.to_string())?;
-        buf.push(b'\n');
-        stdin.write_all(&buf).await.map_err(|e| format!("stdin write: {e}"))
-    }.await;
-    if let Err(e) = write_result {
-        warn!(pid, error = %e, "hermes prompt send failed");
-        let _ = child.start_kill();
-        send_result(result_tx, ExecStatus::Failed, output, Some(e), start, &session_id);
-        stderr_handle.abort();
-        return;
+        Err(_) => {
+            warn!(pid, "hermes handshake timed out after {HANDSHAKE_TIMEOUT:?}");
+            let _ = child.start_kill();
+            send_result(result_tx, ExecStatus::Timeout, output,
+                Some(format!("hermes handshake timed out after {HANDSHAKE_TIMEOUT:?}")), start, &session_id);
+            stderr_handle.abort();
+            return;
+        }
     }
 
     try_send_event(&event_tx, Event::Status { status: "running".to_string() });
