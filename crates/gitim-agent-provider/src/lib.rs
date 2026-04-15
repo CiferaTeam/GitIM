@@ -5,6 +5,7 @@ mod error;
 mod provider;
 mod stubs;
 mod types;
+pub(crate) mod util;
 
 pub use error::ProviderError;
 pub use provider::{create, Provider};
