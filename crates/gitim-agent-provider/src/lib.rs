@@ -3,6 +3,7 @@ pub mod codex;
 pub mod gemini;
 pub mod mock;
 pub mod openclaw;
+pub mod opencode;
 mod error;
 mod provider;
 mod stubs;
