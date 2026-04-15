@@ -120,16 +120,11 @@ function updateAgentStatus(): void {
 
   if (agent.status === "running") {
     agent.status = "idle";
-    agent.currentChannel = undefined;
   } else if (agent.status === "idle") {
     agent.status = "running";
-    agent.currentChannel =
-      channelKeys.length > 0 ? pick(channelKeys) : undefined;
   } else {
     // error or offline → running (simulating recovery)
     agent.status = "running";
-    agent.currentChannel =
-      channelKeys.length > 0 ? pick(channelKeys) : undefined;
   }
 
   agent.lastActivity = new Date().toISOString();

@@ -124,7 +124,6 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     repoPath: (raw.repo_path as string) ?? "",
     messagesProcessed: (raw.messages_processed as number) ?? 0,
     lastActivity: raw.last_activity as string | undefined,
-    currentChannel: raw.current_channel as string | undefined,
   };
 }
 

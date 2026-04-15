@@ -8,9 +8,7 @@ export interface Agent {
   model?: string;
   env?: Record<string, string>;
   repoPath: string;
-  sessionId?: string;
   lastActivity?: string; // ISO8601
-  currentChannel?: string;
   messagesProcessed: number;
 }
 

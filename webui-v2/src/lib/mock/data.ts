@@ -15,9 +15,7 @@ export const mockAgents: Agent[] = [
     status: "running",
     systemPrompt: "You review code for correctness, style, and maintainability. Provide concise, actionable feedback.",
     repoPath: "~/gitim-agents/code-reviewer/",
-    sessionId: "ses-cr-001",
     lastActivity: "2026-04-10T11:45:00Z",
-    currentChannel: "dev-tasks",
     messagesProcessed: 142,
   },
   {
@@ -26,7 +24,6 @@ export const mockAgents: Agent[] = [
     status: "idle",
     systemPrompt: "You plan and break down tasks into actionable sub-tasks. Prioritize based on dependencies.",
     repoPath: "~/gitim-agents/task-planner/",
-    sessionId: "ses-tp-001",
     lastActivity: "2026-04-10T10:30:00Z",
     messagesProcessed: 87,
   },

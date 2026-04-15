@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
@@ -9,17 +10,6 @@ import { relativeTime, statusBadge } from "./agent-card";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { useState } from "react";
 import { toast } from "sonner";
-
-const MOCK_LOG = [
-  { time: "10:23", text: "Received message in #dev-tasks" },
-  { time: "10:24", text: "Spawned sub-agent for code review" },
-  { time: "10:25", text: "Completed review, posted results" },
-  { time: "10:27", text: "Waiting for new messages" },
-  { time: "10:31", text: "Received message in #general" },
-  { time: "10:31", text: "Replied with summary of recent commits" },
-  { time: "10:45", text: "Started scheduled task: daily standup digest" },
-  { time: "10:46", text: "Standup digest posted to #standup" },
-];
 
 function Field({
   label,
@@ -45,7 +35,10 @@ export function AgentDetail() {
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const [removeOpen, setRemoveOpen] = useState(false);
 
+  const activities = useAgentActivityStore((s) => s.activities);
+
   const agent: Agent | undefined = agents.find((a) => a.id === agentId);
+  const agentEvents = agent ? (activities[agent.id] ?? []) : [];
 
   if (!agent) {
     return (
@@ -117,12 +110,6 @@ export function AgentDetail() {
           </code>
         </Field>
 
-        <Field label="Session ID">
-          <code className="text-sm font-mono text-muted-foreground">
-            {agent.sessionId ?? "—"}
-          </code>
-        </Field>
-
         <Field label="Messages Processed">
           <span className="text-sm">{agent.messagesProcessed}</span>
         </Field>
@@ -133,9 +120,6 @@ export function AgentDetail() {
           </span>
         </Field>
 
-        <Field label="Current Channel">
-          <span className="text-sm">{agent.currentChannel ?? "—"}</span>
-        </Field>
       </div>
 
       {/* System Prompt */}
@@ -173,13 +157,21 @@ export function AgentDetail() {
         </p>
         <ScrollArea className="h-48 border rounded-md">
           <div className="p-3 space-y-1">
-            {MOCK_LOG.map((entry, i) => (
-              <p key={i} className="text-sm font-mono">
-                <span className="text-muted-foreground">{entry.time}</span>
-                {" — "}
-                {entry.text}
-              </p>
-            ))}
+            {agentEvents.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No activity yet</p>
+            ) : (
+              agentEvents.map((ev, i) => (
+                <p key={i} className="text-sm font-mono">
+                  <span className="text-muted-foreground">
+                    {ev.timestamp.slice(11, 16)}
+                  </span>
+                  {" — "}
+                  <span className="text-muted-foreground">{ev.event_type}</span>
+                  {" "}
+                  {ev.detail}
+                </p>
+              ))
+            )}
           </div>
         </ScrollArea>
       </div>

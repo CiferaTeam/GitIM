@@ -94,9 +94,6 @@ export function AgentCard({ agent }: AgentCardProps) {
 
             <span className="text-muted-foreground">Messages processed</span>
             <span>{agent.messagesProcessed}</span>
-
-            <span className="text-muted-foreground">Current channel</span>
-            <span>{agent.currentChannel ?? "—"}</span>
           </div>
         </CardContent>
 
