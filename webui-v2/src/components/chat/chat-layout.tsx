@@ -39,8 +39,14 @@ export function ChatLayout() {
   const pushNav = useChatStore((s) => s.pushNav);
   const navHistory = useChatStore((s) => s.navHistory);
 
-  // Whether the backend rejected read with "not_member"
-  const [notMember, setNotMember] = useState(false);
+  // Show join banner for channels the user hasn't joined
+  const currentChannelData = currentChannel
+    ? channels.find((c) => c.name === currentChannel)
+    : null;
+  const showJoinBanner =
+    !!currentChannelData &&
+    currentChannelData.kind === "channel" &&
+    !currentChannelData.members.includes(currentUser);
 
   // UserCard popover state
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
@@ -51,16 +57,12 @@ export function ChatLayout() {
       selectChannel(name);
       clearUnread(name);
       setMessages([]);
-      setNotMember(false);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
       const res = await client.read(apiChannel, 50);
       // Guard: discard result if the user switched channels during the await
-      if (useChatStore.getState().currentChannel !== name) return;
-      if (res.ok && res.data) {
+      if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
-      } else if (res.error === "not_member") {
-        setNotMember(true);
       }
     },
     [selectChannel, clearUnread, setMessages, setThreadRoot]
@@ -79,7 +81,6 @@ export function ChatLayout() {
     if (!currentChannel) return;
     const res = await client.joinChannel(currentChannel);
     if (!res.ok) return;
-    setNotMember(false);
     // Refresh channel list to pick up updated members
     const chRes = await client.channels();
     if (chRes.ok && chRes.data) {
@@ -260,32 +261,28 @@ export function ChatLayout() {
           )}
         </ChatHeader>
 
-        {/* Message area — or join prompt for non-members */}
-        {!notMember ? (
-          <>
-            <MessageList
-              onReply={handleReply}
-              onShowThread={handleShowThread}
-              onMentionClick={handleMentionClick}
-              onChannelClick={handleChannelClick}
-              onMessageLinkClick={handleMessageLinkClick}
-              onUserProfileClick={handleUserProfileClick}
-            />
-            <InputArea onSend={handleSend} />
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center space-y-3">
-              <p className="text-sm text-muted-foreground">
-                You haven't joined #{currentChannel}
-              </p>
-              <Button onClick={handleJoin} size="sm" className="gap-1.5">
-                <LogIn className="size-4" />
-                Join Channel
-              </Button>
-            </div>
+        {/* Join banner for non-members (messages still visible below) */}
+        {showJoinBanner && (
+          <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
+            <span className="text-xs text-muted-foreground">
+              You're viewing #{currentChannel} but haven't joined
+            </span>
+            <Button onClick={handleJoin} variant="outline" size="xs" className="gap-1.5">
+              <LogIn className="size-3" />
+              Join
+            </Button>
           </div>
         )}
+
+        <MessageList
+          onReply={handleReply}
+          onShowThread={handleShowThread}
+          onMentionClick={handleMentionClick}
+          onChannelClick={handleChannelClick}
+          onMessageLinkClick={handleMessageLinkClick}
+          onUserProfileClick={handleUserProfileClick}
+        />
+        <InputArea onSend={handleSend} />
       </div>
 
       {/* Right: thread panel */}
