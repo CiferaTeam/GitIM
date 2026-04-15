@@ -173,6 +173,12 @@ export async function addAgent(
     });
     const data = await res.json();
     if (!data.ok) return data;
+    // Fetch the full agent info from backend (has repo_path etc.)
+    const agentRes = await getAgent(data.id ?? handler);
+    if (agentRes.ok && agentRes.data?.agent) {
+      return agentRes;
+    }
+    // Fallback: construct locally if fetch fails
     const agent: Agent = {
       id: data.id ?? handler,
       name,
