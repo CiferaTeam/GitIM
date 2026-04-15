@@ -92,11 +92,14 @@ echo ""
 
 # ---------- Bump Cargo.toml ----------
 echo "==> Bumping workspace version: ${CURRENT} -> ${NEXT}"
-sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEXT}\"/" "$ROOT/Cargo.toml"
+sed -i '' "s/^version = \".*\"/version = \"${NEXT}\"/" "$ROOT/Cargo.toml"
+
+# ---------- Update Cargo.lock ----------
+echo "==> Updating Cargo.lock..."
+cargo generate-lockfile --quiet
 
 # ---------- Commit & tag ----------
-git add "$NOTES_FILE" "$ROOT/Cargo.toml" Cargo.lock 2>/dev/null || true
-git add "$NOTES_FILE" "$ROOT/Cargo.toml"
+git add "$NOTES_FILE" "$ROOT/Cargo.toml" Cargo.lock
 git commit -m "chore: bump version to ${NEXT}"
 git tag "$NEXT_TAG"
 
