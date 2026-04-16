@@ -27,7 +27,7 @@ interface ChatState {
   setUsers: (u: string[]) => void;
   setChannels: (c: Channel[]) => void;
   selectChannel: (name: string) => void;
-  incrementUnread: (channel: string) => void;
+  incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
@@ -63,7 +63,22 @@ export const useChatStore = create<ChatState>((set) => ({
   setCurrentUser: (u) => set({ currentUser: u }),
   setIsGuest: (v) => set({ isGuest: v }),
   setUsers: (u) => set({ users: u }),
-  setChannels: (c) => set({ channels: c }),
+  setChannels: (newChannels) =>
+    set((state) => {
+      const prevMap = new Map(
+        state.channels.map((c) => [c.name, c])
+      );
+      return {
+        channels: newChannels.map((c) => {
+          const prev = prevMap.get(c.name);
+          return {
+            ...c,
+            unreadCount: prev?.unreadCount || 0,
+            hasMention: prev?.hasMention || false,
+          };
+        }),
+      };
+    }),
 
   selectChannel: (name) =>
     set({
@@ -76,17 +91,23 @@ export const useChatStore = create<ChatState>((set) => ({
       threadMessages: [],
     }),
 
-  incrementUnread: (channel) =>
+  incrementUnread: (channel, mentioned) =>
     set((state) => ({
       channels: state.channels.map((c) =>
-        c.name === channel ? { ...c, unreadCount: c.unreadCount + 1 } : c
+        c.name === channel
+          ? {
+              ...c,
+              unreadCount: (c.unreadCount || 0) + 1,
+              hasMention: c.hasMention || !!mentioned,
+            }
+          : c
       ),
     })),
 
   clearUnread: (channel) =>
     set((state) => ({
       channels: state.channels.map((c) =>
-        c.name === channel ? { ...c, unreadCount: 0 } : c
+        c.name === channel ? { ...c, unreadCount: 0, hasMention: false } : c
       ),
     })),
 

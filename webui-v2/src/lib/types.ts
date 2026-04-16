@@ -30,6 +30,7 @@ export interface Channel {
   name: string;
   kind: "channel" | "dm";
   unreadCount: number;
+  hasMention: boolean;
   members: string[];
 }
 

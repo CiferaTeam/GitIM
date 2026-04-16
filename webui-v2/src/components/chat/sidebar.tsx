@@ -1,10 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { Channel } from "../../lib/types";
 import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
 
 interface SidebarProps {
   onChannelSelect: (name: string) => void;
@@ -41,6 +42,15 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [dmQuery, setDmQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Auto-focus input when popover opens
+  useEffect(() => {
+    if (dmSearchOpen) {
+      setTimeout(() => inputRef.current?.focus(), 0);
+    } else {
+      setDmQuery("");
+    }
+  }, [dmSearchOpen]);
+
   const regularChannels = channels.filter((c) => c.kind === "channel");
   const dmChannels = channels
     .filter((c) => c.kind === "dm")
@@ -60,24 +70,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       )
     : users.filter((u) => u !== currentUser);
 
-  function openDmSearch() {
-    setDmSearchOpen(true);
-    setDmQuery("");
-    // Focus after render
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }
-
   function handleUserSelect(user: string) {
     setDmSearchOpen(false);
-    setDmQuery("");
     onStartDm(user);
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape") {
-      setDmSearchOpen(false);
-      setDmQuery("");
-    }
   }
 
   return (
@@ -96,6 +91,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               key={ch.name}
               label={`# ${ch.name}`}
               unread={ch.unreadCount}
+              hasMention={ch.hasMention}
               active={currentChannel === ch.name}
               onClick={() => onChannelSelect(ch.name)}
             />
@@ -109,43 +105,44 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
             Direct Messages
           </p>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            title="New DM"
-            onClick={openDmSearch}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <span className="text-base leading-none">+</span>
-          </Button>
+          <Popover open={dmSearchOpen} onOpenChange={setDmSearchOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                title="New DM"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <span className="text-base leading-none">+</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent side="right" align="start" className="w-52 p-1">
+              <Input
+                ref={inputRef}
+                placeholder="Search users..."
+                value={dmQuery}
+                onChange={(e) => setDmQuery(e.target.value)}
+                className="h-7 text-xs mb-1"
+              />
+              {filteredUsers.length > 0 && (
+                <ul className="max-h-40 overflow-y-auto">
+                  {filteredUsers.map((u) => (
+                    <li
+                      key={u}
+                      className="px-2 py-1.5 text-sm rounded-sm cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
+                      onMouseDown={() => handleUserSelect(u)}
+                    >
+                      @{u}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {filteredUsers.length === 0 && dmQuery.trim() && (
+                <p className="px-2 py-1.5 text-xs text-muted-foreground">No users found</p>
+              )}
+            </PopoverContent>
+          </Popover>
         </div>
-
-        {/* Inline search */}
-        {dmSearchOpen && (
-          <div className="mb-2 relative px-1">
-            <Input
-              ref={inputRef}
-              placeholder="Search users..."
-              value={dmQuery}
-              onChange={(e) => setDmQuery(e.target.value)}
-              onKeyDown={handleKeyDown}
-              className="h-7 text-xs"
-            />
-            {filteredUsers.length > 0 && (
-              <ul className="absolute z-50 top-full left-0 right-0 mt-1 rounded-md border bg-popover shadow-lg max-h-40 overflow-y-auto">
-                {filteredUsers.map((u) => (
-                  <li
-                    key={u}
-                    className="px-3 py-1.5 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
-                    onMouseDown={() => handleUserSelect(u)}
-                  >
-                    @{u}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
 
         <ul className="space-y-0.5">
           {dmChannels.map((ch) => {
@@ -155,6 +152,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 key={ch.name}
                 label={label}
                 unread={ch.unreadCount}
+                hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
                 onClick={() => onChannelSelect(ch.name)}
               />
@@ -169,11 +167,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 interface ChannelItemProps {
   label: string;
   unread: number;
+  hasMention: boolean;
   active: boolean;
   onClick: () => void;
 }
 
-function ChannelItem({ label, unread, active, onClick }: ChannelItemProps) {
+function ChannelItem({ label, unread, hasMention, active, onClick }: ChannelItemProps) {
   return (
     <li>
       <button
@@ -190,7 +189,7 @@ function ChannelItem({ label, unread, active, onClick }: ChannelItemProps) {
         <span className="truncate">{label}</span>
         {unread > 0 && (
           <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 min-w-4 font-mono">
-            {unread}
+            {hasMention ? `${unread}(@)` : unread}
           </Badge>
         )}
       </button>

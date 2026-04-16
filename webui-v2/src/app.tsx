@@ -98,7 +98,12 @@ export default function App() {
             addMessages(change.entries as Message[]);
           }
         } else {
-          incrementUnread(displayName);
+          const me = useChatStore.getState().currentUser;
+          const mentionTag = `<@${me}>`;
+          const mentioned = !!change.entries?.some((e) =>
+            (e as Message).body?.includes(mentionTag)
+          );
+          incrementUnread(displayName, mentioned);
         }
       }
 
