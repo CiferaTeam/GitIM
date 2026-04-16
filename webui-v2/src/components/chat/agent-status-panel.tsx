@@ -55,12 +55,14 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
 
   return (
     <div
-      className="group relative"
-      onMouseEnter={() => setExpanded(true)}
+      className="relative rounded border border-border/50"
       onMouseLeave={() => setExpanded(false)}
     >
-      {/* Compact row */}
-      <div className="flex items-center gap-1.5 px-2 py-1 min-w-0">
+      {/* Compact row — click to toggle */}
+      <div
+        className="flex items-center gap-1.5 px-2 py-1 min-w-0 cursor-pointer select-none hover:bg-surface-hover rounded"
+        onClick={() => setExpanded((v) => !v)}
+      >
         <StatusDot status={status} />
         <span className="text-[11px] font-mono text-text-secondary shrink-0">
           {name}
@@ -74,7 +76,7 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
         )}
       </div>
 
-      {/* Expanded popover on hover — show recent activities */}
+      {/* Expanded popover — click or mouse-leave to close */}
       {expanded && activities.length > 0 && (
         <div className="absolute left-0 top-full z-50 w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-lg p-2">
           <p className="text-[10px] font-semibold uppercase text-text-muted tracking-widest mb-1">
@@ -99,7 +101,7 @@ export function AgentStatusPanel() {
       <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest mb-1 px-2">
         Agents
       </p>
-      <div className="space-y-0">
+      <div className="space-y-1">
         {agents.map((agent) => (
           <AgentRow
             key={agent.id}
