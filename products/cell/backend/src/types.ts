@@ -13,7 +13,7 @@ export interface InviteCode {
 }
 
 export type Bindings = {
-  CELL_KV: KVNamespace;
+  CELL_GITIM_KV: KVNamespace;
   ADMIN_SECRET: string;
 };
 

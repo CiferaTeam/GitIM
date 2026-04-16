@@ -16,7 +16,7 @@ app.post("/api/verify", async (c) => {
     return c.json({ ok: false, error: "code too long" }, 400);
   }
 
-  const raw = await c.env.CELL_KV.get(kvKey(code));
+  const raw = await c.env.CELL_GITIM_KV.get(kvKey(code));
   if (!raw) {
     return c.json({ ok: false, error: "invalid code" }, 403);
   }
@@ -27,7 +27,7 @@ app.post("/api/verify", async (c) => {
   const existing = invite.devices.find((d) => d.id === deviceId);
   if (existing) {
     existing.last_seen = new Date().toISOString();
-    await c.env.CELL_KV.put(kvKey(code), JSON.stringify(invite));
+    await c.env.CELL_GITIM_KV.put(kvKey(code), JSON.stringify(invite));
     return c.json({ ok: true });
   }
 
@@ -38,7 +38,7 @@ app.post("/api/verify", async (c) => {
 
   const now = new Date().toISOString();
   invite.devices.push({ id: deviceId, registered_at: now, last_seen: now });
-  await c.env.CELL_KV.put(kvKey(code), JSON.stringify(invite));
+  await c.env.CELL_GITIM_KV.put(kvKey(code), JSON.stringify(invite));
   return c.json({ ok: true });
 });
 

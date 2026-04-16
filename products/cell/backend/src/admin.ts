@@ -14,10 +14,10 @@ app.use("*", async (c, next) => {
 
 // List all invite codes
 app.get("/admin/codes", async (c) => {
-  const list = await c.env.CELL_KV.list({ prefix: "invite:" });
+  const list = await c.env.CELL_GITIM_KV.list({ prefix: "invite:" });
   const codes: InviteCode[] = [];
   for (const key of list.keys) {
-    const raw = await c.env.CELL_KV.get(key.name);
+    const raw = await c.env.CELL_GITIM_KV.get(key.name);
     if (raw) codes.push(JSON.parse(raw));
   }
   return c.json({ codes });
@@ -36,7 +36,7 @@ app.post("/admin/codes", async (c) => {
     return c.json({ error: "code required, max 64 chars" }, 400);
   }
 
-  const existing = await c.env.CELL_KV.get(kvKey(code));
+  const existing = await c.env.CELL_GITIM_KV.get(kvKey(code));
   if (existing) {
     return c.json({ error: "code already exists" }, 409);
   }
@@ -49,14 +49,14 @@ app.post("/admin/codes", async (c) => {
     devices: [],
   };
 
-  await c.env.CELL_KV.put(kvKey(code), JSON.stringify(invite));
+  await c.env.CELL_GITIM_KV.put(kvKey(code), JSON.stringify(invite));
   return c.json({ ok: true, invite }, 201);
 });
 
 // Get code detail
 app.get("/admin/codes/:code", async (c) => {
   const code = c.req.param("code");
-  const raw = await c.env.CELL_KV.get(kvKey(code));
+  const raw = await c.env.CELL_GITIM_KV.get(kvKey(code));
   if (!raw) return c.json({ error: "not found" }, 404);
   return c.json(JSON.parse(raw));
 });
@@ -64,7 +64,7 @@ app.get("/admin/codes/:code", async (c) => {
 // Delete code
 app.delete("/admin/codes/:code", async (c) => {
   const code = c.req.param("code");
-  await c.env.CELL_KV.delete(kvKey(code));
+  await c.env.CELL_GITIM_KV.delete(kvKey(code));
   return c.json({ ok: true });
 });
 
@@ -73,12 +73,12 @@ app.delete("/admin/codes/:code/devices/:deviceId", async (c) => {
   const code = c.req.param("code");
   const deviceId = c.req.param("deviceId");
 
-  const raw = await c.env.CELL_KV.get(kvKey(code));
+  const raw = await c.env.CELL_GITIM_KV.get(kvKey(code));
   if (!raw) return c.json({ error: "not found" }, 404);
 
   const invite: InviteCode = JSON.parse(raw);
   invite.devices = invite.devices.filter((d) => d.id !== deviceId);
-  await c.env.CELL_KV.put(kvKey(code), JSON.stringify(invite));
+  await c.env.CELL_GITIM_KV.put(kvKey(code), JSON.stringify(invite));
   return c.json({ ok: true });
 });
 
