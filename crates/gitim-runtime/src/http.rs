@@ -102,7 +102,7 @@ pub fn touch_activity(state: &SharedRuntimeState) {
     );
 }
 
-/// Check if any agent is currently running (has an active loop handle).
+/// Check if any agent is currently running.
 pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
     let s = state.lock().unwrap();
     s.agents.values().any(|a| a.status == "running")

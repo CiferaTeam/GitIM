@@ -13,7 +13,7 @@ fn touch_activity_updates_timestamp() {
 
     let after = state.lock().unwrap().last_activity.load(Ordering::Relaxed);
 
-    assert!(after >= before, "timestamp should advance after touch");
+    assert!(after > before, "timestamp should advance after touch");
 }
 
 #[test]
