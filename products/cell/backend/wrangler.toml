@@ -1,0 +1,11 @@
+name = "cell-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[kv_namespaces]]
+binding = "CELL_KV"
+id = "95ba95fc4eab41a09b64074181aa6fbf"
+preview_id = "f5514fca76c24973bd26f1a7458b7148"
+
+[vars]
+ADMIN_SECRET = "GITIM-IS-THE-BEST-AGENT-TEAM-TOOL"
