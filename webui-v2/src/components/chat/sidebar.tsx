@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
+import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
 import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
 
@@ -38,9 +46,66 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
 
+  const setChannels = useChatStore((s) => s.setChannels);
+
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Create channel dialog state
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [createDisplayName, setCreateDisplayName] = useState("");
+  const [createIntro, setCreateIntro] = useState("");
+  const [createError, setCreateError] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  function resetCreateForm() {
+    setCreateName("");
+    setCreateDisplayName("");
+    setCreateIntro("");
+    setCreateError("");
+    setCreating(false);
+  }
+
+  async function handleCreateChannel() {
+    const name = createName.trim().toLowerCase();
+    const validation = client.validateChannelName(name);
+    if (validation) {
+      setCreateError(validation);
+      return;
+    }
+    setCreating(true);
+    setCreateError("");
+    let created = false;
+    try {
+      const res = await client.createChannel(
+        name,
+        createDisplayName.trim() || undefined,
+        createIntro.trim() || undefined,
+      );
+      if (!res.ok) {
+        setCreateError(res.error ?? "Failed to create channel");
+        setCreating(false);
+        return;
+      }
+      created = true;
+    } catch {
+      setCreateError("Network error — is the server running?");
+      setCreating(false);
+      return;
+    }
+    // Creation succeeded — refresh and navigate (failures here are non-fatal)
+    try {
+      const chRes = await client.channels();
+      if (chRes.ok && chRes.data) {
+        setChannels(chRes.data.channels as Channel[]);
+      }
+    } catch { /* refresh failure is non-fatal */ }
+    resetCreateForm();
+    setCreateOpen(false);
+    onChannelSelect(name);
+  }
 
   // Auto-focus input when popover opens
   useEffect(() => {
@@ -82,9 +147,20 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
       {/* Channels section */}
       <div className="px-3 pt-4 pb-2">
-        <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest mb-2 px-2">
-          Channels
-        </p>
+        <div className="flex items-center justify-between mb-2 px-2">
+          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
+            Channels
+          </p>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            title="Create channel"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => setCreateOpen(true)}
+          >
+            <span className="text-base leading-none">+</span>
+          </Button>
+        </div>
         <ul className="space-y-0.5">
           {regularChannels.map((ch) => (
             <ChannelItem
@@ -98,6 +174,57 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           ))}
         </ul>
       </div>
+
+      {/* Create channel dialog */}
+      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreateForm(); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create Channel</DialogTitle>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => { e.preventDefault(); handleCreateChannel(); }}
+            className="grid gap-3"
+          >
+            <div className="grid gap-1.5">
+              <label htmlFor="ch-name" className="text-sm font-medium">Name</label>
+              <Input
+                id="ch-name"
+                placeholder="e.g. design-review"
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                autoFocus
+              />
+              <p className="text-[11px] text-muted-foreground">Lowercase letters, numbers, hyphens. Max 32 chars.</p>
+            </div>
+            <div className="grid gap-1.5">
+              <label htmlFor="ch-display" className="text-sm font-medium">Display Name <span className="text-muted-foreground font-normal">(optional)</span></label>
+              <Input
+                id="ch-display"
+                placeholder="e.g. Design Review"
+                value={createDisplayName}
+                onChange={(e) => setCreateDisplayName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label htmlFor="ch-intro" className="text-sm font-medium">Introduction <span className="text-muted-foreground font-normal">(optional)</span></label>
+              <Input
+                id="ch-intro"
+                placeholder="What is this channel about?"
+                value={createIntro}
+                onChange={(e) => setCreateIntro(e.target.value)}
+              />
+            </div>
+            {createError && (
+              <p className="text-sm text-destructive">{createError}</p>
+            )}
+            <DialogFooter>
+              <Button type="submit" disabled={creating || !createName.trim()}>
+                {creating ? "Creating..." : "Create"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* DMs section */}
       <div className="px-3 pt-3 pb-4">
