@@ -102,6 +102,12 @@ pub fn touch_activity(state: &SharedRuntimeState) {
     );
 }
 
+/// Check if any agent is currently running (has an active loop handle).
+pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
+    let s = state.lock().unwrap();
+    s.agents.values().any(|a| a.status == "running")
+}
+
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = state.lock().unwrap();
     let initialized = s.workspace.is_some() && s.human_repo.is_some();
