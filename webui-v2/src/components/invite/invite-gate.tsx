@@ -1,6 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { verifyInviteCode } from "../../lib/cell-api";
-import { getDeviceId } from "../../lib/device";
+import { getUUID } from "../../lib/device";
 import { GuidePage } from "./guide-page";
 
 const INVITE_CODE_KEY = "gitim:invite_code";
@@ -61,7 +61,7 @@ export function InviteGate({ children }: { children: ReactNode }) {
     setError("");
     setLoading(true);
 
-    const deviceId = getDeviceId();
+    const deviceId = getUUID();
     const result = await verifyInviteCode(trimmed, deviceId);
 
     setLoading(false);
