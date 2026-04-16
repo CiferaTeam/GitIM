@@ -32,7 +32,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     std::fs::write(&init_file, "init").unwrap();
     run_git(clone_dir.path(), &["add", "init.txt"]);
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     let repo = GitStorage::new(clone_dir.path());
     (bare_dir, clone_dir, repo)
@@ -290,10 +290,10 @@ fn test_rev_parse_returns_commit_hash() {
 }
 
 #[test]
-fn test_rev_parse_origin_main() {
+fn test_rev_parse_upstream() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
-    let hash = repo.rev_parse("origin/main").unwrap();
+    let hash = repo.rev_parse("@{upstream}").unwrap();
     assert_eq!(hash.len(), 40, "SHA should be 40 hex chars");
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
 }

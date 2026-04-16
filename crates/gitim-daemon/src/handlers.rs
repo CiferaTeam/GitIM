@@ -855,9 +855,11 @@ async fn handle_stop(state: SharedState) -> Response {
 }
 
 async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
-    // Determine reference point: origin/main if has remote, else HEAD
-    let ref_name = if state.git_storage.has_remote() {
-        "origin/main"
+    // Use @{upstream} (current branch's tracking ref) when available, else HEAD.
+    let ref_name = if state.git_storage.has_remote()
+        && state.git_storage.rev_parse("@{upstream}").is_ok()
+    {
+        "@{upstream}"
     } else {
         "HEAD"
     };
@@ -1519,7 +1521,7 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["push", "-u", "origin", "main"])
+            .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&repo)
             .output()
             .unwrap();

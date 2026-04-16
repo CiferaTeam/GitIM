@@ -32,7 +32,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     std::fs::write(&init_file, "init").unwrap();
     run_git(clone_dir.path(), &["add", "init.txt"]);
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     let repo = GitStorage::new(clone_dir.path());
     (bare_dir, clone_dir, repo)
@@ -60,13 +60,13 @@ fn run_git(dir: &Path, args: &[&str]) {
 fn test_poll_workflow_no_cursor_returns_commit() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
-    // rev_parse("origin/main") should return a valid 40-char hex commit hash
-    let cursor = repo.rev_parse("origin/main").unwrap();
+    // rev_parse("@{upstream}") should return a valid 40-char hex commit hash
+    let cursor = repo.rev_parse("@{upstream}").unwrap();
     assert_eq!(cursor.len(), 40, "SHA should be 40 hex chars");
     assert!(cursor.chars().all(|c| c.is_ascii_hexdigit()));
 
-    // diff_range from cursor to origin/main (same commit) should be empty
-    let diff = repo.diff_range(&cursor, "origin/main").unwrap();
+    // diff_range from cursor to @{upstream} (same commit) should be empty
+    let diff = repo.diff_range(&cursor, "@{upstream}").unwrap();
     assert!(diff.is_empty(), "diff from cursor to itself should be empty");
 }
 
@@ -76,8 +76,8 @@ fn test_poll_workflow_no_cursor_returns_commit() {
 fn test_poll_workflow_detects_new_message() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
-    // Record initial cursor (origin/main after setup)
-    let old_cursor = repo.rev_parse("origin/main").unwrap();
+    // Record initial cursor (@{upstream} after setup)
+    let old_cursor = repo.rev_parse("@{upstream}").unwrap();
 
     // Create a .thread file, commit and push
     let channels = clone_dir.path().join("channels");
@@ -92,11 +92,11 @@ fn test_poll_workflow_detects_new_message() {
     run_git(clone_dir.path(), &["commit", "-m", "add message"]);
     run_git(clone_dir.path(), &["push"]);
 
-    // Fetch so origin/main is updated
+    // Fetch so @{upstream} is updated
     repo.fetch().unwrap();
 
-    // diff_range from old cursor to origin/main should find the new content
-    let diff = repo.diff_range(&old_cursor, "origin/main").unwrap();
+    // diff_range from old cursor to @{upstream} should find the new content
+    let diff = repo.diff_range(&old_cursor, "@{upstream}").unwrap();
     assert!(!diff.is_empty(), "diff should detect the new .thread file");
 
     let key = diff.keys().next().unwrap();
@@ -108,11 +108,11 @@ fn test_poll_workflow_detects_new_message() {
     assert!(added.contains("hello world"), "diff should contain the message text");
 
     // New cursor should be different from old
-    let new_cursor = repo.rev_parse("origin/main").unwrap();
+    let new_cursor = repo.rev_parse("@{upstream}").unwrap();
     assert_ne!(old_cursor, new_cursor, "cursor should advance after push");
 
     // Re-polling with new cursor should return empty diff
-    let re_diff = repo.diff_range(&new_cursor, "origin/main").unwrap();
+    let re_diff = repo.diff_range(&new_cursor, "@{upstream}").unwrap();
     assert!(re_diff.is_empty(), "re-poll with new cursor should be empty");
 }
 
@@ -122,7 +122,7 @@ fn test_poll_workflow_detects_new_message() {
 fn test_poll_workflow_multiple_channels() {
     let (_bare_dir, clone_dir, repo) = setup_repo_pair();
 
-    let old_cursor = repo.rev_parse("origin/main").unwrap();
+    let old_cursor = repo.rev_parse("@{upstream}").unwrap();
 
     // Create a channels/ .thread file
     let ch_dir = clone_dir.path().join("channels");
@@ -148,7 +148,7 @@ fn test_poll_workflow_multiple_channels() {
 
     repo.fetch().unwrap();
 
-    let diff = repo.diff_range(&old_cursor, "origin/main").unwrap();
+    let diff = repo.diff_range(&old_cursor, "@{upstream}").unwrap();
     assert_eq!(diff.len(), 2, "diff should find both channel and dm thread files");
 
     // Verify both paths are present

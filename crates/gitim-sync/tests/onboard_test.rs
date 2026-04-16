@@ -53,7 +53,7 @@ fn setup_two_clones_with_initial_commit() -> (TempDir, TempDir, TempDir) {
     std::fs::write(clone_a_dir.path().join("init.txt"), "init").unwrap();
     run_git(clone_a_dir.path(), &["add", "init.txt"]);
     run_git(clone_a_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_a_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_a_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     // Clone B
     run_git(

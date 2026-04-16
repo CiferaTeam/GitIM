@@ -48,7 +48,7 @@ fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
     std::fs::write(&init_file, "init").unwrap();
     run_git(clone_a_dir.path(), &["add", "init.txt"]);
     run_git(clone_a_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_a_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_a_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     run_git(
         clone_b_dir.path().parent().unwrap(),

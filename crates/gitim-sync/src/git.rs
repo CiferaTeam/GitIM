@@ -126,7 +126,7 @@ impl GitStorage {
 
     pub fn has_unpushed_commits(&self) -> Result<bool, GitError> {
         let output = Command::new("git")
-            .args(["rev-list", "--count", "origin/main..HEAD"])
+            .args(["rev-list", "--count", "@{upstream}..HEAD"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -170,7 +170,7 @@ impl GitStorage {
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "origin/main..HEAD", "--", pattern])
+            .args(["diff", "@{upstream}..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -216,7 +216,7 @@ impl GitStorage {
 
     pub fn rebase_onto_origin(&self) -> Result<(), GitError> {
         let output = Command::new("git")
-            .args(["rebase", "origin/main"])
+            .args(["rebase", "@{upstream}"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -227,11 +227,11 @@ impl GitStorage {
         Ok(())
     }
 
-    /// List files changed between origin/main and HEAD, matching a pattern.
+    /// List files changed between upstream and HEAD, matching a pattern.
     /// Returns relative paths (e.g. "channels/general.meta.yaml").
     pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "--name-only", "origin/main..HEAD", "--", pattern])
+            .args(["diff", "--name-only", "@{upstream}..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -259,8 +259,8 @@ impl GitStorage {
         Ok(())
     }
 
-    /// Discard all unpushed local changes, reset to remote state.
-    /// Encapsulates rebase_abort + reset_hard_origin.
+    /// Discard all unpushed local changes, reset to upstream state.
+    /// Encapsulates rebase_abort + reset_hard_upstream.
     pub fn discard_unpushed(&self) -> Result<(), GitError> {
         // Best-effort abort any in-progress rebase
         let _ = Command::new("git")
@@ -268,9 +268,9 @@ impl GitStorage {
             .current_dir(&self.root)
             .output();
 
-        // Reset to remote state
+        // Reset to upstream state
         let output = Command::new("git")
-            .args(["reset", "--hard", "origin/main"])
+            .args(["reset", "--hard", "@{upstream}"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -347,7 +347,7 @@ mod tests {
         std::fs::write(clone_a.path().join("init.txt"), "init").unwrap();
         std::process::Command::new("git").args(["add", "."]).current_dir(clone_a.path()).output().unwrap();
         std::process::Command::new("git").args(["commit", "-m", "initial"]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["push", "-u", "origin", "main"]).current_dir(clone_a.path()).output().unwrap();
+        std::process::Command::new("git").args(["push", "-u", "origin", "HEAD"]).current_dir(clone_a.path()).output().unwrap();
 
         std::process::Command::new("git").args(["clone", bare_dir.path().to_str().unwrap(), clone_b.path().to_str().unwrap()]).current_dir(bare_dir.path().parent().unwrap()).output().unwrap();
         std::process::Command::new("git").args(["config", "user.email", "b@test.com"]).current_dir(clone_b.path()).output().unwrap();

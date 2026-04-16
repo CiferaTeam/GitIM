@@ -469,7 +469,7 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["push", "-u", "origin", "main"])
+            .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -711,7 +711,7 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["push", "-u", "origin", "main"])
+            .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&seed)
             .output()
             .unwrap();
@@ -900,7 +900,7 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["push", "-u", "origin", "main"])
+            .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&seed)
             .output()
             .unwrap();
