@@ -16,6 +16,10 @@ export function InviteGate({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    if (import.meta.env.DEV) {
+      setStatus("verified");
+      return;
+    }
     const verified = localStorage.getItem(INVITE_VERIFIED_KEY);
     if (!verified) {
       setStatus("need_code");

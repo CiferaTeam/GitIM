@@ -53,7 +53,7 @@ export function GuidePage({ onComplete }: GuidePageProps) {
       <div className="w-full max-w-lg space-y-8">
         <div className="text-center space-y-2">
           <h1 className="text-xl font-bold tracking-tight text-foreground">
-            设置 GitIM
+            设置 GitIM·Cell
           </h1>
           <p className="text-sm text-muted-foreground">
             完成以下步骤开始使用
@@ -78,8 +78,16 @@ export function GuidePage({ onComplete }: GuidePageProps) {
             2. 启动 Runtime
           </h2>
           <div className="rounded-md bg-card p-3 font-mono text-xs text-foreground select-all">
-            gitim-runtime --port 16868
+            gitim-runtime --port 16868 --daemon
           </div>
+          <p className="text-xs text-text-muted leading-relaxed">
+            <span className="text-foreground font-mono">--port</span> 和{" "}
+            <span className="text-foreground font-mono">--daemon</span>{" "}
+            均为可选项。加{" "}
+            <span className="text-foreground font-mono">-d</span>（或{" "}
+            <span className="text-foreground font-mono">--daemon</span>
+            ）后台运行；不加则前台运行，方便查看日志。
+          </p>
           <p className="text-xs text-text-muted leading-relaxed">
             Runtime 在 24 小时无活动后会自动退出，无需手动关闭。
           </p>

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
+const DEFAULT_PORT: u16 = 16868;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -21,16 +23,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Shell mode: gitim-runtime --port <PORT>
-    if args.len() >= 3 && args[1] == "--port" {
-        let port: u16 = args[2].parse().expect("invalid port number");
+    // Parse flags
+    let daemon = args.iter().any(|a| a == "--daemon");
+    let port = parse_port(&args);
+
+    // Shell mode: no positional args, or --port/--daemon present
+    if daemon || port.is_some() || args.len() == 1 {
+        let port = port.unwrap_or(DEFAULT_PORT);
+        if daemon {
+            return daemonize(port);
+        }
         return run_shell(port).await;
     }
 
     // Legacy agent mode: gitim-runtime <remote_url> <handler> <display_name> [agents_dir]
     if args.len() < 4 {
         eprintln!("Usage:");
-        eprintln!("  gitim-runtime --port <PORT>                              (shell mode)");
+        eprintln!("  gitim-runtime [--port <PORT>] [--daemon]                  (shell mode, default port {DEFAULT_PORT})");
         eprintln!("  gitim-runtime <remote_url> <handler> <display_name> [agents_dir]  (agent mode)");
         std::process::exit(1);
     }
@@ -60,6 +69,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("starting agent loop (ctrl-c to stop) ...");
     let mut agent_loop = AgentLoop::with_defaults(&handle.repo_root)?;
     agent_loop.run().await?;
+
+    Ok(())
+}
+
+fn parse_port(args: &[String]) -> Option<u16> {
+    args.windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].parse().expect("invalid port number"))
+}
+
+fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let gitim_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gitim");
+    std::fs::create_dir_all(&gitim_dir)?;
+
+    let log_path = gitim_dir.join("runtime.log");
+    let pid_path = gitim_dir.join("runtime.pid");
+    let log_file = std::fs::File::create(&log_path)?;
+
+    let child = std::process::Command::new(exe)
+        .args(["--port", &port.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    std::fs::write(&pid_path, child.id().to_string())?;
+    eprintln!("runtime started in background (pid: {}, port: {port})", child.id());
+    eprintln!("log: {}", log_path.display());
 
     Ok(())
 }
