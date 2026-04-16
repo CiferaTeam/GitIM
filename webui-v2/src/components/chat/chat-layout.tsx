@@ -100,7 +100,7 @@ export function ChatLayout() {
       const displayName = parts.join("--");
       const exists = channels.some((c) => c.name === displayName);
       if (!exists) {
-        const newChannel = { name: displayName, kind: "dm" as const, unreadCount: 0, members: parts };
+        const newChannel = { name: displayName, kind: "dm" as const, unreadCount: 0, hasMention: false, members: parts };
         // Add to the store so it appears in the sidebar immediately
         // DM will be created on the backend when the first message is sent
         setChannels([...channels, newChannel]);
