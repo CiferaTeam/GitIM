@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "tsc -b && vite build && wrangler pages deploy dist --project-name cell-gitim --commit-dirty=true"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
