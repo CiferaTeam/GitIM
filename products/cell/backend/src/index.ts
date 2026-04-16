@@ -11,10 +11,12 @@ app.use(
   "*",
   cors({
     origin: (origin) => {
-      const allowed = ["https://cell.gitim.io"];
       // Allow any localhost port in development
       if (origin.match(/^http:\/\/localhost:\d+$/)) return origin;
-      return allowed.includes(origin) ? origin : null;
+      // Allow Cloudflare Pages (production + preview deploys)
+      if (origin === "https://cell.gitim.io") return origin;
+      if (origin.endsWith(".cell-gitim.pages.dev") || origin === "https://cell-gitim.pages.dev") return origin;
+      return null;
     },
     allowMethods: ["GET", "POST", "DELETE"],
     allowHeaders: ["Content-Type", "X-Admin-Secret"],
