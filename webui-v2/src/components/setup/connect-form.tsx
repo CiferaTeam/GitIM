@@ -16,7 +16,7 @@ export function ConnectForm() {
     e.preventDefault();
     const p = parseInt(input, 10);
     if (!Number.isFinite(p) || p < 1 || p > 65535) {
-      setError("Please enter a valid port (1-65535)");
+      setError("请输入有效端口号 (1-65535)");
       return;
     }
 
@@ -30,7 +30,7 @@ export function ConnectForm() {
       const data = await res.json();
 
       if (data.service !== "gitim-runtime") {
-        setError("Connected, but service is not gitim-runtime");
+        setError("连接成功，但服务不是 gitim-runtime");
         return;
       }
 
@@ -38,7 +38,7 @@ export function ConnectForm() {
       setRuntimeVersion(data.version ?? null);
       setStatus("connected");
     } catch {
-      setError(`Cannot reach runtime at port ${p}. Is it running?`);
+      setError(`无法连接 127.0.0.1:${p}，请确认 Runtime 已启动`);
     } finally {
       setChecking(false);
     }
@@ -48,9 +48,9 @@ export function ConnectForm() {
     <div className="flex flex-col items-center justify-center h-screen bg-background text-foreground">
       <div className="w-full max-w-sm space-y-6 px-4">
         <div className="space-y-2 text-center">
-          <h1 className="text-xl font-bold tracking-tight">GitIM</h1>
+          <h1 className="text-xl font-bold tracking-tight">GitIM·Cell</h1>
           <p className="text-sm text-muted-foreground">
-            Connect to a running Runtime instance
+            Runtime 未连接，请重新启动后连接
           </p>
         </div>
 
@@ -60,7 +60,7 @@ export function ConnectForm() {
               htmlFor="port-input"
               className="text-xs font-medium text-text-secondary"
             >
-              Runtime Port
+              Runtime 端口
             </label>
             <input
               id="port-input"
@@ -87,12 +87,12 @@ export function ConnectForm() {
             disabled={checking}
             className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
-            {checking ? "Connecting..." : "Connect"}
+            {checking ? "连接中..." : "连接"}
           </button>
         </form>
 
         <p className="text-xs text-text-muted text-center leading-relaxed">
-          Start the runtime first:{" "}
+          请先启动 Runtime：{" "}
           <code className="text-text-secondary">
             gitim-runtime --port 16868
           </code>

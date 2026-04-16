@@ -56,14 +56,14 @@ export function GuidePage({ onComplete }: GuidePageProps) {
             设置 GitIM·Cell
           </h1>
           <p className="text-sm text-muted-foreground">
-            完成以下步骤开始使用
+            首次使用，请完成以下步骤
           </p>
         </div>
 
         {/* Step 1: Install */}
         <section className="space-y-2">
           <h2 className="text-sm font-medium text-foreground">
-            1. 安装 GitIM
+            1. 安装 GitIM 本地组件
           </h2>
           <div className="rounded-md bg-card p-3 font-mono text-xs text-foreground leading-relaxed select-all">
             curl -sSf

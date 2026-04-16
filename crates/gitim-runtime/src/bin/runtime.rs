@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Parse flags
-    let daemon = args.iter().any(|a| a == "--daemon");
+    let daemon = args.iter().any(|a| a == "--daemon" || a == "-d");
     let port = parse_port(&args);
 
     // Shell mode: no positional args, or --port/--daemon present
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Legacy agent mode: gitim-runtime <remote_url> <handler> <display_name> [agents_dir]
     if args.len() < 4 {
         eprintln!("Usage:");
-        eprintln!("  gitim-runtime [--port <PORT>] [--daemon]                  (shell mode, default port {DEFAULT_PORT})");
+        eprintln!("  gitim-runtime [--port <PORT>] [-d|--daemon]               (shell mode, default port {DEFAULT_PORT})");
         eprintln!("  gitim-runtime <remote_url> <handler> <display_name> [agents_dir]  (agent mode)");
         std::process::exit(1);
     }
