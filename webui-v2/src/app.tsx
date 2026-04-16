@@ -5,6 +5,7 @@ import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
+import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
@@ -12,7 +13,6 @@ import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
-import { InviteGate } from "./components/invite/invite-gate";
 import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
@@ -49,6 +49,7 @@ export default function App() {
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
 
+  useVersionCheck();
   // Connect to agent activity SSE stream
   useAgentActivitySSE();
 
@@ -166,18 +167,16 @@ export default function App() {
   }, [port, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
   return (
-    <InviteGate>
-      <SetupGate>
-        <Toaster position="top-right" richColors />
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route index element={<Navigate to="/management" replace />} />
-            <Route path="/management" element={<ManagementPage />} />
-            <Route path="/management/:agentId" element={<AgentDetail />} />
-            <Route path="/chat" element={<ChatPage />} />
-          </Route>
-        </Routes>
-      </SetupGate>
-    </InviteGate>
+    <SetupGate>
+      <Toaster position="top-right" richColors />
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<Navigate to="/management" replace />} />
+          <Route path="/management" element={<ManagementPage />} />
+          <Route path="/management/:agentId" element={<AgentDetail />} />
+          <Route path="/chat" element={<ChatPage />} />
+        </Route>
+      </Routes>
+    </SetupGate>
   );
 }

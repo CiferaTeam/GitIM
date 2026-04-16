@@ -27,18 +27,21 @@ export async function verifyInviteCode(
   }
 }
 
-export async function sendHeartbeat(
-  code: string,
-  deviceId: string,
-  version?: string
-): Promise<void> {
+interface VersionResult {
+  ok: boolean;
+  latest_version?: string;
+  error?: string;
+}
+
+export async function checkVersion(uuid: string): Promise<VersionResult> {
   try {
-    await fetch(`${API_URL}/api/heartbeat`, {
+    const res = await fetch(`${API_URL}/api/check-version`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, device_id: deviceId, version }),
+      body: JSON.stringify({ uuid }),
     });
+    return (await res.json()) as VersionResult;
   } catch {
-    // heartbeat failure is non-critical, silently ignore
+    return { ok: false, error: "unable to reach version service" };
   }
 }
