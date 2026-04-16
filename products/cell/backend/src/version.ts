@@ -60,6 +60,8 @@ async function recordVisitor(
     .run();
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 app.post("/api/check-version", async (c) => {
@@ -71,8 +73,8 @@ app.post("/api/check-version", async (c) => {
   }
 
   const uuid = body.uuid?.trim();
-  if (!uuid) {
-    return c.json({ ok: false, error: "uuid required" }, 400);
+  if (!uuid || !UUID_RE.test(uuid)) {
+    return c.json({ ok: false, error: "invalid uuid" }, 400);
   }
 
   // Record visitor (fire-and-forget, don't block response)

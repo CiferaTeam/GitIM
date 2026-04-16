@@ -8,15 +8,13 @@ export function useVersionCheck() {
   const checked = useRef(false);
 
   useEffect(() => {
-    if (checked.current) return;
-    checked.current = true;
-
     const uuid = getUUID();
 
-    // Initial check
-    checkVersion(uuid);
+    if (!checked.current) {
+      checked.current = true;
+      checkVersion(uuid);
+    }
 
-    // Hourly repeat
     const handle = setInterval(() => checkVersion(uuid), ONE_HOUR_MS);
     return () => clearInterval(handle);
   }, []);
