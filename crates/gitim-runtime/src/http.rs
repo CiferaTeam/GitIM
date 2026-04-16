@@ -663,6 +663,7 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
                                 Some(chrono::Utc::now().to_rfc3339());
                         }
                     }
+                    touch_activity(&state_clone);
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
