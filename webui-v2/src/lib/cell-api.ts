@@ -9,15 +9,21 @@ export async function verifyInviteCode(
   code: string,
   deviceId: string
 ): Promise<VerifyResult> {
+  let res: Response;
   try {
-    const res = await fetch(`${API_URL}/api/verify`, {
+    res = await fetch(`${API_URL}/api/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, device_id: deviceId }),
     });
-    return (await res.json()) as VerifyResult;
   } catch {
     return { ok: false, error: "无法连接验证服务" };
+  }
+
+  try {
+    return (await res.json()) as VerifyResult;
+  } catch {
+    return { ok: false, error: `服务器返回异常 (${res.status})` };
   }
 }
 
