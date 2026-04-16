@@ -65,6 +65,8 @@ pub struct RuntimeState {
     pub poll_cursor: Option<String>,
     pub agents: HashMap<String, AgentInfo>,
     pub activity_tx: broadcast::Sender<AgentActivityEvent>,
+    /// Epoch seconds of last activity. Used by idle watchdog.
+    pub last_activity: std::sync::atomic::AtomicU64,
 }
 
 impl Default for RuntimeState {
@@ -76,11 +78,29 @@ impl Default for RuntimeState {
             poll_cursor: None,
             agents: HashMap::new(),
             activity_tx,
+            last_activity: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
         }
     }
 }
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
+
+/// Update the last-activity timestamp to now.
+pub fn touch_activity(state: &SharedRuntimeState) {
+    let s = state.lock().unwrap();
+    s.last_activity.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = state.lock().unwrap();
