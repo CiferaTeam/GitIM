@@ -17,7 +17,7 @@ export function AppShell({ children }: AppShellProps) {
       <header className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0 bg-background/95 backdrop-blur-sm">
         {/* Left: logo + connection status */}
         <div className="flex items-center gap-2.5 min-w-[120px]">
-          <span className="font-bold text-sm tracking-tight">GitIM</span>
+          <span className="font-bold text-sm tracking-tight">GitIM·Cell</span>
           <span
             className={[
               "inline-block w-1.5 h-1.5 rounded-full",

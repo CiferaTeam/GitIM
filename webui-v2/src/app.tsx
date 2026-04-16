@@ -7,6 +7,7 @@ import { AgentList } from "./components/management/agent-list";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
+import { useConnectionStore } from "./hooks/use-connection-store";
 import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
@@ -40,6 +41,7 @@ export default function App() {
   const addMessages = useChatStore((s) => s.addMessages);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
+  const port = useConnectionStore((s) => s.port);
 
   // Mutable refs for poll loop — avoids stale closures
   const sinceRef = useRef<string | undefined>(undefined);
@@ -117,8 +119,10 @@ export default function App() {
     }
   }, [addMessages, incrementUnread, setChannels, setAgents]);
 
-  // Init + poll loop
+  // Init + poll loop — only run when port is available
   useEffect(() => {
+    if (!port) return;
+
     async function init() {
       const [healthRes, meRes, channelsRes, usersRes, agentsRes] =
         await Promise.all([
@@ -154,7 +158,7 @@ export default function App() {
     return () => {
       clearInterval(pollHandle);
     };
-  }, [setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
+  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
   return (
     <InviteGate>
