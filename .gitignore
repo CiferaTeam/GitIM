@@ -17,4 +17,5 @@ __pycache__/
 temp/
 **/.env
 **/.env.*
+!**/.env.example
 **/wrangler.toml
