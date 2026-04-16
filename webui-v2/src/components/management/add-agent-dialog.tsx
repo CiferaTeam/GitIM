@@ -20,7 +20,7 @@ export function AddAgentDialog() {
   const addAgent = useAgentStore((s) => s.addAgent);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [model, setModel] = useState("claude-sonnet-4-6");
+  const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -48,7 +48,7 @@ export function AddAgentDialog() {
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
         setName("");
-        setModel("claude-sonnet-4-6");
+        setModel("");
         setSystemPrompt("");
         setEnvVars([]);
         setOpen(false);
@@ -105,6 +105,7 @@ export function AddAgentDialog() {
                 onChange={(e) => setModel(e.target.value)}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
+                <option value="">-</option>
                 <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
                 <option value="claude-opus-4-6">Claude Opus 4.6</option>
                 <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
