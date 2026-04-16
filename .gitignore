@@ -16,3 +16,4 @@ __pycache__/
 .playwright-mcp/
 temp/
 **/.env
+**/wrangler.toml
