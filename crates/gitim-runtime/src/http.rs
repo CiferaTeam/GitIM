@@ -953,6 +953,15 @@ async fn preflight_claude() -> impl axum::response::IntoResponse {
     }
 }
 
+async fn activity_middleware(
+    State(state): State<SharedRuntimeState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    touch_activity(&state);
+    next.run(request).await
+}
+
 pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
@@ -976,6 +985,10 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
         .route("/preflight/claude", get(preflight_claude))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            activity_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
 
