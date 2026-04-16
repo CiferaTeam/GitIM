@@ -342,6 +342,32 @@ async fn im_channels(State(state): State<SharedRuntimeState>) -> Json<serde_json
     api_response_to_json(client.list_channels().await)
 }
 
+// -- /im/create-channel --
+
+#[derive(Deserialize)]
+struct CreateChannelRequest {
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    introduction: Option<String>,
+}
+
+async fn im_create(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<CreateChannelRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    api_response_to_json(
+        client
+            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref())
+            .await,
+    )
+}
+
 // -- /im/join --
 
 #[derive(Deserialize)]
@@ -978,6 +1004,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/git/init", post(git_init))
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))
+        .route("/im/create-channel", post(im_create))
         .route("/im/join", post(im_join))
         .route("/im/send", post(im_send))
         .route("/im/read", post(im_read))

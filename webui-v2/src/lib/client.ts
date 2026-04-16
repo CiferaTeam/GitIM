@@ -56,6 +56,19 @@ export async function send(
   return await res.json();
 }
 
+export async function createChannel(
+  name: string,
+  displayName?: string,
+  introduction?: string,
+): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/im/create-channel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, display_name: displayName, introduction }),
+  });
+  return await res.json();
+}
+
 export async function joinChannel(channel: string): Promise<ApiResponse> {
   const res = await fetch(`${baseUrl()}/im/join`, {
     method: "POST",
@@ -110,6 +123,16 @@ export function validateHandler(name: string): string | null {
   const handler = toHandler(name);
   if (!handler) return "Name must contain at least one letter or digit";
   if (handler === "system") return "\"system\" is reserved";
+  return null;
+}
+
+/** Validate a channel name. Returns error message or null if valid. */
+export function validateChannelName(name: string): string | null {
+  if (!name) return "Channel name is required";
+  if (name.length > 32) return "Channel name must be 32 characters or less";
+  if (!/^[a-z0-9-]+$/.test(name)) return "Only lowercase letters, numbers, and hyphens";
+  if (name.startsWith("-") || name.endsWith("-")) return "Cannot start or end with a hyphen";
+  if (name.includes("--")) return "Cannot contain consecutive hyphens";
   return null;
 }
 

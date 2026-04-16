@@ -93,6 +93,29 @@ export function addChannel(channel: Channel): void {
   }
 }
 
+export async function createChannel(
+  name: string,
+  _displayName?: string,
+  _introduction?: string,
+): Promise<ApiResponse> {
+  await delay();
+  if (!name || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) || name.length > 32 || name.includes("--")) {
+    return { ok: false, error: "invalid channel name" };
+  }
+  if (channelList.some((c) => c.name === name)) {
+    return { ok: false, error: "channel already exists" };
+  }
+  const channel: Channel = {
+    name,
+    kind: "channel",
+    unreadCount: 0,
+    hasMention: false,
+    members: ["lewis"],
+  };
+  addChannel(channel);
+  return { ok: true, data: { channel: name, created_by: "lewis" } };
+}
+
 export async function users(): Promise<ApiResponse> {
   await delay();
   return { ok: true, data: { users: [...mockUsers] } };
