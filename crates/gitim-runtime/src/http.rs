@@ -65,6 +65,8 @@ pub struct RuntimeState {
     pub poll_cursor: Option<String>,
     pub agents: HashMap<String, AgentInfo>,
     pub activity_tx: broadcast::Sender<AgentActivityEvent>,
+    /// Epoch seconds of last activity. Used by idle watchdog.
+    pub last_activity: std::sync::atomic::AtomicU64,
 }
 
 impl Default for RuntimeState {
@@ -76,11 +78,35 @@ impl Default for RuntimeState {
             poll_cursor: None,
             agents: HashMap::new(),
             activity_tx,
+            last_activity: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
         }
     }
 }
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
+
+/// Update the last-activity timestamp to now.
+pub fn touch_activity(state: &SharedRuntimeState) {
+    let s = state.lock().unwrap();
+    s.last_activity.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Check if any agent is currently running.
+pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
+    let s = state.lock().unwrap();
+    s.agents.values().any(|a| a.status == "running")
+}
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = state.lock().unwrap();
@@ -643,6 +669,7 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
                                 Some(chrono::Utc::now().to_rfc3339());
                         }
                     }
+                    touch_activity(&state_clone);
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
@@ -933,6 +960,15 @@ async fn preflight_claude() -> impl axum::response::IntoResponse {
     }
 }
 
+async fn activity_middleware(
+    State(state): State<SharedRuntimeState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    touch_activity(&state);
+    next.run(request).await
+}
+
 pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
@@ -956,6 +992,10 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
         .route("/preflight/claude", get(preflight_claude))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            activity_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
 

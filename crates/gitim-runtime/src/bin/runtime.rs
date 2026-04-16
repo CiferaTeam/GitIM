@@ -110,6 +110,38 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Recover previous workspace from ~/.gitim/runtime.json
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
+    // Idle watchdog: exit if no activity for 24 hours
+    let idle_state = state.clone();
+    tokio::spawn(async move {
+        const IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+        const CHECK_INTERVAL_SECS: u64 = 60 * 60;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+            let last = idle_state
+                .lock()
+                .unwrap()
+                .last_activity
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now.saturating_sub(last) >= IDLE_TIMEOUT_SECS {
+                if gitim_runtime::http::has_active_agents(&idle_state) {
+                    eprintln!("idle timeout reached but agents still active, deferring exit");
+                    continue;
+                }
+                eprintln!("no activity for 24h — shutting down");
+                // Clean up pid file
+                if let Some(home) = dirs::home_dir() {
+                    let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
+                }
+                kill_managed_daemons(&idle_state);
+                std::process::exit(0);
+            }
+        }
+    });
+
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     eprintln!("runtime shell listening on http://{addr}");
 
