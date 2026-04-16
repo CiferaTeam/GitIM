@@ -5,6 +5,7 @@ import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
+import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
@@ -48,6 +49,7 @@ export default function App() {
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
 
+  useVersionCheck();
   // Connect to agent activity SSE stream
   useAgentActivitySSE();
 
