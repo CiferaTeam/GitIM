@@ -1,10 +1,15 @@
 /**
  * Backend interface — abstracts the communication layer between webui-v2 and
  * the IM engine. Two implementations:
- *   - HttpBackend: talks to gitim-runtime via HTTP (desktop, current behavior)
- *   - LocalBackend: talks to daemon-web via Web Worker (mobile, Phase 1+)
+ *   - HttpBackend: talks to gitim-runtime via HTTP (desktop)
+ *   - LocalBackend: talks to daemon-web via Web Worker (mobile)
  */
 import type { ApiResponse } from "./types";
+import type {
+  WorkerRequest,
+  WorkerResponse,
+  WorkerEvent,
+} from "../daemon-web/worker";
 
 export interface Backend {
   health(): Promise<ApiResponse>;
@@ -101,5 +106,107 @@ export class HttpBackend implements Backend {
       body: JSON.stringify({ channel }),
     });
     return await res.json();
+  }
+}
+
+/**
+ * LocalBackend — communicates with daemon-web Web Worker via postMessage RPC.
+ * Used in mobile/local mode where there is no gitim-runtime server.
+ */
+export class LocalBackend implements Backend {
+  private worker: Worker;
+  private nextId = 1;
+  private pending = new Map<
+    number,
+    { resolve: (v: ApiResponse) => void; reject: (e: Error) => void }
+  >();
+  private onSyncReset?: () => void;
+
+  constructor(onSyncReset?: () => void) {
+    this.onSyncReset = onSyncReset;
+    this.worker = new Worker(
+      new URL("../daemon-web/worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    this.worker.onmessage = (event: MessageEvent) => {
+      const data = event.data as WorkerResponse | WorkerEvent;
+
+      // Unsolicited events from sync loop
+      if ("type" in data && data.type === "sync_reset") {
+        this.onSyncReset?.();
+        return;
+      }
+
+      // RPC response
+      const resp = data as WorkerResponse;
+      const handler = this.pending.get(resp.id);
+      if (handler) {
+        this.pending.delete(resp.id);
+        if (resp.error) {
+          handler.resolve({ ok: false, error: resp.error });
+        } else {
+          handler.resolve(resp.result as ApiResponse);
+        }
+      }
+    };
+  }
+
+  private call(method: string, ...args: unknown[]): Promise<ApiResponse> {
+    return new Promise((resolve, reject) => {
+      const id = this.nextId++;
+      this.pending.set(id, { resolve, reject });
+      const request: WorkerRequest = { id, method, args };
+      this.worker.postMessage(request);
+    });
+  }
+
+  async init(config: {
+    remoteUrl: string;
+    corsProxy: string;
+    token: string;
+    handler: string;
+  }): Promise<ApiResponse> {
+    return this.call("init", config);
+  }
+
+  async startSync(): Promise<void> {
+    await this.call("startSync");
+  }
+
+  health(): Promise<ApiResponse> {
+    return this.call("health");
+  }
+  me(): Promise<ApiResponse> {
+    return this.call("me");
+  }
+  poll(since?: string): Promise<ApiResponse> {
+    return this.call("poll", since);
+  }
+  channels(): Promise<ApiResponse> {
+    return this.call("channels");
+  }
+  read(channel: string, limit?: number): Promise<ApiResponse> {
+    return this.call("read", channel, limit);
+  }
+  send(
+    channel: string,
+    body: string,
+    author?: string,
+    replyTo?: number,
+  ): Promise<ApiResponse> {
+    return this.call("send", channel, body, author, replyTo);
+  }
+  thread(channel: string, line: number): Promise<ApiResponse> {
+    return this.call("thread", channel, line);
+  }
+  users(): Promise<ApiResponse> {
+    return this.call("users");
+  }
+  joinChannel(channel: string): Promise<ApiResponse> {
+    return this.call("joinChannel", channel);
+  }
+
+  terminate(): void {
+    this.worker.terminate();
   }
 }

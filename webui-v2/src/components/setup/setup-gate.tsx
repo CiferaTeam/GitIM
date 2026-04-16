@@ -6,19 +6,24 @@ import {
 import { ConnectForm } from "./connect-form";
 import { GitProviderForm } from "./git-provider-form";
 import { WorkspaceForm } from "./workspace-form";
+import { LocalSetup } from "./local-setup";
 
 interface SetupGateProps {
   children: ReactNode;
 }
 
 export function SetupGate({ children }: SetupGateProps) {
+  const mode = useConnectionStore((s) => s.mode);
   const status = useConnectionStore((s) => s.status);
   const port = useConnectionStore((s) => s.port);
+  const localReady = useConnectionStore((s) => s.localReady);
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
+  const setMode = useConnectionStore((s) => s.setMode);
 
-  // On mount: if we have a stored port, try to connect automatically
+  // On mount: if remote mode, try to connect automatically
   useEffect(() => {
+    if (mode === "local") return;
     if (status !== "checking") return;
     if (!port) {
       setStatus("disconnected");
@@ -47,16 +52,35 @@ export function SetupGate({ children }: SetupGateProps) {
     }
 
     tryConnect();
-    return () => { cancelled = true; };
-  }, [status, port, setStatus, setRuntimeVersion]);
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, status, port, setStatus, setRuntimeVersion]);
 
+  // Local mode
+  if (mode === "local") {
+    if (localReady) return <>{children}</>;
+    return <LocalSetup />;
+  }
+
+  // Remote mode
   const screens: Record<ConnectionStatus, ReactNode> = {
     checking: (
       <div className="flex items-center justify-center h-screen bg-background text-muted-foreground text-sm">
         Connecting...
       </div>
     ),
-    disconnected: <ConnectForm />,
+    disconnected: (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-background gap-4">
+        <ConnectForm />
+        <button
+          onClick={() => setMode("local")}
+          className="text-sm text-muted-foreground hover:text-foreground"
+        >
+          Use Local Mode (no server needed)
+        </button>
+      </div>
+    ),
     connected: <WorkspaceForm />,
     workspace_set: <GitProviderForm />,
     ready: <>{children}</>,

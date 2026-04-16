@@ -27,13 +27,13 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
  * Connects to the SSE endpoint for agent activity events.
  * Call once at the app level (e.g., in App.tsx).
  */
-export function useAgentActivitySSE() {
+export function useAgentActivitySSE(enabled = true) {
   const port = useConnectionStore((s) => s.port);
   const push = useAgentActivityStore((s) => s.push);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    if (!port) return;
+    if (!enabled || !port) return;
 
     const url = `http://127.0.0.1:${port}/agents/events`;
     const es = new EventSource(url);
@@ -56,5 +56,5 @@ export function useAgentActivitySSE() {
       es.close();
       esRef.current = null;
     };
-  }, [port, push]);
+  }, [enabled, port, push]);
 }
