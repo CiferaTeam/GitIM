@@ -12,7 +12,6 @@ import type { Agent, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
-import { InviteGate } from "./components/invite/invite-gate";
 import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
@@ -161,18 +160,16 @@ export default function App() {
   }, [port, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
 
   return (
-    <InviteGate>
-      <SetupGate>
-        <Toaster position="top-right" richColors />
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route index element={<Navigate to="/management" replace />} />
-            <Route path="/management" element={<ManagementPage />} />
-            <Route path="/management/:agentId" element={<AgentDetail />} />
-            <Route path="/chat" element={<ChatPage />} />
-          </Route>
-        </Routes>
-      </SetupGate>
-    </InviteGate>
+    <SetupGate>
+      <Toaster position="top-right" richColors />
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<Navigate to="/management" replace />} />
+          <Route path="/management" element={<ManagementPage />} />
+          <Route path="/management/:agentId" element={<AgentDetail />} />
+          <Route path="/chat" element={<ChatPage />} />
+        </Route>
+      </Routes>
+    </SetupGate>
   );
 }
