@@ -77,7 +77,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
     setCreating(true);
     setCreateError("");
-    let created = false;
     try {
       const res = await client.createChannel(
         name,
@@ -89,7 +88,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         setCreating(false);
         return;
       }
-      created = true;
     } catch {
       setCreateError("Network error — is the server running?");
       setCreating(false);
