@@ -363,7 +363,7 @@ async fn im_create(
     };
     api_response_to_json(
         client
-            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref())
+            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref(), &[])
             .await,
     )
 }

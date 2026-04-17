@@ -194,6 +194,7 @@ impl GitimClient {
         name: &str,
         display_name: Option<&str>,
         introduction: Option<&str>,
+        invitees: &[String],
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "create_channel",
@@ -201,6 +202,7 @@ impl GitimClient {
                 "name": name,
                 "display_name": display_name,
                 "introduction": introduction,
+                "invitees": invitees,
             }),
         )
         .await
