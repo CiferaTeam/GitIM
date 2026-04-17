@@ -312,11 +312,46 @@ CORS proxy 是 HTTP pass-through。部署方案：
 
 ### 认证
 
-isomorphic-git 支持 `onAuth` 回调：
+手机端没有 GitIM 自己的 token 概念——GitIM 无中心服务器，所有认证都是直接对 git remote。用户需要自行在 git 托管平台生成一个 Personal Access Token，粘贴到初始化页面。isomorphic-git 的 `onAuth` 回调把 token 塞进 HTTP Basic Auth：
 
-- **GitHub**：Personal Access Token，`username: token, password: 'x-oauth-basic'`
-- **Gitea / GitLab**：同理，token 作为 HTTP basic auth
-- Token 存储在浏览器 localStorage 或 IndexedDB 中（仅限当前 origin）
+```typescript
+onAuth: () => ({ username: token, password: 'x-oauth-basic' })
+```
+
+**不做 OAuth Device Flow**：需要为 GitHub / Gitea / GitLab 分别注册 OAuth App 并做 endpoint 适配，用户自部署 Gitea 实例还要各自配 OAuth App，分发 client_id 的复杂度不可接受。PAT 是三个平台的最大公约数，一份文档覆盖全部场景，零运维。
+
+#### Token 来源(用户手动生成)
+
+| 平台 | 生成路径 | 最小 scope |
+|------|---------|-----------|
+| GitHub (Fine-grained，推荐) | Settings → Developer settings → Personal access tokens → Fine-grained tokens | Repository access 锁到目标 repo；Contents R/W + Metadata R |
+| GitHub (Classic) | Settings → Developer settings → Tokens (classic) | `repo` |
+| Gitea | Settings → Applications → Manage Access Tokens | `write:repository` |
+| GitLab | User Settings → Access Tokens | `write_repository` |
+
+推荐 Fine-grained PAT(GitHub)：权限锁死到单个 repo，被盗的影响面最小。这套 token 生成步骤需要一份独立的用户文档并配截图——手机用户不看长文字。
+
+#### Deeplink 辅助
+
+手机端初始化 gate 放一个 "Generate token on GitHub" 按钮，跳转到预填好 name / scope 的生成页：
+
+```
+https://github.com/settings/personal-access-tokens/new?name=GitIM%20mobile&...
+```
+
+Gitea / GitLab 不提供同类预填 query，只能给静态跳转链接。
+
+#### Token 生命周期
+
+Fine-grained PAT **强制过期**(最长 1 年)，Gitea/GitLab 默认也有过期时间。"重新输入 token" 不是边缘场景，是每个用户一年内必经路径。UI 必须常备此路径：
+
+- **过期前提醒**：初始化时记录 token 过期日，到期前 7 天在 UI 顶栏显示 banner
+- **过期后的软着陆**：fetch/push 收到 401 时弹重新输入 dialog，仓库不用重 clone，只换 token
+- **"Update access token" 入口常驻**：设置页要有显式按钮，不能只在报错时才出现
+
+#### Token 存储
+
+Token 存储在浏览器 localStorage 或 IndexedDB 中，仅限当前 origin。同 origin 的 XSS 或被攻破的前端依赖都能窃取——参见 "已知限制与风险 → Token 安全" 小节。
 
 ## 手机端初始化流程
 
