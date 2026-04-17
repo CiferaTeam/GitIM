@@ -83,10 +83,6 @@ pub async fn handle_create_card(
     status: Option<String>,
     author: String,
 ) -> Response {
-    let _h = match Handler::new(&author) {
-        Ok(h) => h,
-        Err(e) => return Response::error(format!("invalid author: {}", e)),
-    };
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
@@ -97,6 +93,10 @@ pub async fn handle_create_card(
     };
     if !channel_thread_exists(&state, &ch_name) {
         return Response::error(format!("channel '{}' does not exist", channel));
+    }
+
+    if title.trim().is_empty() {
+        return Response::error("title cannot be empty");
     }
 
     let labels_vec = labels.unwrap_or_default();
@@ -116,10 +116,6 @@ pub async fn handle_create_card(
         if let Err(e) = ensure_known_user(&state, a).await {
             return Response::error(format!("assignee invalid: {}", e));
         }
-    }
-
-    if title.trim().is_empty() {
-        return Response::error("title cannot be empty");
     }
 
     let card_id = generate_card_id();
@@ -486,10 +482,6 @@ pub async fn handle_update_card(
     assignee: Option<String>,
     author: String,
 ) -> Response {
-    let _h = match Handler::new(&author) {
-        Ok(h) => h,
-        Err(e) => return Response::error(format!("invalid author: {}", e)),
-    };
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
