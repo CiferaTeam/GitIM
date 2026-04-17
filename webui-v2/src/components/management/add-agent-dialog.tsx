@@ -19,7 +19,7 @@ import {
 } from "@/lib/providers";
 import type { Agent } from "@/lib/types";
 import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function AddAgentDialog() {
@@ -33,6 +33,9 @@ export function AddAgentDialog() {
   const [submitting, setSubmitting] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectResult, setDetectResult] = useState<PreflightResult | null>(null);
+  // Generation counter guards against stale preflight responses when the user
+  // switches provider mid-flight or fires Detect multiple times in succession.
+  const detectSeq = useRef(0);
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
@@ -47,13 +50,18 @@ export function AddAgentDialog() {
     setSubmitting(false);
     setDetecting(false);
     setDetectResult(null);
+    detectSeq.current += 1;
   }
 
   async function handleDetect() {
     if (!provider || detecting) return;
+    const seq = ++detectSeq.current;
     setDetecting(true);
     setDetectResult(null);
     const res = await client.preflightProvider(provider as ProviderId);
+    // Bail out if the user switched provider (or fired another detect) while
+    // the request was in flight — a stale response must not overwrite state.
+    if (seq !== detectSeq.current) return;
     if (res.ok && res.data) {
       setDetectResult(res.data);
     } else {
@@ -149,6 +157,9 @@ export function AddAgentDialog() {
                 onChange={(e) => {
                   setProvider(e.target.value as ProviderId | "");
                   setModel("");
+                  // Invalidate any in-flight detect so its late-arriving
+                  // response can't clobber the cleared state.
+                  detectSeq.current += 1;
                   setDetectResult(null);
                 }}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
