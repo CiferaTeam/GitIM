@@ -495,6 +495,148 @@ async fn im_thread(
     api_response_to_json(client.get_thread(&req.channel, req.line).await)
 }
 
+// -- /im/cards --
+
+#[derive(Deserialize)]
+struct CreateCardRequest {
+    channel: String,
+    title: String,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+async fn im_create_card(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<CreateCardRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let labels_slice = req.labels.as_deref();
+    api_response_to_json(
+        client
+            .create_card(
+                &req.channel,
+                &req.title,
+                labels_slice,
+                req.assignee.as_deref(),
+                req.status.as_deref(),
+            )
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct ListCardsQuery {
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    label: Vec<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+async fn im_list_cards(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Query(q): axum::extract::Query<ListCardsQuery>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let labels_slice: Option<&[String]> = if q.label.is_empty() { None } else { Some(&q.label) };
+    api_response_to_json(
+        client
+            .list_cards(q.channel.as_deref(), labels_slice, q.status.as_deref(), q.assignee.as_deref())
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct ReadCardQuery {
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    since: Option<u64>,
+}
+
+async fn im_read_card(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<ReadCardQuery>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client.read_card(&channel, &card_id, q.limit, q.since).await,
+    )
+}
+
+#[derive(Deserialize)]
+struct SendCardMessageRequest {
+    body: String,
+    #[serde(default)]
+    reply_to: Option<u64>,
+}
+
+async fn im_send_card_message(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    Json(req): Json<SendCardMessageRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .send_card_message(&channel, &card_id, &req.body, req.reply_to)
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct UpdateCardRequest {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+async fn im_update_card(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    Json(req): Json<UpdateCardRequest>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let labels_slice = req.labels.as_deref();
+    api_response_to_json(
+        client
+            .update_card(
+                &channel,
+                &card_id,
+                req.status.as_deref(),
+                labels_slice,
+                req.assignee.as_deref(),
+            )
+            .await,
+    )
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -1015,6 +1157,11 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/im/poll", post(im_poll))
         .route("/im/users", get(im_users))
         .route("/im/thread", post(im_thread))
+        .route("/im/cards", post(im_create_card))
+        .route("/im/cards", get(im_list_cards))
+        .route("/im/cards/{channel}/{card_id}", get(im_read_card))
+        .route("/im/cards/{channel}/{card_id}/messages", post(im_send_card_message))
+        .route("/im/cards/{channel}/{card_id}", axum::routing::patch(im_update_card))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
