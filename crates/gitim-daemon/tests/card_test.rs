@@ -91,8 +91,10 @@ async fn test_create_card_happy_path() {
         .join("card.meta.yaml");
     assert!(meta_path.exists());
     let content = std::fs::read_to_string(&meta_path).unwrap();
-    assert!(content.contains("status: todo"));
-    assert!(content.contains("channel: dev"));
+    let meta: gitim_core::types::CardMeta = serde_yaml::from_str(&content).unwrap();
+    assert_eq!(meta.status, gitim_core::types::CardStatus::Todo);
+    assert_eq!(meta.channel, "dev");
+    assert_eq!(meta.title, "Implement X");
 }
 
 #[tokio::test]
@@ -123,7 +125,9 @@ async fn test_create_card_invalid_status() {
     .unwrap();
     let resp = handle_request(req, state).await;
     assert!(!resp.ok);
-    assert!(resp.error.unwrap().contains("invalid status"));
+    let err = resp.error.unwrap();
+    assert!(err.contains("invalid status"), "expected 'invalid status' in: {}", err);
+    assert!(err.contains("review"), "expected 'review' in error: {}", err);
 }
 
 #[tokio::test]
@@ -144,8 +148,8 @@ async fn test_create_card_with_labels() {
         state.repo_root.join("channels/dev/cards").join(&card_id).join("card.meta.yaml"),
     )
     .unwrap();
-    assert!(content.contains("v2"));
-    assert!(content.contains("agent-task"));
+    let meta: gitim_core::types::CardMeta = serde_yaml::from_str(&content).unwrap();
+    assert_eq!(meta.labels, vec!["v2".to_string(), "agent-task".to_string()]);
 }
 
 #[tokio::test]
@@ -266,11 +270,13 @@ async fn test_send_card_message_emits_event() {
     .unwrap();
     let resp = handle_request(req, state).await;
     assert!(resp.ok);
+    let response_line = resp.data.as_ref().unwrap()["line_number"].as_u64().unwrap();
 
     let ev = rx.recv().await.unwrap();
     match ev {
         gitim_daemon::api::Event::CardMessageAppended { line_numbers, .. } => {
-            assert_eq!(line_numbers, vec![1]);
+            assert_eq!(line_numbers, vec![response_line]);
+            assert!(response_line >= 1);
         }
         other => panic!("unexpected event: {:?}", other),
     }
@@ -303,4 +309,6 @@ async fn test_read_card_roundtrip() {
     assert_eq!(data["meta"]["title"].as_str().unwrap(), "T");
     let entries = data["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["body"].as_str().unwrap(), "progress line");
+    assert_eq!(entries[0]["author"].as_str().unwrap(), "bob");
 }
