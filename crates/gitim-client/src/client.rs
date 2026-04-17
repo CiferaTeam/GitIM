@@ -233,6 +233,7 @@ impl GitimClient {
         channel_type: Option<&str>,
         limit: Option<u64>,
         offset: Option<u64>,
+        include_cards: bool,
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "search",
@@ -243,6 +244,7 @@ impl GitimClient {
                 "channel_type": channel_type,
                 "limit": limit.unwrap_or(50),
                 "offset": offset.unwrap_or(0),
+                "include_cards": include_cards,
             }),
         )
         .await

@@ -117,6 +117,9 @@ enum Commands {
         /// Offset for pagination
         #[arg(long, default_value = "0")]
         offset: u64,
+        /// Include card discussion messages in results
+        #[arg(long)]
+        include_cards: bool,
     },
 
     /// Rebuild the search index
@@ -401,6 +404,7 @@ async fn main() {
             channel_type,
             limit,
             offset,
+            include_cards,
         } => {
             commands::admin::cmd_search(
                 &client,
@@ -411,6 +415,7 @@ async fn main() {
                 channel_type.as_deref(),
                 limit,
                 offset,
+                include_cards,
             )
             .await
         }

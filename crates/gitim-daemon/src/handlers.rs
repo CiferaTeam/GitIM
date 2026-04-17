@@ -154,7 +154,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             channel_type,
             limit,
             offset,
-        } => handle_search(state, query, author, channel, channel_type, limit, offset).await,
+            include_cards,
+        } => handle_search(state, query, author, channel, channel_type, limit, offset, include_cards).await,
         Request::Reindex => handle_reindex(state).await,
         Request::ArchiveChannel { channel, author } => {
             let resolved_author = match resolve_author(author, &state).await {
@@ -2696,6 +2697,7 @@ async fn handle_search(
     channel_type: Option<String>,
     limit: usize,
     offset: usize,
+    include_cards: bool,
 ) -> Response {
     let current_user = state.current_user.read().await.clone();
     let index = {
@@ -2714,6 +2716,7 @@ async fn handle_search(
         current_user,
         limit,
         offset,
+        include_cards,
     };
 
     match tokio::task::spawn_blocking(move || index.search(params)).await {

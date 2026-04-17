@@ -145,6 +145,8 @@ pub enum Request {
         limit: usize,
         #[serde(default)]
         offset: usize,
+        #[serde(default)]
+        include_cards: bool,
     },
     #[serde(rename = "reindex")]
     Reindex,

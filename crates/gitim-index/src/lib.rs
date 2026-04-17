@@ -41,6 +41,7 @@ pub struct SearchParams {
     pub current_user: Option<String>,
     pub limit: usize,
     pub offset: usize,
+    pub include_cards: bool,
 }
 
 /// 搜索结果中的单条消息
@@ -541,12 +542,18 @@ impl Index {
             bind_values.push(Box::new(channel_type.clone()));
         }
 
+        // Cards 默认过滤：除非显式 include_cards=true 或指定了 channel_type
+        if !params.include_cards && params.channel_type.is_none() {
+            conditions.push("m.channel_type != 'card'".to_string());
+        }
+
         // DM 可见性过滤
         if let Some(ref current_user) = params.current_user {
             let idx1 = bind_values.len() + 1;
+            let card_clause = if params.include_cards { " OR m.channel_type = 'card'" } else { "" };
             conditions.push(format!(
-                "(m.channel_type = 'channel' OR (m.channel LIKE '%' || ?{} || '%'))",
-                idx1
+                "(m.channel_type = 'channel'{} OR (m.channel LIKE '%' || ?{} || '%'))",
+                card_clause, idx1
             ));
             bind_values.push(Box::new(current_user.clone()));
         }
@@ -697,6 +704,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 2);
@@ -721,6 +729,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 2);
@@ -745,6 +754,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
@@ -770,6 +780,7 @@ mod tests {
             current_user: Some("bob".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
@@ -793,6 +804,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(result.is_ok());
     }
@@ -808,6 +820,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(matches!(result, Err(IndexError::EmptySearch)));
     }
@@ -869,6 +882,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
