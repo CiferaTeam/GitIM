@@ -977,16 +977,34 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
     }
 }
 
-async fn preflight_claude() -> impl axum::response::IntoResponse {
-    match crate::preflight::check_claude().await {
-        Ok(version) => Json(serde_json::json!({
-            "available": true,
-            "version": version,
-        })),
-        Err(error) => Json(serde_json::json!({
-            "available": false,
-            "error": error,
-        })),
+/// HTTP handler for `GET /preflight/{provider}`.
+///
+/// Dispatches to the matching provider's real-hello preflight. Unknown
+/// providers return 400 with a stable `{"ok": false, "error": ...}` shape so
+/// the WebUI can branch without parsing provider-specific fields.
+async fn preflight_handler(
+    axum::extract::Path(provider): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    match provider.as_str() {
+        "claude" => {
+            let result = crate::preflight::preflight_claude().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        "codex" => {
+            let result = crate::preflight::preflight_codex().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "unknown provider",
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -1022,7 +1040,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
-        .route("/preflight/claude", get(preflight_claude))
+        .route("/preflight/{provider}", get(preflight_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             activity_middleware,

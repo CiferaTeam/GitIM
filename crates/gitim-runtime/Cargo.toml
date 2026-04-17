@@ -27,3 +27,5 @@ path = "src/bin/runtime.rs"
 
 [dev-dependencies]
 serial_test = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
