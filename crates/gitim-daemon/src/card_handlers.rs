@@ -234,6 +234,104 @@ pub async fn handle_create_card(
     }))
 }
 
+pub async fn handle_archive_card(
+    state: SharedState,
+    channel: String,
+    card_id: String,
+    author: String,
+) -> Response {
+    // 1. Validate user
+    if let Err(e) = ensure_known_user(&state, &author).await {
+        return Response::error(e);
+    }
+
+    // 2. Validate channel name format
+    let ch_name = match ChannelName::new(&channel) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+    };
+
+    // 3. Validate card_id
+    if let Err(e) = validate_card_id(&card_id) {
+        return Response::error(format!("invalid card_id: {}", e));
+    }
+
+    // 4. Locate card
+    let located = match locate_card(&state, &ch_name, &card_id) {
+        None => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+        Some(loc) if loc.is_archived => return Response::error(format!("card '{}' is already archived", card_id)),
+        Some(loc) => loc,
+    };
+
+    // 5. Read card.meta.yaml
+    let meta_path = state.repo_root.join(&located.rel_path).join("card.meta.yaml");
+    let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
+        Ok(c) => match serde_yaml::from_str(&c) {
+            Ok(m) => m,
+            Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
+        },
+        Err(_) => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+    };
+
+    // 6. Permission check: only creator or assignee can archive
+    let is_creator = meta.created_by == author;
+    let is_assignee = meta.assignee.as_deref() == Some(author.as_str());
+    if !is_creator && !is_assignee {
+        return Response::error("only creator or assignee can archive");
+    }
+
+    // 7. Create archive target parent directory
+    let archive_cards_dir = state
+        .repo_root
+        .join("archive")
+        .join("channels")
+        .join(ch_name.to_string())
+        .join("cards");
+    if let Err(e) = std::fs::create_dir_all(&archive_cards_dir) {
+        return Response::error(format!("failed to create archive dir: {}", e));
+    }
+
+    // 8. git mv (directory rename — git 2.x handles directories atomically)
+    let from_rel = &located.rel_path; // channels/<ch>/cards/<id>
+    let to_rel = format!("archive/channels/{}/cards/{}", ch_name, card_id);
+    if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
+        return Response::error(format!("git mv failed: {}", e));
+    }
+
+    // 9. add + commit as author — pass specific files since add_and_commit_as does git add on paths
+    let meta_to = format!("{}/card.meta.yaml", to_rel);
+    let thread_to = format!("{}/discussion.thread", to_rel);
+    let commit_msg = format!("card: archive {} in {} by @{}", card_id, channel, author);
+    if let Err(e) = state
+        .git_storage
+        .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
+    {
+        return Response::error(format!("archive_card commit failed: {}", e));
+    }
+
+    // 10. Push with retry
+    if let Err(e) = push_with_retry(&state, "archive_card").await {
+        return Response::error(e);
+    }
+
+    // 11. Emit event
+    let _ = state.event_tx.send(Event::CardArchived {
+        channel: ch_name.to_string(),
+        card_id: card_id.clone(),
+        author: author.clone(),
+    });
+
+    // 12. Info log
+    info!("card '{}' archived in channel '{}' by @{}", card_id, channel, author);
+
+    // 13. Return success
+    Response::success(serde_json::json!({
+        "channel": ch_name.to_string(),
+        "card_id": card_id,
+        "archived_by": author,
+    }))
+}
+
 pub async fn handle_list_cards(
     state: SharedState,
     channel: Option<String>,
@@ -974,6 +1072,303 @@ mod tests {
             err.contains("archived"),
             "error should mention 'archived': {}",
             err
+        );
+    }
+
+    // ─── handle_archive_card tests ────────────────────────────────────────────
+
+    /// Create a card with specific created_by / assignee for archive permission tests.
+    fn write_card_meta_full(
+        path: &std::path::Path,
+        channel: &str,
+        created_by: &str,
+        assignee: Option<&str>,
+        status: &str,
+    ) {
+        let assignee_field = match assignee {
+            Some(a) => format!("assignee: {}", a),
+            None => "assignee: ~".to_string(),
+        };
+        let content = format!(
+            "title: Test Card\nchannel: {}\nstatus: {}\nlabels: []\n{}\ncreated_by: {}\ncreated_at: 20260101T000000Z\nupdated_at: 20260101T000000Z\n",
+            channel, status, assignee_field, created_by
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    async fn create_card_for_archive(
+        state: &SharedState,
+        channel: &str,
+        card_id: &str,
+        created_by: &str,
+        assignee: Option<&str>,
+        status: &str,
+    ) {
+        let card_dir = state
+            .repo_root
+            .join("channels")
+            .join(channel)
+            .join("cards")
+            .join(card_id);
+        std::fs::create_dir_all(&card_dir).unwrap();
+        write_card_meta_full(
+            &card_dir.join("card.meta.yaml"),
+            channel,
+            created_by,
+            assignee,
+            status,
+        );
+        std::fs::write(card_dir.join("discussion.thread"), "").unwrap();
+
+        // git add + commit so git mv will work
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&state.repo_root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", &format!("add card {}", card_id)]);
+    }
+
+    const ARCHIVE_CARD_ID: &str = "20260101-120000-abc";
+
+    #[tokio::test]
+    async fn test_archive_card_by_creator_success() {
+        let (_tmp, state) = setup_test_repo().await;
+        // Setup: alice creates a card, no assignee
+        create_card_for_archive(&state, "dev", ARCHIVE_CARD_ID, "alice", None, "todo").await;
+
+        let mut event_rx = state.event_tx.subscribe();
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "archive by creator should succeed: {:?}", resp.error);
+
+        // Active path should no longer exist
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(ARCHIVE_CARD_ID);
+        assert!(
+            !active_dir.exists(),
+            "active card dir should be gone after archive"
+        );
+
+        // Archived path should exist with card.meta.yaml preserved
+        let archive_meta = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(ARCHIVE_CARD_ID)
+            .join("card.meta.yaml");
+        assert!(
+            archive_meta.exists(),
+            "archived card.meta.yaml should exist"
+        );
+
+        // Meta content should be preserved (status unchanged)
+        let content = std::fs::read_to_string(&archive_meta).unwrap();
+        assert!(content.contains("status: todo"), "status should be preserved: {}", content);
+
+        // CardArchived event should be emitted
+        let event = event_rx.try_recv().expect("should have received an event");
+        match event {
+            crate::api::Event::CardArchived { channel, card_id, author } => {
+                assert_eq!(channel, "dev");
+                assert_eq!(card_id, ARCHIVE_CARD_ID);
+                assert_eq!(author, "alice");
+            }
+            other => panic!("expected CardArchived, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_by_assignee_success() {
+        let (_tmp, state) = setup_test_repo().await;
+        // card created by alice, assigned to lewis (bob is in users list)
+        // Add lewis to users list for this test
+        {
+            let mut users = state.users.write().await;
+            users.push("lewis".to_string());
+        }
+        std::fs::write(
+            state.repo_root.join("users/lewis.meta.yaml"),
+            "display_name: Lewis\nrole: dev\nintroduction: hi\n",
+        )
+        .unwrap();
+
+        create_card_for_archive(
+            &state,
+            "dev",
+            ARCHIVE_CARD_ID,
+            "alice",
+            Some("lewis"),
+            "doing",
+        )
+        .await;
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "lewis".to_string(), // assignee archives it
+        )
+        .await;
+        assert!(resp.ok, "archive by assignee should succeed: {:?}", resp.error);
+
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(ARCHIVE_CARD_ID);
+        assert!(archive_dir.exists(), "archived dir should exist");
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_rejects_non_creator_non_assignee() {
+        let (_tmp, state) = setup_test_repo().await;
+        // card created by alice, no assignee; bob tries to archive
+        create_card_for_archive(&state, "dev", ARCHIVE_CARD_ID, "alice", None, "todo").await;
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "bob".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "non-creator/non-assignee should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("only creator or assignee"),
+            "error should mention permission: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_rejects_already_archived() {
+        let (_tmp, state) = setup_test_repo().await;
+        // Place card directly in archive location
+        let archive_card_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(ARCHIVE_CARD_ID);
+        std::fs::create_dir_all(&archive_card_dir).unwrap();
+        write_card_meta_full(
+            &archive_card_dir.join("card.meta.yaml"),
+            "dev",
+            "alice",
+            None,
+            "todo",
+        );
+        std::fs::write(archive_card_dir.join("discussion.thread"), "").unwrap();
+
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&state.repo_root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "add archived card"]);
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "already archived card should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("already archived"),
+            "error should mention 'already archived': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_rejects_unknown_card() {
+        let (_tmp, state) = setup_test_repo().await;
+        // No card setup at all
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "unknown card should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("not found"),
+            "error should mention 'not found': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_rejects_unknown_author() {
+        let (_tmp, state) = setup_test_repo().await;
+        create_card_for_archive(&state, "dev", ARCHIVE_CARD_ID, "alice", None, "todo").await;
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "nobody".to_string(), // not in users list
+        )
+        .await;
+        assert!(!resp.ok, "unknown author should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("unknown user"),
+            "error should mention 'unknown user': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_preserves_status_field() {
+        let (_tmp, state) = setup_test_repo().await;
+        // Card in "doing" status — archive should not change status
+        create_card_for_archive(&state, "dev", ARCHIVE_CARD_ID, "alice", None, "doing").await;
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            ARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "archive should succeed: {:?}", resp.error);
+
+        let archive_meta = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(ARCHIVE_CARD_ID)
+            .join("card.meta.yaml");
+        let content = std::fs::read_to_string(&archive_meta).unwrap();
+        assert!(
+            content.contains("status: doing"),
+            "status 'doing' should be preserved after archive, got: {}",
+            content
         );
     }
 }
