@@ -220,6 +220,17 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Classify a spawn-time `io::Error` into our stable [`ErrorKind`] taxonomy.
+/// `NotFound` means the CLI binary isn't on PATH; everything else (permission
+/// denied, ENOEXEC, etc.) is bucketed as `Other` so the WebUI only has to
+/// special-case "not installed".
+fn map_spawn_error(err: &std::io::Error) -> ErrorKind {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => ErrorKind::NotInstalled,
+        _ => ErrorKind::Other,
+    }
+}
+
 /// Run a real-hello ping against the Claude CLI at `bin`.
 ///
 /// Returns a `PreflightResult` that captures the outcome with a stable error
@@ -266,11 +277,7 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                ErrorKind::NotInstalled
-            } else {
-                ErrorKind::Other
-            };
+            let kind = map_spawn_error(&e);
             let msg = if kind == ErrorKind::NotInstalled {
                 format!("claude CLI not found at `{bin}`: {e}")
             } else {
@@ -443,11 +450,7 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                ErrorKind::NotInstalled
-            } else {
-                ErrorKind::Other
-            };
+            let kind = map_spawn_error(&e);
             let msg = if kind == ErrorKind::NotInstalled {
                 format!("codex CLI not found at `{bin}`: {e}")
             } else {
@@ -663,5 +666,22 @@ mod tests {
             serde_json::to_value(ErrorKind::Other).unwrap(),
             serde_json::Value::String("other".into())
         );
+    }
+
+    #[test]
+    fn test_map_spawn_error_not_found() {
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(map_spawn_error(&err), ErrorKind::NotInstalled);
+    }
+
+    #[test]
+    fn test_map_spawn_error_other() {
+        // PermissionDenied is a representative non-NotFound kind; anything
+        // that isn't NotFound should funnel into ErrorKind::Other.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(map_spawn_error(&err), ErrorKind::Other);
+
+        let err = std::io::Error::from(std::io::ErrorKind::Other);
+        assert_eq!(map_spawn_error(&err), ErrorKind::Other);
     }
 }
