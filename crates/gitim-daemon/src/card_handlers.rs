@@ -374,6 +374,14 @@ pub async fn handle_unarchive_card(
         Some(loc) => loc,
     };
 
+    // 4b. Guard: refuse to unarchive into an inactive (archived or deleted) channel
+    if !channel_thread_exists(&state, &ch_name) {
+        return Response::error(format!(
+            "cannot unarchive card: channel '{}' is not active (may be archived or deleted)",
+            channel
+        ));
+    }
+
     // 5. Read card.meta.yaml
     let meta_path = state.repo_root.join(&located.rel_path).join("card.meta.yaml");
     let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
@@ -1738,6 +1746,94 @@ mod tests {
         assert!(
             err.contains("not found"),
             "error should mention 'not found': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejects_when_channel_archived() {
+        // Card is archived; but the channel itself is also archived (thread file moved to archive/).
+        // Fixture: place the card in archive/channels/dev/cards/<id> (as normal),
+        // but also move the channel thread to archive/channels/ to simulate an archived channel.
+        let (_tmp, state) = setup_test_repo().await;
+
+        // Put the card in the archive location and commit it
+        create_archived_card_fixture(&state, "dev", UNARCHIVE_CARD_ID, "alice", None).await;
+
+        // Simulate channel "dev" being archived: remove channels/dev.thread
+        // (channel_thread_exists checks for channels/<ch>.thread)
+        let channel_thread = state.repo_root.join("channels/dev.thread");
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&state.repo_root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        // Move thread file to simulate archived channel
+        let archive_ch_dir = state.repo_root.join("archive/channels");
+        std::fs::create_dir_all(&archive_ch_dir).unwrap();
+        std::fs::rename(&channel_thread, archive_ch_dir.join("dev.thread")).unwrap();
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "archive channel dev"]);
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "unarchive into archived channel should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("channel") && err.contains("not active"),
+            "error should mention channel not active: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejects_when_channel_deleted() {
+        // Card is archived; but the channel does not exist at all (deleted).
+        let (_tmp, state) = setup_test_repo().await;
+
+        // Put the card in the archive location
+        create_archived_card_fixture(&state, "dev", UNARCHIVE_CARD_ID, "alice", None).await;
+
+        // Delete channels/dev.thread entirely to simulate a deleted channel
+        let channel_thread = state.repo_root.join("channels/dev.thread");
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&state.repo_root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        std::fs::remove_file(&channel_thread).unwrap();
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "delete channel dev"]);
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "unarchive into deleted channel should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("channel") && err.contains("not active"),
+            "error should mention channel not active: {}",
             err
         );
     }
