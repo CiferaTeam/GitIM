@@ -252,35 +252,20 @@ impl GitimClient {
         self.request("reindex", json!({})).await
     }
 
-    pub async fn create_board(
-        &self,
-        name: &str,
-        display_name: Option<&str>,
-        statuses: Option<&[String]>,
-    ) -> Result<ApiResponse, ClientError> {
-        self.request(
-            "create_board",
-            json!({
-                "name": name,
-                "display_name": display_name,
-                "statuses": statuses,
-            }),
-        )
-        .await
-    }
-
     pub async fn create_card(
         &self,
-        board: &str,
+        channel: &str,
         title: &str,
+        labels: Option<&[String]>,
         assignee: Option<&str>,
         status: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "create_card",
             json!({
-                "board": board,
+                "channel": channel,
                 "title": title,
+                "labels": labels,
                 "assignee": assignee,
                 "status": status,
             }),
@@ -288,20 +273,20 @@ impl GitimClient {
         .await
     }
 
-    pub async fn list_boards(&self) -> Result<ApiResponse, ClientError> {
-        self.request("list_boards", json!({})).await
-    }
-
     pub async fn list_cards(
         &self,
-        board: &str,
+        channel: Option<&str>,
+        labels: Option<&[String]>,
         status: Option<&str>,
+        assignee: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "list_cards",
             json!({
-                "board": board,
+                "channel": channel,
+                "labels": labels,
                 "status": status,
+                "assignee": assignee,
             }),
         )
         .await
@@ -309,7 +294,7 @@ impl GitimClient {
 
     pub async fn read_card(
         &self,
-        board: &str,
+        channel: &str,
         card_id: &str,
         limit: Option<u64>,
         since: Option<u64>,
@@ -317,7 +302,7 @@ impl GitimClient {
         self.request(
             "read_card",
             json!({
-                "board": board,
+                "channel": channel,
                 "card_id": card_id,
                 "limit": limit,
                 "since": since,
@@ -328,7 +313,7 @@ impl GitimClient {
 
     pub async fn send_card_message(
         &self,
-        board: &str,
+        channel: &str,
         card_id: &str,
         body: &str,
         reply_to: Option<u64>,
@@ -336,7 +321,7 @@ impl GitimClient {
         self.request(
             "send_card_message",
             json!({
-                "board": board,
+                "channel": channel,
                 "card_id": card_id,
                 "body": body,
                 "reply_to": reply_to,
@@ -347,17 +332,19 @@ impl GitimClient {
 
     pub async fn update_card(
         &self,
-        board: &str,
+        channel: &str,
         card_id: &str,
         status: Option<&str>,
+        labels: Option<&[String]>,
         assignee: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "update_card",
             json!({
-                "board": board,
+                "channel": channel,
                 "card_id": card_id,
                 "status": status,
+                "labels": labels,
                 "assignee": assignee,
             }),
         )
