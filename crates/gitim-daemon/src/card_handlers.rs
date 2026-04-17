@@ -576,9 +576,13 @@ pub async fn handle_list_archived_cards(
                 continue;
             };
             let card_id = entry.file_name().to_string_lossy().to_string();
+            debug_assert_eq!(
+                meta.channel, *ch,
+                "archived card meta.channel diverged from dir name for card {card_id}"
+            );
             cards.push(serde_json::json!({
                 "card_id": card_id,
-                "channel": ch,
+                "channel": meta.channel,
                 "title": meta.title,
                 "status": meta.status.as_str(),
                 "labels": meta.labels,
