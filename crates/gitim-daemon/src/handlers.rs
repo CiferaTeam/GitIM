@@ -59,6 +59,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::CreateCard { .. }
                 | Request::SendCardMessage { .. }
                 | Request::UpdateCard { .. }
+                | Request::ArchiveCard { .. }
+                | Request::UnarchiveCard { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -2717,6 +2719,66 @@ mod tests {
 
         let resp = handle_request(Request::ListUsers, state.clone()).await;
         assert!(resp.ok, "guest list_users should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_archive_card_rejected_in_guest_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::ArchiveCard {
+                channel: "dev".to_string(),
+                card_id: "20260101-120000-abc".to_string(),
+                author: "alice".to_string(),
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest archive_card should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejected_in_guest_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::UnarchiveCard {
+                channel: "dev".to_string(),
+                card_id: "20260101-120000-abc".to_string(),
+                author: "alice".to_string(),
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest unarchive_card should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_allowed_in_guest_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::ListArchivedCards { channel: None },
+            state,
+        )
+        .await;
+
+        assert!(resp.ok, "guest list_archived_cards should succeed (read-only): {:?}", resp.error);
     }
 }
 
