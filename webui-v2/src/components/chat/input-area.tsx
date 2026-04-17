@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { ApiResponse } from "../../lib/types";
@@ -6,6 +6,12 @@ import { MentionPopup } from "./mention-popup";
 
 interface InputAreaProps {
   onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
+}
+
+const MAX_HEIGHT = 200;
+
+function draftKey(channel: string) {
+  return `gitim:draft:${channel}`;
 }
 
 export function InputArea({ onSend }: InputAreaProps) {
@@ -34,6 +40,20 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Restore draft when switching channels
+  useEffect(() => {
+    if (!currentChannel) return;
+    setText(localStorage.getItem(draftKey(currentChannel)) ?? "");
+  }, [currentChannel]);
+
+  // Auto-resize textarea up to MAX_HEIGHT
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
+  }, [text]);
+
   if (!currentChannel || isGuest) return null;
 
   function detectMention(value: string, cursorPos: number) {
@@ -52,6 +72,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     const value = e.target.value;
     setText(value);
     setError(null);
+    localStorage.setItem(draftKey(currentChannel), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -76,6 +97,8 @@ export function InputArea({ onSend }: InputAreaProps) {
         setText(savedText);
         setReplyTo(savedReplyTo);
         setError(res.error ?? "Send failed");
+      } else {
+        localStorage.removeItem(draftKey(currentChannel));
       }
     } catch (err) {
       setText(savedText);
@@ -165,7 +188,8 @@ export function InputArea({ onSend }: InputAreaProps) {
           onKeyDown={handleKeyDown}
           disabled={sending}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
-          className="w-full resize-none rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 disabled:opacity-50 transition-colors"
+          className="w-full resize-none rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 disabled:opacity-50 transition-colors overflow-y-auto"
+          style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />
 
         {sending && (
