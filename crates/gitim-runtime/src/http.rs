@@ -351,6 +351,8 @@ struct CreateChannelRequest {
     display_name: Option<String>,
     #[serde(default)]
     introduction: Option<String>,
+    #[serde(default)]
+    invitees: Vec<String>,
 }
 
 async fn im_create(
@@ -363,7 +365,7 @@ async fn im_create(
     };
     api_response_to_json(
         client
-            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref(), &[])
+            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref(), &req.invitees)
             .await,
     )
 }
