@@ -91,6 +91,44 @@ async fn test_recover_unknown_provider_marks_error() {
     assert!(info.loop_handle.is_none());
 }
 
+#[tokio::test]
+async fn test_recover_missing_provider_broadcasts_error_event() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "no-prov",
+        serde_json::json!({
+            "handler": "no-prov",
+            "display_name": "No Provider",
+        }),
+    );
+
+    let state = fresh_state();
+    // Subscribe BEFORE triggering recover so the broadcast isn't lost — a
+    // broadcast channel drops sends made when the subscriber count is 0.
+    let mut rx = {
+        let s = state.lock().unwrap();
+        s.activity_tx.subscribe()
+    };
+
+    recover_agents_from_workspace(state.clone(), tmp.path()).await;
+
+    // Timeout guards against the broadcast never firing.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("activity event should arrive within 1s")
+        .expect("broadcast channel should deliver the event");
+
+    assert_eq!(event.event_type, "error", "event_type should be error");
+    assert_eq!(event.agent_id, "no-prov", "agent_id should match handler");
+    assert!(
+        event.detail.contains("Missing"),
+        "detail should mention Missing: {}",
+        event.detail
+    );
+    assert!(!event.timestamp.is_empty(), "timestamp should be set");
+}
+
 // Note: a `test_recover_valid_provider_starts_normally` case would need to
 // drive ensure_daemon + start_agent_loop, both of which spawn real
 // subprocesses and real IPC sockets. Set-up cost outweighs value here

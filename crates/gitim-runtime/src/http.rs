@@ -994,6 +994,20 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
 
         if let Some(msg) = provider_error {
             tracing::warn!("agent @{handler} recovered in error state: {msg}");
+            // Broadcast the failure so SSE subscribers (WebUI /agents/events)
+            // see recovery errors in the same activity stream as runtime
+            // errors. Send may return Err when no one is subscribed — that's
+            // fine, it's the broadcast channel's documented behavior.
+            let activity_tx = {
+                let s = state.lock().unwrap();
+                s.activity_tx.clone()
+            };
+            let _ = activity_tx.send(AgentActivityEvent {
+                agent_id: handler.clone(),
+                event_type: "error".to_string(),
+                detail: msg.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
             let mut s = state.lock().unwrap();
             s.agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
