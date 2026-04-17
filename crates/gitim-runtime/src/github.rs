@@ -14,18 +14,16 @@ pub enum GithubError {
     RepoNotFoundOrNoAccess,
     #[error("rate limited by github")]
     RateLimited,
-    #[error("network error: {0}")]
-    NetworkError(String),
+    #[error("network error")]
+    NetworkError(#[from] reqwest::Error),
+    #[error("unexpected github response status {0}")]
+    UnexpectedStatus(u16),
     #[error("parse error: {0}")]
     ParseError(String),
 }
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const USER_AGENT: &str = "gitim-runtime";
-
-fn map_transport_error(err: reqwest::Error) -> GithubError {
-    GithubError::NetworkError(err.to_string())
-}
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const USER_AGENT: &str = concat!("gitim-runtime/", env!("CARGO_PKG_VERSION"));
 
 async fn send_github_get(url: &str, token: &str) -> Result<StatusCode, GithubError> {
     let response = reqwest::Client::new()
@@ -34,13 +32,12 @@ async fn send_github_get(url: &str, token: &str) -> Result<StatusCode, GithubErr
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
         .send()
-        .await
-        .map_err(map_transport_error)?;
+        .await?;
 
     let status = response.status();
     // Drain the body so a hang mid-stream surfaces as NetworkError — some
     // servers send headers before stalling the body (see the timeout test).
-    response.bytes().await.map_err(map_transport_error)?;
+    response.bytes().await?;
     Ok(status)
 }
 
@@ -51,7 +48,8 @@ pub async fn verify_token(token: &str, api_base: &str) -> Result<(), GithubError
         401 => Err(GithubError::InvalidToken),
         403 => Err(GithubError::InsufficientScope),
         429 => Err(GithubError::RateLimited),
-        _ => Ok(()),
+        s if (200..300).contains(&s) => Ok(()),
+        s => Err(GithubError::UnexpectedStatus(s)),
     }
 }
 
@@ -68,7 +66,8 @@ pub async fn check_repo_access(
         403 => Err(GithubError::InsufficientScope),
         401 => Err(GithubError::InvalidToken),
         429 => Err(GithubError::RateLimited),
-        _ => Ok(()),
+        s if (200..300).contains(&s) => Ok(()),
+        s => Err(GithubError::UnexpectedStatus(s)),
     }
 }
 
