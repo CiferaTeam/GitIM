@@ -1,9 +1,22 @@
 import { useRef, useEffect, useMemo, useState } from "react";
-import { useChatStore } from "../../hooks/use-chat-store";
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
 
 interface MessageListProps {
+  messages: Message[];
+  /** Identifier for the current scope (channel name, card path, etc.).
+   *  null = no scope selected — show "select a channel" empty state. */
+  scopeKey: string | null;
+  replyTo: Message | null;
+  highlightLine: number | null;
+  pendingScrollLine: number | null;
+  onHighlightLineChange: (line: number | null) => void;
+  onPendingScrollClear: () => void;
+  /** Custom empty-state hint when scope is selected but has no messages. */
+  emptyHint?: string;
+  /** Custom empty-state hint when scope is null. */
+  noScopeHint?: string;
+
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
   onMentionClick?: (handler: string, event: React.MouseEvent) => void;
@@ -13,6 +26,15 @@ interface MessageListProps {
 }
 
 export function MessageList({
+  messages,
+  scopeKey,
+  replyTo,
+  highlightLine,
+  pendingScrollLine,
+  onHighlightLineChange,
+  onPendingScrollClear,
+  emptyHint,
+  noScopeHint,
   onReply,
   onShowThread,
   onMentionClick,
@@ -20,15 +42,6 @@ export function MessageList({
   onMessageLinkClick,
   onUserProfileClick,
 }: MessageListProps) {
-  const messages = useChatStore((s) => s.messages);
-  const currentChannel = useChatStore((s) => s.currentChannel);
-  const replyTo = useChatStore((s) => s.replyTo);
-  const highlightLine = useChatStore((s) => s.highlightLine);
-  const setHighlightLine = useChatStore((s) => s.setHighlightLine);
-
-  const pendingScrollLine = useChatStore((s) => s.pendingScrollLine);
-  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
-
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(messages.length);
 
@@ -48,7 +61,6 @@ export function MessageList({
     const prev = prevLengthRef.current;
     prevLengthRef.current = messages.length;
 
-    // If we have a pending scroll target and messages just loaded, scroll to it
     if (pendingScrollLine !== null && messages.length > 0) {
       requestAnimationFrame(() => {
         if (!scrollRef.current) return;
@@ -57,25 +69,24 @@ export function MessageList({
         ) as HTMLElement | null;
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "center" });
-          setHighlightLine(pendingScrollLine);
+          onHighlightLineChange(pendingScrollLine);
         }
-        setPendingScrollLine(null);
+        onPendingScrollClear();
       });
       return;
     }
 
-    // Normal auto-scroll to bottom
     if (messages.length > prev && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, pendingScrollLine, setHighlightLine, setPendingScrollLine]);
+  }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);
 
   // Clear highlight after 1500ms
   useEffect(() => {
     if (highlightLine === null) return;
-    const t = setTimeout(() => setHighlightLine(null), 1500);
+    const t = setTimeout(() => onHighlightLineChange(null), 1500);
     return () => clearTimeout(t);
-  }, [highlightLine, setHighlightLine]);
+  }, [highlightLine, onHighlightLineChange]);
 
   function handleScrollTo(lineNumber: number) {
     if (!scrollRef.current) return;
@@ -84,7 +95,7 @@ export function MessageList({
     ) as HTMLElement | null;
     if (el) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      setHighlightLine(lineNumber);
+      onHighlightLineChange(lineNumber);
     }
   }
 
@@ -94,12 +105,11 @@ export function MessageList({
     setTimeout(() => setCopiedLine(null), 1500);
   }
 
-  // Empty states
-  if (!currentChannel) {
+  if (!scopeKey) {
     return (
       <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
         <p className="text-muted-foreground/60 text-sm">
-          Select a channel to start chatting
+          {noScopeHint ?? "Select a channel to start chatting"}
         </p>
       </div>
     );
@@ -108,7 +118,9 @@ export function MessageList({
   if (messages.length === 0) {
     return (
       <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
-        <p className="text-muted-foreground/60 text-sm">No messages yet</p>
+        <p className="text-muted-foreground/60 text-sm">
+          {emptyHint ?? "No messages yet"}
+        </p>
       </div>
     );
   }

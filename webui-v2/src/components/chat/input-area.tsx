@@ -1,50 +1,49 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { useAgentStore } from "../../hooks/use-agent-store";
-import { useChatStore } from "../../hooks/use-chat-store";
-import type { ApiResponse } from "../../lib/types";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import type { ApiResponse, Message } from "../../lib/types";
 import { MentionPopup } from "./mention-popup";
 
 interface InputAreaProps {
+  /** Unique key for this input's scope — used for localStorage draft keying.
+   *  Channel scope: the channel display name.
+   *  Card scope: "card:<channel>/<card_id>". */
+  scopeKey: string;
+  replyTo: Message | null;
+  onReplyToChange: (msg: Message | null) => void;
+  mentionCandidates: string[];
+  disabled?: boolean;
   onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
+  placeholder?: string;
 }
 
 const MAX_HEIGHT = 200;
 
-function draftKey(channel: string) {
-  return `gitim:draft:${channel}`;
+function draftKey(scopeKey: string) {
+  return `gitim:draft:${scopeKey}`;
 }
 
-export function InputArea({ onSend }: InputAreaProps) {
-  const currentChannel = useChatStore((s) => s.currentChannel);
-  const replyTo = useChatStore((s) => s.replyTo);
-  const setReplyTo = useChatStore((s) => s.setReplyTo);
-  const users = useChatStore((s) => s.users);
-  const agents = useAgentStore((s) => s.agents);
-  const isGuest = useChatStore((s) => s.isGuest);
-
-  // Merge human users + agent handlers for @mention
-  const mentionCandidates = useMemo(() => {
-    const agentIds = agents.map((a) => a.id);
-    const set = new Set([...users, ...agentIds]);
-    return [...set];
-  }, [users, agents]);
-
+export function InputArea({
+  scopeKey,
+  replyTo,
+  onReplyToChange,
+  mentionCandidates,
+  disabled,
+  onSend,
+  placeholder,
+}: InputAreaProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Mention popup state
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [mentionStart, setMentionStart] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Restore draft when switching channels
+  // Restore draft when scope changes
   useEffect(() => {
-    if (!currentChannel) return;
-    setText(localStorage.getItem(draftKey(currentChannel!)) ?? "");
-  }, [currentChannel]);
+    setText(localStorage.getItem(draftKey(scopeKey)) ?? "");
+  }, [scopeKey]);
 
   // Auto-resize textarea up to MAX_HEIGHT
   useEffect(() => {
@@ -54,7 +53,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
 
-  if (!currentChannel || isGuest) return null;
+  if (disabled) return null;
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
@@ -72,7 +71,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     const value = e.target.value;
     setText(value);
     setError(null);
-    localStorage.setItem(draftKey(currentChannel!), value);
+    localStorage.setItem(draftKey(scopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -86,7 +85,7 @@ export function InputArea({ onSend }: InputAreaProps) {
 
     // Optimistic: clear immediately
     setText("");
-    setReplyTo(null);
+    onReplyToChange(null);
     setMentionOpen(false);
     setSending(true);
     setError(null);
@@ -95,14 +94,14 @@ export function InputArea({ onSend }: InputAreaProps) {
       const res = await onSend(trimmed, savedReplyTo?.line_number ?? 0);
       if (!res.ok) {
         setText(savedText);
-        setReplyTo(savedReplyTo);
+        onReplyToChange(savedReplyTo);
         setError(res.error ?? "Send failed");
       } else {
-        localStorage.removeItem(draftKey(currentChannel!));
+        localStorage.removeItem(draftKey(scopeKey));
       }
     } catch (err) {
       setText(savedText);
-      setReplyTo(savedReplyTo);
+      onReplyToChange(savedReplyTo);
       setError(err instanceof Error ? err.message : "Send failed");
     } finally {
       setSending(false);
@@ -112,12 +111,10 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Escape" && !mentionOpen) {
-      setReplyTo(null);
+      onReplyToChange(null);
       return;
     }
 
-    // When mention popup is open, arrow/enter/tab/escape are handled by the popup's
-    // global keydown listener — don't let Enter also send
     if (mentionOpen) return;
 
     if (e.key === "Enter" && !e.shiftKey) {
@@ -131,7 +128,6 @@ export function InputArea({ onSend }: InputAreaProps) {
     if (!ta) return;
 
     const cursor = ta.selectionStart ?? text.length;
-    // Replace from mentionStart to cursor with <@handle>
     const before = text.slice(0, mentionStart);
     const after = text.slice(cursor);
     const inserted = `<@${handle}> `;
@@ -139,7 +135,6 @@ export function InputArea({ onSend }: InputAreaProps) {
     setText(newText);
     setMentionOpen(false);
 
-    // Restore focus and cursor after render
     requestAnimationFrame(() => {
       if (!ta) return;
       ta.focus();
@@ -150,7 +145,6 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   return (
     <div className="border-t border-border/60 px-4 py-3 shrink-0">
-      {/* Reply bar */}
       {replyTo && (
         <div className="mb-2 flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
           <span className="flex-1 truncate">
@@ -160,7 +154,7 @@ export function InputArea({ onSend }: InputAreaProps) {
               : replyTo.body}
           </span>
           <button
-            onClick={() => setReplyTo(null)}
+            onClick={() => onReplyToChange(null)}
             className="ml-1 shrink-0 hover:text-foreground transition-colors text-base leading-none"
             aria-label="Clear reply"
           >
@@ -169,7 +163,6 @@ export function InputArea({ onSend }: InputAreaProps) {
         </div>
       )}
 
-      {/* Input wrapper — position relative for popup anchoring */}
       <div className="relative">
         {mentionOpen && (
           <MentionPopup
@@ -187,7 +180,10 @@ export function InputArea({ onSend }: InputAreaProps) {
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           disabled={sending}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+          placeholder={
+            placeholder ??
+            "Type a message... (Enter to send, Shift+Enter for newline)"
+          }
           className="w-full resize-none rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 disabled:opacity-50 transition-colors overflow-y-auto"
           style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />
@@ -199,9 +195,7 @@ export function InputArea({ onSend }: InputAreaProps) {
         )}
       </div>
 
-      {error && (
-        <p className="mt-1 text-xs text-destructive">{error}</p>
-      )}
+      {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
     </div>
   );
 }

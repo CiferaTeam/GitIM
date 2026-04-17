@@ -97,7 +97,7 @@ function injectMessage(): void {
     channelMsgs.splice(0, channelMsgs.length - MAX_MESSAGES_PER_CHANNEL);
   }
 
-  const change: PollChange = { channel: channelKey, kind: "message" };
+  const change: PollChange = { channel: channelKey, kind: "channel" };
   pushChange(change);
 }
 
