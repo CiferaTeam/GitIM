@@ -547,15 +547,18 @@ impl Index {
             conditions.push("m.channel_type != 'card'".to_string());
         }
 
-        // DM 可见性过滤
+        // DM 可见性过滤 (不适用于 card：卡片通过所属 channel 管理访问权限)
+        let skip_dm_filter = params.channel_type.as_deref() == Some("card");
         if let Some(ref current_user) = params.current_user {
-            let idx1 = bind_values.len() + 1;
-            let card_clause = if params.include_cards { " OR m.channel_type = 'card'" } else { "" };
-            conditions.push(format!(
-                "(m.channel_type = 'channel'{} OR (m.channel LIKE '%' || ?{} || '%'))",
-                card_clause, idx1
-            ));
-            bind_values.push(Box::new(current_user.clone()));
+            if !skip_dm_filter {
+                let idx1 = bind_values.len() + 1;
+                let card_clause = if params.include_cards { " OR m.channel_type = 'card'" } else { "" };
+                conditions.push(format!(
+                    "(m.channel_type = 'channel'{} OR (m.channel LIKE '%' || ?{} || '%'))",
+                    card_clause, idx1
+                ));
+                bind_values.push(Box::new(current_user.clone()));
+            }
         }
 
         let where_clause = if conditions.is_empty() {
