@@ -5,6 +5,7 @@ import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
 import { Button } from "../ui/button";
+import { ChannelCardDrawer } from "../cards/channel-card-drawer";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -66,6 +67,12 @@ export function ChatLayout() {
 
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
   const [userCardPosition, setUserCardPosition] = useState<{ x: number; y: number } | null>(null);
+
+  // Card drawer state — auto-close when switching channels
+  const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
+  useEffect(() => {
+    setCardDrawerOpen(false);
+  }, [currentChannel]);
 
   const handleChannelSelect = useCallback(
     async (name: string) => {
@@ -257,7 +264,14 @@ export function ChatLayout() {
       />
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ChatHeader onStartDm={handleStartDm}>
+        <ChatHeader
+          onStartDm={handleStartDm}
+          onOpenCards={
+            currentChannel && currentChannelData?.kind === "channel"
+              ? () => setCardDrawerOpen(true)
+              : undefined
+          }
+        >
           {navHistory.length > 0 && (
             <button
               onClick={handleNavBack}
@@ -326,6 +340,14 @@ export function ChatLayout() {
           position={userCardPosition}
           onClose={handleCloseUserCard}
           onStartDm={handleStartDm}
+        />
+      )}
+
+      {currentChannel && currentChannelData?.kind === "channel" && (
+        <ChannelCardDrawer
+          channel={currentChannel}
+          open={cardDrawerOpen}
+          onOpenChange={setCardDrawerOpen}
         />
       )}
     </div>
