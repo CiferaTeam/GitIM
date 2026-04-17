@@ -638,6 +638,10 @@ T14 Agent 类型 + agent-card 展示 error_message（依赖 T7）
 - [ ] 前端 `tsc --noEmit` 通过
 - [ ] 前端 `pnpm -C webui-v2 lint` 不引入新 warning
 
+## Security posture
+
+Codex exec 以 `--dangerously-bypass-approvals-and-sandbox` 启动，以便 agent 在回复过程中能直接调用 `gitim send` 等命令而不被审批拦截（与 Claude `bypassPermissions` 形成对称）。爆炸半径受限于 agent workspace（`<workspace>/<handler>/`）：这是一个独立目录，不是用户 home 也不是主仓库，工具链不会穿出到用户其他项目。后续可以在 per-agent 维度引入更细的 sandbox profile 与 allowlist（例如基于 bubblewrap / seatbelt 的命令白名单），当前版本优先保证功能可用。
+
 ## Out of Scope（明确不做）
 
 - Gemini / Hermes / Openclaw / Opencode / Cursor 的 UI 露出
