@@ -54,6 +54,7 @@
 
 - `archive/channels/` 下既有平铺文件(`<ch>.{thread,meta.yaml}` from channel archive)也会有子目录(`<ch>/cards/<id>/` from card archive),依赖文件系统 namespace 区分。未来 channel 归档级联 cards 时可统一
 - `locate_card` 若活跃和归档**都存在**同一 card_id(手工 git 污染),优先活跃并 log warning,不硬 fail
+- `handle_archive_card` / `handle_unarchive_card` 代码高度对称(~99%),未抽共享辅助。Follow-up 可考虑 `move_card(direction: CardMoveDirection)` 统一。本 v1 接受并靠测试覆盖控制 drift 风险。
 
 ---
 
