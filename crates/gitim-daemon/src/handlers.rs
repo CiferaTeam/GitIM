@@ -140,6 +140,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             display_name,
             introduction,
             author,
+            invitees: _,  // consumed in a later task
         } => {
             let resolved_author = match resolve_author(author, &state).await {
                 Ok(a) => a,
@@ -2301,6 +2302,7 @@ mod tests {
                 display_name: Some("Random".to_string()),
                 introduction: Some("A random channel".to_string()),
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2342,6 +2344,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2366,6 +2369,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2391,6 +2395,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2473,6 +2478,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: None,
+                invitees: vec![],
             },
             state,
         )
