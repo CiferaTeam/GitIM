@@ -1,3 +1,5 @@
+// Detect pings a fixed cheap model in the runtime (claude-haiku-4-5 / gpt-5.4-mini),
+// not the user's selected model — so a green check verifies CLI availability, not model availability.
 export type ProviderId = "claude" | "codex";
 
 export type PreflightErrorKind = "not_installed" | "timeout" | "other";
