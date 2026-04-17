@@ -140,13 +140,13 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             display_name,
             introduction,
             author,
-            invitees: _,  // consumed in a later task
+            invitees,
         } => {
             let resolved_author = match resolve_author(author, &state).await {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            handle_create_channel(state, name, display_name, introduction, resolved_author).await
+            handle_create_channel(state, name, display_name, introduction, resolved_author, invitees).await
         }
         Request::Search {
             query,
@@ -1059,6 +1059,7 @@ async fn handle_create_channel(
     display_name: Option<String>,
     introduction: Option<String>,
     author: String,
+    invitees: Vec<String>,
 ) -> Response {
     // 1. Validate author
     let handler = match Handler::new(&author) {
@@ -1069,6 +1070,12 @@ async fn handle_create_channel(
         let users = state.users.read().await;
         if !users.contains(&author) {
             return Response::error(format!("unknown user: {}", author));
+        }
+        // Validate all invitees before any I/O
+        for invitee in &invitees {
+            if !users.contains(invitee) {
+                return Response::error(format!("invitee '{}' is not registered", invitee));
+            }
         }
     }
 
@@ -1098,28 +1105,36 @@ async fn handle_create_channel(
         return Response::error(format!("failed to create channels dir: {}", e));
     }
 
-    // 5. Write meta.yaml
+    // 5. Build members list: author first, then invitees in order, deduped
+    let mut members: Vec<String> = vec![author.clone()];
+    for invitee in invitees {
+        if !members.contains(&invitee) {
+            members.push(invitee);
+        }
+    }
+
+    // 6. Write meta.yaml
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let meta = ChannelMeta {
         display_name: display_name.unwrap_or_else(|| name.clone()),
         created_by: author.clone(),
         created_at: now.clone(),
         introduction: introduction.unwrap_or_default(),
-        members: vec![author.clone()],
+        members,
     };
     let meta_str = serde_yaml::to_string(&meta).unwrap();
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
 
-    // 6. Write .thread with join event
+    // 7. Write .thread with join event
     let thread_path = channels_dir.join(format!("{}.thread", channel_name));
     let join_line = format_event(1, &handler, &now, "join", &serde_json::json!({}));
     if let Err(e) = std::fs::write(&thread_path, &join_line) {
         return Response::error(format!("failed to write channel thread: {}", e));
     }
 
-    // 7. Commit
+    // 8. Commit
     let meta_rel = format!("channels/{}.meta.yaml", channel_name);
     let thread_rel = format!("channels/{}.thread", channel_name);
     let commit_msg = format!("channel: create #{} by @{}", name, author);
@@ -1130,7 +1145,7 @@ async fn handle_create_channel(
         return Response::error(format!("create_channel commit failed: {}", e));
     }
 
-    // 8. Push with retry (skip if no remote)
+    // 9. Push with retry (skip if no remote)
     if state.git_storage.has_remote() {
         let mut pushed = false;
         for attempt in 1..=MAX_PUSH_RETRIES {
@@ -1166,7 +1181,7 @@ async fn handle_create_channel(
 
     info!("channel '{}' created by @{}", name, author);
 
-    // 9. Return success
+    // 10. Return success
     Response::success(serde_json::json!({
         "channel": name,
         "created_by": author,
