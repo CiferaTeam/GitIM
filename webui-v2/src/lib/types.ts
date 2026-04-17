@@ -56,10 +56,39 @@ export interface ApiResponse<T = Record<string, unknown>> {
   error?: string;
 }
 
+export type PollChangeKind =
+  | "channel"
+  | "channel_meta"
+  | "dm"
+  | "card_meta"
+  | "card_thread";
+
 export interface PollChange {
   channel: string;
-  kind: string;
+  kind: PollChangeKind;
   entries?: Message[];
+}
+
+export type CardStatus = "todo" | "doing" | "done";
+
+export interface Card {
+  card_id: string;
+  channel: string;
+  title: string;
+  status: CardStatus;
+  labels: string[];
+  assignee: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CardFilter {
+  channel?: string | null;
+  channels?: string[]; // for multi-select filter bar (client-side)
+  labels?: string[];
+  status?: CardStatus | null;
+  assignee?: string | null;
 }
 
 /** Format timestamp "20260317T120000Z" → "12:00" */
