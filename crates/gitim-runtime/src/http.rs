@@ -118,6 +118,13 @@ pub struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         let (activity_tx, _) = broadcast::channel(128);
+        // E2E test seam: env vars let a compiled binary point at a stub
+        // github API + a local `file://` bare repo instead of github.com.
+        // Unset in production; Rust integration tests still override directly
+        // via `state.lock()`.
+        let base_url = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+            .unwrap_or_else(|_| "https://api.github.com".to_string());
+        let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
         Self {
             workspace: None,
             human_repo: None,
@@ -130,10 +137,8 @@ impl Default for RuntimeState {
                     .unwrap()
                     .as_secs(),
             ),
-            github_api: Arc::new(DefaultGithubApi {
-                base_url: "https://api.github.com".to_string(),
-            }),
-            clone_url_override: None,
+            github_api: Arc::new(DefaultGithubApi { base_url }),
+            clone_url_override,
         }
     }
 }
@@ -484,7 +489,9 @@ async fn git_init_github(
         }));
     }
 
-    let clone_url = clone_override.unwrap_or_else(|| build_token_url(&owner, &repo, &token));
+    let clone_url = clone_override
+        .clone()
+        .unwrap_or_else(|| build_token_url(&owner, &repo, &token));
 
     let runtime_dir = workspace.join(".gitim-runtime");
     if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
@@ -533,10 +540,16 @@ async fn git_init_github(
     // git operation (status inspection, debug dump) doesn't leak it. Token
     // injection for push/fetch happens through sync_loop's credential helper
     // in Task 7, not through the origin URL.
-    let _ = std::process::Command::new("git")
-        .args(["remote", "set-url", "origin", &remote_url])
-        .current_dir(&human_dir)
-        .output();
+    //
+    // When `clone_url_override` is set (E2E tests use `file://`), the clone
+    // URL already has no token so there's nothing to scrub — keep the
+    // `file://` origin so the daemon's push target matches the stub bare.
+    if clone_override.is_none() {
+        let _ = std::process::Command::new("git")
+            .args(["remote", "set-url", "origin", &remote_url])
+            .current_dir(&human_dir)
+            .output();
+    }
 
     let auth = serde_json::json!({
         "type": "github",
