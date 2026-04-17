@@ -1,5 +1,4 @@
 pub mod card;
-pub mod board;
 pub mod channel;
 pub mod handler;
 pub mod link;
@@ -7,7 +6,9 @@ pub mod message;
 pub mod meta;
 pub mod config;
 
-pub use board::{BoardMeta, CardMeta};
+pub use card::{
+    validate_label, validate_labels, CardError, CardMeta, CardStatus, MAX_LABELS, MAX_LABEL_LEN,
+};
 pub use channel::ChannelName;
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
