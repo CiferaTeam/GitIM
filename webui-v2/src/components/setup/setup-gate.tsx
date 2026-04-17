@@ -7,6 +7,7 @@ import { ConnectForm } from "./connect-form";
 import { GithubSetupForm } from "./github-setup-form";
 import { GitProviderForm } from "./git-provider-form";
 import { WorkspaceForm } from "./workspace-form";
+import { SetupShell } from "./setup-shell";
 
 interface SetupGateProps {
   children: ReactNode;
@@ -51,12 +52,18 @@ export function SetupGate({ children }: SetupGateProps) {
     return () => { cancelled = true; };
   }, [status, port, setStatus, setRuntimeVersion]);
 
-  const screens: Record<ConnectionStatus, ReactNode> = {
-    checking: (
-      <div className="flex items-center justify-center h-screen bg-background text-muted-foreground text-sm">
-        Connecting...
-      </div>
-    ),
+  if (status === "checking") {
+    return (
+      <SetupShell
+        step={1}
+        title="Connect Runtime"
+        description="Link GitIM·Cell to your local runtime daemon"
+        loading
+      />
+    );
+  }
+
+  const screens: Record<Exclude<ConnectionStatus, "checking">, ReactNode> = {
     disconnected: <ConnectForm />,
     connected: <WorkspaceForm />,
     workspace_set: <GitProviderForm />,

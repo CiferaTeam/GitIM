@@ -8,14 +8,14 @@ const EMPTY_ACTIVITIES: AgentActivityEvent[] = [];
 function StatusDot({ status }: { status: string }) {
   const color =
     status === "running"
-      ? "bg-success"
+      ? "bg-success shadow-[0_0_4px_rgba(74,222,128,0.5)]"
       : status === "error"
-        ? "bg-error"
+        ? "bg-error shadow-[0_0_4px_rgba(248,113,113,0.4)]"
         : "bg-text-muted";
 
   return (
     <span
-      className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${color}`}
+      className={`inline-block w-2 h-2 rounded-full shrink-0 ${color}`}
     />
   );
 }
@@ -33,7 +33,7 @@ function ActivityLine({ event }: { event: AgentActivityEvent }) {
   const time = event.timestamp.slice(11, 19);
 
   return (
-    <div className="flex items-baseline gap-1.5 py-0.5 text-[10px] leading-tight text-text-muted">
+    <div className="flex items-baseline gap-1.5 py-0.5 text-[11px] leading-tight text-text-muted">
       <span className="text-text-faint shrink-0 font-mono">{time}</span>
       <span className="truncate font-mono">
         {typeLabel}
@@ -59,35 +59,33 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
 
   return (
     <div
-      className="relative rounded border border-border/50"
+      className="relative rounded-md border border-border/60 bg-background/40"
       onMouseLeave={() => setExpanded(false)}
     >
-      {/* Compact row — click to toggle */}
       <div
-        className="flex items-center gap-1.5 px-2 py-1 min-w-0 cursor-pointer select-none hover:bg-surface-hover rounded"
+        className="flex items-center gap-2 px-2.5 py-1.5 min-w-0 cursor-pointer select-none hover:bg-surface-hover rounded-md transition-colors"
         onClick={() => setExpanded((v) => !v)}
       >
         <StatusDot status={status} />
-        <span className="text-[11px] font-mono text-text-secondary shrink-0">
+        <span className="text-xs font-medium text-text-secondary shrink-0">
           {name}
         </span>
         {showError ? (
-          <span className="text-[10px] font-mono text-error truncate whitespace-pre-line">
+          <span className="text-[11px] font-mono text-error truncate whitespace-pre-line">
             {errorMessage ?? "unknown error"}
           </span>
         ) : latest ? (
-          <span className="text-[10px] font-mono text-text-muted truncate">
+          <span className="text-[11px] font-mono text-text-muted truncate">
             {latest.detail}
           </span>
         ) : (
-          <span className="text-[10px] text-text-faint italic">idle</span>
+          <span className="text-[11px] text-text-faint italic">idle</span>
         )}
       </div>
 
-      {/* Expanded popover — click or mouse-leave to close */}
       {expanded && activities.length > 0 && (
-        <div className="absolute left-0 top-full z-50 w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-lg p-2">
-          <p className="text-[10px] font-semibold uppercase text-text-muted tracking-widest mb-1">
+        <div className="absolute left-0 top-full z-50 w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-xl p-2 mt-1">
+          <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider mb-1">
             {name} — Recent Activity
           </p>
           {activities.map((evt, i) => (
@@ -106,10 +104,10 @@ export function AgentStatusPanel() {
 
   return (
     <div className="px-3 pt-3 pb-1">
-      <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest mb-1 px-2">
+      <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider mb-2 px-2">
         Agents
       </p>
-      <div className="space-y-1">
+      <div className="space-y-1.5">
         {agents.map((agent) => (
           <AgentRow
             key={agent.id}

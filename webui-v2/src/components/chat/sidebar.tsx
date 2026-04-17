@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Hash, AtSign, Plus, Search } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
@@ -25,15 +26,12 @@ function dmDisplayName(channel: Channel, currentUser: string): string {
   const parts = channel.name.split("--");
   if (parts.length !== 2) return channel.name;
   const [a, b] = parts;
-  // Self-DM
   if (a === b || (a === currentUser && b === currentUser)) {
     return `${currentUser} (me)`;
   }
-  // Current user is a member — show the other side
   if (a === currentUser) return b;
   if (b === currentUser) return a;
-  // Admin view — neither side is current user
-  return `${a} \u2194 ${b}`;
+  return `${a} ↔ ${b}`;
 }
 
 function isSelfDm(channel: Channel, currentUser: string): boolean {
@@ -46,14 +44,13 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const channels = useChatStore((s) => s.channels);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
-
   const setChannels = useChatStore((s) => s.setChannels);
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
+  const [channelQuery, setChannelQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Create channel dialog state
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDisplayName, setCreateDisplayName] = useState("");
@@ -97,7 +94,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       setCreating(false);
       return;
     }
-    // Creation succeeded — refresh and navigate (failures here are non-fatal)
     try {
       const chRes = await client.channels();
       if (chRes.ok && chRes.data) {
@@ -109,7 +105,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     onChannelSelect(name);
   }
 
-  // Auto-focus input when popover opens
   useEffect(() => {
     if (dmSearchOpen) {
       setTimeout(() => inputRef.current?.focus(), 0);
@@ -122,13 +117,18 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const dmChannels = channels
     .filter((c) => c.kind === "dm")
     .sort((a, b) => {
-      // Self-DM to top
       const aSelf = isSelfDm(a, currentUser);
       const bSelf = isSelfDm(b, currentUser);
       if (aSelf && !bSelf) return -1;
       if (!aSelf && bSelf) return 1;
       return a.name.localeCompare(b.name);
     });
+
+  const filteredRegularChannels = channelQuery.trim()
+    ? regularChannels.filter((c) =>
+        c.name.toLowerCase().includes(channelQuery.toLowerCase())
+      )
+    : regularChannels;
 
   const filteredUsers = dmQuery.trim()
     ? users.filter(
@@ -143,14 +143,14 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   return (
-    <div className="w-56 shrink-0 border-r border-border/60 bg-muted/30 flex flex-col overflow-y-auto">
+    <div className="w-64 shrink-0 border-r border-border bg-card/40 flex flex-col overflow-hidden">
       {/* Agent status panel */}
       <AgentStatusPanel />
 
       {/* Channels section */}
-      <div className="px-3 pt-4 pb-2">
+      <div className="px-3 pt-4 pb-2 flex flex-col min-h-0 flex-1 overflow-hidden">
         <div className="flex items-center justify-between mb-2 px-2">
-          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
+          <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
             Channels
           </p>
           <Button
@@ -160,21 +160,38 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             className="text-muted-foreground hover:text-foreground"
             onClick={() => setCreateOpen(true)}
           >
-            <span className="text-base leading-none">+</span>
+            <Plus className="size-3.5" />
           </Button>
         </div>
-        <ul className="space-y-0.5">
-          {regularChannels.map((ch) => (
+
+        {/* Channel search */}
+        <div className="relative mb-2 px-1">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-text-faint" />
+          <input
+            type="text"
+            value={channelQuery}
+            onChange={(e) => setChannelQuery(e.target.value)}
+            placeholder="Search channels..."
+            className="w-full h-7 pl-7 pr-2 rounded-md border border-border/60 bg-background/60 text-xs placeholder:text-text-faint focus:outline-none focus:ring-1 focus:ring-ring/50"
+          />
+        </div>
+
+        <div className="overflow-y-auto -mx-1 px-1 space-y-0.5">
+          {filteredRegularChannels.map((ch) => (
             <ChannelItem
               key={ch.name}
-              label={`# ${ch.name}`}
+              icon={<Hash className="size-3.5 text-text-muted" />}
+              label={ch.name}
               unread={ch.unreadCount}
               hasMention={ch.hasMention}
               active={currentChannel === ch.name}
               onClick={() => onChannelSelect(ch.name)}
             />
           ))}
-        </ul>
+          {filteredRegularChannels.length === 0 && channelQuery.trim() && (
+            <p className="px-2 py-1 text-[11px] text-text-muted">No channels found</p>
+          )}
+        </div>
       </div>
 
       {/* Create channel dialog */}
@@ -239,9 +256,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       </Dialog>
 
       {/* DMs section */}
-      <div className="px-3 pt-3 pb-4">
+      <div className="px-3 pt-3 pb-4 border-t border-border/60 flex flex-col min-h-0 max-h-[45%]">
         <div className="flex items-center justify-between mb-2 px-2">
-          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
+          <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
             Direct Messages
           </p>
           <Popover open={dmSearchOpen} onOpenChange={setDmSearchOpen}>
@@ -252,23 +269,23 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 title="New DM"
                 className="text-muted-foreground hover:text-foreground"
               >
-                <span className="text-base leading-none">+</span>
+                <Plus className="size-3.5" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent side="right" align="start" className="w-52 p-1">
+            <PopoverContent side="right" align="start" className="w-56 p-2">
               <Input
                 ref={inputRef}
                 placeholder="Search users..."
                 value={dmQuery}
                 onChange={(e) => setDmQuery(e.target.value)}
-                className="h-7 text-xs mb-1"
+                className="h-8 text-xs mb-1"
               />
               {filteredUsers.length > 0 && (
-                <ul className="max-h-40 overflow-y-auto">
+                <ul className="max-h-40 overflow-y-auto space-y-0.5">
                   {filteredUsers.map((u) => (
                     <li
                       key={u}
-                      className="px-2 py-1.5 text-sm rounded-sm cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
+                      className="px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
                       onMouseDown={() => handleUserSelect(u)}
                     >
                       @{u}
@@ -283,12 +300,13 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           </Popover>
         </div>
 
-        <ul className="space-y-0.5">
+        <div className="overflow-y-auto -mx-1 px-1 space-y-0.5">
           {dmChannels.map((ch) => {
-            const label = `@ ${dmDisplayName(ch, currentUser)}`;
+            const label = dmDisplayName(ch, currentUser);
             return (
               <ChannelItem
                 key={ch.name}
+                icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
@@ -297,13 +315,14 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               />
             );
           })}
-        </ul>
+        </div>
       </div>
     </div>
   );
 }
 
 interface ChannelItemProps {
+  icon: React.ReactNode;
   label: string;
   unread: number;
   hasMention: boolean;
@@ -311,24 +330,31 @@ interface ChannelItemProps {
   onClick: () => void;
 }
 
-function ChannelItem({ label, unread, hasMention, active, onClick }: ChannelItemProps) {
+function ChannelItem({ icon, label, unread, hasMention, active, onClick }: ChannelItemProps) {
   return (
     <li>
       <button
         type="button"
         onClick={onClick}
         className={[
-          "w-full flex items-center justify-between rounded-md px-2 py-1.5 text-[13px] text-left transition-colors",
+          "w-full flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left transition-all duration-150",
           active
-            ? "bg-accent text-accent-foreground font-medium"
-            : "hover:bg-accent/40 text-muted-foreground hover:text-foreground",
+            ? "bg-primary/15 text-primary font-medium border-l-2 border-primary"
+            : "hover:bg-surface/60 text-text-secondary hover:text-foreground border-l-2 border-transparent",
           unread > 0 && !active ? "text-foreground font-medium" : "",
         ].join(" ")}
       >
-        <span className="truncate">{label}</span>
+        {icon}
+        <span className="truncate flex-1">{label}</span>
         {unread > 0 && (
-          <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 min-w-4 font-mono">
-            {hasMention ? `${unread}(@)` : unread}
+          <Badge
+            variant="default"
+            className={[
+              "ml-1 text-[10px] px-1.5 py-0 h-4 min-w-4 font-mono",
+              hasMention ? "bg-primary text-white" : "bg-surface-hover text-foreground border border-border",
+            ].join(" ")}
+          >
+            {hasMention ? `${unread}@` : unread}
           </Badge>
         )}
       </button>
