@@ -80,6 +80,64 @@ CLI 完全委托 daemon 处理身份推断和仓库初始化：
 - **GitHub**：通过 token 调用 API 获取用户信息
 - **Gitea/GitLab**：通过 token + 自定义 URL 调用对应 API
 
+### Runtime / WebUI 路径（workspace 级）
+
+WebUI 走 Runtime 的 `/git/init` HTTP 端点。两种 provider：
+
+1. **local 模式**：创建 `$workspace/repo.git` bare repo → clone 到 `$workspace/.gitim-runtime/human/` → 本地 git config 推断身份。
+2. **github 模式**：
+   - `validate_workspace_path` 拒绝云同步路径（iCloud Drive / Dropbox / Google Drive / OneDrive）
+   - Windows 不支持（v1 scope 外）
+   - Runtime pre-flight：`github::verify_token` → `github::check_repo_access`（区分 404 / 403，分别映射 `invalid_token`、`token_lacks_repo_access`、`insufficient_scope` 等 `error_code`）
+   - Clone token URL `https://x-access-token:TOK@github.com/owner/repo.git` 到 `.gitim-runtime/human/`（**不创建本地 bare**）
+   - Daemon 走 `AuthData::GitHub` 分支自己推断身份（curl `/user`）
+   - macOS 加 Time Machine exclusion xattr 到 `.gitim-runtime/`
+   - 失败清理：kill daemon pid + rm human dir + 不写 config
+
+### WorkspaceConfig Schema
+
+`$workspace/.gitim-runtime/config.json`（chmod 0600，unix 唯一权限模型）：
+
+```json
+{
+  "workspace": "/abs/path",
+  "created_at": "2026-04-17T10:20:30Z",
+  "git": {
+    "provider": "local" | "github",
+    "remote_url": "https://github.com/org/repo" | null,
+    "token": "ghp_..." | null
+  }
+}
+```
+
+**Token source of truth = 这份文件**。各 clone 的 `.git/config` URL 里嵌的 token 是派生值。
+
+- Runtime 启动（recover workspace 后）+ `add_agent` 成功后 → 调 `token_propagation::propagate_token` 扫所有 clone 并覆盖 `remote.origin.url`
+- 未来 "Update token" UI（v2）→ 改 config.json → propagate → 所有 clone 同步
+
+### Handler 冲突防护（github 模式）
+
+`add_agent` 在 provision 前：
+1. `git fetch origin` human clone（best-effort，失败降级到本地检查）
+2. 检查 `users/<handler>.meta.yaml` 存在性 → 存在 → 拒绝（`error_code: "handler_conflict"`）
+
+防止多机 workspace 同名 agent 两处跑 daemon 造成 split-brain。
+
+### sync_loop auth 熔断
+
+daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` Arc<AtomicBool> 置位 → 后续 sync cycle 直接跳过 git 操作，只保持 cadence。
+
+避免 PAT 过期 / revoke 后死循环烧 GitHub rate limit（5000 req/h）。v1 **无 UI 恢复路径**：用户要么重启 daemon（清标志），要么等 v2 加"更新 token"入口。
+
+### Non-goals (v1)
+
+- **local → github 迁移**：需 rm -rf workspace 重建
+- **换 remote URL**：需 rm -rf 重建
+- **Token rotate UI**：v1 无，手工改 config.json + 重启 runtime
+- **Windows 支持**：`chmod 0600` + xattr + `dirs::home_dir` 的 OneDrive 检测不适配
+- **Agent 独立 GitHub 身份**：共用 workspace PAT。commit author = agent handler；GitHub committer = PAT owner（audit 归因见 `author` 字段）
+- **OAuth Device Flow**：不做。PAT 手动粘贴
+
 ## 约定
 - Handler：小写 a-z 0-9 连字符，1-39 字符，`system` 为保留字
 - DM 文件名：两个 handler 按字典序排列，`--` 连接
@@ -107,7 +165,7 @@ Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
 ## Current Orientation
-**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。
-**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持、WebUI 完善
+**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。
+**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善
 **Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。
-**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码
+**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一
