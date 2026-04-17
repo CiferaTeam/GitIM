@@ -2,6 +2,7 @@ import { useRef, useEffect, useMemo, useState } from "react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
+import { MessageSquare, Hash } from "lucide-react";
 
 interface MessageListProps {
   onReply: (msg: Message) => void;
@@ -34,7 +35,6 @@ export function MessageList({
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
-  // O(1) reply target lookup — only real messages, never events (events have no body)
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const m of messages) {
@@ -43,12 +43,10 @@ export function MessageList({
     return map;
   }, [messages]);
 
-  // Auto-scroll to bottom when new messages arrive, UNLESS we have a pending scroll target
   useEffect(() => {
     const prev = prevLengthRef.current;
     prevLengthRef.current = messages.length;
 
-    // If we have a pending scroll target and messages just loaded, scroll to it
     if (pendingScrollLine !== null && messages.length > 0) {
       requestAnimationFrame(() => {
         if (!scrollRef.current) return;
@@ -64,13 +62,11 @@ export function MessageList({
       return;
     }
 
-    // Normal auto-scroll to bottom
     if (messages.length > prev && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, pendingScrollLine, setHighlightLine, setPendingScrollLine]);
 
-  // Clear highlight after 1500ms
   useEffect(() => {
     if (highlightLine === null) return;
     const t = setTimeout(() => setHighlightLine(null), 1500);
@@ -97,18 +93,38 @@ export function MessageList({
   // Empty states
   if (!currentChannel) {
     return (
-      <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
-        <p className="text-muted-foreground/60 text-sm">
-          Select a channel to start chatting
-        </p>
+      <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
+        <div className="text-center space-y-4 max-w-xs">
+          <div className="w-12 h-12 rounded-2xl bg-surface flex items-center justify-center mx-auto border border-border">
+            <MessageSquare className="size-6 text-primary" />
+          </div>
+          <div>
+            <p className="text-foreground font-medium">Select a channel</p>
+            <p className="text-sm text-text-muted mt-1">
+              Choose a channel or DM from the sidebar to start chatting
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
 
   if (messages.length === 0) {
     return (
-      <div className="flex-1 overflow-y-auto p-4 flex items-center justify-center">
-        <p className="text-muted-foreground/60 text-sm">No messages yet</p>
+      <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
+        <div className="text-center space-y-4 max-w-sm">
+          <div className="w-12 h-12 rounded-2xl bg-surface flex items-center justify-center mx-auto border border-border">
+            <Hash className="size-6 text-primary" />
+          </div>
+          <div>
+            <p className="text-foreground font-medium">
+              #{currentChannel}
+            </p>
+            <p className="text-sm text-text-muted mt-2">
+              No messages yet. Send the first message to get started.
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -117,7 +133,7 @@ export function MessageList({
     <div
       ref={scrollRef}
       data-message-scroll
-      className="flex-1 overflow-y-auto px-4 py-2 space-y-0.5"
+      className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
     >
       {messages.map((msg) => {
         const key = msg._pendingId ?? msg.line_number;
@@ -131,7 +147,7 @@ export function MessageList({
                 : msg.body ?? `${msg.author}: ${msg.event_type}`;
           return (
             <div key={key} className="flex justify-center py-2">
-              <span className="text-[11px] text-muted-foreground/60 italic">
+              <span className="text-[11px] text-text-muted/70 italic bg-surface/40 px-2 py-0.5 rounded-full">
                 {eventText}
               </span>
             </div>

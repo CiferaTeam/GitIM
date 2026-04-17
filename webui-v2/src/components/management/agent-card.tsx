@@ -13,6 +13,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
+import { Play, Pause, Settings, Trash2 } from "lucide-react";
 
 export function relativeTime(isoString: string): string {
   const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
@@ -26,21 +27,42 @@ export function statusBadge(status: AgentStatus) {
   switch (status) {
     case "running":
       return (
-        <Badge className="bg-success text-white hover:bg-success">
+        <Badge className="bg-success/15 text-success border border-success/30 hover:bg-success/20">
           Running
         </Badge>
       );
     case "idle":
       return (
-        <Badge className="bg-warning text-white hover:bg-warning">
+        <Badge className="bg-warning/15 text-warning border border-warning/30 hover:bg-warning/20">
           Idle
         </Badge>
       );
     case "error":
       return <Badge variant="destructive">Error</Badge>;
     case "offline":
-      return <Badge variant="secondary">Offline</Badge>;
+      return <Badge variant="secondary" className="text-text-muted">Offline</Badge>;
   }
+}
+
+function statusBarColor(status: AgentStatus) {
+  switch (status) {
+    case "running": return "bg-success";
+    case "idle": return "bg-warning";
+    case "error": return "bg-destructive";
+    case "offline": return "bg-text-muted";
+  }
+}
+
+function initials(name: string) {
+  return name.slice(0, 2).toUpperCase();
+}
+
+function avatarColor(name: string) {
+  const hues = [210, 150, 30, 280, 340, 190, 45, 260];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = hues[Math.abs(hash) % hues.length];
+  return `hsl(${hue} 70% 55%)`;
 }
 
 interface AgentCardProps {
@@ -75,24 +97,37 @@ export function AgentCard({ agent }: AgentCardProps) {
   return (
     <>
       <Card
-        className="cursor-pointer hover:shadow-md transition-all duration-150 hover:border-border/80 bg-card/50"
+        className="relative overflow-hidden cursor-pointer hover:shadow-lg hover:shadow-black/20 transition-all duration-200 hover:border-border-strong bg-card/60 group"
         onClick={() => navigate(`/management/${agent.id}`)}
       >
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-semibold text-lg truncate">{agent.name}</span>
+        {/* Status bar */}
+        <div className={`absolute top-0 left-0 right-0 h-1 ${statusBarColor(agent.status)}`} />
+
+        <CardHeader className="pb-2 pt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className="w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold text-white shadow-sm shrink-0"
+                style={{ backgroundColor: avatarColor(agent.name || agent.id) }}
+              >
+                {initials(agent.name || agent.id)}
+              </div>
+              <div className="min-w-0">
+                <span className="font-semibold text-lg truncate block">{agent.name}</span>
+                {agent.status === "error" && (
+                  <p className="text-xs text-destructive truncate">
+                    {agent.errorMessage ?? "unknown error"}
+                  </p>
+                )}
+              </div>
+            </div>
             {statusBadge(agent.status)}
           </div>
-          {agent.status === "error" && (
-            <p className="text-xs text-muted-foreground whitespace-pre-line mt-1">
-              {agent.errorMessage ?? "unknown error"}
-            </p>
-          )}
         </CardHeader>
 
         <CardContent>
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
-            <span className="text-muted-foreground">Last activity</span>
+          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            <span className="text-text-muted">Last activity</span>
             <span>
               {agent.lastActivity ? relativeTime(agent.lastActivity) : "—"}
             </span>
@@ -104,24 +139,33 @@ export function AgentCard({ agent }: AgentCardProps) {
 
         <CardFooter className="gap-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
           <Button
-            variant="outline"
+            variant={isRunning ? "outline" : "default"}
             size="sm"
             onClick={handleToggle}
+            className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
           >
-            {isRunning ? "Stop" : "Start"}
+            {isRunning ? (
+              <><Pause className="size-3.5 mr-1" /> Stop</>
+            ) : (
+              <><Play className="size-3.5 mr-1" /> Start</>
+            )}
           </Button>
           <Button
             variant="outline"
             size="sm"
             onClick={() => navigate(`/management/${agent.id}`)}
+            className="border-border-strong hover:bg-surface-hover"
           >
+            <Settings className="size-3.5 mr-1" />
             Details
           </Button>
           <Button
-            variant="destructive"
+            variant="ghost"
             size="sm"
             onClick={() => setRemoveOpen(true)}
+            className="text-destructive hover:text-destructive hover:bg-destructive/10"
           >
+            <Trash2 className="size-3.5 mr-1" />
             Remove
           </Button>
         </CardFooter>

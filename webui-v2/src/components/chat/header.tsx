@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { UserPlus, Users } from "lucide-react";
+import { UserPlus, Users, Hash, AtSign } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
@@ -37,8 +37,8 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
 
   if (!currentChannel) {
     return (
-      <div className="h-12 border-b border-border/60 flex items-center px-4 shrink-0">
-        <span className="text-sm text-muted-foreground">
+      <div className="h-12 border-b border-border flex items-center px-4 shrink-0 bg-card/30">
+        <span className="text-sm text-text-muted">
           Select a channel or DM
         </span>
       </div>
@@ -48,7 +48,6 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
   const channel = channels.find((c) => c.name === currentChannel);
   const isDm = channel?.kind === "dm";
 
-  // Channel display: "#general" or "@alice"
   let displayName: string;
   if (isDm) {
     const parts = currentChannel.split("--");
@@ -63,54 +62,60 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
   }
 
   const members = channel?.members ?? [];
-  // daemon-side validate_join 只允许 member 邀请他人；非成员场景（有 Join banner）
-  // 若仍显示 Invite 入口，点击必失败 → 隐藏更诚实
   const canInvite = !isDm && !!currentUser && members.includes(currentUser);
 
   return (
-    <div className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0">
+    <div className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/30">
       {/* Left: back button + channel name */}
-      <div className="flex items-center">
+      <div className="flex items-center gap-2 min-w-0">
         {children}
-        <span className="font-semibold text-sm tracking-tight">{displayName}</span>
+        <div className="flex items-center gap-1.5">
+          {isDm ? (
+            <AtSign className="size-4 text-primary shrink-0" />
+          ) : (
+            <Hash className="size-4 text-primary shrink-0" />
+          )}
+          <span className="font-semibold text-sm tracking-tight truncate">{displayName}</span>
+        </div>
       </div>
 
       {/* Right: member list (channels only) */}
       {!isDm && members.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="gap-1.5">
+            <Button variant="ghost" size="sm" className="gap-1.5 text-text-secondary hover:text-foreground hover:bg-surface-hover">
               <Users className="size-4" />
               <span>{members.length}</span>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuContent align="end" className="w-52 bg-popover border-border">
             {canInvite && (
               <>
                 <DropdownMenuItem
                   onSelect={() => setInviteOpen(true)}
-                  className="gap-2"
+                  className="gap-2 cursor-pointer focus:bg-surface-hover"
                 >
                   <UserPlus className="size-3.5" />
                   <span>Invite members</span>
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
+                <DropdownMenuSeparator className="bg-border" />
               </>
             )}
-            <DropdownMenuLabel>Members</DropdownMenuLabel>
-            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-text-muted text-xs uppercase tracking-wider">Members</DropdownMenuLabel>
+            <DropdownMenuSeparator className="bg-border" />
             {members.map((member) => (
               <DropdownMenuItem
                 key={member}
-                className="justify-between"
+                className="justify-between cursor-default focus:bg-transparent"
                 onSelect={(e) => e.preventDefault()}
               >
-                <span>@{member}</span>
+                <span className="text-sm">@{member}</span>
                 {member !== currentUser && (
                   <Button
                     variant="ghost"
                     size="xs"
                     onClick={() => onStartDm(member)}
+                    className="text-primary hover:text-primary hover:bg-primary/10"
                   >
                     DM
                   </Button>

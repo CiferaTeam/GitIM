@@ -14,14 +14,18 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       {/* Top bar */}
-      <header className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0 bg-background/95 backdrop-blur-sm">
+      <header className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
         {/* Left: logo + connection status */}
-        <div className="flex items-center gap-2.5 min-w-[120px]">
-          <span className="font-bold text-sm tracking-tight">GitIM·Cell</span>
+        <div className="flex items-center gap-2.5 min-w-[140px]">
+          <span className="font-bold text-sm tracking-tight text-foreground">
+            GitIM<span className="text-primary">·</span>Cell
+          </span>
           <span
             className={[
-              "inline-block w-1.5 h-1.5 rounded-full",
-              connected ? "bg-success shadow-[0_0_4px_rgba(74,222,128,0.5)]" : "bg-error",
+              "inline-block w-2 h-2 rounded-full",
+              connected
+                ? "bg-success shadow-[0_0_6px_rgba(74,222,128,0.6)]"
+                : "bg-error",
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
@@ -31,10 +35,12 @@ export function AppShell({ children }: AppShellProps) {
         <NavTabs />
 
         {/* Right: current user */}
-        <div className="flex items-center justify-end min-w-[120px]">
-          <span className="text-xs text-muted-foreground font-mono">
-            {currentUser ? `@${currentUser}` : ""}
-          </span>
+        <div className="flex items-center justify-end min-w-[140px]">
+          {currentUser ? (
+            <span className="text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border">
+              @{currentUser}
+            </span>
+          ) : null}
         </div>
       </header>
 

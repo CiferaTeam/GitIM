@@ -3,6 +3,7 @@ import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import type { ApiResponse } from "../../lib/types";
 import { MentionPopup } from "./mention-popup";
+import { CornerDownLeft, X } from "lucide-react";
 
 interface InputAreaProps {
   onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
@@ -22,7 +23,6 @@ export function InputArea({ onSend }: InputAreaProps) {
   const agents = useAgentStore((s) => s.agents);
   const isGuest = useChatStore((s) => s.isGuest);
 
-  // Merge human users + agent handlers for @mention
   const mentionCandidates = useMemo(() => {
     const agentIds = agents.map((a) => a.id);
     const set = new Set([...users, ...agentIds]);
@@ -33,20 +33,17 @@ export function InputArea({ onSend }: InputAreaProps) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Mention popup state
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [mentionStart, setMentionStart] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Restore draft when switching channels
   useEffect(() => {
     if (!currentChannel) return;
     setText(localStorage.getItem(draftKey(currentChannel!)) ?? "");
   }, [currentChannel]);
 
-  // Auto-resize textarea up to MAX_HEIGHT
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -84,7 +81,6 @@ export function InputArea({ onSend }: InputAreaProps) {
     const savedText = text;
     const savedReplyTo = replyTo;
 
-    // Optimistic: clear immediately
     setText("");
     setReplyTo(null);
     setMentionOpen(false);
@@ -116,8 +112,6 @@ export function InputArea({ onSend }: InputAreaProps) {
       return;
     }
 
-    // When mention popup is open, arrow/enter/tab/escape are handled by the popup's
-    // global keydown listener — don't let Enter also send
     if (mentionOpen) return;
 
     if (e.key === "Enter" && !e.shiftKey) {
@@ -131,7 +125,6 @@ export function InputArea({ onSend }: InputAreaProps) {
     if (!ta) return;
 
     const cursor = ta.selectionStart ?? text.length;
-    // Replace from mentionStart to cursor with <@handle>
     const before = text.slice(0, mentionStart);
     const after = text.slice(cursor);
     const inserted = `<@${handle}> `;
@@ -139,7 +132,6 @@ export function InputArea({ onSend }: InputAreaProps) {
     setText(newText);
     setMentionOpen(false);
 
-    // Restore focus and cursor after render
     requestAnimationFrame(() => {
       if (!ta) return;
       ta.focus();
@@ -149,27 +141,27 @@ export function InputArea({ onSend }: InputAreaProps) {
   }
 
   return (
-    <div className="border-t border-border/60 px-4 py-3 shrink-0">
+    <div className="border-t border-border bg-card/60 px-4 py-3 shrink-0">
       {/* Reply bar */}
       {replyTo && (
-        <div className="mb-2 flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="mb-2 flex items-center gap-2 rounded-lg border border-border/60 bg-surface/60 px-3 py-1.5 text-xs text-text-muted">
           <span className="flex-1 truncate">
-            <span className="font-medium">Reply to @{replyTo.author}: </span>
+            <span className="font-medium text-foreground">Reply to @{replyTo.author}: </span>
             {replyTo.body.length > 40
               ? replyTo.body.slice(0, 40) + "..."
               : replyTo.body}
           </span>
           <button
             onClick={() => setReplyTo(null)}
-            className="ml-1 shrink-0 hover:text-foreground transition-colors text-base leading-none"
+            className="ml-1 shrink-0 hover:text-foreground transition-colors p-0.5 rounded hover:bg-surface-hover"
             aria-label="Clear reply"
           >
-            x
+            <X className="size-3.5" />
           </button>
         </div>
       )}
 
-      {/* Input wrapper — position relative for popup anchoring */}
+      {/* Input wrapper */}
       <div className="relative">
         {mentionOpen && (
           <MentionPopup
@@ -188,19 +180,24 @@ export function InputArea({ onSend }: InputAreaProps) {
           onKeyDown={handleKeyDown}
           disabled={sending}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
-          className="w-full resize-none rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 disabled:opacity-50 transition-colors overflow-y-auto"
+          className="w-full resize-none rounded-xl border border-border bg-background px-4 py-2.5 text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 disabled:opacity-50 transition-all overflow-y-auto pr-10"
           style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />
 
-        {sending && (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
-            Sending...
-          </span>
-        )}
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
+          {sending ? (
+            <span className="text-xs text-text-muted">Sending...</span>
+          ) : (
+            <CornerDownLeft className="size-3.5 text-text-faint" />
+          )}
+        </div>
       </div>
 
       {error && (
-        <p className="mt-1 text-xs text-destructive">{error}</p>
+        <p className="mt-1.5 text-xs text-destructive flex items-center gap-1">
+          <span className="inline-block w-1 h-1 rounded-full bg-destructive" />
+          {error}
+        </p>
       )}
     </div>
   );

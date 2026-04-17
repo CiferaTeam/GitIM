@@ -4,7 +4,7 @@ import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Play, Pause, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-card";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
@@ -19,13 +19,25 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-1">
-      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">
+    <div className="space-y-1.5">
+      <p className="text-xs text-text-muted font-semibold uppercase tracking-wider">
         {label}
       </p>
-      <div>{children}</div>
+      <div className="text-sm">{children}</div>
     </div>
   );
+}
+
+function initials(name: string) {
+  return name.slice(0, 2).toUpperCase();
+}
+
+function avatarColor(name: string) {
+  const hues = [210, 150, 30, 280, 340, 190, 45, 260];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = hues[Math.abs(hash) % hues.length];
+  return `hsl(${hue} 70% 55%)`;
 }
 
 export function AgentDetail() {
@@ -47,7 +59,7 @@ export function AgentDetail() {
           <ArrowLeft className="size-4 mr-1" />
           Back
         </Button>
-        <p className="mt-4 text-muted-foreground">Agent not found.</p>
+        <p className="mt-4 text-text-muted">Agent not found.</p>
       </div>
     );
   }
@@ -77,7 +89,7 @@ export function AgentDetail() {
       <Button
         variant="ghost"
         size="sm"
-        className="mb-4"
+        className="mb-4 text-text-secondary hover:text-foreground"
         onClick={() => navigate("/management")}
       >
         <ArrowLeft className="size-4 mr-1" />
@@ -85,48 +97,54 @@ export function AgentDetail() {
       </Button>
 
       {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <h1 className="text-2xl font-semibold">{agent.name}</h1>
-        {statusBadge(agent.status)}
+      <div className="flex items-start gap-4 mb-8">
+        <div
+          className="w-16 h-16 rounded-2xl flex items-center justify-center text-xl font-bold text-white shadow-lg"
+          style={{ backgroundColor: avatarColor(agent.name || agent.id) }}
+        >
+          {initials(agent.name || agent.id)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-2xl font-semibold tracking-tight">{agent.name}</h1>
+            {statusBadge(agent.status)}
+          </div>
+          <p className="text-sm text-text-muted mt-1 font-mono truncate">
+            {agent.id}
+          </p>
+        </div>
       </div>
 
-      {/* Fields */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-6">
-        <Field label="ID">
-          <code className="text-sm font-mono text-muted-foreground">
-            {agent.id}
-          </code>
-        </Field>
-
+      {/* Info grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8 p-5 rounded-xl border border-border bg-card/50">
         <Field label="Repo Path">
-          <code className="text-sm font-mono text-muted-foreground">
+          <code className="text-sm font-mono text-text-secondary bg-background/60 px-2 py-1 rounded">
             {agent.repoPath}
           </code>
         </Field>
 
         <Field label="Model">
-          <code className="text-sm font-mono text-muted-foreground">
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
             {agent.model ?? "claude-sonnet-4-6"}
-          </code>
-        </Field>
-
-        <Field label="Messages Processed">
-          <span className="text-sm">{agent.messagesProcessed}</span>
-        </Field>
-
-        <Field label="Last Activity">
-          <span className="text-sm">
-            {agent.lastActivity ? relativeTime(agent.lastActivity) : "—"}
           </span>
         </Field>
 
+        <Field label="Messages Processed">
+          <span className="text-lg font-semibold">{agent.messagesProcessed}</span>
+        </Field>
+
+        <Field label="Last Activity">
+          <span className="text-text-secondary">
+            {agent.lastActivity ? relativeTime(agent.lastActivity) : "—"}
+          </span>
+        </Field>
       </div>
 
       {/* System Prompt */}
-      <div className="mb-6">
+      <div className="mb-8">
         <Field label="System Prompt">
-          <div className="mt-1 border rounded-md p-3 bg-muted/30">
-            <pre className="text-sm whitespace-pre-wrap font-mono break-words">
+          <div className="mt-2 rounded-xl border border-border bg-card/50 p-4">
+            <pre className="text-sm whitespace-pre-wrap font-mono break-words text-text-secondary leading-relaxed">
               {agent.systemPrompt || "(none)"}
             </pre>
           </div>
@@ -135,14 +153,14 @@ export function AgentDetail() {
 
       {/* Environment Variables */}
       {agent.env && Object.keys(agent.env).length > 0 && (
-        <div className="mb-6">
+        <div className="mb-8">
           <Field label="Environment Variables">
-            <div className="mt-1 border rounded-md p-3 bg-muted/30 space-y-1">
+            <div className="mt-2 rounded-xl border border-border bg-card/50 p-4 space-y-2">
               {Object.entries(agent.env).map(([key, value]) => (
-                <div key={key} className="text-sm font-mono">
-                  <span className="text-muted-foreground">{key}</span>
-                  <span className="text-muted-foreground mx-1">=</span>
-                  <span>{value}</span>
+                <div key={key} className="text-sm font-mono flex items-center gap-2">
+                  <span className="text-primary font-medium">{key}</span>
+                  <span className="text-text-muted">=</span>
+                  <span className="text-text-secondary">{value}</span>
                 </div>
               ))}
             </div>
@@ -151,25 +169,27 @@ export function AgentDetail() {
       )}
 
       {/* Activity Log */}
-      <div className="mb-6">
-        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide mb-2">
+      <div className="mb-8">
+        <p className="text-xs text-text-muted font-semibold uppercase tracking-wider mb-3">
           Activity Log
         </p>
-        <ScrollArea className="h-48 border rounded-md">
-          <div className="p-3 space-y-1">
+        <ScrollArea className="h-56 rounded-xl border border-border bg-card/50">
+          <div className="p-4 space-y-2">
             {agentEvents.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No activity yet</p>
+              <p className="text-sm text-text-muted">No activity yet</p>
             ) : (
               agentEvents.map((ev, i) => (
-                <p key={i} className="text-sm font-mono">
-                  <span className="text-muted-foreground">
+                <div key={i} className="flex items-start gap-3 text-sm">
+                  <span className="text-text-faint shrink-0 font-mono text-xs pt-0.5">
                     {ev.timestamp.slice(11, 16)}
                   </span>
-                  {" — "}
-                  <span className="text-muted-foreground">{ev.event_type}</span>
-                  {" "}
-                  {ev.detail}
-                </p>
+                  <div className="flex-1">
+                    <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-surface text-text-muted mb-0.5">
+                      {ev.event_type}
+                    </span>
+                    <p className="text-text-secondary">{ev.detail}</p>
+                  </div>
+                </div>
               ))
             )}
           </div>
@@ -177,11 +197,26 @@ export function AgentDetail() {
       </div>
 
       {/* Actions */}
-      <div className="flex gap-2">
-        <Button variant="outline" onClick={handleToggle}>
-          {isRunning ? "Stop" : "Start"}
+      <div className="flex gap-3">
+        <Button
+          variant={isRunning ? "outline" : "default"}
+          size="default"
+          onClick={handleToggle}
+          className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
+        >
+          {isRunning ? (
+            <><Pause className="size-4 mr-1.5" /> Stop</>
+          ) : (
+            <><Play className="size-4 mr-1.5" /> Start</>
+          )}
         </Button>
-        <Button variant="destructive" onClick={() => setRemoveOpen(true)}>
+        <Button
+          variant="ghost"
+          size="default"
+          onClick={() => setRemoveOpen(true)}
+          className="text-destructive hover:text-destructive hover:bg-destructive/10"
+        >
+          <Trash2 className="size-4 mr-1.5" />
           Remove
         </Button>
       </div>
