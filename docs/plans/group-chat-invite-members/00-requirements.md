@@ -1,45 +1,92 @@
 # 群聊邀请成员 — 需求共识
 
 ## 背景
-当前创建频道对话框仅有 name/display_name/intro 字段，`CreateChannelRequest` 也无成员参数，频道建好后只有一个 `join_channel`（自我加入）动作，没有"把别人拉进群"的能力。`ChannelMeta.members: Vec<String>` 已存在，createChannel 时自动填入 `[author]`。ChannelHeader 右上角 DropdownMenu 已展示 `channel.members`，但无"邀请"入口。
+WebUI 的创建频道对话框只有 name/display/intro，频道 Header DropdownMenu 只能看现有成员；看上去"没法拉人"。
+
+**但实际上 daemon + CLI 早已支持邀请语义**：
+- `handle_join_channel(author, channel, targets: Vec<String>)` 复用一个接口：`targets` 空 = author 自己加入；`targets` 非空 = author 以现有成员身份把 targets 加到 `ChannelMeta.members`（`handlers.rs:1035-1051, 1414-1421`）
+- CLI `gitim join-channel <channel> -t h1 h2` 早已存在（`main.rs:72-77, 395-397`，doc comment 明写 "Join a channel or invite users"）
+
+**断点在 HTTP + WebUI**：
+- `/im/join` 把 targets 写死 `&[]`（`gitim-runtime/src/http.rs:384`）
+- `/im/create-channel` 无 `invitees` 字段
+- `webui-v2/src/lib/client.ts` `joinChannel(channel)` 只传 channel
+- 创建对话框 / Header 没有任何邀请入口
 
 ## 功能范围（用户确认）
 
-1. **创建时可选人** — 创建频道对话框增加"邀请成员"多选输入
-2. **创建后可加人** — 已有 ChannelHeader DropdownMenu 里增加"邀请成员"入口
-3. **邀请语义** — 直接把对方加入 `ChannelMeta.members`，对方不需确认（被动入群）
-4. **Thread 不留痕** — 本期不在 `.thread` 文件写"system: X invited Y"事件
-5. **权限** — 创建者 + 已在群里的任意成员均可邀请
+1. **创建时可选人**
+2. **创建后可加人**（任意群内成员都能再拉人，不止创建者）
+3. **邀请语义** — 直接把对方加入 `ChannelMeta.members`（被动入群，无对方确认流程）
+4. **Thread 不留痕** — 本期不写 "system: X invited Y"
+5. **权限** — caller 必须是 channel 的现有 member（复用 `handle_join_channel` 既有校验）
 
-## 数据模型
-- 复用 `ChannelMeta.members: Vec<String>`（无需新增字段）
-- 邀请 = 对 members 去重追加
+## 技术方案
 
-## 后端改动
-- `CreateChannelRequest` 增加 `invitees: Vec<String>`（可选），创建时 `members = [author] ∪ invitees`（去重）
-- 新增 daemon command `InviteMembers { channel, targets: Vec<String> }`
-  - HTTP: `POST /im/invite-members`
-  - 权限校验：caller 必须是该 channel 的 member；否则 403
-  - Handler：读 meta → 校验 → 合并 targets → 写回 meta → git commit
-- 校验：targets 中每个 handle 必须是已注册用户（`users/<handle>.meta.yaml` 存在）；不存在则返回错误
-- CLI：`gitim invite <channel> <handle>...`（本期做）
+### daemon 层
+- **扩展** `handle_create_channel`：接受 `invitees: Vec<String>` 参数，创建时 `members = [author] ∪ invitees`（去重，顺序：author 优先）
+- 复用 `handle_join_channel` 的 targets 机制 —— **不新增 command**
+- 相关 Command / API types 同步扩展 `CreateChannel { ..., invitees }`
 
-## 前端改动（webui-v2）
-- **`components/chat/sidebar.tsx`**（创建对话框）：增加"邀请成员"多选字段
-- **`components/chat/header.tsx`**（ChannelHeader DropdownMenu）：增加"邀请成员"按钮 → 打开邀请对话框
-- 新增可复用 `MemberPicker` 组件（搜索 + 多选），供创建 & 邀请两处共用
-- `lib/api.ts` / client：
-  - `createChannel(..., invitees?)` 扩展参数
-  - `inviteMembers(channel, targets)` 新方法
-- Store 对应 action 更新
+### gitim-runtime HTTP
+- `JoinRequest` 新增 `#[serde(default)] targets: Vec<String>`，透传给 `client.join_channel(&req.channel, &req.targets)`
+- `CreateChannelRequest` 新增 `#[serde(default)] invitees: Vec<String>`，透传给 `client.create_channel(..., invitees)`
 
-## 设计原则
-- `MemberPicker` 数据源：已注册用户列表（从 daemon 取或复用已有 members store）
-- 已在群里的 handle 在创建对话框默认禁用/过滤；邀请对话框过滤掉已在群成员
-- 自己的 handle 不出现在可选列表
+### gitim-client Rust
+- `create_channel(name, display_name, introduction, invitees: &[String])` 签名扩展，构造 Command 时带上 invitees
+
+### gitim-cli
+- **不动**。现有 `gitim join-channel <channel> -t h1 h2` 已够用
+- `gitim create-channel` 是否需要 `-t` 选人？本期不做（用户未要求；有需要可 follow-up）
+
+### webui-v2
+- `lib/client.ts`
+  - `joinChannel(channel, targets?: string[])` 参数扩展
+  - `createChannel(name, displayName?, intro?, invitees?: string[])` 参数扩展
+- 新组件 `components/chat/member-picker.tsx`
+  - 搜索框 + checkbox/chip 多选
+  - 数据源 `useChatStore((s) => s.users)`（已有，`app.tsx:152` 启动加载）
+  - 排除自己（`me.handler`）；可选 prop `excludeHandlers: string[]` 用于隐藏已在群者
+- `components/chat/sidebar.tsx` 创建 Dialog 嵌入 `<MemberPicker>`，提交时附 `invitees`
+- `components/chat/header.tsx` DropdownMenu 新增"邀请成员"条目 → 打开 `components/chat/invite-dialog.tsx`（内嵌 `<MemberPicker>`，调用 `joinChannel(channel, targets)`）；成功后刷新 channel members
+
+### 用户校验
+- daemon 现有 handlers 各自 `state.users` 检查即可，不抽通用 helper（本期 scope 不扩）
+- 校验时机：创建 handler 校验 invitees 都已注册；join handler 校验 targets 都已注册
+
+## 五问决议
+
+| # | 问题 | 决定 |
+|---|---|---|
+| 1 | MemberPicker 数据源 | `useChatStore.users` + `/im/users`（均已有） |
+| 2 | CLI 本期做不做 | 不做，已存在 |
+| 3 | 邀请对话框容器 | 新 Dialog（DropdownMenu `w-48` 太窄） |
+| 4 | daemon 用户校验 | 现有 state.users check，不抽 helper |
+| 5 | meta.yaml 并发合并 | **本期不处理**，follow-up |
 
 ## 非目标（本期不做）
 - 邀请需对方接受的流程
 - 移除/踢出成员
-- 邀请事件的 `.thread` 留痕
-- 邀请权限分级（管理员/普通成员）
+- 邀请事件 `.thread` 留痕
+- 邀请权限分级
+- `gitim create-channel -t` CLI 参数
+- `channels/*.meta.yaml` 并发 merge driver（现 `gitim-sync/conflict.rs` 只处理 `.thread` 行号，同时邀请不同人会触发 git 冲突 marker，记 follow-up）
+
+## 测试要点
+- daemon：`handle_create_channel` with invitees → 验证 meta.members 集合正确；invitees 含未注册 handle → 报错
+- runtime HTTP：`/im/join` with targets → 底层 client 收到正确 targets；`/im/create-channel` with invitees → 透传正确
+- webui：MemberPicker 搜索过滤；创建/邀请对话框提交后 members 刷新
+
+## 关键文件映射
+
+| 职责 | 文件 |
+|---|---|
+| create channel handler | `crates/gitim-daemon/src/handlers.rs:1055` |
+| join channel handler | `crates/gitim-daemon/src/handlers.rs:1035` |
+| Command API types | `crates/gitim-daemon/src/api.rs:99-124` |
+| Rust client | `crates/gitim-client/src/client.rs:165` |
+| HTTP routes | `crates/gitim-runtime/src/http.rs:345, 371` |
+| webui client | `webui-v2/src/lib/client.ts:72` |
+| sidebar create dialog | `webui-v2/src/components/chat/sidebar.tsx:71-226` |
+| header dropdown | `webui-v2/src/components/chat/header.tsx:61-92` |
+| chat store | `webui-v2/src/hooks/use-chat-store.ts:13, 51, 65` |
