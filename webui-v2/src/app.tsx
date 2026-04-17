@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Navigate, Route, Routes } from "react-router";
+import { CardDetail } from "./components/cards/card-detail";
+import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
@@ -202,6 +204,8 @@ export default function App() {
           <Route path="/management" element={<ManagementPage />} />
           <Route path="/management/:agentId" element={<AgentDetail />} />
           <Route path="/chat" element={<ChatPage />} />
+          <Route path="/cards" element={<CardKanban />} />
+          <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
         </Route>
       </Routes>
     </SetupGate>

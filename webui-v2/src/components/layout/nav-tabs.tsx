@@ -29,6 +29,19 @@ export function NavTabs() {
       >
         Chat
       </NavLink>
+      <NavLink
+        to="/cards"
+        className={({ isActive }) =>
+          [
+            "px-4 py-1.5 text-sm font-medium rounded-md transition-colors",
+            isActive
+              ? "bg-accent text-accent-foreground"
+              : "text-muted-foreground hover:text-foreground hover:bg-accent/50",
+          ].join(" ")
+        }
+      >
+        Cards
+      </NavLink>
     </div>
   );
 }
