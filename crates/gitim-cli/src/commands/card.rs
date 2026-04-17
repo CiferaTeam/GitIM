@@ -1,10 +1,50 @@
 #![deny(warnings)]
 
-use std::process;
+use std::{env, fs, process};
+use std::path::Path;
 
-use gitim_client::GitimClient;
+use gitim_client::{find_repo_root, GitimClient};
 
 use crate::output::OutputMode;
+
+fn get_repo_root() -> std::path::PathBuf {
+    let cwd = env::current_dir().unwrap_or_else(|e| {
+        eprintln!("Error: cannot read current directory: {e}");
+        process::exit(1);
+    });
+    match find_repo_root(&cwd) {
+        Some(r) => r,
+        None => {
+            eprintln!("Error: not in a GitIM repository (no .gitim/ found)");
+            process::exit(1);
+        }
+    }
+}
+
+fn read_my_handler(repo_root: &Path) -> String {
+    let me_path = repo_root.join(".gitim/me.json");
+    let contents = match fs::read_to_string(&me_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot read {}: {e}", me_path.display());
+            process::exit(1);
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: invalid me.json: {e}");
+            process::exit(1);
+        }
+    };
+    match v.get("handler").and_then(|h| h.as_str()) {
+        Some(h) => h.to_string(),
+        None => {
+            eprintln!("Error: me.json missing \"handler\" field");
+            process::exit(1);
+        }
+    }
+}
 
 fn print_or_exit(
     resp: gitim_client::ApiResponse,
@@ -171,6 +211,80 @@ pub async fn cmd_update_card(
                 d["status"].as_str().unwrap_or(""),
                 d["assignee"].as_str().unwrap_or("-"),
             );
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_archive_card(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    card_id: &str,
+) {
+    let repo_root = get_repo_root();
+    let author = read_my_handler(&repo_root);
+    match client.archive_card(channel, card_id, &author).await {
+        Ok(resp) => print_or_exit(resp, mode, |_| {
+            println!("已归档卡片 #{}/{}", channel, card_id);
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_unarchive_card(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    card_id: &str,
+) {
+    let repo_root = get_repo_root();
+    let author = read_my_handler(&repo_root);
+    match client.unarchive_card(channel, card_id, &author).await {
+        Ok(resp) => print_or_exit(resp, mode, |_| {
+            println!("已取消归档卡片 #{}/{}", channel, card_id);
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_archived_cards(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: Option<&str>,
+) {
+    match client.list_archived_cards(channel).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            let cards = d.get("cards").and_then(|v| v.as_array());
+            match cards {
+                Some(arr) if !arr.is_empty() => {
+                    for c in arr {
+                        let ch = c["channel"].as_str().unwrap_or("?");
+                        let id = c["card_id"].as_str().unwrap_or("?");
+                        let t = c["title"].as_str().unwrap_or("");
+                        let s = c["status"].as_str().unwrap_or("");
+                        let a = c["assignee"].as_str().unwrap_or("-");
+                        let ls: Vec<&str> = c["labels"]
+                            .as_array()
+                            .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
+                            .unwrap_or_default();
+                        println!(
+                            "#{ch}/{id}  [{s}]  {t}  @{a}  {}",
+                            if ls.is_empty() { String::new() } else { format!("[{}]", ls.join(", ")) }
+                        );
+                    }
+                }
+                _ => println!("没有已归档的卡片"),
+            }
         }),
         Err(e) => {
             eprintln!("Error: {e}");
