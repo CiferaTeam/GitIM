@@ -9,6 +9,7 @@ pub mod http;
 pub mod poller;
 pub mod preflight;
 pub mod state;
+pub mod token_propagation;
 pub mod url_redact;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};

@@ -366,7 +366,7 @@ async fn git_init_local(
 /// stamp `x-access-token:{token}` and restore the `.git` suffix that
 /// `parse_github_url` stripped. Suffix is always singular because `parse_github_url`
 /// also strips any explicit `.git` the user provided.
-fn build_token_url(owner: &str, repo: &str, token: &str) -> String {
+pub(crate) fn build_token_url(owner: &str, repo: &str, token: &str) -> String {
     format!("https://x-access-token:{token}@github.com/{owner}/{repo}.git")
 }
 
@@ -1030,6 +1030,13 @@ async fn agents_add(
             {
                 let mut s = state.lock().unwrap();
                 s.agents.insert(req.handler.clone(), info);
+            }
+
+            // Defensive: provision already stamped the new clone with the
+            // current token, but resyncing here guarantees a single consistent
+            // state if config.json was edited mid-provision.
+            if let Err(e) = crate::token_propagation::propagate_token(&workspace) {
+                tracing::warn!(error = %e, "token propagation after add_agent failed");
             }
 
             // Auto-start the agent loop

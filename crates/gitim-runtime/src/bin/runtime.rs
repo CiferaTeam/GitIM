@@ -110,6 +110,15 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Recover previous workspace from ~/.gitim/runtime.json
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
+    // If config.json's token was edited while the runtime was down, clones
+    // still carry the old token. Resync on startup so fetch/push don't fail.
+    let recovered_workspace = state.lock().unwrap().workspace.clone();
+    if let Some(workspace) = recovered_workspace {
+        if let Err(e) = gitim_runtime::token_propagation::propagate_token(&workspace) {
+            tracing::warn!(error = %e, "token propagation on startup failed");
+        }
+    }
+
     // Idle watchdog: exit if no activity for 24 hours
     let idle_state = state.clone();
     tokio::spawn(async move {
