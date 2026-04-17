@@ -104,10 +104,13 @@ export function CardDetail() {
         ...(patch.assignee !== undefined && { assignee: patch.assignee }),
         updated_at: nowTimestamp(),
       };
-      upsertCard(next);
-      // Use channel/cardId from route params — `card.*` could be stale after the
-      // optimistic upsertCard above if any poll tick landed between reads.
+      // Mark in-flight BEFORE optimistic upsert so the merge guard is always
+      // tighter than any intervening poll tick, closing the theoretical race
+      // where listCards() returns mid-edit with pre-patch state.
       markCardInFlight(channel, cardId);
+      upsertCard(next);
+      // Use channel/cardId from route params — `card.*` could be stale after
+      // the optimistic upsertCard above if any poll tick landed between reads.
       const res = await client.updateCard(channel, cardId, patch);
       unmarkCardInFlight(channel, cardId);
       if (!res.ok) {

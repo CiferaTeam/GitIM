@@ -93,8 +93,11 @@ export default function App() {
       for (const change of changes) {
         // Card events: channel string is "card:<channel>/<card_id>"
         if (change.kind === "card_meta" || change.kind === "card_thread") {
-          needCardRefresh = true;
-          if (change.kind === "card_thread" && change.entries?.length) {
+          if (change.kind === "card_meta") {
+            // Only meta changes (status/labels/assignee/creation) require a
+            // list refresh; thread-only changes are applied in-place below.
+            needCardRefresh = true;
+          } else if (change.entries?.length) {
             const parsed = parseCardScope(change.channel);
             if (parsed) {
               const pathKey = `${parsed.channel}/${parsed.cardId}`;

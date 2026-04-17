@@ -92,9 +92,10 @@ export function CardKanban() {
   const handleStatusChange = useCallback(
     async (card: Card, newStatus: CardStatus) => {
       const prev = card;
-      // Optimistic update
-      upsertCard({ ...card, status: newStatus });
+      // Mark in-flight before optimistic upsert so any interleaving poll
+      // tick sees the guard before it can observe the optimistic state.
       markCardInFlight(card.channel, card.card_id);
+      upsertCard({ ...card, status: newStatus });
       const res = await client.updateCard(card.channel, card.card_id, {
         status: newStatus,
       });
