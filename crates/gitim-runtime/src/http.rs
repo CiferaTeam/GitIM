@@ -930,8 +930,17 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         }
     }
 
-    // Scan for agent directories (have .gitim/me.json, not human or repo.git)
-    let entries = match std::fs::read_dir(&workspace) {
+    recover_agents_from_workspace(state, &workspace).await;
+}
+
+/// Scan a workspace directory for agent sub-dirs and recover each into
+/// `state`. Agents with a missing or unsupported `provider` field in
+/// `me.json` are inserted in `status = "error"` and skip daemon startup +
+/// loop auto-start — so broken configs don't stall the recovery loop. Split
+/// out from `recover_from_config` so tests can exercise it without mutating
+/// the global `~/.gitim/runtime.json`.
+pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace: &Path) {
+    let entries = match std::fs::read_dir(workspace) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -961,7 +970,52 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
             .unwrap_or(&handler)
             .to_string();
 
-        // Ensure agent daemon is running
+        let model = me["model"].as_str().map(|s| s.to_string());
+        let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
+        let env: HashMap<String, String> = me.get("env")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        // Provider must be present AND one of the supported values. Anything
+        // else registers the agent in error state and skips daemon startup.
+        let provider_raw = me["provider"].as_str();
+        let provider_error = match provider_raw {
+            None => Some(format!(
+                "Missing \"provider\" in {}. Add \"provider\": \"claude\" or \"provider\": \"codex\" to the file and restart the runtime.",
+                me_path.display()
+            )),
+            Some(p) if p != "claude" && p != "codex" => Some(format!(
+                "Unsupported provider \"{}\" in {}. Expected \"claude\" or \"codex\".",
+                p,
+                me_path.display()
+            )),
+            Some(_) => None,
+        };
+
+        if let Some(msg) = provider_error {
+            tracing::warn!("agent @{handler} recovered in error state: {msg}");
+            let mut s = state.lock().unwrap();
+            s.agents.insert(handler.clone(), AgentInfo {
+                id: handler.clone(),
+                handler: handler.clone(),
+                display_name,
+                status: "error".to_string(),
+                last_activity: None,
+                messages_processed: 0,
+                repo_path: dir.display().to_string(),
+                provider: provider_raw.map(|s| s.to_string()),
+                model,
+                system_prompt: custom_system_prompt,
+                env,
+                error_message: Some(msg),
+                loop_handle: None,
+            });
+            // Intentional: skip ensure_daemon + start_agent_loop — a broken
+            // agent should not hold a daemon socket or run the AI loop.
+            continue;
+        }
+
+        // Valid provider — start daemon and auto-start loop.
         let root = dir.clone();
         match tokio::task::spawn_blocking(move || gitim_client::ensure_daemon(&root)).await {
             Ok(Ok(())) => {}
@@ -977,13 +1031,6 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
 
         {
             let mut s = state.lock().unwrap();
-            let provider = me["provider"].as_str().map(|s| s.to_string());
-            let model = me["model"].as_str().map(|s| s.to_string());
-            let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
-            let env: HashMap<String, String> = me.get("env")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-
             s.agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
                 handler: handler.clone(),
@@ -992,7 +1039,7 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 last_activity: None,
                 messages_processed: 0,
                 repo_path: dir.display().to_string(),
-                provider,
+                provider: provider_raw.map(|s| s.to_string()),
                 model,
                 system_prompt: custom_system_prompt,
                 env,
