@@ -525,8 +525,11 @@ async fn agents_add(
     // Provider whitelist runs before workspace/state checks so invalid input
     // is rejected even when the runtime isn't fully initialised — and so the
     // router-level test can exercise this branch without provisioning.
+    // `mock` is permitted because existing E2E tests (agent-interaction.spec.ts)
+    // provision an agent with provider=mock; the UI still only offers
+    // claude/codex per Q1 scope.
     match req.provider.as_str() {
-        "claude" | "codex" => {}
+        "claude" | "codex" | "mock" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,

@@ -185,7 +185,7 @@ async fn test_agents_add_unsupported_provider_returns_400() {
         .oneshot(agents_add_request(serde_json::json!({
             "handler": "bot",
             "display_name": "Bot",
-            "provider": "gemini",
+            "provider": "unknown_xyz",
         })))
         .await
         .unwrap();
@@ -199,7 +199,7 @@ async fn test_agents_add_unsupported_provider_returns_400() {
         "error should mention 'unsupported provider', got: {error}"
     );
     assert!(
-        error.contains("gemini"),
+        error.contains("unknown_xyz"),
         "error should echo the rejected provider name, got: {error}"
     );
 }
