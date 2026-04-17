@@ -731,6 +731,7 @@ dependencies = [
  "gitim-core",
  "notify",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
