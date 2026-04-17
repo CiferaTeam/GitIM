@@ -100,7 +100,13 @@ pub fn infer_identity(
 
         AuthData::GitHub { token } => {
             let auth_header = format!("Authorization: token {}", token);
-            let body = run_curl(&["-H", &auth_header, "https://api.github.com/user"])?;
+            // E2E test seam mirroring the one in gitim-runtime: points at a
+            // local stub so a compiled daemon binary can run the full onboard
+            // flow without talking to github.com. Unset in production.
+            let api_base = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+                .unwrap_or_else(|_| "https://api.github.com".to_string());
+            let url = format!("{}/user", api_base.trim_end_matches('/'));
+            let body = run_curl(&["-H", &auth_header, &url])?;
 
             let v: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| IdentityError::ParseError(e.to_string()))?;

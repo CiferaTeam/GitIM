@@ -39,6 +39,10 @@ pub struct AppState {
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
     /// Epoch seconds of last client connection. Used by idle watchdog.
     pub last_client_activity: AtomicU64,
+    /// Latched by sync_loop when 3 consecutive auth failures trip the circuit.
+    /// Readers can check this to surface "PAT expired" to the UI; the flag stays
+    /// set until daemon restart (v1).
+    pub auth_failed: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -71,6 +75,7 @@ impl AppState {
                     .unwrap()
                     .as_secs(),
             ),
+            auth_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -144,6 +149,7 @@ impl AppState {
         let sync_interval = state.config.daemon.sync_interval;
         let sync_root = state.repo_root.clone();
         let push_notify = state.push_notify.clone();
+        let auth_failed = state.auth_failed.clone();
         let push_state = state.clone();
         let renum_state = state.clone();
         let synced_state = state.clone();
@@ -154,6 +160,7 @@ impl AppState {
                 &sync_root,
                 sync_interval,
                 push_notify,
+                auth_failed,
                 move || {
                     // on_pushed: get commit_id, send PushResult::Pushed to waiters,
                     // clear pending_push and broadcast MessagesPushed events

@@ -65,6 +65,57 @@ Git Remote (source of truth)
 - 通过 push/pull 同步，不能共享工作目录
 - Runtime 初始化时设置 remote 地址，后续每注册一个 agent 就 clone 一份
 
+#### 2a. Local vs GitHub 模式盘面
+
+**Local 模式**（开发用，无 remote）：
+
+```
+(无 github，单机)
+  $workspace/repo.git (bare, 本地 source of truth)
+   ↓ clone
+  $workspace/.gitim-runtime/human/
+  $workspace/agent-a/
+  $workspace/agent-b/
+   各自 daemon，互相通过本地 bare 同步
+```
+
+**GitHub 模式**（分布式用，github 做 source of truth）：
+
+```
+github.com/org/repo  ←── source of truth
+   ↑ fetch/push (各 clone 独立直连)
+  $workspace/.gitim-runtime/human/
+  $workspace/agent-a/
+  $workspace/agent-b/
+  (无本地 bare；`repo.git` 不创建)
+```
+
+关键差异：
+- **跳过本地 bare**：github mode 不创建 `repo.git`；各 clone 直连 github
+- **Token 集中**：`$workspace/.gitim-runtime/config.json` 存 `{ provider, remote_url, token }`，chmod 0600
+- **Token 派生到 clone**：各 clone 的 `.git/config` 里 `remote.origin.url` 嵌 `https://x-access-token:TOK@github.com/...`
+- **Token 传播**：runtime 启动时 + `add_agent` 成功后自动扫所有 clone 用 config.json 的 token 覆写 URL（防漂移）
+- **Time Machine exclusion**：macOS 下 `.gitim-runtime/` 加 `com.apple.metadata:com_apple_backup_excludeItem` xattr
+- **云同步路径拒绝**：workspace 在 `~/Library/Mobile Documents/` / `~/Dropbox` / `~/Google Drive` / `~/OneDrive` 下 → init 拒绝
+
+#### 2b. 多机场景
+
+机器 A 跑着 human + agent-planner + agent-coder。GitHub 远端只存协议目录（`channels/`、`users/`、`boards/`），**不存 `agent-*/` 工作目录**。
+
+机器 B 用同一 repo onboard：
+- 要输入自己的 PAT（同账号可复用 A 的 PAT；不同账号用各自 PAT）
+- clone 只拉到协议目录；agent 本地 daemon 不会在 B 出现（agent 进程锚定机器 A）
+- B 默认是"人类观察者"：能看 channel 全部消息、能 `@agent-planner`，但要等 A 的 poll loop pull 到 mention 才响应
+- A 离线 → agent 全部"休眠"；A 恢复 → sync 消费积压
+
+**Handler 冲突防护**：B 上尝试建同名 agent（如也叫 `agent-planner`）→ `add_agent` 先 `git fetch origin` 刷新 → 检查 `users/agent-planner.meta.yaml` 存在 → 拒绝（`error_code: "handler_conflict"`），防 split-brain。
+
+#### 2c. sync_loop auth 熔断
+
+daemon 的 sync_loop 在连续 3 次 push/fetch 返回 auth 失败（401 / 403） → `AppState.auth_failed` Arc<AtomicBool> 置位 → 后续 sync cycle 跳过 git 操作，只保持 cadence。
+
+避免 PAT 过期 / revoke 后死循环烧 GitHub rate limit（5000 req/h）。v1 **无 UI 恢复**：重启 daemon 清标志，或等 v2 的"更新 token"入口。
+
 ### 3. 每个 Agent 独立 Daemon
 
 第一版中，每个 agent 目录各跑一个独立的 daemon 进程。Runtime 通过 `gitim` CLI 命令与每个 daemon 通信（跟狼人杀 demo 模式一致）。
@@ -286,3 +337,21 @@ webui/                 # React 前端（扩展管理层）
 - **Subscribe vs Poll**：现有 daemon 已支持 subscribe 模式（实时推送事件），比 poll 延迟更低。M0 先用 poll（实现简单），后续可切换到 subscribe 提升实时性。
 - **Agent 间错误循环**：两个 agent 可能形成乒乓循环（A 报错 → B 尝试修复 → 又触发 A → 无限循环）。daemon 层只过滤"该不该看到"，不过滤"该不该响应"。需要某种限流或 circuit breaker 机制，通过 system prompt 约束或 Runtime 层检测。
 - **可观测性**：多 agent 运行时的日志归集、状态监控、问题排查机制待设计。前端管理层（M2）是第一步，但不够。
+- **GitHub audit 归因**：github 模式所有 agent 共享 workspace PAT push，github commit 的 `committer` 字段都是 PAT owner。Agent 身份保留在 commit `author` 字段（即 handler），但 GitHub UI / audit log 主要看 committer。如需精细归因，可走 v2 "per-agent PAT"路径（现 v1 不做）。
+- **HTTP stack 不一致**：daemon `identity::infer_identity` 在 github 分支 shell 调 `curl` 到 `api.github.com/user` 做身份推断；runtime `github::verify_token` 用 `reqwest`。两套 HTTP stack 语义可能漂移（超时、TLS 版本、错误格式）。未来应统一到单一实现。
+- **E2E 注入的 env var seam**：`GITIM_TEST_GITHUB_API_BASE` + `GITIM_TEST_CLONE_URL_OVERRIDE` 在 runtime 和 daemon 都读。生产默认均不设。这些是 test-only 路径，严禁在部署脚本里默认导出。
+
+## Non-goals (v1)
+
+明确**不**做的场景，避免暗坑。用户若命中其中任何一个，先 rm -rf workspace 重建是唯一 supported 动作：
+
+| 不做 | 原因 | Workaround |
+|------|------|------------|
+| local → github 模式切换 | 需迁移 bare 内容到 github remote，force push 风险高 | rm -rf workspace + 重新 onboard github |
+| 换 remote URL（公司切账号）| config.json + 所有 agent `.git/config` 都要更新；边缘情况多 | rm -rf 重建 |
+| Token rotate UI | v1 无"Update token"入口 | 手工改 config.json + 重启 runtime（propagation 会扫一遍） |
+| Windows 平台支持 | chmod 0600、macOS xattr、`dirs::home_dir` 的 OneDrive 检测都依赖 unix/macOS 语义 | 用 macOS / Linux |
+| Agent 独立 GitHub 身份 | 共用 workspace PAT，配置/UI 成本翻倍 | 接受 commit `committer = PAT owner`；`author = agent handler` 做应用层归因 |
+| OAuth Device Flow | 要给 GitHub / Gitea / GitLab 各注册 OAuth App + 分发 client_id | PAT 手动粘贴，文档覆盖 |
+| 删除 workspace 清理 `~/.gitim/runtime.json` 引用 | 可降级处理：`rm -rf` 后 runtime 启动会自动回落"未设置 workspace"状态 | 不主动清理，依赖下次 init |
+| auto-recover auth 熔断 | v1 设计决策：sync_loop 熔断后停 git ops，保持 cadence。无 UI 提示 | 重启 daemon 清标志（或等 v2） |

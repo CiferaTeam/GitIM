@@ -152,11 +152,20 @@ export async function startEnv(): Promise<RuntimeEnv> {
   };
 }
 
+export interface StartServersOptions {
+  /** Extra env vars merged into the runtime child process. E2E tests use
+   * `GITIM_TEST_GITHUB_API_BASE` / `GITIM_TEST_CLONE_URL_OVERRIDE` to redirect
+   * github traffic to a local stub. */
+  runtimeEnv?: Record<string, string>;
+}
+
 /**
  * Start runtime + vite WITHOUT completing the startup flow.
  * Use this when the UI test needs to drive the setup itself.
  */
-export async function startServers(): Promise<RuntimeEnv> {
+export async function startServers(
+  opts: StartServersOptions = {},
+): Promise<RuntimeEnv> {
   const tmpBase = process.platform === "darwin" ? "/tmp" : os.tmpdir();
   const workspaceDir = fs.mkdtempSync(path.join(tmpBase, "gitim-e2e-"));
 
@@ -165,8 +174,20 @@ export async function startServers(): Promise<RuntimeEnv> {
   const debugBinDir = path.join(ROOT, "target/debug");
   const runtimeProc = spawn(runtimeBin, ["--port", String(runtimePort)], {
     stdio: "pipe",
-    env: { ...process.env, PATH: `${debugBinDir}:${process.env.PATH ?? ""}` },
+    env: {
+      ...process.env,
+      PATH: `${debugBinDir}:${process.env.PATH ?? ""}`,
+      ...(opts.runtimeEnv ?? {}),
+    },
   });
+  if (process.env.GITIM_E2E_DEBUG) {
+    runtimeProc.stdout?.on("data", (d) =>
+      process.stdout.write(`[runtime] ${d}`),
+    );
+    runtimeProc.stderr?.on("data", (d) =>
+      process.stderr.write(`[runtime] ${d}`),
+    );
+  }
 
   const vitePort = await freePort();
   const viteProc = spawn(

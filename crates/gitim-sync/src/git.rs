@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::url_redact::redacted_url;
+
 #[derive(Error, Debug)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -13,6 +15,8 @@ pub enum GitError {
     PushConflict,
     #[error("rate limited by remote")]
     RateLimited,
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
 }
 
 pub struct GitStorage {
@@ -34,9 +38,7 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            return Err(classify_remote_error(&String::from_utf8_lossy(&output.stderr)));
         }
         Ok(())
     }
@@ -88,14 +90,7 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if is_rate_limited(&stderr) {
-                return Err(GitError::RateLimited);
-            }
-            if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
-                return Err(GitError::PushConflict);
-            }
-            return Err(GitError::CommandFailed(stderr));
+            return Err(classify_remote_error(&String::from_utf8_lossy(&output.stderr)));
         }
         Ok(())
     }
@@ -115,11 +110,7 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if is_rate_limited(&stderr) {
-                return Err(GitError::RateLimited);
-            }
-            return Err(GitError::CommandFailed(stderr));
+            return Err(classify_remote_error(&String::from_utf8_lossy(&output.stderr)));
         }
         Ok(())
     }
@@ -299,6 +290,40 @@ fn is_rate_limited(stderr: &str) -> bool {
         || lower.contains("secondaryratelimit")
 }
 
+fn is_auth_failed(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("authentication failed")
+        || lower.contains("invalid username or password")
+        || lower.contains("invalid username or token")
+        || lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("error: 401")
+        || lower.contains("error: 403")
+        || lower.contains("permission denied (publickey)")
+        || lower.contains("bad credentials")
+}
+
+/// Classify git push/fetch stderr into a structured error. Rate-limit takes
+/// precedence over auth (HTTP 429 from an authed request shouldn't look like
+/// credential decay), and divergence is push-only but harmless to detect for fetch.
+/// Credentials are redacted before the stderr enters the error value — anything
+/// that exits this function is safe to log.
+pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
+    let stderr = redacted_url(raw_stderr);
+    if is_rate_limited(&stderr) {
+        return GitError::RateLimited;
+    }
+    if is_auth_failed(&stderr) {
+        return GitError::AuthFailed(stderr);
+    }
+    if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+        return GitError::PushConflict;
+    }
+    GitError::CommandFailed(stderr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +343,67 @@ mod tests {
         assert!(!is_rate_limited("error: failed to push some refs"));
         assert!(!is_rate_limited("[rejected] main -> main (non-fast-forward)"));
         assert!(!is_rate_limited(""));
+    }
+
+    #[test]
+    fn auth_failed_detection_matches_known_patterns() {
+        assert!(is_auth_failed("fatal: Authentication failed for 'https://github.com/x/y.git/'"));
+        assert!(is_auth_failed("remote: Invalid username or token. Password authentication is not supported"));
+        assert!(is_auth_failed("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
+        assert!(is_auth_failed("fatal: could not read Password for 'https://x@gitlab.com'"));
+        assert!(is_auth_failed("error: The requested URL returned error: 401"));
+        assert!(is_auth_failed("error: The requested URL returned error: 403"));
+        assert!(is_auth_failed("fatal: unable to access '...': HTTP 401"));
+        assert!(is_auth_failed("git@github.com: Permission denied (publickey)."));
+        assert!(is_auth_failed("remote: Bad credentials"));
+        assert!(is_auth_failed("remote: invalid username or password"));
+    }
+
+    #[test]
+    fn auth_failed_detection_no_false_positives() {
+        assert!(!is_auth_failed(""));
+        assert!(!is_auth_failed("fatal: rate limit exceeded"));
+        assert!(!is_auth_failed("[rejected] main -> main (non-fast-forward)"));
+        assert!(!is_auth_failed("fatal: '/tmp/missing.git' does not appear to be a git repository"));
+    }
+
+    #[test]
+    fn classify_remote_error_prioritizes_rate_limit_over_auth() {
+        let stderr = "HTTP 429 rate limit exceeded, auth token invalid";
+        assert!(matches!(classify_remote_error(stderr), GitError::RateLimited));
+    }
+
+    #[test]
+    fn classify_remote_error_auth_case() {
+        let stderr = "fatal: Authentication failed for 'https://github.com/x/y.git/'";
+        match classify_remote_error(stderr) {
+            GitError::AuthFailed(msg) => assert!(msg.contains("Authentication failed")),
+            other => panic!("expected AuthFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_remote_error_redacts_credentials_in_stderr() {
+        let stderr = "fatal: Authentication failed for 'https://x:secrettoken@github.com/x/y.git/'";
+        match classify_remote_error(stderr) {
+            GitError::AuthFailed(msg) => {
+                assert!(!msg.contains("secrettoken"), "token should be redacted: {}", msg);
+                assert!(msg.contains("<REDACTED>"));
+            }
+            other => panic!("expected AuthFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_remote_error_push_conflict_case() {
+        let stderr = "! [rejected]        main -> main (non-fast-forward)";
+        assert!(matches!(classify_remote_error(stderr), GitError::PushConflict));
+    }
+
+    #[test]
+    fn classify_remote_error_falls_through_to_command_failed() {
+        let stderr = "fatal: '/tmp/nope' does not appear to be a git repository";
+        assert!(matches!(classify_remote_error(stderr), GitError::CommandFailed(_)));
     }
 
     #[test]

@@ -1,18 +1,73 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use rand::Rng;
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::conflict::{self, build_rebase_commit_msg};
-use crate::git::GitStorage;
+use crate::git::{GitError, GitStorage};
 
 /// Outcome of a single sync cycle, used to determine backoff.
 pub enum SyncOutcome {
     Normal,
     RateLimited,
+    /// Auth circuit is tripped; loop should idle without making git calls.
+    AuthCircuitOpen,
+}
+
+/// Consecutive auth failures at which the circuit trips.
+/// Credentials can fail for 1-2 cycles during rotation; 3 strikes is where we're
+/// confident the PAT is revoked rather than transiently noisy.
+pub const AUTH_FAILURE_TRIP_THRESHOLD: u32 = 3;
+
+/// Tracks consecutive auth failures and latches the `tripped` flag shared with daemon state.
+/// A successful remote op resets the counter; once tripped, the flag stays set
+/// until the daemon clears it (v1: restart = fresh state).
+pub struct AuthCircuit {
+    pub tripped: Arc<AtomicBool>,
+    consecutive_failures: u32,
+}
+
+impl AuthCircuit {
+    pub fn new(tripped: Arc<AtomicBool>) -> Self {
+        Self { tripped, consecutive_failures: 0 }
+    }
+
+    pub fn is_tripped(&self) -> bool {
+        self.tripped.load(Ordering::SeqCst)
+    }
+
+    /// Feed the circuit a push/fetch result. Returns true iff this call transitioned
+    /// the circuit from closed to tripped (caller logs once on that edge).
+    pub fn record(&mut self, result: &Result<(), GitError>) -> bool {
+        match result {
+            Ok(()) => {
+                self.consecutive_failures = 0;
+                false
+            }
+            Err(GitError::AuthFailed(_)) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                if self.consecutive_failures >= AUTH_FAILURE_TRIP_THRESHOLD
+                    && !self.tripped.swap(true, Ordering::SeqCst)
+                {
+                    return true;
+                }
+                false
+            }
+            // Non-auth errors neither reset nor advance the counter. A network
+            // blip between two auth failures shouldn't mask credential decay,
+            // and a non-auth failure shouldn't count toward the auth budget.
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
 }
 
 /// Start the sync loop with push-first strategy.
@@ -24,10 +79,12 @@ pub enum SyncOutcome {
 ///   The index layer uses this to decide whether incremental updates are needed.
 /// - `on_cycle_done`: called at the very end of every cycle, regardless of success or failure.
 ///   Used to notify remaining waiters that the push did not succeed.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_sync_loop<F1, F2, F3, F4>(
     repo_root: &Path,
     interval_secs: u32,
     push_notify: Arc<Notify>,
+    auth_failed: Arc<AtomicBool>,
     on_pushed: F1,
     on_renumbered: F2,
     on_synced: F3,
@@ -53,6 +110,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let base_ms = interval_secs as u64 * 1000;
     let jitter_range = base_ms / 3;
     let mut consecutive_rate_limits: u32 = 0;
+    let mut circuit = AuthCircuit::new(auth_failed);
 
     info!("sync loop started, interval={}s (jitter +0..{}ms)", interval_secs, jitter_range);
 
@@ -60,9 +118,9 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let mut next_delay = Duration::from_millis(base_ms);
 
     loop {
-        if consecutive_rate_limits > 0 {
-            // During rate-limit backoff, ignore push_notify to avoid
-            // hammering the remote when local writers are active.
+        if consecutive_rate_limits > 0 || circuit.is_tripped() {
+            // During rate-limit backoff or tripped auth circuit, ignore
+            // push_notify: hammering the remote just burns rate-limit budget.
             tokio::time::sleep(next_delay).await;
         } else {
             tokio::select! {
@@ -71,7 +129,14 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
             }
         }
 
-        let outcome = run_sync_cycle(&repo, &on_pushed, &on_renumbered, &on_synced, &on_cycle_done);
+        let outcome = run_sync_cycle(
+            &repo,
+            &mut circuit,
+            &on_pushed,
+            &on_renumbered,
+            &on_synced,
+            &on_cycle_done,
+        );
 
         next_delay = match outcome {
             SyncOutcome::Normal => {
@@ -96,18 +161,37 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
                 );
                 Duration::from_millis(capped_ms + backoff_jitter)
             }
+            SyncOutcome::AuthCircuitOpen => {
+                // Idle on the regular cadence. Flag stays latched until the
+                // daemon clears it (v1: restart). No git calls get made.
+                Duration::from_millis(base_ms)
+            }
         };
     }
 }
 
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
-fn run_sync_cycle<F1, F2, F3, F4>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2, on_synced: &F3, on_cycle_done: &F4) -> SyncOutcome
+/// Made `pub` so integration tests can drive cycles deterministically without
+/// spawning the async loop.
+pub fn run_sync_cycle<F1, F2, F3, F4>(
+    repo: &GitStorage,
+    circuit: &mut AuthCircuit,
+    on_pushed: &F1,
+    on_renumbered: &F2,
+    on_synced: &F3,
+    on_cycle_done: &F4,
+) -> SyncOutcome
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
     F3: Fn(String),
     F4: Fn(),
 {
+    if circuit.is_tripped() {
+        on_cycle_done();
+        return SyncOutcome::AuthCircuitOpen;
+    }
+
     let has_unpushed = match repo.has_unpushed_commits() {
         Ok(v) => v,
         Err(e) => {
@@ -118,9 +202,9 @@ where
     };
 
     let outcome = if has_unpushed {
-        sync_with_push(repo, on_pushed, on_renumbered)
+        sync_with_push(repo, circuit, on_pushed, on_renumbered)
     } else {
-        sync_pull_only(repo)
+        sync_pull_only(repo, circuit)
     };
 
     match repo.rev_parse("HEAD") {
@@ -136,24 +220,51 @@ where
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
 
-fn sync_with_push<F1, F2>(repo: &GitStorage, on_pushed: &F1, on_renumbered: &F2) -> SyncOutcome
+/// Every remote operation in the sync loop funnels its result through this helper
+/// so the auth circuit observes every push/fetch. Callers check the returned flag
+/// once and trip-log if it transitioned.
+fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
+    if circuit.record(result) {
+        error!(
+            "sync: auth circuit tripped after {} consecutive auth failures — \
+             sync loop will idle until daemon restart",
+            AUTH_FAILURE_TRIP_THRESHOLD
+        );
+    }
+}
+
+fn sync_with_push<F1, F2>(
+    repo: &GitStorage,
+    circuit: &mut AuthCircuit,
+    on_pushed: &F1,
+    on_renumbered: &F2,
+) -> SyncOutcome
 where
     F1: Fn(),
     F2: Fn(PathBuf, u64, u64),
 {
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
-        match repo.push() {
+        let push_result = repo.push();
+        observe_auth(circuit, &push_result);
+        match push_result {
             Ok(()) => {
                 on_pushed();
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
-            Err(crate::git::GitError::RateLimited) => {
+            Err(GitError::RateLimited) => {
                 warn!("sync: push rate limited (attempt {})", attempt);
                 return SyncOutcome::RateLimited;
             }
-            Err(crate::git::GitError::PushConflict) => {
+            Err(GitError::AuthFailed(_)) => {
+                warn!("sync: push auth failed (attempt {})", attempt);
+                if circuit.is_tripped() {
+                    return SyncOutcome::AuthCircuitOpen;
+                }
+                return SyncOutcome::Normal;
+            }
+            Err(GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
             Err(e) => {
@@ -163,10 +274,19 @@ where
         }
 
         // Fetch remote changes
-        match repo.fetch() {
-            Err(crate::git::GitError::RateLimited) => {
+        let fetch_result = repo.fetch();
+        observe_auth(circuit, &fetch_result);
+        match fetch_result {
+            Err(GitError::RateLimited) => {
                 warn!("sync: fetch rate limited (attempt {})", attempt);
                 return SyncOutcome::RateLimited;
+            }
+            Err(GitError::AuthFailed(_)) => {
+                warn!("sync: fetch auth failed (attempt {})", attempt);
+                if circuit.is_tripped() {
+                    return SyncOutcome::AuthCircuitOpen;
+                }
+                return SyncOutcome::Normal;
             }
             Err(e) => {
                 warn!("sync: fetch failed: {}", e);
@@ -197,15 +317,24 @@ where
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
-                match repo.push() {
+                let push_after_rebase = repo.push();
+                observe_auth(circuit, &push_after_rebase);
+                match push_after_rebase {
                     Ok(()) => {
                         on_pushed();
                         info!("sync: push complete after rebase (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
-                    Err(crate::git::GitError::RateLimited) => {
+                    Err(GitError::RateLimited) => {
                         warn!("sync: push rate limited after rebase (attempt {})", attempt);
                         return SyncOutcome::RateLimited;
+                    }
+                    Err(GitError::AuthFailed(_)) => {
+                        warn!("sync: push auth failed after rebase (attempt {})", attempt);
+                        if circuit.is_tripped() {
+                            return SyncOutcome::AuthCircuitOpen;
+                        }
+                        return SyncOutcome::Normal;
                     }
                     Err(_) => {
                         warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
@@ -321,15 +450,24 @@ where
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
 
-                match repo.push() {
+                let push_after_resolve = repo.push();
+                observe_auth(circuit, &push_after_resolve);
+                match push_after_resolve {
                     Ok(()) => {
                         on_pushed();
                         info!("sync: push complete after conflict resolution (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
-                    Err(crate::git::GitError::RateLimited) => {
+                    Err(GitError::RateLimited) => {
                         warn!("sync: push rate limited after conflict resolution (attempt {})", attempt);
                         return SyncOutcome::RateLimited;
+                    }
+                    Err(GitError::AuthFailed(_)) => {
+                        warn!("sync: push auth failed after conflict resolution (attempt {})", attempt);
+                        if circuit.is_tripped() {
+                            return SyncOutcome::AuthCircuitOpen;
+                        }
+                        return SyncOutcome::Normal;
                     }
                     Err(_) => {
                         warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
@@ -348,11 +486,20 @@ where
 
 /// Pull-only path: fetch remote changes, then fast-forward via rebase.
 /// On failure, abort the rebase but preserve local state — next cycle retries.
-fn sync_pull_only(repo: &GitStorage) -> SyncOutcome {
-    match repo.fetch() {
-        Err(crate::git::GitError::RateLimited) => {
+fn sync_pull_only(repo: &GitStorage, circuit: &mut AuthCircuit) -> SyncOutcome {
+    let fetch_result = repo.fetch();
+    observe_auth(circuit, &fetch_result);
+    match fetch_result {
+        Err(GitError::RateLimited) => {
             warn!("sync: fetch rate limited (pull-only)");
             return SyncOutcome::RateLimited;
+        }
+        Err(GitError::AuthFailed(_)) => {
+            warn!("sync: fetch auth failed (pull-only)");
+            if circuit.is_tripped() {
+                return SyncOutcome::AuthCircuitOpen;
+            }
+            return SyncOutcome::Normal;
         }
         Err(e) => {
             warn!("sync: fetch failed: {}", e);
