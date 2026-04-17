@@ -527,6 +527,78 @@ pub async fn handle_list_cards(
     Response::success(serde_json::json!({ "cards": cards }))
 }
 
+pub async fn handle_list_archived_cards(
+    state: SharedState,
+    channel: Option<String>,
+) -> Response {
+    // Determine which channel directories to scan under archive/channels/
+    let arch_channels_dir = state.repo_root.join("archive").join("channels");
+
+    let channels_to_scan: Vec<String> = match channel {
+        Some(ref c) => {
+            let name = match ChannelName::new(c) {
+                Ok(n) => n,
+                Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+            };
+            vec![name.to_string()]
+        }
+        None => {
+            let mut names = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&arch_channels_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        names.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                }
+            }
+            names
+        }
+    };
+
+    let mut cards: Vec<serde_json::Value> = Vec::new();
+    for ch in &channels_to_scan {
+        let cards_dir = arch_channels_dir.join(ch).join("cards");
+        if !cards_dir.exists() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&cards_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let meta_path = entry.path().join("card.meta.yaml");
+            let Ok(content) = std::fs::read_to_string(&meta_path) else {
+                continue;
+            };
+            let Ok(meta) = serde_yaml::from_str::<CardMeta>(&content) else {
+                continue;
+            };
+            let card_id = entry.file_name().to_string_lossy().to_string();
+            cards.push(serde_json::json!({
+                "card_id": card_id,
+                "channel": ch,
+                "title": meta.title,
+                "status": meta.status.as_str(),
+                "labels": meta.labels,
+                "assignee": meta.assignee,
+                "created_by": meta.created_by,
+                "created_at": meta.created_at,
+                "updated_at": meta.updated_at,
+            }));
+        }
+    }
+
+    cards.sort_by(|a, b| {
+        let ca = a["channel"].as_str().unwrap_or("");
+        let cb = b["channel"].as_str().unwrap_or("");
+        ca.cmp(cb)
+            .then(a["card_id"].as_str().unwrap_or("").cmp(b["card_id"].as_str().unwrap_or("")))
+    });
+    Response::success(serde_json::json!({ "cards": cards }))
+}
+
 pub async fn handle_read_card(
     state: SharedState,
     channel: String,
@@ -1651,5 +1723,111 @@ mod tests {
             "error should mention 'not found': {}",
             err
         );
+    }
+
+    // ─── handle_list_archived_cards tests ────────────────────────────────────
+
+    /// Write a CardMeta yaml directly into the archive location for a given channel and card_id.
+    fn write_archived_card(state: &SharedState, channel: &str, card_id: &str) {
+        let dir = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(channel)
+            .join("cards")
+            .join(card_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!(
+            "title: Archived Card\nchannel: {}\nstatus: todo\nlabels: []\nassignee: ~\ncreated_by: alice\ncreated_at: 20260101T000000Z\nupdated_at: 20260101T000000Z\n",
+            channel
+        );
+        std::fs::write(dir.join("card.meta.yaml"), content).unwrap();
+        std::fs::write(dir.join("discussion.thread"), "").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_empty() {
+        let (_tmp, state) = setup_test_repo().await;
+        // No archive directory at all
+        let resp = handle_list_archived_cards(state.clone(), None).await;
+        assert!(resp.ok, "should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let cards = data["cards"].as_array().unwrap();
+        assert!(cards.is_empty(), "no archived cards should return empty list");
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_returns_all_when_no_channel_filter() {
+        let (_tmp, state) = setup_test_repo().await;
+        // channel "a": 2 cards, channel "b": 1 card
+        write_archived_card(&state, "a", "20260101-000001-aaa");
+        write_archived_card(&state, "a", "20260101-000002-bbb");
+        write_archived_card(&state, "b", "20260101-000003-ccc");
+
+        let resp = handle_list_archived_cards(state.clone(), None).await;
+        assert!(resp.ok, "should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let cards = data["cards"].as_array().unwrap();
+        assert_eq!(cards.len(), 3, "should return all 3 archived cards");
+
+        // Verify stable sort by (channel, card_id)
+        assert_eq!(cards[0]["channel"].as_str().unwrap(), "a");
+        assert_eq!(cards[0]["card_id"].as_str().unwrap(), "20260101-000001-aaa");
+        assert_eq!(cards[1]["channel"].as_str().unwrap(), "a");
+        assert_eq!(cards[1]["card_id"].as_str().unwrap(), "20260101-000002-bbb");
+        assert_eq!(cards[2]["channel"].as_str().unwrap(), "b");
+        assert_eq!(cards[2]["card_id"].as_str().unwrap(), "20260101-000003-ccc");
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_filters_by_channel() {
+        let (_tmp, state) = setup_test_repo().await;
+        write_archived_card(&state, "a", "20260101-000001-aaa");
+        write_archived_card(&state, "a", "20260101-000002-bbb");
+        write_archived_card(&state, "b", "20260101-000003-ccc");
+
+        let resp = handle_list_archived_cards(state.clone(), Some("a".to_string())).await;
+        assert!(resp.ok, "should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let cards = data["cards"].as_array().unwrap();
+        assert_eq!(cards.len(), 2, "should return only channel 'a' cards");
+        assert!(
+            cards.iter().all(|c| c["channel"].as_str().unwrap() == "a"),
+            "all returned cards should be from channel 'a'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_unknown_channel_returns_empty() {
+        let (_tmp, state) = setup_test_repo().await;
+        write_archived_card(&state, "a", "20260101-000001-aaa");
+
+        // Channel "nonexistent" has no archived cards — should return empty, not error
+        let resp = handle_list_archived_cards(state.clone(), Some("nonexistent".to_string())).await;
+        assert!(resp.ok, "should succeed even for unknown channel: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let cards = data["cards"].as_array().unwrap();
+        assert!(cards.is_empty(), "unknown channel should return empty list");
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_cards_ignores_active_cards() {
+        let (_tmp, state) = setup_test_repo().await;
+        // One archived card and one active card in the same channel
+        write_archived_card(&state, "dev", "20260101-000001-arch");
+
+        // Active card in channels/dev/cards/
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards/20260101-000002-active");
+        std::fs::create_dir_all(&active_dir).unwrap();
+        write_card_meta(&active_dir.join("card.meta.yaml"), "dev");
+
+        let resp = handle_list_archived_cards(state.clone(), None).await;
+        assert!(resp.ok, "should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let cards = data["cards"].as_array().unwrap();
+        assert_eq!(cards.len(), 1, "should only return the archived card");
+        assert_eq!(cards[0]["card_id"].as_str().unwrap(), "20260101-000001-arch");
     }
 }
