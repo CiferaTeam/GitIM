@@ -11,6 +11,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
 import { toHandler, validateHandler } from "@/lib/client";
+import {
+  PROVIDER_IDS,
+  PROVIDERS,
+  type ProviderId,
+} from "@/lib/providers";
 import type { Agent } from "@/lib/types";
 import { Plus } from "lucide-react";
 import { useState } from "react";
@@ -20,6 +25,7 @@ export function AddAgentDialog() {
   const addAgent = useAgentStore((s) => s.addAgent);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
@@ -27,10 +33,32 @@ export function AddAgentDialog() {
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
+  const availableModels = provider ? PROVIDERS[provider].models : [];
+
+  function resetForm() {
+    setName("");
+    setProvider("");
+    setModel("");
+    setSystemPrompt("");
+    setEnvVars([]);
+    setSubmitting(false);
+  }
+
+  function handleOpenChange(next: boolean) {
+    setOpen(next);
+    if (!next) resetForm();
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || validationError || submitting) return;
+    if (
+      !name.trim() ||
+      validationError ||
+      submitting ||
+      !provider ||
+      !model
+    )
+      return;
 
     const envMap: Record<string, string> = {};
     for (const { key, value } of envVars) {
@@ -41,16 +69,14 @@ export function AddAgentDialog() {
     try {
       const res = await client.addAgent(
         name.trim(),
+        provider,
         systemPrompt.trim(),
         model,
         envMap,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
-        setName("");
-        setModel("");
-        setSystemPrompt("");
-        setEnvVars([]);
+        resetForm();
         setOpen(false);
       } else {
         toast.error(res.error ?? "Failed to add agent");
@@ -67,13 +93,35 @@ export function AddAgentDialog() {
         Add Agent
       </Button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Agent</DialogTitle>
           </DialogHeader>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="agent-provider">
+                Provider
+              </label>
+              <select
+                id="agent-provider"
+                value={provider}
+                onChange={(e) => {
+                  setProvider(e.target.value as ProviderId | "");
+                  setModel("");
+                }}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="">— Select provider —</option>
+                {PROVIDER_IDS.map((id) => (
+                  <option key={id} value={id}>
+                    {PROVIDERS[id].label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-name">
                 Name
@@ -103,12 +151,15 @@ export function AddAgentDialog() {
                 id="agent-model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                disabled={!provider}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <option value="">-</option>
-                <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
-                <option value="claude-opus-4-6">Claude Opus 4.6</option>
-                <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+                <option value="">— Select model —</option>
+                {availableModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -182,11 +233,20 @@ export function AddAgentDialog() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setOpen(false)}
+                onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={!name.trim() || !!validationError || submitting}>
+              <Button
+                type="submit"
+                disabled={
+                  !name.trim() ||
+                  !!validationError ||
+                  submitting ||
+                  !provider ||
+                  !model
+                }
+              >
                 Add
               </Button>
             </DialogFooter>
