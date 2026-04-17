@@ -211,6 +211,35 @@ fn map_spawn_error(err: &std::io::Error) -> ErrorKind {
     }
 }
 
+/// Extract the `result` text from `claude --print --output-format json` stdout.
+///
+/// Tolerates both shapes the Claude CLI has been observed to emit:
+/// - a JSON array of event objects (older CLI versions), or
+/// - a single JSON object representing the final result directly.
+///
+/// Returns the `result` field as a `String`, or a human-readable error suitable
+/// for surfacing via [`PreflightResult::failure`].
+fn parse_claude_result(stdout: &str) -> Result<String, String> {
+    let root: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| format!("failed to parse claude JSON output: {e}"))?;
+    let items: Vec<serde_json::Value> = match root {
+        serde_json::Value::Array(a) => a,
+        // Single-object fallback: wrap so the scan below treats it uniformly.
+        other => vec![other],
+    };
+
+    items
+        .iter()
+        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("result"))
+        .and_then(|item| item.get("result"))
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            "claude JSON output did not contain a result entry with a `result` field"
+                .to_string()
+        })
+}
+
 /// Run a real-hello ping against the Claude CLI at `bin`.
 ///
 /// Returns a `PreflightResult` that captures the outcome with a stable error
@@ -319,37 +348,14 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
         );
     }
 
-    // `claude --print --output-format json` returns a JSON array. Scan for
-    // the `type == "result"` entry and read its `result` field.
-    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(trimmed_stdout);
-    let items = match parsed {
-        Ok(v) => v,
-        Err(e) => {
-            return PreflightResult::failure(
-                "claude",
-                ErrorKind::Other,
-                format!("failed to parse claude JSON output: {e}"),
-                duration_ms,
-            );
-        }
-    };
-
-    let result_text = items
-        .iter()
-        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("result"))
-        .and_then(|item| item.get("result"))
-        .and_then(|r| r.as_str())
-        .map(|s| s.to_string());
-
-    let text = match result_text {
-        Some(t) => t,
-        None => {
-            return PreflightResult::failure(
-                "claude",
-                ErrorKind::Other,
-                "claude JSON output did not contain a result entry with a `result` field",
-                duration_ms,
-            );
+    // `claude --print --output-format json` may emit either a JSON array of
+    // events or a single JSON object (shape varies across CLI versions). Both
+    // cases resolve to the same thing: find the `type == "result"` entry and
+    // read its `result` field.
+    let text = match parse_claude_result(trimmed_stdout) {
+        Ok(t) => t,
+        Err(msg) => {
+            return PreflightResult::failure("claude", ErrorKind::Other, msg, duration_ms);
         }
     };
 
@@ -663,5 +669,43 @@ mod tests {
 
         let err = std::io::Error::from(std::io::ErrorKind::Other);
         assert_eq!(map_spawn_error(&err), ErrorKind::Other);
+    }
+
+    #[test]
+    fn parse_claude_result_array_shape() {
+        // Regression: older CLI versions emit an array of event objects.
+        let stdout = r#"[
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": "..."},
+            {"type": "result", "result": "GITIM_OK", "is_error": false}
+        ]"#;
+        let text = parse_claude_result(stdout).expect("array shape should parse");
+        assert_eq!(text, "GITIM_OK");
+    }
+
+    #[test]
+    fn parse_claude_result_single_object_shape() {
+        // P0 fix: newer CLI versions emit a single object directly rather
+        // than wrapping it in an array. Both shapes must resolve identically.
+        let stdout = r#"{"type": "result", "result": "GITIM_OK", "is_error": false}"#;
+        let text = parse_claude_result(stdout).expect("single-object shape should parse");
+        assert_eq!(text, "GITIM_OK");
+    }
+
+    #[test]
+    fn parse_claude_result_missing_result_entry() {
+        // Neither an array with no result entry nor an unrelated single
+        // object should spuriously succeed.
+        let arr = r#"[{"type": "system"}]"#;
+        assert!(parse_claude_result(arr).is_err());
+
+        let obj = r#"{"type": "assistant", "message": "hi"}"#;
+        assert!(parse_claude_result(obj).is_err());
+    }
+
+    #[test]
+    fn parse_claude_result_invalid_json() {
+        let err = parse_claude_result("not json").unwrap_err();
+        assert!(err.contains("failed to parse"));
     }
 }
