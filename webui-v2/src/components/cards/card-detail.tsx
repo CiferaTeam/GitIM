@@ -56,6 +56,9 @@ export function CardDetail() {
 
   useEffect(() => {
     let aborted = false;
+    // Intentional: set loading state synchronously when (channel, cardId) change
+    // so the fetch-then-update cycle has a correct UI story.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadStatus("loading");
     setLoadError(null);
     (async () => {

@@ -59,7 +59,9 @@ export function CardCreateDialog({
 
   useEffect(() => {
     if (open) {
-      // reset form when re-opening
+      // Reset form each time dialog (re)opens so stale aborted-create state
+      // doesn't leak into the next session.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTitle("");
       setChannel(presetChannel ?? "");
       setAssignee("");

@@ -68,9 +68,11 @@ export function ChatLayout() {
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
   const [userCardPosition, setUserCardPosition] = useState<{ x: number; y: number } | null>(null);
 
-  // Card drawer state — auto-close when switching channels
+  // Card drawer state — auto-close when switching channels.
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
   useEffect(() => {
+    // Intentional: UX contract is "switching context closes transient overlays".
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCardDrawerOpen(false);
   }, [currentChannel]);
 

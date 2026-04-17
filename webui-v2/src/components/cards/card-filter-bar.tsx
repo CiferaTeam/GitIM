@@ -18,6 +18,7 @@ export interface CardFilterState {
   mineOnly: boolean;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- same-file constant used by CardKanban; matches project pattern (badge/button/tabs)
 export const EMPTY_CARD_FILTER: CardFilterState = {
   channels: [],
   labels: [],

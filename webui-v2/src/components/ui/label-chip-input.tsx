@@ -3,6 +3,8 @@ import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "./badge";
 
+/* eslint-disable react-refresh/only-export-components -- co-located constants + validator match project pattern (ui/badge.tsx, ui/button.tsx, ui/tabs.tsx) */
+
 export const LABEL_CHARSET = /^[a-z0-9_-]+$/;
 export const MAX_LABEL_LENGTH = 32;
 export const DEFAULT_MAX_CHIPS = 10;

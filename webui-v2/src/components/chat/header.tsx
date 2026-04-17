@@ -27,8 +27,21 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
   const currentUser = useChatStore((s) => s.currentUser);
   const allUsers = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
+  const cards = useCardStore((s) => s.cards);
 
   const [inviteOpen, setInviteOpen] = useState(false);
+
+  const channel = channels.find((c) => c.name === currentChannel);
+  const isDm = channel?.kind === "dm";
+
+  // Count cards in the current channel (channel scope only — DMs don't have cards)
+  const cardCount = useMemo(
+    () =>
+      !currentChannel || isDm
+        ? 0
+        : cards.filter((c) => c.channel === currentChannel).length,
+    [cards, currentChannel, isDm],
+  );
 
   async function refreshChannels() {
     const chRes = await client.channels();
@@ -46,16 +59,6 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
       </div>
     );
   }
-
-  const channel = channels.find((c) => c.name === currentChannel);
-  const isDm = channel?.kind === "dm";
-
-  // Count cards in the current channel (channel scope only — DMs don't have cards)
-  const cards = useCardStore((s) => s.cards);
-  const cardCount = useMemo(
-    () => (isDm ? 0 : cards.filter((c) => c.channel === currentChannel).length),
-    [cards, currentChannel, isDm],
-  );
 
   // Channel display: "#general" or "@alice"
   let displayName: string;
