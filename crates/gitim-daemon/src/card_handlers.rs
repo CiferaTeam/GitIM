@@ -5,7 +5,7 @@ use gitim_core::types::{
     validate_labels, CardMeta, CardStatus, ChannelName, Handler,
 };
 use gitim_sync::git::GitError;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const MAX_PUSH_RETRIES: u32 = 3;
 
@@ -319,7 +319,11 @@ pub async fn handle_archive_card(
         .git_storage
         .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
     {
-        return Response::error(format!("archive_card commit failed: {}", e));
+        // Rollback the git mv to leave the working tree clean.
+        if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
+            error!("archive_card: rollback mv also failed: {}", rb_err);
+        }
+        return Response::error(format!("archive_card commit failed: {}; rolled back git mv", e));
     }
 
     // 10. Push with retry
@@ -424,7 +428,11 @@ pub async fn handle_unarchive_card(
         .git_storage
         .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
     {
-        return Response::error(format!("unarchive_card commit failed: {}", e));
+        // Rollback the git mv to leave the working tree clean.
+        if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
+            error!("unarchive_card: rollback mv also failed: {}", rb_err);
+        }
+        return Response::error(format!("unarchive_card commit failed: {}; rolled back git mv", e));
     }
 
     // 10. Push with retry
@@ -1566,6 +1574,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_archive_card_rolls_back_git_mv_on_commit_failure() {
+        let (_tmp, state) = setup_test_repo().await;
+        let card_id = "20260101-120000-ee1";
+        create_card_for_archive(&state, "dev", card_id, "alice", None, "todo").await;
+
+        // Install a pre-commit hook that rejects all commits, triggering commit failure.
+        let hooks_dir = state.repo_root.join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let resp = handle_archive_card(
+            state.clone(),
+            "dev".to_string(),
+            card_id.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+        // Response must be an error
+        assert!(!resp.ok, "archive should fail when commit is rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("rolled back"),
+            "error should mention rollback: {}",
+            err
+        );
+
+        // Card file must still be in active location (rollback succeeded)
+        let active_meta = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(card_id)
+            .join("card.meta.yaml");
+        assert!(
+            active_meta.exists(),
+            "card.meta.yaml should still be in active location after rollback"
+        );
+
+        // Archive location must be empty (no partial move left behind)
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(card_id);
+        assert!(
+            !archive_dir.exists(),
+            "archive dir should not exist after rollback"
+        );
+
+        // Working tree should be clean (no staged git mv)
+        let status_output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        let status_str = String::from_utf8_lossy(&status_output.stdout);
+        assert!(
+            status_str.trim().is_empty(),
+            "working tree should be clean after rollback, got: {}",
+            status_str
+        );
+    }
+
     // ─── handle_unarchive_card tests ─────────────────────────────────────────
 
     /// Create a card directly in the archive location (already git-committed),
@@ -1835,6 +1912,76 @@ mod tests {
             err.contains("channel") && err.contains("not active"),
             "error should mention channel not active: {}",
             err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rolls_back_git_mv_on_commit_failure() {
+        let (_tmp, state) = setup_test_repo().await;
+        let card_id = "20260102-120000-ee2";
+        // Create card in archive (channel dev remains active)
+        create_archived_card_fixture(&state, "dev", card_id, "alice", None).await;
+
+        // Install a pre-commit hook that rejects all commits, triggering commit failure.
+        let hooks_dir = state.repo_root.join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            card_id.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+        // Response must be an error
+        assert!(!resp.ok, "unarchive should fail when commit is rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("rolled back"),
+            "error should mention rollback: {}",
+            err
+        );
+
+        // Card must still be in archive location (rollback succeeded)
+        let archive_meta = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(card_id)
+            .join("card.meta.yaml");
+        assert!(
+            archive_meta.exists(),
+            "card.meta.yaml should still be in archive location after rollback"
+        );
+
+        // Active location must not exist (no partial move left behind)
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(card_id);
+        assert!(
+            !active_dir.exists(),
+            "active dir should not exist after rollback"
+        );
+
+        // Working tree should be clean (no staged git mv)
+        let status_output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        let status_str = String::from_utf8_lossy(&status_output.stdout);
+        assert!(
+            status_str.trim().is_empty(),
+            "working tree should be clean after rollback, got: {}",
+            status_str
         );
     }
 
