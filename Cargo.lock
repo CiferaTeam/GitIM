@@ -732,6 +732,7 @@ dependencies = [
  "futures",
  "gitim-agent-provider",
  "gitim-client",
+ "gitim-sync",
  "mockito",
  "regex",
  "reqwest",

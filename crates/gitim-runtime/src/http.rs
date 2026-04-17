@@ -18,8 +18,8 @@ use crate::git_config::{
     WorkspaceConfig, WorkspacePathError,
 };
 use crate::github::{check_repo_access, parse_github_url, verify_token, GithubError};
-use crate::url_redact::redacted_url;
 use gitim_client::GitimClient;
+use gitim_sync::url_redact::redacted_url;
 
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care

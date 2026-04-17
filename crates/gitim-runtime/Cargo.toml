@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 gitim-client = { path = "../gitim-client" }
 gitim-agent-provider = { path = "../gitim-agent-provider" }
+gitim-sync = { path = "../gitim-sync" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

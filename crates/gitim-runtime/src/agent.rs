@@ -5,6 +5,7 @@ use serde_json::json;
 use tracing::info;
 
 use gitim_client::{ensure_daemon, GitimClient};
+use gitim_sync::url_redact::redacted_url;
 
 use crate::error::RuntimeError;
 
@@ -62,7 +63,7 @@ pub async fn provision_human(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RuntimeError::GitCloneFailed(stderr.to_string()));
+            return Err(RuntimeError::GitCloneFailed(redacted_url(&stderr)));
         }
         info!("cloned remote into human/");
     }
@@ -132,7 +133,7 @@ pub async fn provision_agent(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RuntimeError::GitCloneFailed(stderr.to_string()));
+            return Err(RuntimeError::GitCloneFailed(redacted_url(&stderr)));
         }
         info!(handler = %config.handler, "cloned repo");
     }

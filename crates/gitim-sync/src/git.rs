@@ -38,9 +38,7 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            return Err(classify_remote_error(&String::from_utf8_lossy(&output.stderr)));
         }
         Ok(())
     }
