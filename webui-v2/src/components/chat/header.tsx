@@ -63,6 +63,9 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
   }
 
   const members = channel?.members ?? [];
+  // daemon-side validate_join 只允许 member 邀请他人；非成员场景（有 Join banner）
+  // 若仍显示 Invite 入口，点击必失败 → 隐藏更诚实
+  const canInvite = !isDm && !!currentUser && members.includes(currentUser);
 
   return (
     <div className="h-12 border-b border-border/60 flex items-center px-4 justify-between shrink-0">
@@ -82,14 +85,18 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuItem
-              onSelect={() => setInviteOpen(true)}
-              className="gap-2"
-            >
-              <UserPlus className="size-3.5" />
-              <span>Invite members</span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
+            {canInvite && (
+              <>
+                <DropdownMenuItem
+                  onSelect={() => setInviteOpen(true)}
+                  className="gap-2"
+                >
+                  <UserPlus className="size-3.5" />
+                  <span>Invite members</span>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuLabel>Members</DropdownMenuLabel>
             <DropdownMenuSeparator />
             {members.map((member) => (
@@ -114,7 +121,7 @@ export function ChatHeader({ onStartDm, children }: ChatHeaderProps) {
         </DropdownMenu>
       )}
 
-      {!isDm && currentChannel && (
+      {canInvite && (
         <InviteDialog
           open={inviteOpen}
           onOpenChange={setInviteOpen}
