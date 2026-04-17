@@ -28,7 +28,7 @@ export function ThreadPanel({
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const msg of threadMessages) {
-      map.set(msg.line_number, msg);
+      if (msg.type !== "event") map.set(msg.line_number, msg);
     }
     return map;
   }, [threadMessages]);
@@ -52,6 +52,7 @@ export function ThreadPanel({
       {/* Thread messages */}
       <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-1">
         {threadMessages.map((msg) => {
+          if (msg.type === "event") return null;
           const isRoot = msg.line_number === threadRoot.line_number;
           const parent =
             msg.point_to > 0 ? msgByLine.get(msg.point_to) : null;
