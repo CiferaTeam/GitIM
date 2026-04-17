@@ -375,6 +375,8 @@ async fn im_create(
 #[derive(Deserialize)]
 struct JoinRequest {
     channel: String,
+    #[serde(default)]
+    targets: Vec<String>,
 }
 
 async fn im_join(
@@ -385,7 +387,7 @@ async fn im_join(
         Ok(c) => c,
         Err(e) => return e,
     };
-    api_response_to_json(client.join_channel(&req.channel, &[]).await)
+    api_response_to_json(client.join_channel(&req.channel, &req.targets).await)
 }
 
 // -- /im/send --
