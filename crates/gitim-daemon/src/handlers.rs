@@ -2416,97 +2416,6 @@ mod tests {
         assert!(send_resp.ok, "send to new channel failed: {:?}", send_resp.error);
     }
 
-    fn make_guest_state(tmp: &std::path::Path) -> SharedState {
-        let repo = tmp.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-
-        let (tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(repo, Config::default(), tx, None));
-        state
-            .is_guest
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        state
-    }
-
-    #[tokio::test]
-    async fn guest_send_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = make_guest_state(tmp.path());
-
-        let resp = handle_request(
-            Request::Send {
-                channel: "general".to_string(),
-                body: "hello".to_string(),
-                reply_to: None,
-                author: None,
-            },
-            state,
-        )
-        .await;
-
-        assert!(!resp.ok, "guest send should fail");
-        assert!(
-            resp.error.as_deref().unwrap().contains("guest"),
-            "error should mention guest mode: {:?}",
-            resp.error
-        );
-    }
-
-    #[tokio::test]
-    async fn guest_create_channel_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = make_guest_state(tmp.path());
-
-        let resp = handle_request(
-            Request::CreateChannel {
-                name: "test-ch".to_string(),
-                display_name: None,
-                introduction: None,
-                author: None,
-                invitees: vec![],
-            },
-            state,
-        )
-        .await;
-
-        assert!(!resp.ok, "guest create_channel should fail");
-        assert!(
-            resp.error.as_deref().unwrap().contains("guest"),
-            "error should mention guest mode: {:?}",
-            resp.error
-        );
-    }
-
-    #[tokio::test]
-    async fn guest_read_operations_are_allowed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = make_guest_state(tmp.path());
-
-        let resp = handle_request(Request::Status, state.clone()).await;
-        assert!(resp.ok, "guest status should succeed");
-
-        let resp = handle_request(Request::ListChannels, state.clone()).await;
-        assert!(resp.ok, "guest list_channels should succeed");
-
-        let resp = handle_request(Request::ListUsers, state.clone()).await;
-        assert!(resp.ok, "guest list_users should succeed");
-    }
-
     // --- Task 2: create_channel invitees 测试（红阶段）---
     // Tests 1-4 are expected to FAIL until Task 3 implements invitees in handle_create_channel.
     // Test 5 is a regression guard and may PASS already.
@@ -2699,6 +2608,97 @@ mod tests {
             "no invitees → members should only contain author; got: {:?}",
             meta.members
         );
+    }
+
+    fn make_guest_state(tmp: &std::path::Path) -> SharedState {
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(repo, Config::default(), tx, None));
+        state
+            .is_guest
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+    }
+
+    #[tokio::test]
+    async fn guest_send_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::Send {
+                channel: "general".to_string(),
+                body: "hello".to_string(),
+                reply_to: None,
+                author: None,
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest send should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_create_channel_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "test-ch".to_string(),
+                display_name: None,
+                introduction: None,
+                author: None,
+                invitees: vec![],
+            },
+            state,
+        )
+        .await;
+
+        assert!(!resp.ok, "guest create_channel should fail");
+        assert!(
+            resp.error.as_deref().unwrap().contains("guest"),
+            "error should mention guest mode: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_read_operations_are_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_guest_state(tmp.path());
+
+        let resp = handle_request(Request::Status, state.clone()).await;
+        assert!(resp.ok, "guest status should succeed");
+
+        let resp = handle_request(Request::ListChannels, state.clone()).await;
+        assert!(resp.ok, "guest list_channels should succeed");
+
+        let resp = handle_request(Request::ListUsers, state.clone()).await;
+        assert!(resp.ok, "guest list_users should succeed");
     }
 }
 
