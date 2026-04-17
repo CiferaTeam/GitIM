@@ -3,8 +3,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 
 const providers = [
   { id: "local", label: "Git Local", description: "Create a bare repo in the workspace", enabled: true },
-  { id: "github", label: "GitHub", description: "Clone from a GitHub repository", enabled: false },
-  { id: "gitlab", label: "GitLab", description: "Clone from a GitLab repository", enabled: false },
+  { id: "github", label: "GitHub", description: "Clone from an existing GitHub repository", enabled: true },
 ] as const;
 
 export function GitProviderForm() {
@@ -17,9 +16,14 @@ export function GitProviderForm() {
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSelect(provider: string) {
-    setSubmitting(true);
     setError(null);
 
+    if (provider === "github") {
+      setStatus("github_setup");
+      return;
+    }
+
+    setSubmitting(true);
     try {
       const res = await fetch(`${baseUrl()}/git/init`, {
         method: "POST",

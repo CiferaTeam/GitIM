@@ -5,6 +5,7 @@ export type ConnectionStatus =
   | "disconnected"   // no runtime found, show port form
   | "connected"      // health OK, need workspace
   | "workspace_set"  // workspace configured, need git provider
+  | "github_setup"   // github provider selected, collecting remote URL + PAT
   | "ready";         // git initialized, app can proceed
 
 const STORAGE_KEY = "gitim-runtime-port";
