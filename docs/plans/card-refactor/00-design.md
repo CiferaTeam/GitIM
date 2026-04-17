@@ -157,12 +157,15 @@ PATCH /im/cards/:channel/:card_id  update_card
 SQLite FTS5 索引需支持：
 
 - 卡片 discussion.thread 的消息也被索引到既有 messages 表
-- messages 表新增 `card_id TEXT NULL` 字段：频道消息该字段为 NULL，卡片消息写 card-id
-- 频道消息的 `channel` 字段语义不变（就是 channel 名）
+- **复用**既有 `channel_type` 字段，新增 `"card"` 枚举值（既有 `"channel"` / `"dm"` 不变）
+- 卡片消息的 `channel` 字段编码为相对路径 `channels/<ch>/cards/<id>`（和既有 DM 用 `dm:...` 式 identifier 对齐）
+- **schema 不改**（PK 仍是 `(channel, line_number)`）— 频道消息 `(foo, 1)` 和卡片消息 `(channels/foo/cards/YYYY-xxx, 1)` 自然不冲突
 - Search API 行为：
-  - 默认 `search(...)` 只返回频道消息（`card_id IS NULL`），保持既有行为
+  - 默认 `search(...)` 只返回频道/DM 消息（WHERE 子句加 `channel_type != 'card'`），保持既有行为
   - `search(..., include_cards=true)` 同时返回卡片消息
-  - `search(..., channel=foo, card_id=YYYYMMDD-xxx)` 精确检索某张卡片的讨论
+  - `search(..., channel="channels/foo/cards/YYYY-xxx")` 精确检索某张卡片的讨论（channel 字段直接匹配路径）
+
+**不引入** `card_id` 独立字段：SQLite 复合主键对 NULL 处理会造成唯一性漏洞（`(ch, NULL, 1)` 可重复插入）。用 `channel_type` + 路径编码的方案实质等价，实施更小侵入。
 
 ## 8. 迁移
 
