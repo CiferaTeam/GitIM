@@ -60,20 +60,29 @@ export async function createChannel(
   name: string,
   displayName?: string,
   introduction?: string,
+  invitees?: string[],
 ): Promise<ApiResponse> {
+  const payload: Record<string, unknown> = { name, display_name: displayName, introduction };
+  if (invitees && invitees.length > 0) {
+    payload.invitees = invitees;
+  }
   const res = await fetch(`${baseUrl()}/im/create-channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, display_name: displayName, introduction }),
+    body: JSON.stringify(payload),
   });
   return await res.json();
 }
 
-export async function joinChannel(channel: string): Promise<ApiResponse> {
+export async function joinChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+  const payload: Record<string, unknown> = { channel };
+  if (targets && targets.length > 0) {
+    payload.targets = targets;
+  }
   const res = await fetch(`${baseUrl()}/im/join`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
+    body: JSON.stringify(payload),
   });
   return await res.json();
 }
