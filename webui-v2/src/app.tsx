@@ -7,9 +7,10 @@ import { AgentList } from "./components/management/agent-list";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
+import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
-import type { Agent, Channel, Message, PollChange } from "./lib/types";
+import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
@@ -41,6 +42,8 @@ export default function App() {
   const addMessages = useChatStore((s) => s.addMessages);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
+  const setCards = useCardStore((s) => s.setCards);
+  const addCardMessages = useCardStore((s) => s.addCardMessages);
   const port = useConnectionStore((s) => s.port);
 
   // Mutable refs for poll loop — avoids stale closures
@@ -82,8 +85,22 @@ export default function App() {
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
       let needChannelRefresh = false;
+      let needCardRefresh = false;
 
       for (const change of changes) {
+        // Card events: channel string is "card:<channel>/<card_id>"
+        if (change.kind === "card_meta" || change.kind === "card_thread") {
+          needCardRefresh = true;
+          if (change.kind === "card_thread" && change.entries?.length) {
+            const parsed = parseCardScope(change.channel);
+            if (parsed) {
+              const pathKey = `${parsed.channel}/${parsed.cardId}`;
+              addCardMessages(pathKey, change.entries as Message[]);
+            }
+          }
+          continue;
+        }
+
         const displayName = apiToDisplay(change.channel);
         const knownChannel = channelsRef.current.some(
           (c) => c.name === displayName
@@ -115,6 +132,13 @@ export default function App() {
         }
       }
 
+      if (needCardRefresh) {
+        const cardRes = await client.listCards();
+        if (cardRes.ok && cardRes.data) {
+          setCards(cardRes.data.cards as Card[]);
+        }
+      }
+
       // Periodically refresh agents (real backend)
       const agentsRes = await client.listAgents();
       if (agentsRes.ok && agentsRes.data) {
@@ -123,20 +147,21 @@ export default function App() {
     } catch {
       // Silently skip failed polls
     }
-  }, [addMessages, incrementUnread, setChannels, setAgents]);
+  }, [addMessages, incrementUnread, setChannels, setAgents, setCards, addCardMessages]);
 
   // Init + poll loop — only run when port is available
   useEffect(() => {
     if (!port) return;
 
     async function init() {
-      const [healthRes, meRes, channelsRes, usersRes, agentsRes] =
+      const [healthRes, meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
           client.health(),
           client.me(),
           client.channels(),
           client.users(),
           client.listAgents(),
+          client.listCards(),
         ]);
 
       // Restore cursor from localStorage keyed by workspace
@@ -152,6 +177,8 @@ export default function App() {
         setUsers(usersRes.data.users as string[]);
       if (agentsRes.ok && agentsRes.data)
         setAgents(agentsRes.data.agents as Agent[]);
+      if (cardsRes.ok && cardsRes.data)
+        setCards(cardsRes.data.cards as Card[]);
 
       setConnected(true);
     }
@@ -164,7 +191,7 @@ export default function App() {
     return () => {
       clearInterval(pollHandle);
     };
-  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
+  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setCards, setConnected, runPoll]);
 
   return (
     <SetupGate>
