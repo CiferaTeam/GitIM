@@ -393,6 +393,193 @@ pub async fn preflight_claude() -> PreflightResult {
     preflight_claude_with("claude", Duration::from_secs(60)).await
 }
 
+/// Model forced during the codex preflight ping. Same rationale as
+/// [`CLAUDE_PREFLIGHT_MODEL`]: predictable response-time and cost.
+const CODEX_PREFLIGHT_MODEL: &str = "gpt-5.4-mini";
+
+/// Run a real-hello ping against the Codex CLI at `bin`.
+///
+/// Mirrors [`preflight_claude_with`]: isolates cwd, spawns the CLI with a
+/// fixed prompt, enforces a timeout, and classifies the result with the same
+/// `NotInstalled` / `Timeout` / `Other` taxonomy.
+///
+/// The shape diverges in two places:
+/// 1. Codex accepts `Stdio::null()` on stdin (claude needs a piped EOF).
+/// 2. `codex exec --json` emits JSONL (one JSON object per line), not a
+///    single JSON array. We scan for `turn.completed` (the stream terminator)
+///    and extract the `agent_message` text from the matching `item.completed`.
+pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResult {
+    let started = Instant::now();
+
+    let tmpdir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            return PreflightResult::failure(
+                "codex",
+                ErrorKind::Other,
+                format!("failed to create tempdir: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.current_dir(tmpdir.path())
+        .arg("exec")
+        .arg("--json")
+        // Our tempdir is isolation-by-design, not a git repo. Without
+        // `--skip-git-repo-check`, codex refuses to run with "Not inside a
+        // trusted directory".
+        .arg("--skip-git-repo-check")
+        .args(["--model", CODEX_PREFLIGHT_MODEL])
+        .arg("Reply with exactly: GITIM_OK")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    // Codex is happy with a null stdin — unlike claude, no need to drop
+    // the write end to signal EOF.
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                ErrorKind::NotInstalled
+            } else {
+                ErrorKind::Other
+            };
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("codex CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn codex: {e}")
+            };
+            return PreflightResult::failure(
+                "codex",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return PreflightResult::failure(
+                "codex",
+                ErrorKind::Other,
+                format!("codex IO error: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+        Err(_) => {
+            return PreflightResult::failure(
+                "codex",
+                ErrorKind::Timeout,
+                format!("codex preflight exceeded {}ms", timeout.as_millis()),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = truncate(stderr.trim(), STDERR_TRUNCATE);
+        let msg = if trimmed.is_empty() {
+            format!("codex exited with status {}", output.status)
+        } else {
+            format!("codex exited with status {}: {}", output.status, trimmed)
+        };
+        return PreflightResult::failure("codex", ErrorKind::Other, msg, duration_ms);
+    }
+
+    // JSONL: each non-empty line should be a JSON object. We care about two
+    // record types:
+    //   - `item.completed` with `item.type == "agent_message"` → carries the text
+    //   - `turn.completed` → marks the stream as cleanly finished
+    // Non-JSON lines and types we don't recognize are ignored. Codex may log
+    // symlink warnings to stderr; those don't affect parsing here.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut saw_turn_completed = false;
+    let mut agent_message: Option<String> = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match obj.get("type").and_then(|t| t.as_str()) {
+            Some("turn.completed") => saw_turn_completed = true,
+            Some("item.completed") => {
+                let item = obj.get("item");
+                let is_agent_message = item
+                    .and_then(|i| i.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("agent_message");
+                if is_agent_message {
+                    if let Some(text) = item
+                        .and_then(|i| i.get("text"))
+                        .and_then(|t| t.as_str())
+                    {
+                        agent_message = Some(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_turn_completed {
+        return PreflightResult::failure(
+            "codex",
+            ErrorKind::Other,
+            "codex stream ended without turn.completed",
+            duration_ms,
+        );
+    }
+
+    let text = match agent_message {
+        Some(t) => t,
+        None => {
+            return PreflightResult::failure(
+                "codex",
+                ErrorKind::Other,
+                "no agent_message in codex output",
+                duration_ms,
+            );
+        }
+    };
+
+    if text.contains("GITIM_OK") {
+        PreflightResult::success(
+            "codex",
+            None,
+            Some(CODEX_PREFLIGHT_MODEL.to_string()),
+            duration_ms,
+            Some(truncate(&text, PREVIEW_TRUNCATE)),
+        )
+    } else {
+        PreflightResult::failure(
+            "codex",
+            ErrorKind::Other,
+            "response did not contain GITIM_OK",
+            duration_ms,
+        )
+    }
+}
+
+/// Run a real-hello preflight against the default `codex` binary.
+///
+/// Spawns `codex exec --json`, scans the JSONL stream for the agent message,
+/// and returns a classified [`PreflightResult`].
+pub async fn preflight_codex() -> PreflightResult {
+    preflight_codex_with("codex", Duration::from_secs(60)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
