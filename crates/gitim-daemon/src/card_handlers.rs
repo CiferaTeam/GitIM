@@ -21,6 +21,55 @@ fn validate_card_id(card_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) struct LocatedCard {
+    pub rel_path: String,
+    pub is_archived: bool,
+}
+
+pub(crate) fn locate_card(
+    state: &SharedState,
+    channel: &ChannelName,
+    card_id: &str,
+) -> Option<LocatedCard> {
+    let active_rel = format!("channels/{}/cards/{}", channel, card_id);
+    let archived_rel = format!("archive/channels/{}/cards/{}", channel, card_id);
+
+    let active_exists = state
+        .repo_root
+        .join(&active_rel)
+        .join("card.meta.yaml")
+        .exists();
+    let archived_exists = state
+        .repo_root
+        .join(&archived_rel)
+        .join("card.meta.yaml")
+        .exists();
+
+    if active_exists && archived_exists {
+        warn!(
+            "card {} has both active and archived paths in channel {}; preferring active",
+            card_id, channel
+        );
+        return Some(LocatedCard {
+            rel_path: active_rel,
+            is_archived: false,
+        });
+    }
+    if active_exists {
+        return Some(LocatedCard {
+            rel_path: active_rel,
+            is_archived: false,
+        });
+    }
+    if archived_exists {
+        return Some(LocatedCard {
+            rel_path: archived_rel,
+            is_archived: true,
+        });
+    }
+    None
+}
+
 fn generate_card_id() -> String {
     let now = chrono::Utc::now();
     let ts = now.format("%Y%m%d-%H%M%S").to_string();
@@ -297,12 +346,16 @@ pub async fn handle_read_card(
     if let Err(e) = validate_card_id(&card_id) {
         return Response::error(format!("invalid card_id: {}", e));
     }
-    let card_dir = state
-        .repo_root
-        .join("channels")
-        .join(ch_name.to_string())
-        .join("cards")
-        .join(&card_id);
+    let located = match locate_card(&state, &ch_name, &card_id) {
+        Some(l) => l,
+        None => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
+    };
+    let card_dir = state.repo_root.join(&located.rel_path);
     let meta_path = card_dir.join("card.meta.yaml");
     let meta: CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
@@ -324,6 +377,7 @@ pub async fn handle_read_card(
     Response::success(serde_json::json!({
         "channel": ch_name.to_string(),
         "card_id": card_id,
+        "archived": located.is_archived,
         "meta": {
             "title": meta.title,
             "status": meta.status.as_str(),
@@ -359,19 +413,22 @@ pub async fn handle_send_card_message(
     if let Err(e) = validate_card_id(&card_id) {
         return Response::error(format!("invalid card_id: {}", e));
     }
-    let card_dir = state
-        .repo_root
-        .join("channels")
-        .join(ch_name.to_string())
-        .join("cards")
-        .join(&card_id);
-    let meta_path = card_dir.join("card.meta.yaml");
-    if !meta_path.exists() {
+    let located = match locate_card(&state, &ch_name, &card_id) {
+        Some(l) => l,
+        None => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
+    };
+    if located.is_archived {
         return Response::error(format!(
-            "card '{}' not found in channel '{}'",
+            "cannot send to archived card '{}' in channel '{}'",
             card_id, channel
         ));
     }
+    let card_dir = state.repo_root.join(&located.rel_path);
     let thread_path = card_dir.join("discussion.thread");
     let (next_line, _new_content) =
         match thread_io::append_message_to_thread(&thread_path, &handler, &body, reply_to) {
@@ -379,11 +436,8 @@ pub async fn handle_send_card_message(
             Err(e) => return Response::error(e),
         };
 
-    let thread_rel = format!(
-        "channels/{}/cards/{}/discussion.thread",
-        ch_name, card_id
-    );
-    let channel_key = format!("channels/{}/cards/{}", ch_name, card_id);
+    let thread_rel = format!("{}/discussion.thread", located.rel_path);
+    let channel_key = located.rel_path.clone();
     let commit_msg = format!(
         "card-msg: @{} -> {}/{} L{:06}",
         author, ch_name, card_id, next_line
@@ -496,12 +550,23 @@ pub async fn handle_update_card(
         return Response::error("must provide at least one field to update");
     }
 
-    let card_dir = state
-        .repo_root
-        .join("channels")
-        .join(ch_name.to_string())
-        .join("cards")
-        .join(&card_id);
+    let located = match locate_card(&state, &ch_name, &card_id) {
+        Some(l) => l,
+        None => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
+    };
+    if located.is_archived {
+        return Response::error(format!(
+            "cannot update archived card '{}' in channel '{}'",
+            card_id, channel
+        ));
+    }
+
+    let card_dir = state.repo_root.join(&located.rel_path);
     let meta_path = card_dir.join("card.meta.yaml");
     let mut meta: CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
@@ -542,10 +607,7 @@ pub async fn handle_update_card(
         return Response::error(format!("failed to write card meta: {}", e));
     }
 
-    let meta_rel = format!(
-        "channels/{}/cards/{}/card.meta.yaml",
-        ch_name, card_id
-    );
+    let meta_rel = format!("{}/card.meta.yaml", located.rel_path);
     let commit_msg = format!(
         "card: update {} in {} by @{}",
         card_id, channel, author
@@ -580,4 +642,338 @@ pub async fn handle_update_card(
         "labels": meta.labels,
         "assignee": meta.assignee,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gitim_core::types::Config;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::broadcast;
+
+    fn make_config() -> Config {
+        serde_yaml::from_str("version: 1").unwrap()
+    }
+
+    async fn setup_test_repo() -> (TempDir, SharedState) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("users")).unwrap();
+        std::fs::create_dir_all(root.join("channels")).unwrap();
+        std::fs::write(
+            root.join("users/alice.meta.yaml"),
+            "display_name: Alice\nrole: dev\nintroduction: hi\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("users/bob.meta.yaml"),
+            "display_name: Bob\nrole: dev\nintroduction: hello\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("channels/dev.thread"), "").unwrap();
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        run_git(&["init"]);
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "init"]);
+        let (tx, _) = broadcast::channel(100);
+        let state = Arc::new(AppState::new(
+            root,
+            make_config(),
+            tx,
+            Some("alice".to_string()),
+        ));
+        {
+            let mut users = state.users.write().await;
+            *users = vec!["alice".to_string(), "bob".to_string()];
+        }
+        (tmp, state)
+    }
+
+    /// Write a minimal CardMeta yaml to a given path.
+    fn write_card_meta(path: &std::path::Path, channel: &str) {
+        let content = format!(
+            "title: Test Card\nchannel: {}\nstatus: todo\nlabels: []\nassignee: ~\ncreated_by: alice\ncreated_at: 20260101T000000Z\nupdated_at: 20260101T000000Z\n",
+            channel
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    const CARD_ID: &str = "20260101-000000-abc";
+
+    // ─── locate_card tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_locate_card_finds_active_path() {
+        let (_tmp, state) = setup_test_repo().await;
+        let ch = ChannelName::new("foo").unwrap();
+        let card_dir = state
+            .repo_root
+            .join("channels/foo/cards")
+            .join(CARD_ID);
+        std::fs::create_dir_all(&card_dir).unwrap();
+        write_card_meta(&card_dir.join("card.meta.yaml"), "foo");
+
+        let result = locate_card(&state, &ch, CARD_ID);
+        let loc = result.expect("should find the active card");
+        assert!(!loc.is_archived, "should be active");
+        assert_eq!(
+            loc.rel_path,
+            format!("channels/foo/cards/{}", CARD_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_locate_card_finds_archived_path() {
+        let (_tmp, state) = setup_test_repo().await;
+        let ch = ChannelName::new("foo").unwrap();
+        let card_dir = state
+            .repo_root
+            .join("archive/channels/foo/cards")
+            .join(CARD_ID);
+        std::fs::create_dir_all(&card_dir).unwrap();
+        write_card_meta(&card_dir.join("card.meta.yaml"), "foo");
+
+        let result = locate_card(&state, &ch, CARD_ID);
+        let loc = result.expect("should find the archived card");
+        assert!(loc.is_archived, "should be archived");
+        assert_eq!(
+            loc.rel_path,
+            format!("archive/channels/foo/cards/{}", CARD_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_locate_card_prefers_active_when_both_exist() {
+        let (_tmp, state) = setup_test_repo().await;
+        let ch = ChannelName::new("foo").unwrap();
+
+        // Setup both paths (anomalous state)
+        let active_dir = state
+            .repo_root
+            .join("channels/foo/cards")
+            .join(CARD_ID);
+        std::fs::create_dir_all(&active_dir).unwrap();
+        write_card_meta(&active_dir.join("card.meta.yaml"), "foo");
+
+        let archived_dir = state
+            .repo_root
+            .join("archive/channels/foo/cards")
+            .join(CARD_ID);
+        std::fs::create_dir_all(&archived_dir).unwrap();
+        write_card_meta(&archived_dir.join("card.meta.yaml"), "foo");
+
+        let result = locate_card(&state, &ch, CARD_ID);
+        let loc = result.expect("should find a card");
+        assert!(!loc.is_archived, "should prefer active over archived");
+        assert_eq!(
+            loc.rel_path,
+            format!("channels/foo/cards/{}", CARD_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_locate_card_not_found() {
+        let (_tmp, state) = setup_test_repo().await;
+        let ch = ChannelName::new("foo").unwrap();
+        let result = locate_card(&state, &ch, CARD_ID);
+        assert!(result.is_none(), "card should not be found");
+    }
+
+    // ─── handle_read_card tests ───────────────────────────────────────────────
+
+    async fn create_active_card_fixture(state: &SharedState, channel: &str) -> String {
+        let resp = handle_create_card(
+            state.clone(),
+            channel.to_string(),
+            "Test Card".to_string(),
+            None,
+            None,
+            None,
+            "alice".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "create_card should succeed: {:?}", resp.error);
+        resp.data.unwrap()["card_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_read_card_active_returns_archived_false() {
+        let (_tmp, state) = setup_test_repo().await;
+        let card_id = create_active_card_fixture(&state, "dev").await;
+
+        let resp = handle_read_card(
+            state.clone(),
+            "dev".to_string(),
+            card_id.clone(),
+            None,
+            None,
+        )
+        .await;
+        assert!(resp.ok, "read should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(
+            data["archived"].as_bool().unwrap(),
+            false,
+            "active card should have archived=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_card_archived_returns_archived_true_and_messages() {
+        let (_tmp, state) = setup_test_repo().await;
+        // Create card the normal way to get a valid card_id format
+        let card_id = create_active_card_fixture(&state, "dev").await;
+
+        // Send a message to it first
+        let send_resp = handle_send_card_message(
+            state.clone(),
+            "dev".to_string(),
+            card_id.clone(),
+            "a message".to_string(),
+            None,
+            "alice".to_string(),
+        )
+        .await;
+        assert!(send_resp.ok, "send should succeed");
+
+        // Manually move the card directory to the archive location
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(&card_id);
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(&card_id);
+        std::fs::create_dir_all(archive_dir.parent().unwrap()).unwrap();
+        std::fs::rename(&active_dir, &archive_dir).unwrap();
+
+        let resp = handle_read_card(
+            state.clone(),
+            "dev".to_string(),
+            card_id.clone(),
+            None,
+            None,
+        )
+        .await;
+        assert!(resp.ok, "read of archived card should succeed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(
+            data["archived"].as_bool().unwrap(),
+            true,
+            "archived card should have archived=true"
+        );
+        let entries = data["entries"].as_array().unwrap();
+        assert!(!entries.is_empty(), "archived card entries should be readable");
+    }
+
+    #[tokio::test]
+    async fn test_read_card_not_found_returns_error() {
+        let (_tmp, state) = setup_test_repo().await;
+        let resp = handle_read_card(
+            state.clone(),
+            "dev".to_string(),
+            CARD_ID.to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(!resp.ok, "read of missing card should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("not found"),
+            "error should mention 'not found': {}",
+            err
+        );
+    }
+
+    // ─── handle_send_card_message reject archived tests ───────────────────────
+
+    #[tokio::test]
+    async fn test_send_card_message_rejects_archived() {
+        let (_tmp, state) = setup_test_repo().await;
+        let card_id = create_active_card_fixture(&state, "dev").await;
+
+        // Move to archive
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(&card_id);
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(&card_id);
+        std::fs::create_dir_all(archive_dir.parent().unwrap()).unwrap();
+        std::fs::rename(&active_dir, &archive_dir).unwrap();
+
+        let resp = handle_send_card_message(
+            state.clone(),
+            "dev".to_string(),
+            card_id.clone(),
+            "should fail".to_string(),
+            None,
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "send to archived card should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("archived"),
+            "error should mention 'archived': {}",
+            err
+        );
+    }
+
+    // ─── handle_update_card reject archived tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_card_rejects_archived() {
+        let (_tmp, state) = setup_test_repo().await;
+        let card_id = create_active_card_fixture(&state, "dev").await;
+
+        // Move to archive
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(&card_id);
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(&card_id);
+        std::fs::create_dir_all(archive_dir.parent().unwrap()).unwrap();
+        std::fs::rename(&active_dir, &archive_dir).unwrap();
+
+        let resp = handle_update_card(
+            state.clone(),
+            "dev".to_string(),
+            card_id.clone(),
+            Some("done".to_string()),
+            None,
+            None,
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "update of archived card should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("archived"),
+            "error should mention 'archived': {}",
+            err
+        );
+    }
 }
