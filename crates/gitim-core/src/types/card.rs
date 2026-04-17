@@ -1,5 +1,17 @@
-// crates/gitim-core/src/types/card.rs
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum CardError {
+    #[error("invalid status '{0}', allowed: todo/doing/done")]
+    InvalidStatus(String),
+    #[error("label length out of range (1..={1}), got {0}")]
+    LabelLengthOutOfRange(usize, usize),
+    #[error("invalid char '{0}' in label (allowed: a-z 0-9 - _)")]
+    InvalidLabelChar(char),
+    #[error("too many labels (max {1}), got {0}")]
+    TooManyLabels(usize, usize),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -18,12 +30,12 @@ impl CardStatus {
         }
     }
 
-    pub fn parse(s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str) -> Result<Self, CardError> {
         match s {
             "todo" => Ok(CardStatus::Todo),
             "doing" => Ok(CardStatus::Doing),
             "done" => Ok(CardStatus::Done),
-            other => Err(format!("invalid status '{}', allowed: todo/doing/done", other)),
+            other => Err(CardError::InvalidStatus(other.to_string())),
         }
     }
 }
@@ -45,21 +57,21 @@ pub struct CardMeta {
 pub const MAX_LABELS: usize = 10;
 pub const MAX_LABEL_LEN: usize = 32;
 
-pub fn validate_label(label: &str) -> Result<(), String> {
+pub fn validate_label(label: &str) -> Result<(), CardError> {
     if label.is_empty() || label.len() > MAX_LABEL_LEN {
-        return Err(format!("label length out of range (1..={})", MAX_LABEL_LEN));
+        return Err(CardError::LabelLengthOutOfRange(label.len(), MAX_LABEL_LEN));
     }
     for ch in label.chars() {
         if !matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_') {
-            return Err(format!("invalid char '{}' in label (allowed: a-z 0-9 - _)", ch));
+            return Err(CardError::InvalidLabelChar(ch));
         }
     }
     Ok(())
 }
 
-pub fn validate_labels(labels: &[String]) -> Result<(), String> {
+pub fn validate_labels(labels: &[String]) -> Result<(), CardError> {
     if labels.len() > MAX_LABELS {
-        return Err(format!("too many labels (max {})", MAX_LABELS));
+        return Err(CardError::TooManyLabels(labels.len(), MAX_LABELS));
     }
     for l in labels {
         validate_label(l)?;
