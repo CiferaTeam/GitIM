@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod error;
+pub mod git_config;
 pub mod http;
 pub mod poller;
 pub mod preflight;

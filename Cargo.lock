@@ -722,6 +722,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "xattr",
 ]
 
 [[package]]
