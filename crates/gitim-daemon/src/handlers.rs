@@ -1073,6 +1073,9 @@ async fn handle_create_channel(
         }
         // Validate all invitees before any I/O
         for invitee in &invitees {
+            if Handler::new(invitee).is_err() {
+                return Response::error(format!("invalid invitee handle: {}", invitee));
+            }
             if !users.contains(invitee) {
                 return Response::error(format!("invitee '{}' is not registered", invitee));
             }
@@ -1128,6 +1131,8 @@ async fn handle_create_channel(
     }
 
     // 7. Write .thread with join event
+    // Only the creator's join event is recorded. Invitees appear in members (meta.yaml)
+    // but do NOT receive a synthetic thread event — by design, see needs doc.
     let thread_path = channels_dir.join(format!("{}.thread", channel_name));
     let join_line = format_event(1, &handler, &now, "join", &serde_json::json!({}));
     if let Err(e) = std::fs::write(&thread_path, &join_line) {
