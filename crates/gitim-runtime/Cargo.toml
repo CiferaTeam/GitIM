@@ -19,11 +19,13 @@ axum = "0.8"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
+tempfile = "3"
 
 [[bin]]
 name = "gitim-runtime"
 path = "src/bin/runtime.rs"
 
 [dev-dependencies]
-tempfile = "3"
 serial_test = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

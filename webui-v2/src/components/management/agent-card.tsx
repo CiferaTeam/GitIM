@@ -83,6 +83,11 @@ export function AgentCard({ agent }: AgentCardProps) {
             <span className="font-semibold text-lg truncate">{agent.name}</span>
             {statusBadge(agent.status)}
           </div>
+          {agent.status === "error" && (
+            <p className="text-xs text-muted-foreground whitespace-pre-line mt-1">
+              {agent.errorMessage ?? "unknown error"}
+            </p>
+          )}
         </CardHeader>
 
         <CardContent>

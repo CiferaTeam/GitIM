@@ -55,6 +55,8 @@ pub struct AgentInfo {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -643,8 +645,10 @@ async fn im_update_card(
 struct AgentAddRequest {
     handler: String,
     display_name: String,
-    #[serde(default)]
-    provider: Option<String>,
+    // `provider` is required. Omitting it triggers serde's "missing field"
+    // error, which axum's Json extractor reports as a 4xx before the handler
+    // body runs — the WebUI can no longer silently fall back to Claude.
+    provider: String,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -656,7 +660,30 @@ struct AgentAddRequest {
 async fn agents_add(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<AgentAddRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Provider whitelist runs before workspace/state checks so invalid input
+    // is rejected even when the runtime isn't fully initialised — and so the
+    // router-level test can exercise this branch without provisioning.
+    // `mock` is permitted because existing E2E tests (agent-interaction.spec.ts)
+    // provision an agent with provider=mock; the UI still only offers
+    // claude/codex per Q1 scope.
+    match req.provider.as_str() {
+        "claude" | "codex" | "mock" => {}
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("unsupported provider: {other}"),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let (workspace, already_exists) = {
         let s = state.lock().unwrap();
         let ws = match &s.workspace {
@@ -665,7 +692,8 @@ async fn agents_add(
                 return Json(serde_json::json!({
                     "ok": false,
                     "error": "workspace not set"
-                }));
+                }))
+                .into_response();
             }
         };
         let exists = s.agents.contains_key(&req.handler);
@@ -676,7 +704,8 @@ async fn agents_add(
         return Json(serde_json::json!({
             "ok": false,
             "error": format!("agent already exists: {}", req.handler)
-        }));
+        }))
+        .into_response();
     }
 
     let agents_dir = workspace.clone();
@@ -684,7 +713,8 @@ async fn agents_add(
         return Json(serde_json::json!({
             "ok": false,
             "error": format!("failed to create agents dir: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     let bare_repo = workspace.join("repo.git");
@@ -703,7 +733,8 @@ async fn agents_add(
                     return Json(serde_json::json!({
                         "ok": true,
                         "id": req.handler,
-                    }));
+                    }))
+                    .into_response();
                 }
             }
 
@@ -711,9 +742,7 @@ async fn agents_add(
             let me_path = handle.repo_root.join(".gitim/me.json");
             if let Ok(content) = std::fs::read_to_string(&me_path) {
                 if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(provider) = &req.provider {
-                        me["provider"] = serde_json::Value::String(provider.clone());
-                    }
+                    me["provider"] = serde_json::Value::String(req.provider.clone());
                     if let Some(model) = &req.model {
                         me["model"] = serde_json::Value::String(model.clone());
                     }
@@ -735,10 +764,14 @@ async fn agents_add(
                 last_activity: None,
                 messages_processed: 0,
                 repo_path: handle.repo_root.display().to_string(),
-                provider: req.provider.clone(),
+                // AgentInfo.provider stays Option<String> for back-compat with
+                // old me.json files recovered at startup; new agents always
+                // get Some(req.provider).
+                provider: Some(req.provider.clone()),
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
+                error_message: None,
                 loop_handle: None,
             };
             {
@@ -751,12 +784,13 @@ async fn agents_add(
                 tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
             }
 
-            Json(serde_json::json!({ "ok": true, "id": req.handler }))
+            Json(serde_json::json!({ "ok": true, "id": req.handler })).into_response()
         }
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "error": format!("provision_agent failed: {e}")
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -1041,8 +1075,17 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         }
     }
 
-    // Scan for agent directories (have .gitim/me.json, not human or repo.git)
-    let entries = match std::fs::read_dir(&workspace) {
+    recover_agents_from_workspace(state, &workspace).await;
+}
+
+/// Scan a workspace directory for agent sub-dirs and recover each into
+/// `state`. Agents with a missing or unsupported `provider` field in
+/// `me.json` are inserted in `status = "error"` and skip daemon startup +
+/// loop auto-start — so broken configs don't stall the recovery loop. Split
+/// out from `recover_from_config` so tests can exercise it without mutating
+/// the global `~/.gitim/runtime.json`.
+pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace: &Path) {
+    let entries = match std::fs::read_dir(workspace) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -1072,7 +1115,66 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
             .unwrap_or(&handler)
             .to_string();
 
-        // Ensure agent daemon is running
+        let model = me["model"].as_str().map(|s| s.to_string());
+        let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
+        let env: HashMap<String, String> = me.get("env")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        // Provider must be present AND one of the supported values. Anything
+        // else registers the agent in error state and skips daemon startup.
+        let provider_raw = me["provider"].as_str();
+        let provider_error = match provider_raw {
+            None => Some(format!(
+                "Missing \"provider\" in {}. Add \"provider\": \"claude\" or \"provider\": \"codex\" to the file and restart the runtime.",
+                me_path.display()
+            )),
+            Some(p) if p != "claude" && p != "codex" => Some(format!(
+                "Unsupported provider \"{}\" in {}. Expected \"claude\" or \"codex\".",
+                p,
+                me_path.display()
+            )),
+            Some(_) => None,
+        };
+
+        if let Some(msg) = provider_error {
+            tracing::warn!("agent @{handler} recovered in error state: {msg}");
+            // Broadcast the failure so SSE subscribers (WebUI /agents/events)
+            // see recovery errors in the same activity stream as runtime
+            // errors. Send may return Err when no one is subscribed — that's
+            // fine, it's the broadcast channel's documented behavior.
+            let activity_tx = {
+                let s = state.lock().unwrap();
+                s.activity_tx.clone()
+            };
+            let _ = activity_tx.send(AgentActivityEvent {
+                agent_id: handler.clone(),
+                event_type: "error".to_string(),
+                detail: msg.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+            let mut s = state.lock().unwrap();
+            s.agents.insert(handler.clone(), AgentInfo {
+                id: handler.clone(),
+                handler: handler.clone(),
+                display_name,
+                status: "error".to_string(),
+                last_activity: None,
+                messages_processed: 0,
+                repo_path: dir.display().to_string(),
+                provider: provider_raw.map(|s| s.to_string()),
+                model,
+                system_prompt: custom_system_prompt,
+                env,
+                error_message: Some(msg),
+                loop_handle: None,
+            });
+            // Intentional: skip ensure_daemon + start_agent_loop — a broken
+            // agent should not hold a daemon socket or run the AI loop.
+            continue;
+        }
+
+        // Valid provider — start daemon and auto-start loop.
         let root = dir.clone();
         match tokio::task::spawn_blocking(move || gitim_client::ensure_daemon(&root)).await {
             Ok(Ok(())) => {}
@@ -1088,13 +1190,6 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
 
         {
             let mut s = state.lock().unwrap();
-            let provider = me["provider"].as_str().map(|s| s.to_string());
-            let model = me["model"].as_str().map(|s| s.to_string());
-            let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
-            let env: HashMap<String, String> = me.get("env")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-
             s.agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
                 handler: handler.clone(),
@@ -1103,10 +1198,11 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 last_activity: None,
                 messages_processed: 0,
                 repo_path: dir.display().to_string(),
-                provider,
+                provider: provider_raw.map(|s| s.to_string()),
                 model,
                 system_prompt: custom_system_prompt,
                 env,
+                error_message: None,
                 loop_handle: None,
             });
         }
@@ -1119,16 +1215,34 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
     }
 }
 
-async fn preflight_claude() -> impl axum::response::IntoResponse {
-    match crate::preflight::check_claude().await {
-        Ok(version) => Json(serde_json::json!({
-            "available": true,
-            "version": version,
-        })),
-        Err(error) => Json(serde_json::json!({
-            "available": false,
-            "error": error,
-        })),
+/// HTTP handler for `GET /preflight/{provider}`.
+///
+/// Dispatches to the matching provider's real-hello preflight. Unknown
+/// providers return 400 with a stable `{"ok": false, "error": ...}` shape so
+/// the WebUI can branch without parsing provider-specific fields.
+async fn preflight_handler(
+    axum::extract::Path(provider): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    match provider.as_str() {
+        "claude" => {
+            let result = crate::preflight::preflight_claude().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        "codex" => {
+            let result = crate::preflight::preflight_codex().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "unknown provider",
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -1169,7 +1283,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
         .route("/agents/{id}", get(agents_get))
-        .route("/preflight/claude", get(preflight_claude))
+        .route("/preflight/{provider}", get(preflight_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             activity_middleware,

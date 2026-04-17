@@ -51,7 +51,11 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
   const status =
     useAgentStore((s) => s.agents.find((a) => a.id === agentId)?.status) ??
     "offline";
+  const errorMessage = useAgentStore(
+    (s) => s.agents.find((a) => a.id === agentId)?.errorMessage,
+  );
   const latest = activities[0];
+  const showError = status === "error";
 
   return (
     <div
@@ -67,7 +71,11 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
         <span className="text-[11px] font-mono text-text-secondary shrink-0">
           {name}
         </span>
-        {latest ? (
+        {showError ? (
+          <span className="text-[10px] font-mono text-error truncate whitespace-pre-line">
+            {errorMessage ?? "unknown error"}
+          </span>
+        ) : latest ? (
           <span className="text-[10px] font-mono text-text-muted truncate">
             {latest.detail}
           </span>

@@ -3,6 +3,7 @@
  * Agent methods fall back to mock if runtime is unreachable.
  */
 import type { Agent, ApiResponse } from "./types";
+import type { PreflightResult, ProviderId } from "./providers";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 
@@ -145,17 +146,36 @@ export function validateChannelName(name: string): string | null {
   return null;
 }
 
+// --- Preflight ---
+
+export async function preflightProvider(
+  provider: ProviderId,
+): Promise<ApiResponse<PreflightResult>> {
+  try {
+    const res = await fetch(`${baseUrl()}/preflight/${provider}`);
+    const data = await res.json();
+    if (res.ok) {
+      return { ok: true, data };
+    }
+    return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 function mapBackendAgent(raw: Record<string, unknown>): Agent {
   return {
     id: (raw.id ?? raw.handler) as string,
     name: (raw.display_name ?? raw.handler) as string,
     status: ((raw.status as string) === "idle" ? "offline" : raw.status) as Agent["status"],
+    provider: (raw.provider as ProviderId) ?? undefined,
     systemPrompt: (raw.system_prompt as string) ?? "",
     model: (raw.model as string) ?? undefined,
     env: (raw.env as Record<string, string>) ?? undefined,
     repoPath: (raw.repo_path as string) ?? "",
     messagesProcessed: (raw.messages_processed as number) ?? 0,
     lastActivity: raw.last_activity as string | undefined,
+    errorMessage: (raw.error_message as string) ?? undefined,
   };
 }
 
@@ -186,6 +206,7 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 
 export async function addAgent(
   name: string,
+  provider: ProviderId,
   systemPrompt: string,
   model?: string,
   env?: Record<string, string>,
@@ -198,6 +219,7 @@ export async function addAgent(
       body: JSON.stringify({
         handler,
         display_name: name,
+        provider,
         model: model || undefined,
         system_prompt: systemPrompt || undefined,
         env: env && Object.keys(env).length > 0 ? env : undefined,
@@ -215,6 +237,7 @@ export async function addAgent(
       id: data.id ?? handler,
       name,
       status: "offline",
+      provider,
       systemPrompt,
       model,
       env,
@@ -223,7 +246,7 @@ export async function addAgent(
     };
     return { ok: true, data: { agent } };
   } catch {
-    return mockClient.addAgent(name, systemPrompt);
+    return mockClient.addAgent(name, provider, systemPrompt);
   }
 }
 

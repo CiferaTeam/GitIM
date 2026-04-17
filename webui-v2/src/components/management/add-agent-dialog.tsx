@@ -11,26 +11,101 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
 import { toHandler, validateHandler } from "@/lib/client";
+import {
+  PROVIDER_IDS,
+  PROVIDERS,
+  type PreflightResult,
+  type ProviderId,
+} from "@/lib/providers";
 import type { Agent } from "@/lib/types";
-import { Plus } from "lucide-react";
-import { useState } from "react";
+import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function AddAgentDialog() {
   const addAgent = useAgentStore((s) => s.addAgent);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectResult, setDetectResult] = useState<PreflightResult | null>(null);
+  // Generation counter guards against stale preflight responses when the user
+  // switches provider mid-flight or fires Detect multiple times in succession.
+  const detectSeq = useRef(0);
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
+  const availableModels = provider ? PROVIDERS[provider].models : [];
+
+  function resetForm() {
+    setName("");
+    setProvider("");
+    setModel("");
+    setSystemPrompt("");
+    setEnvVars([]);
+    setSubmitting(false);
+    setDetecting(false);
+    setDetectResult(null);
+    detectSeq.current += 1;
+  }
+
+  async function handleDetect() {
+    if (!provider || detecting) return;
+    const seq = ++detectSeq.current;
+    setDetecting(true);
+    setDetectResult(null);
+    const res = await client.preflightProvider(provider as ProviderId);
+    // Bail out if the user switched provider (or fired another detect) while
+    // the request was in flight — a stale response must not overwrite state.
+    if (seq !== detectSeq.current) return;
+    if (res.ok && res.data) {
+      setDetectResult(res.data);
+    } else {
+      setDetectResult({
+        available: false,
+        provider: provider as string,
+        version: null,
+        model_used: null,
+        duration_ms: 0,
+        output_preview: null,
+        error: res.error ?? "Request failed",
+        error_kind: "other",
+      });
+    }
+    setDetecting(false);
+  }
+
+  function detectErrorMessage(result: PreflightResult): string {
+    switch (result.error_kind) {
+      case "not_installed":
+        return "CLI not found. Install claude/codex and retry.";
+      case "timeout":
+        return "Timed out.";
+      default:
+        return result.error ?? "Unknown error";
+    }
+  }
+
+  function handleOpenChange(next: boolean) {
+    setOpen(next);
+    if (!next) resetForm();
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || validationError || submitting) return;
+    if (
+      !name.trim() ||
+      validationError ||
+      submitting ||
+      !provider ||
+      !model ||
+      !detectResult?.available
+    )
+      return;
 
     const envMap: Record<string, string> = {};
     for (const { key, value } of envVars) {
@@ -41,16 +116,14 @@ export function AddAgentDialog() {
     try {
       const res = await client.addAgent(
         name.trim(),
+        provider,
         systemPrompt.trim(),
         model,
         envMap,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
-        setName("");
-        setModel("");
-        setSystemPrompt("");
-        setEnvVars([]);
+        resetForm();
         setOpen(false);
       } else {
         toast.error(res.error ?? "Failed to add agent");
@@ -67,13 +140,74 @@ export function AddAgentDialog() {
         Add Agent
       </Button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Agent</DialogTitle>
           </DialogHeader>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="agent-provider">
+                Provider
+              </label>
+              <select
+                id="agent-provider"
+                value={provider}
+                onChange={(e) => {
+                  setProvider(e.target.value as ProviderId | "");
+                  setModel("");
+                  // Invalidate any in-flight detect so its late-arriving
+                  // response can't clobber the cleared state.
+                  detectSeq.current += 1;
+                  setDetectResult(null);
+                }}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="">— Select provider —</option>
+                {PROVIDER_IDS.map((id) => (
+                  <option key={id} value={id}>
+                    {PROVIDERS[id].label}
+                  </option>
+                ))}
+              </select>
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetect}
+                  disabled={!provider || detecting}
+                >
+                  {detecting ? (
+                    <>
+                      <Loader2 className="size-4 mr-1 animate-spin" />
+                      Detecting...
+                    </>
+                  ) : (
+                    "Detect"
+                  )}
+                </Button>
+                {detecting && (
+                  <span className="text-sm text-muted-foreground">
+                    Detecting...
+                  </span>
+                )}
+                {!detecting && detectResult?.available === true && (
+                  <span className="flex items-center gap-1 text-sm text-green-600">
+                    <CheckCircle2 className="size-4" />
+                    OK — {detectResult.duration_ms} ms
+                  </span>
+                )}
+                {!detecting && detectResult?.available === false && (
+                  <span className="flex items-center gap-1 text-sm text-red-600">
+                    <XCircle className="size-4" />
+                    {detectErrorMessage(detectResult)}
+                  </span>
+                )}
+              </div>
+            </div>
+
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-name">
                 Name
@@ -103,12 +237,15 @@ export function AddAgentDialog() {
                 id="agent-model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                disabled={!provider}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <option value="">-</option>
-                <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
-                <option value="claude-opus-4-6">Claude Opus 4.6</option>
-                <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+                <option value="">— Select model —</option>
+                {availableModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -182,11 +319,21 @@ export function AddAgentDialog() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setOpen(false)}
+                onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={!name.trim() || !!validationError || submitting}>
+              <Button
+                type="submit"
+                disabled={
+                  !name.trim() ||
+                  !!validationError ||
+                  submitting ||
+                  !provider ||
+                  !model ||
+                  !detectResult?.available
+                }
+              >
                 Add
               </Button>
             </DialogFooter>
