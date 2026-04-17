@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
-use crate::agent::{provision_agent, provision_human, AgentConfig};
+use crate::agent::{detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig};
 use crate::agent_loop::AgentLoop;
 use gitim_client::GitimClient;
 
@@ -231,8 +231,19 @@ async fn git_init(
 
     match output {
         Ok(o) if o.status.success() => {
-            // Provision the human daemon after bare repo is ready
-            match provision_human(&workspace).await {
+            let remote_url = repo_path.to_string_lossy().into_owned();
+            let display_name = detect_git_config("user.name", &workspace)
+                .unwrap_or_else(|| "human".to_string());
+            let handler = {
+                let h = name_to_handler(&display_name);
+                if h.is_empty() { "human".to_string() } else { h }
+            };
+            let auth = serde_json::json!({
+                "type": "git",
+                "handler": handler,
+                "display_name": display_name,
+            });
+            match provision_human(&workspace, &remote_url, "git", auth).await {
                 Ok(human_dir) => {
                     let mut s = state.lock().unwrap();
                     s.human_repo = Some(human_dir.clone());
@@ -889,7 +900,19 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
     // Recover human daemon
     let human_dir = workspace.join(".gitim-runtime/human");
     if human_dir.exists() {
-        match provision_human(&workspace).await {
+        let remote_url = workspace.join("repo.git").to_string_lossy().into_owned();
+        let display_name = detect_git_config("user.name", &workspace)
+            .unwrap_or_else(|| "human".to_string());
+        let handler = {
+            let h = name_to_handler(&display_name);
+            if h.is_empty() { "human".to_string() } else { h }
+        };
+        let auth = serde_json::json!({
+            "type": "git",
+            "handler": handler,
+            "display_name": display_name,
+        });
+        match provision_human(&workspace, &remote_url, "git", auth).await {
             Ok(dir) => {
                 let mut s = state.lock().unwrap();
                 s.human_repo = Some(dir);

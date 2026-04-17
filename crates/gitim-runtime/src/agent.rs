@@ -10,7 +10,7 @@ use crate::error::RuntimeError;
 
 /// Read a git config key from the given directory.
 /// Returns None if the key is not set.
-fn detect_git_config(key: &str, cwd: &Path) -> Option<String> {
+pub(crate) fn detect_git_config(key: &str, cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["config", "--get", key])
         .current_dir(cwd)
@@ -25,7 +25,7 @@ fn detect_git_config(key: &str, cwd: &Path) -> Option<String> {
 }
 
 /// Normalise a display name into a valid handler: lowercase, spaces → hyphens.
-fn name_to_handler(name: &str) -> String {
+pub(crate) fn name_to_handler(name: &str) -> String {
     name.to_lowercase()
         .chars()
         .map(|c| if c == ' ' { '-' } else { c })
@@ -33,22 +33,30 @@ fn name_to_handler(name: &str) -> String {
         .collect()
 }
 
-/// Provision the human clone: clone bare repo → start daemon → onboard → verify.
+/// Provision the human clone: clone remote → start daemon → onboard → verify.
+///
+/// The caller owns `remote_url` and `auth`: local mode passes the bare-repo
+/// path and `{type:"git", handler, display_name}`; github mode will pass an
+/// https URL and `{type:"github", token}`. Identity inference lives in the
+/// daemon — runtime forwards the auth payload unchanged.
 ///
 /// Idempotent: if `.gitim-runtime/human/` already exists, skip the clone step.
-pub async fn provision_human(workspace: &Path) -> Result<PathBuf, RuntimeError> {
+pub async fn provision_human(
+    workspace: &Path,
+    remote_url: &str,
+    git_server: &str,
+    auth: serde_json::Value,
+) -> Result<PathBuf, RuntimeError> {
     let runtime_dir = workspace.join(".gitim-runtime");
     std::fs::create_dir_all(&runtime_dir)?;
 
     let human_dir = runtime_dir.join("human");
-    let bare_repo = workspace.join("repo.git");
 
-    // Clone only if the human directory doesn't exist yet
     if human_dir.exists() {
         info!("human dir exists, skipping clone");
     } else {
         let output = Command::new("git")
-            .args(["clone", &bare_repo.to_string_lossy(), "human"])
+            .args(["clone", remote_url, "human"])
             .current_dir(&runtime_dir)
             .output()?;
 
@@ -56,13 +64,11 @@ pub async fn provision_human(workspace: &Path) -> Result<PathBuf, RuntimeError> 
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(RuntimeError::GitCloneFailed(stderr.to_string()));
         }
-        info!("cloned bare repo into human/");
+        info!("cloned remote into human/");
     }
 
-    // Ensure .gitim/ exists (idempotent)
     std::fs::create_dir_all(human_dir.join(".gitim"))?;
 
-    // Start daemon (idempotent — skips if already running)
     let root = human_dir.clone();
     tokio::task::spawn_blocking(move || ensure_daemon(&root))
         .await
@@ -71,25 +77,9 @@ pub async fn provision_human(workspace: &Path) -> Result<PathBuf, RuntimeError> 
         ))??;
     info!("human daemon running");
 
-    // Detect identity from local git config
-    let display_name = detect_git_config("user.name", workspace)
-        .unwrap_or_else(|| "human".to_string());
-    let handler = name_to_handler(&display_name);
-    let handler = if handler.is_empty() { "human".to_string() } else { handler };
-
-    // Onboard (idempotent — daemon handles repeat calls)
     let client = GitimClient::new(&human_dir);
     let onboard_resp = client
-        .onboard(
-            "git",
-            json!({
-                "type": "git",
-                "handler": handler,
-                "display_name": display_name,
-            }),
-            true,  // admin=true for the human owner
-            false,
-        )
+        .onboard(git_server, auth, true, false)
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 
@@ -99,9 +89,8 @@ pub async fn provision_human(workspace: &Path) -> Result<PathBuf, RuntimeError> 
             .unwrap_or_else(|| "unknown onboard error".into());
         return Err(RuntimeError::OnboardFailed(msg));
     }
-    info!(handler = %handler, "human onboarded");
+    info!("human onboarded");
 
-    // Verify daemon is responsive
     client
         .status()
         .await
