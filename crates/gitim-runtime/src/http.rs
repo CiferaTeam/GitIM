@@ -1354,22 +1354,52 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         s.workspace = Some(workspace.clone());
     }
 
-    // Recover human daemon
+    // Recover human daemon: branch on provider from WorkspaceConfig so github-mode
+    // workspaces don't get re-onboarded with a spurious "git"-mode identity (which
+    // would clobber me.json and push a bogus users/human.meta.yaml).
     let human_dir = workspace.join(".gitim-runtime/human");
     if human_dir.exists() {
-        let remote_url = workspace.join("repo.git").to_string_lossy().into_owned();
-        let display_name = detect_git_config("user.name", &workspace)
-            .unwrap_or_else(|| "human".to_string());
-        let handler = {
-            let h = name_to_handler(&display_name);
-            if h.is_empty() { "human".to_string() } else { h }
+        let workspace_cfg = WorkspaceConfig::read(&workspace).ok();
+        let (remote_url, git_server, auth) = match workspace_cfg.as_ref().map(|c| &c.git) {
+            Some(GitConfig {
+                provider: GitProvider::Github,
+                remote_url: Some(url),
+                token: Some(token),
+            }) => {
+                let token_url = match parse_github_url(url) {
+                    Ok((owner, repo)) => build_token_url(&owner, &repo, token),
+                    Err(_) => url.clone(),
+                };
+                (
+                    token_url,
+                    "github".to_string(),
+                    serde_json::json!({ "type": "github", "token": token }),
+                )
+            }
+            _ => {
+                let remote = workspace.join("repo.git").to_string_lossy().into_owned();
+                let display_name = detect_git_config("user.name", &workspace)
+                    .unwrap_or_else(|| "human".to_string());
+                let handler = {
+                    let h = name_to_handler(&display_name);
+                    if h.is_empty() {
+                        "human".to_string()
+                    } else {
+                        h
+                    }
+                };
+                (
+                    remote,
+                    "git".to_string(),
+                    serde_json::json!({
+                        "type": "git",
+                        "handler": handler,
+                        "display_name": display_name,
+                    }),
+                )
+            }
         };
-        let auth = serde_json::json!({
-            "type": "git",
-            "handler": handler,
-            "display_name": display_name,
-        });
-        match provision_human(&workspace, &remote_url, "git", auth).await {
+        match provision_human(&workspace, &remote_url, &git_server, auth).await {
             Ok(dir) => {
                 let mut s = state.lock().unwrap();
                 s.human_repo = Some(dir);

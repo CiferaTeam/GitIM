@@ -27,6 +27,12 @@ const ERROR_MESSAGES: Record<string, string> = {
     "Workspace is inside a cloud-sync folder (iCloud/Dropbox/Google Drive/OneDrive). Move it elsewhere to keep your PAT local.",
   provider_not_supported:
     "GitHub mode is not available in this runtime. (On Windows, this is not yet supported.)",
+  workspace_not_set:
+    "Select a workspace first, then retry.",
+  config_write_failed:
+    "Could not write workspace config. Check permissions on the workspace folder.",
+  onboard_failed:
+    "Repository cloned, but identity setup failed. Try again, or rotate your PAT if the issue persists.",
 };
 
 export function GithubSetupForm() {
