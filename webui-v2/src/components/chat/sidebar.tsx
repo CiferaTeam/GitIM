@@ -14,6 +14,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
+import { MemberPicker } from "./member-picker";
 
 interface SidebarProps {
   onChannelSelect: (name: string) => void;
@@ -57,6 +58,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [createName, setCreateName] = useState("");
   const [createDisplayName, setCreateDisplayName] = useState("");
   const [createIntro, setCreateIntro] = useState("");
+  const [createInvitees, setCreateInvitees] = useState<string[]>([]);
   const [createError, setCreateError] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -64,6 +66,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     setCreateName("");
     setCreateDisplayName("");
     setCreateIntro("");
+    setCreateInvitees([]);
     setCreateError("");
     setCreating(false);
   }
@@ -77,19 +80,18 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
     setCreating(true);
     setCreateError("");
-    let created = false;
     try {
       const res = await client.createChannel(
         name,
         createDisplayName.trim() || undefined,
         createIntro.trim() || undefined,
+        createInvitees.length > 0 ? createInvitees : undefined,
       );
       if (!res.ok) {
         setCreateError(res.error ?? "Failed to create channel");
         setCreating(false);
         return;
       }
-      created = true;
     } catch {
       setCreateError("Network error — is the server running?");
       setCreating(false);
@@ -212,6 +214,16 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 placeholder="What is this channel about?"
                 value={createIntro}
                 onChange={(e) => setCreateIntro(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium">Invite members <span className="text-muted-foreground font-normal">(optional)</span></label>
+              <MemberPicker
+                allUsers={users}
+                excludeHandlers={currentUser ? [currentUser] : []}
+                value={createInvitees}
+                onChange={setCreateInvitees}
+                placeholder="Search users to invite..."
               />
             </div>
             {createError && (

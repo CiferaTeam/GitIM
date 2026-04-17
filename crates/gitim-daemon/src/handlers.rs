@@ -140,12 +140,13 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             display_name,
             introduction,
             author,
+            invitees,
         } => {
             let resolved_author = match resolve_author(author, &state).await {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            handle_create_channel(state, name, display_name, introduction, resolved_author).await
+            handle_create_channel(state, name, display_name, introduction, resolved_author, invitees).await
         }
         Request::Search {
             query,
@@ -1058,6 +1059,7 @@ async fn handle_create_channel(
     display_name: Option<String>,
     introduction: Option<String>,
     author: String,
+    invitees: Vec<String>,
 ) -> Response {
     // 1. Validate author
     let handler = match Handler::new(&author) {
@@ -1068,6 +1070,15 @@ async fn handle_create_channel(
         let users = state.users.read().await;
         if !users.contains(&author) {
             return Response::error(format!("unknown user: {}", author));
+        }
+        // Validate all invitees before any I/O
+        for invitee in &invitees {
+            if Handler::new(invitee).is_err() {
+                return Response::error(format!("invalid invitee handle: {}", invitee));
+            }
+            if !users.contains(invitee) {
+                return Response::error(format!("invitee '{}' is not registered", invitee));
+            }
         }
     }
 
@@ -1097,28 +1108,38 @@ async fn handle_create_channel(
         return Response::error(format!("failed to create channels dir: {}", e));
     }
 
-    // 5. Write meta.yaml
+    // 5. Build members list: author first, then invitees in order, deduped
+    let mut members: Vec<String> = vec![author.clone()];
+    for invitee in invitees {
+        if !members.contains(&invitee) {
+            members.push(invitee);
+        }
+    }
+
+    // 6. Write meta.yaml
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let meta = ChannelMeta {
         display_name: display_name.unwrap_or_else(|| name.clone()),
         created_by: author.clone(),
         created_at: now.clone(),
         introduction: introduction.unwrap_or_default(),
-        members: vec![author.clone()],
+        members,
     };
     let meta_str = serde_yaml::to_string(&meta).unwrap();
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
 
-    // 6. Write .thread with join event
+    // 7. Write .thread with join event
+    // Only the creator's join event is recorded. Invitees appear in members (meta.yaml)
+    // but do NOT receive a synthetic thread event — by design, see needs doc.
     let thread_path = channels_dir.join(format!("{}.thread", channel_name));
     let join_line = format_event(1, &handler, &now, "join", &serde_json::json!({}));
     if let Err(e) = std::fs::write(&thread_path, &join_line) {
         return Response::error(format!("failed to write channel thread: {}", e));
     }
 
-    // 7. Commit
+    // 8. Commit
     let meta_rel = format!("channels/{}.meta.yaml", channel_name);
     let thread_rel = format!("channels/{}.thread", channel_name);
     let commit_msg = format!("channel: create #{} by @{}", name, author);
@@ -1129,7 +1150,7 @@ async fn handle_create_channel(
         return Response::error(format!("create_channel commit failed: {}", e));
     }
 
-    // 8. Push with retry (skip if no remote)
+    // 9. Push with retry (skip if no remote)
     if state.git_storage.has_remote() {
         let mut pushed = false;
         for attempt in 1..=MAX_PUSH_RETRIES {
@@ -1165,7 +1186,7 @@ async fn handle_create_channel(
 
     info!("channel '{}' created by @{}", name, author);
 
-    // 9. Return success
+    // 10. Return success
     Response::success(serde_json::json!({
         "channel": name,
         "created_by": author,
@@ -2301,6 +2322,7 @@ mod tests {
                 display_name: Some("Random".to_string()),
                 introduction: Some("A random channel".to_string()),
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2342,6 +2364,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2366,6 +2389,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2391,6 +2415,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: Some("alice".to_string()),
+                invitees: vec![],
             },
             state.clone(),
         )
@@ -2409,6 +2434,200 @@ mod tests {
         )
         .await;
         assert!(send_resp.ok, "send to new channel failed: {:?}", send_resp.error);
+    }
+
+    // --- Task 2: create_channel invitees 测试（红阶段）---
+    // Tests 1-4 are expected to FAIL until Task 3 implements invitees in handle_create_channel.
+    // Test 5 is a regression guard and may PASS already.
+
+    #[tokio::test]
+    async fn test_create_channel_with_invitees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        register_test_user(&state, "carol").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "team-alpha".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec!["bob".to_string(), "carol".to_string()],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel with invitees failed: {:?}", resp.error);
+
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/team-alpha.meta.yaml"),
+        )
+        .expect("meta.yaml should exist after successful create");
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+
+        assert_eq!(
+            meta.members,
+            vec!["alice".to_string(), "bob".to_string(), "carol".to_string()],
+            "members should be [author, invitees...] in order; got: {:?}",
+            meta.members
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invitee_dedup_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        register_test_user(&state, "carol").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "dedup-test".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec![
+                    "bob".to_string(),
+                    "bob".to_string(),
+                    "carol".to_string(),
+                ],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel failed: {:?}", resp.error);
+
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/dedup-test.meta.yaml"),
+        )
+        .expect("meta.yaml should exist");
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+
+        assert_eq!(
+            meta.members,
+            vec!["alice".to_string(), "bob".to_string(), "carol".to_string()],
+            "duplicate invitees should be deduped; got: {:?}",
+            meta.members
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invitee_dedup_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+
+        // invitees contains the author themselves — author should not appear twice
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "self-dedup".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec!["alice".to_string(), "bob".to_string()],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel failed: {:?}", resp.error);
+
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/self-dedup.meta.yaml"),
+        )
+        .expect("meta.yaml should exist");
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+
+        assert_eq!(
+            meta.members,
+            vec!["alice".to_string(), "bob".to_string()],
+            "author in invitees should not cause duplicate; got: {:?}",
+            meta.members
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invitee_unregistered_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        // "ghost" is intentionally NOT registered
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "ghost-channel".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec!["ghost".to_string()],
+            },
+            state.clone(),
+        )
+        .await;
+
+        assert!(
+            !resp.ok,
+            "create_channel should reject unregistered invitee; got ok=true"
+        );
+        let err = resp.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("ghost") || err.contains("not registered"),
+            "error message should mention 'ghost' or 'not registered'; got: {:?}",
+            resp.error
+        );
+
+        // Channel must NOT have been created (full transactional reject)
+        assert!(
+            !state
+                .repo_root
+                .join("channels/ghost-channel.meta.yaml")
+                .exists(),
+            "meta.yaml must NOT be created when an invitee is unregistered"
+        );
+        assert!(
+            !state
+                .repo_root
+                .join("channels/ghost-channel.thread")
+                .exists(),
+            "thread file must NOT be created when an invitee is unregistered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_without_invitees() {
+        // Regression: empty invitees list must preserve the original "author only" behavior.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "solo-channel".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec![],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel without invitees failed: {:?}", resp.error);
+
+        let meta_str = std::fs::read_to_string(
+            state.repo_root.join("channels/solo-channel.meta.yaml"),
+        )
+        .expect("meta.yaml should exist");
+        let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+
+        assert_eq!(
+            meta.members,
+            vec!["alice".to_string()],
+            "no invitees → members should only contain author; got: {:?}",
+            meta.members
+        );
     }
 
     fn make_guest_state(tmp: &std::path::Path) -> SharedState {
@@ -2473,6 +2692,7 @@ mod tests {
                 display_name: None,
                 introduction: None,
                 author: None,
+                invitees: vec![],
             },
             state,
         )

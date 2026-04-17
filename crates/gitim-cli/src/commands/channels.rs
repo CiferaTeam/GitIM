@@ -28,7 +28,7 @@ pub async fn cmd_create_channel(
     display_name: Option<&str>,
     introduction: Option<&str>,
 ) {
-    match client.create_channel(name, display_name, introduction).await {
+    match client.create_channel(name, display_name, introduction, &[]).await {
         Ok(resp) => {
             if !resp.ok {
                 let msg = resp.error.as_deref().unwrap_or("unknown error");

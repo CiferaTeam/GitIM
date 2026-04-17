@@ -121,6 +121,8 @@ pub enum Request {
         introduction: Option<String>,
         #[serde(default)]
         author: Option<String>,
+        #[serde(default)]
+        invitees: Vec<String>,
     },
     #[serde(rename = "search")]
     Search {
