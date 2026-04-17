@@ -55,6 +55,8 @@ pub struct AgentInfo {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -624,6 +626,7 @@ async fn agents_add(
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
+                error_message: None,
                 loop_handle: None,
             };
             {
@@ -993,6 +996,7 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
                 model,
                 system_prompt: custom_system_prompt,
                 env,
+                error_message: None,
                 loop_handle: None,
             });
         }
