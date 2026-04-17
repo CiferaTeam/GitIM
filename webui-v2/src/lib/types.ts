@@ -1,15 +1,19 @@
+import type { ProviderId } from "./providers";
+
 export type AgentStatus = "running" | "idle" | "error" | "offline";
 
 export interface Agent {
   id: string;
   name: string;
   status: AgentStatus;
+  provider?: ProviderId;
   systemPrompt: string;
   model?: string;
   env?: Record<string, string>;
   repoPath: string;
   lastActivity?: string; // ISO8601
   messagesProcessed: number;
+  errorMessage?: string;
 }
 
 export type MessageStatus = "sending" | "sent" | "synced" | "failed";
@@ -46,9 +50,9 @@ export interface AgentActivityEvent {
   timestamp: string; // ISO8601
 }
 
-export interface ApiResponse {
+export interface ApiResponse<T = Record<string, unknown>> {
   ok: boolean;
-  data?: Record<string, unknown>;
+  data?: T;
   error?: string;
 }
 

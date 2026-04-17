@@ -1,4 +1,5 @@
 import type { Agent, ApiResponse, Channel, Message, PollChange } from "../types";
+import type { ProviderId } from "../providers";
 import { nowTimestamp } from "../types";
 import {
   mockAgents as initialAgents,
@@ -226,6 +227,7 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 
 export async function addAgent(
   name: string,
+  provider: ProviderId,
   systemPrompt: string
 ): Promise<ApiResponse> {
   await delay();
@@ -234,6 +236,7 @@ export async function addAgent(
     id,
     name,
     status: "offline",
+    provider,
     systemPrompt,
     repoPath: `~/gitim-agents/${id}/`,
     messagesProcessed: 0,
