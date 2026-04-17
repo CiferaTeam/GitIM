@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -200,6 +201,193 @@ pub async fn check_claude() -> Result<String, String> {
         return Err("claude --version returned empty output".to_string());
     }
     Ok(version)
+}
+
+/// Model forced during the preflight ping. Held constant so response-time
+/// and cost are predictable across environments.
+const CLAUDE_PREFLIGHT_MODEL: &str = "claude-haiku-4-5";
+
+/// Max chars of stderr/output to surface — keeps logs and UI tooltips bounded
+/// when Claude prints a multi-line error or a verbose session transcript.
+const STDERR_TRUNCATE: usize = 500;
+const PREVIEW_TRUNCATE: usize = 200;
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect()
+    }
+}
+
+/// Run a real-hello ping against the Claude CLI at `bin`.
+///
+/// Returns a `PreflightResult` that captures the outcome with a stable error
+/// taxonomy (`NotInstalled` / `Timeout` / `Other`). Split from
+/// [`preflight_claude`] so tests can inject fake binaries (e.g. `/bin/false`,
+/// a stalling shell script) to exercise each error branch without needing a
+/// logged-in Claude CLI.
+pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightResult {
+    let started = Instant::now();
+
+    // Isolate cwd so Claude doesn't pick up project memory, settings, or
+    // MCP config from whatever directory the caller happens to be in.
+    let tmpdir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            return PreflightResult::failure(
+                "claude",
+                ErrorKind::Other,
+                format!("failed to create tempdir: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.current_dir(tmpdir.path())
+        .arg("--print")
+        .args(["--model", CLAUDE_PREFLIGHT_MODEL])
+        .args(["--output-format", "json"])
+        .args(["--setting-sources", ""])
+        .args(["--tools", ""])
+        .args([
+            "--system-prompt",
+            "Reply with exactly what the user asks.",
+        ])
+        .arg("Reply with exactly: GITIM_OK")
+        // Pipe stdin so we can close the write end immediately — some
+        // Claude CLI versions block on stdin readiness when it's `null`.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                ErrorKind::NotInstalled
+            } else {
+                ErrorKind::Other
+            };
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("claude CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn claude: {e}")
+            };
+            return PreflightResult::failure(
+                "claude",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    // Signal EOF immediately — Claude's --print mode doesn't need input on stdin.
+    drop(child.stdin.take());
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return PreflightResult::failure(
+                "claude",
+                ErrorKind::Other,
+                format!("claude IO error: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+        Err(_) => {
+            return PreflightResult::failure(
+                "claude",
+                ErrorKind::Timeout,
+                format!("claude preflight exceeded {}ms", timeout.as_millis()),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = truncate(stderr.trim(), STDERR_TRUNCATE);
+        let msg = if trimmed.is_empty() {
+            format!("claude exited with status {}", output.status)
+        } else {
+            format!("claude exited with status {}: {}", output.status, trimmed)
+        };
+        return PreflightResult::failure("claude", ErrorKind::Other, msg, duration_ms);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed_stdout = stdout.trim();
+    if trimmed_stdout.is_empty() {
+        return PreflightResult::failure(
+            "claude",
+            ErrorKind::Other,
+            "claude returned empty stdout",
+            duration_ms,
+        );
+    }
+
+    // `claude --print --output-format json` returns a JSON array. Scan for
+    // the `type == "result"` entry and read its `result` field.
+    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(trimmed_stdout);
+    let items = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            return PreflightResult::failure(
+                "claude",
+                ErrorKind::Other,
+                format!("failed to parse claude JSON output: {e}"),
+                duration_ms,
+            );
+        }
+    };
+
+    let result_text = items
+        .iter()
+        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("result"))
+        .and_then(|item| item.get("result"))
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string());
+
+    let text = match result_text {
+        Some(t) => t,
+        None => {
+            return PreflightResult::failure(
+                "claude",
+                ErrorKind::Other,
+                "claude JSON output did not contain a result entry with a `result` field",
+                duration_ms,
+            );
+        }
+    };
+
+    if text.contains("GITIM_OK") {
+        PreflightResult::success(
+            "claude",
+            None,
+            Some(CLAUDE_PREFLIGHT_MODEL.to_string()),
+            duration_ms,
+            Some(truncate(&text, PREVIEW_TRUNCATE)),
+        )
+    } else {
+        PreflightResult::failure(
+            "claude",
+            ErrorKind::Other,
+            "response did not contain GITIM_OK",
+            duration_ms,
+        )
+    }
+}
+
+/// Run a real-hello preflight against the user's `claude` CLI on PATH with a
+/// 60s timeout. Called by the `/preflight/claude` HTTP endpoint.
+pub async fn preflight_claude() -> PreflightResult {
+    preflight_claude_with("claude", Duration::from_secs(60)).await
 }
 
 #[cfg(test)]
