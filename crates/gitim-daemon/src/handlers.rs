@@ -905,15 +905,36 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     let skip_filter = is_admin || is_guest;
 
     // Step 1: Build channel membership cache (admin skips — never checked)
+    //
+    // Channel names we want to pre-populate the cache for:
+    //   channels/<ch>.thread             → ch
+    //   channels/<ch>.meta.yaml          → ch
+    //   channels/<ch>/cards/<id>/<file>  → ch (outer channel owns the card's membership)
+    let extract_channel = |path_str: &str| -> Option<String> {
+        let rest = path_str.strip_prefix("channels/")?;
+        if let Some(stem) = rest
+            .strip_suffix(".thread")
+            .or_else(|| rest.strip_suffix(".meta.yaml"))
+        {
+            // Top-level channel file — the stem may contain no '/', that's the channel name.
+            if !stem.contains('/') {
+                return Some(stem.to_string());
+            }
+        }
+        // Nested card path: channels/<ch>/cards/<id>/<file>
+        let (ch, tail) = rest.split_once('/')?;
+        if tail.starts_with("cards/") {
+            return Some(ch.to_string());
+        }
+        None
+    };
+
     let mut channel_membership: HashMap<String, bool> = HashMap::new();
     if !skip_filter {
         for (path, _) in &diff {
             let path_str = path.to_string_lossy();
-            if let Some(ch_name) = path_str.strip_prefix("channels/").and_then(|s| {
-                s.strip_suffix(".thread")
-                    .or_else(|| s.strip_suffix(".meta.yaml"))
-            }) {
-                if channel_membership.contains_key(ch_name) {
+            if let Some(ch_name) = extract_channel(&path_str) {
+                if channel_membership.contains_key(&ch_name) {
                     continue;
                 }
                 let meta_path = state
@@ -935,7 +956,7 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
                 } else {
                     true
                 };
-                channel_membership.insert(ch_name.to_string(), is_member);
+                channel_membership.insert(ch_name, is_member);
             }
         }
     } // end if !skip_filter
@@ -944,7 +965,61 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     for (path, added_content) in &diff {
         let path_str = path.to_string_lossy();
 
+        // Match card paths first so they don't fall through to the channel_meta /
+        // channel branches below (which would otherwise mangle the channel name).
+        if let Some(rest) = path_str.strip_prefix("channels/") {
+            if let Some((ch, tail)) = rest.split_once('/') {
+                if let Some(card_rest) = tail.strip_prefix("cards/") {
+                    if let Some((card_id, file)) = card_rest.split_once('/') {
+                        // Membership check via outer channel
+                        if !skip_filter && !channel_membership.get(ch).copied().unwrap_or(true) {
+                            continue;
+                        }
+                        let card_key = format!("card:{}/{}", ch, card_id);
+                        if file == "card.meta.yaml" {
+                            changes.push(serde_json::json!({
+                                "channel": card_key,
+                                "kind": "card_meta",
+                                "entries": [],
+                            }));
+                            continue;
+                        }
+                        if file == "discussion.thread" {
+                            let parsed = match parse_thread(added_content) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("poll: failed to parse card thread {}: {}", path_str, e);
+                                    continue;
+                                }
+                            };
+                            if parsed.entries.is_empty() {
+                                continue;
+                            }
+                            let entries: Vec<serde_json::Value> = parsed
+                                .entries
+                                .iter()
+                                .map(|entry| entry_to_json(entry))
+                                .collect();
+                            changes.push(serde_json::json!({
+                                "channel": card_key,
+                                "kind": "card_thread",
+                                "entries": entries,
+                            }));
+                            continue;
+                        }
+                        // Other files inside the card dir are ignored.
+                        continue;
+                    }
+                }
+            }
+        }
+
         let (channel, kind) = if let Some(name) = path_str.strip_prefix("channels/") {
+            if name.contains('/') {
+                // Nested path we didn't handle above (e.g., future subtree). Skip
+                // rather than let strip_suffix swallow it and emit malformed events.
+                continue;
+            }
             if let Some(ch_name) = name.strip_suffix(".thread") {
                 (ch_name.to_string(), "channel")
             } else if let Some(ch_name) = name.strip_suffix(".meta.yaml") {
@@ -2708,6 +2783,218 @@ mod tests {
 
         let resp = handle_request(Request::ListUsers, state.clone()).await;
         assert!(resp.ok, "guest list_users should succeed");
+    }
+
+    // ─── Card poll tests ────────────────────────────────────────────────
+
+    async fn poll_cursor(state: &SharedState) -> String {
+        let resp = handle_request(Request::Poll { since: None }, state.clone()).await;
+        resp.data.unwrap()["commit_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn do_create_card(state: &SharedState, channel: &str, title: &str, author: &str) -> String {
+        let resp = handle_request(
+            Request::CreateCard {
+                channel: channel.to_string(),
+                title: title.to_string(),
+                labels: None,
+                assignee: None,
+                status: None,
+                author: Some(author.to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_card failed: {:?}", resp.error);
+        resp.data.unwrap()["card_id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn test_poll_surfaces_card_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "dev", "alice");
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("alice".to_string());
+        }
+
+        state.git_storage.push().ok();
+        let cursor = poll_cursor(&state).await;
+
+        let card_id = do_create_card(&state, "dev", "Implement X", "alice").await;
+        state.git_storage.push().ok();
+
+        let resp = handle_request(
+            Request::Poll {
+                since: Some(cursor),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "poll failed: {:?}", resp.error);
+        let data = resp.data.unwrap();
+        let changes = data["changes"].as_array().unwrap().clone();
+
+        let card_channel_key = format!("card:dev/{}", card_id);
+        let card_meta_change = changes
+            .iter()
+            .find(|c| c["kind"] == "card_meta" && c["channel"] == card_channel_key);
+        assert!(
+            card_meta_change.is_some(),
+            "expected card_meta change for '{}', got: {:?}",
+            card_channel_key,
+            changes
+        );
+
+        // Update status -> should produce another card_meta event
+        let cursor2 = data["commit_id"].as_str().unwrap().to_string();
+        let upd = handle_request(
+            Request::UpdateCard {
+                channel: "dev".to_string(),
+                card_id: card_id.clone(),
+                status: Some("doing".to_string()),
+                labels: None,
+                assignee: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(upd.ok, "update_card failed: {:?}", upd.error);
+        state.git_storage.push().ok();
+
+        let resp2 = handle_request(
+            Request::Poll {
+                since: Some(cursor2),
+            },
+            state.clone(),
+        )
+        .await;
+        let changes2 = resp2.data.unwrap()["changes"].as_array().unwrap().clone();
+        assert!(
+            changes2
+                .iter()
+                .any(|c| c["kind"] == "card_meta" && c["channel"] == card_channel_key),
+            "expected card_meta event after status update, got: {:?}",
+            changes2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_surfaces_card_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        create_test_channel(&state, "dev", "alice");
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("alice".to_string());
+        }
+
+        let card_id = do_create_card(&state, "dev", "T", "alice").await;
+        state.git_storage.push().ok();
+        let cursor = poll_cursor(&state).await;
+
+        let send = handle_request(
+            Request::SendCardMessage {
+                channel: "dev".to_string(),
+                card_id: card_id.clone(),
+                body: "hello from card".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send.ok, "send_card_message failed: {:?}", send.error);
+        state.git_storage.push().ok();
+
+        let resp = handle_request(
+            Request::Poll {
+                since: Some(cursor),
+            },
+            state.clone(),
+        )
+        .await;
+        let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+        let card_channel_key = format!("card:dev/{}", card_id);
+        let thread_change = changes
+            .iter()
+            .find(|c| c["kind"] == "card_thread" && c["channel"] == card_channel_key)
+            .expect("expected card_thread change");
+        let entries = thread_change["entries"].as_array().unwrap();
+        assert!(!entries.is_empty(), "entries should contain the sent message");
+        let first = &entries[0];
+        assert_eq!(first["author"], "alice");
+        assert_eq!(first["body"], "hello from card");
+        assert_eq!(first["type"], "message");
+    }
+
+    #[tokio::test]
+    async fn test_poll_filters_card_by_channel_membership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        create_test_channel(&state, "general", "alice");
+        create_test_channel(&state, "private", "alice");
+
+        // Alice joins "private" so its members becomes non-empty (closed channel)
+        let alice_join = handle_request(
+            Request::JoinChannel {
+                channel: "private".to_string(),
+                targets: vec![],
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(alice_join.ok);
+
+        // Acting as alice, create card in private
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("alice".to_string());
+        }
+        let card_id = do_create_card(&state, "private", "secret", "alice").await;
+        let send = handle_request(
+            Request::SendCardMessage {
+                channel: "private".to_string(),
+                card_id: card_id.clone(),
+                body: "classified".to_string(),
+                reply_to: None,
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(send.ok);
+        state.git_storage.push().ok();
+
+        // Switch current_user to bob and poll from the beginning
+        {
+            let mut cu = state.current_user.write().await;
+            *cu = Some("bob".to_string());
+        }
+        let resp = handle_request(Request::Poll { since: None }, state.clone()).await;
+        let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+        // Bob is NOT member of "private". He must not see the card events from it.
+        let bob_saw_private_card = changes.iter().any(|c| {
+            let ch = c["channel"].as_str().unwrap_or("");
+            ch.starts_with("card:private/")
+        });
+        assert!(
+            !bob_saw_private_card,
+            "bob (non-member) should NOT see private channel cards in poll, got: {:?}",
+            changes
+        );
     }
 }
 
