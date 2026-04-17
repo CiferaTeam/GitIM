@@ -11,7 +11,7 @@ const describe = REAL ? test.describe : test.describe.skip;
 describe("real Claude + Codex round-trip", () => {
   // Real LLM round-trip is slow: daemon push → agent pull → poll → LLM call →
   // reply → push → human pull. Two agents in parallel, each taking ~20-60s.
-  test.setTimeout(180_000);
+  test.setTimeout(360_000);
 
   let env: RuntimeEnv;
 
@@ -97,10 +97,13 @@ describe("real Claude + Codex round-trip", () => {
       expect((await sendRes.json()).ok).toBe(true);
     }
 
-    // 6. Poll until both expected tokens appear, or 150s deadline.
+    // 6. Poll until both expected tokens appear, or 300s deadline.
+    //    Codex's first turn in a fresh agent repo spends ~2-3 minutes exploring
+    //    (30+ Bash calls) before replying, so the cold-start budget has to
+    //    absorb that worst case.
     let sawClaude = false;
     let sawCodex = false;
-    const deadline = Date.now() + 150_000;
+    const deadline = Date.now() + 300_000;
 
     while (Date.now() < deadline && !(sawClaude && sawCodex)) {
       const pollRes = await fetch(`${env.baseUrl}/im/poll`, {
@@ -131,7 +134,7 @@ describe("real Claude + Codex round-trip", () => {
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    expect(sawClaude, "Claude bot did not reply with CLAUDE_HELLO within 150s").toBe(true);
-    expect(sawCodex, "Codex bot did not reply with CODEX_HELLO within 150s").toBe(true);
+    expect(sawClaude, "Claude bot did not reply with CLAUDE_HELLO within 300s").toBe(true);
+    expect(sawCodex, "Codex bot did not reply with CODEX_HELLO within 300s").toBe(true);
   });
 });

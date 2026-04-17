@@ -57,6 +57,8 @@ impl Provider for CodexProvider {
             args.extend(["resume".to_string(), resume_token.clone()]);
         }
         args.push("--json".to_string());
+        // bypass sandbox — agents need to run gitim commands without approval prompts
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         if let Some(model) = &opts.model {
             args.extend(["--model".to_string(), model.clone()]);
         }
