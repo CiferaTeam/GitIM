@@ -332,6 +332,103 @@ pub async fn handle_archive_card(
     }))
 }
 
+pub async fn handle_unarchive_card(
+    state: SharedState,
+    channel: String,
+    card_id: String,
+    author: String,
+) -> Response {
+    // 1. Validate user
+    if let Err(e) = ensure_known_user(&state, &author).await {
+        return Response::error(e);
+    }
+
+    // 2. Validate channel name format
+    let ch_name = match ChannelName::new(&channel) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+    };
+
+    // 3. Validate card_id
+    if let Err(e) = validate_card_id(&card_id) {
+        return Response::error(format!("invalid card_id: {}", e));
+    }
+
+    // 4. Locate card — must be archived
+    let located = match locate_card(&state, &ch_name, &card_id) {
+        None => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+        Some(loc) if !loc.is_archived => return Response::error(format!("card '{}' is not archived", card_id)),
+        Some(loc) => loc,
+    };
+
+    // 5. Read card.meta.yaml
+    let meta_path = state.repo_root.join(&located.rel_path).join("card.meta.yaml");
+    let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
+        Ok(c) => match serde_yaml::from_str(&c) {
+            Ok(m) => m,
+            Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
+        },
+        Err(_) => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+    };
+
+    // 6. Permission check: only creator or assignee can unarchive
+    let is_creator = meta.created_by == author;
+    let is_assignee = meta.assignee.as_deref() == Some(author.as_str());
+    if !is_creator && !is_assignee {
+        return Response::error("only creator or assignee can unarchive");
+    }
+
+    // 7. Ensure target parent directory exists (defensive — likely already there)
+    let active_cards_dir = state
+        .repo_root
+        .join("channels")
+        .join(ch_name.to_string())
+        .join("cards");
+    if let Err(e) = std::fs::create_dir_all(&active_cards_dir) {
+        return Response::error(format!("failed to create cards dir: {}", e));
+    }
+
+    // 8. git mv: archive/channels/<ch>/cards/<id> → channels/<ch>/cards/<id>
+    let from_rel = &located.rel_path; // archive/channels/<ch>/cards/<id>
+    let to_rel = format!("channels/{}/cards/{}", ch_name, card_id);
+    if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
+        return Response::error(format!("git mv failed: {}", e));
+    }
+
+    // 9. add + commit as author
+    let meta_to = format!("{}/card.meta.yaml", to_rel);
+    let thread_to = format!("{}/discussion.thread", to_rel);
+    let commit_msg = format!("card: unarchive {} in {} by @{}", card_id, channel, author);
+    if let Err(e) = state
+        .git_storage
+        .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
+    {
+        return Response::error(format!("unarchive_card commit failed: {}", e));
+    }
+
+    // 10. Push with retry
+    if let Err(e) = push_with_retry(&state, "unarchive_card").await {
+        return Response::error(e);
+    }
+
+    // 11. Emit event
+    let _ = state.event_tx.send(Event::CardUnarchived {
+        channel: ch_name.to_string(),
+        card_id: card_id.clone(),
+        author: author.clone(),
+    });
+
+    // 12. Info log
+    info!("card '{}' unarchived in channel '{}' by @{}", card_id, channel, author);
+
+    // 13. Return success
+    Response::success(serde_json::json!({
+        "channel": ch_name.to_string(),
+        "card_id": card_id,
+        "unarchived_by": author,
+    }))
+}
+
 pub async fn handle_list_cards(
     state: SharedState,
     channel: Option<String>,
@@ -1369,6 +1466,190 @@ mod tests {
             content.contains("status: doing"),
             "status 'doing' should be preserved after archive, got: {}",
             content
+        );
+    }
+
+    // ─── handle_unarchive_card tests ─────────────────────────────────────────
+
+    /// Create a card directly in the archive location (already git-committed),
+    /// ready for unarchive tests.
+    async fn create_archived_card_fixture(
+        state: &SharedState,
+        channel: &str,
+        card_id: &str,
+        created_by: &str,
+        assignee: Option<&str>,
+    ) {
+        let archive_card_dir = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(channel)
+            .join("cards")
+            .join(card_id);
+        std::fs::create_dir_all(&archive_card_dir).unwrap();
+        write_card_meta_full(
+            &archive_card_dir.join("card.meta.yaml"),
+            channel,
+            created_by,
+            assignee,
+            "todo",
+        );
+        std::fs::write(archive_card_dir.join("discussion.thread"), "").unwrap();
+
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&state.repo_root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap()
+        };
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", &format!("add archived card {}", card_id)]);
+    }
+
+    const UNARCHIVE_CARD_ID: &str = "20260102-120000-def";
+
+    #[tokio::test]
+    async fn test_unarchive_card_by_creator_success() {
+        let (_tmp, state) = setup_test_repo().await;
+        create_archived_card_fixture(&state, "dev", UNARCHIVE_CARD_ID, "alice", None).await;
+
+        let mut event_rx = state.event_tx.subscribe();
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "unarchive by creator should succeed: {:?}", resp.error);
+
+        // Active path should now exist with card.meta.yaml
+        let active_meta = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(UNARCHIVE_CARD_ID)
+            .join("card.meta.yaml");
+        assert!(active_meta.exists(), "card.meta.yaml should exist in active location");
+
+        // Archive path should be gone
+        let archive_dir = state
+            .repo_root
+            .join("archive/channels/dev/cards")
+            .join(UNARCHIVE_CARD_ID);
+        assert!(!archive_dir.exists(), "archived dir should be gone after unarchive");
+
+        // CardUnarchived event should be emitted
+        let event = event_rx.try_recv().expect("should have received an event");
+        match event {
+            crate::api::Event::CardUnarchived { channel, card_id, author } => {
+                assert_eq!(channel, "dev");
+                assert_eq!(card_id, UNARCHIVE_CARD_ID);
+                assert_eq!(author, "alice");
+            }
+            other => panic!("expected CardUnarchived, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_by_assignee_success() {
+        let (_tmp, state) = setup_test_repo().await;
+        {
+            let mut users = state.users.write().await;
+            users.push("lewis".to_string());
+        }
+        std::fs::write(
+            state.repo_root.join("users/lewis.meta.yaml"),
+            "display_name: Lewis\nrole: dev\nintroduction: hi\n",
+        )
+        .unwrap();
+
+        create_archived_card_fixture(&state, "dev", UNARCHIVE_CARD_ID, "alice", Some("lewis"))
+            .await;
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "lewis".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "unarchive by assignee should succeed: {:?}", resp.error);
+
+        let active_dir = state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(UNARCHIVE_CARD_ID);
+        assert!(active_dir.exists(), "active dir should exist after unarchive");
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejects_non_creator_non_assignee() {
+        let (_tmp, state) = setup_test_repo().await;
+        // card created by alice, no assignee; bob tries to unarchive
+        create_archived_card_fixture(&state, "dev", UNARCHIVE_CARD_ID, "alice", None).await;
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "bob".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "non-creator/non-assignee should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("only creator or assignee"),
+            "error should mention permission: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejects_not_archived() {
+        let (_tmp, state) = setup_test_repo().await;
+        // Place an active (non-archived) card
+        create_card_for_archive(&state, "dev", UNARCHIVE_CARD_ID, "alice", None, "todo").await;
+
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "unarchiving a non-archived card should fail");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("not archived"),
+            "error should mention 'not archived': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unarchive_card_rejects_unknown_card() {
+        let (_tmp, state) = setup_test_repo().await;
+        // No card setup at all
+        let resp = handle_unarchive_card(
+            state.clone(),
+            "dev".to_string(),
+            UNARCHIVE_CARD_ID.to_string(),
+            "alice".to_string(),
+        )
+        .await;
+        assert!(!resp.ok, "unknown card should be rejected");
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("not found"),
+            "error should mention 'not found': {}",
+            err
         );
     }
 }
