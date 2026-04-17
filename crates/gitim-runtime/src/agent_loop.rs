@@ -214,6 +214,12 @@ impl AgentLoop {
         let mut steering_check = tokio::time::interval(Duration::from_secs(5));
         steering_check.tick().await; // consume the immediate first tick
 
+        // Sliding window for [[RESET]] detection across streaming text chunks.
+        // The agent signals an intentional context reset by emitting "[[RESET]]" in its output.
+        // This is a private runtime protocol — silent, not surfaced to IM or the WebUI.
+        let mut text_tail = String::new();
+        let mut reset_requested = false;
+
         loop {
             tokio::select! {
                 event = session.events.recv() => {
@@ -222,6 +228,24 @@ impl AgentLoop {
                             match &event {
                                 gitim_agent_provider::Event::Text { content } => {
                                     tracing::debug!(text_len = content.len(), "agent text");
+                                    text_tail.push_str(content);
+                                    if text_tail.contains("[[RESET]]") {
+                                        info!(
+                                            handler = %self.handler,
+                                            "agent requested context reset"
+                                        );
+                                        session.cancel();
+                                        reset_requested = true;
+                                        break;
+                                    }
+                                    // Cap tail size: RESET tag is 9 bytes, 128 leaves ample margin
+                                    // for the tag to survive chunk boundaries without unbounded growth.
+                                    const TAIL_MAX: usize = 128;
+                                    if text_tail.len() > TAIL_MAX {
+                                        let cut = text_tail.len() - TAIL_MAX;
+                                        let safe = text_tail.floor_char_boundary(cut);
+                                        text_tail.drain(..safe);
+                                    }
                                 }
                                 gitim_agent_provider::Event::ToolUse { tool, input, .. } => {
                                     let snippet = summarize_tool_input(tool, input);
@@ -265,6 +289,21 @@ impl AgentLoop {
             .result
             .await
             .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
+
+        // Silent reset short-circuit: agent asked to reset its own context.
+        // Clear session_token so next cycle rebuilds the system prompt.
+        // Cursor is preserved — the messages in this cycle have been consumed.
+        // Intentionally skip status match + emit_activity: this is invisible to IM and UI.
+        if reset_requested {
+            info!(
+                handler = %self.handler,
+                duration_ms = exec_result.duration_ms,
+                "context reset complete, clearing session_token"
+            );
+            self.session_token = None;
+            self.save_state()?;
+            return Ok(true);
+        }
 
         let duration_s = exec_result.duration_ms as f64 / 1000.0;
         match exec_result.status {

@@ -26,6 +26,9 @@ pub trait Provider: Send + Sync {
     fn prompt_memory(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_memory(ctx)
     }
+    fn prompt_reset_protocol(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_reset_protocol(ctx)
+    }
     fn prompt_cold_start(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_cold_start(ctx)
     }
@@ -39,6 +42,7 @@ pub trait Provider: Send + Sync {
             self.prompt_cognitive_loop(ctx),
             self.prompt_collaboration(ctx),
             self.prompt_memory(ctx),
+            self.prompt_reset_protocol(ctx),
             self.prompt_cold_start(ctx),
             self.prompt_gitim_api(ctx),
         ]
