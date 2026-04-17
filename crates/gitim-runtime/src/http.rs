@@ -834,7 +834,7 @@ async fn agents_add(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<AgentAddRequest>,
 ) -> Json<serde_json::Value> {
-    let (workspace, already_exists) = {
+    let (workspace, human_repo, already_exists) = {
         let s = state.lock().unwrap();
         let ws = match &s.workspace {
             Some(p) => p.clone(),
@@ -845,14 +845,71 @@ async fn agents_add(
                 }));
             }
         };
+        let human = s.human_repo.clone();
         let exists = s.agents.contains_key(&req.handler);
-        (ws, exists)
+        (ws, human, exists)
     };
 
     if already_exists {
         return Json(serde_json::json!({
             "ok": false,
+            "error_code": "handler_conflict",
             "error": format!("agent already exists: {}", req.handler)
+        }));
+    }
+
+    // Read workspace config; treat a missing/legacy file as local mode so
+    // workspaces from before the github schema still work.
+    let workspace_config = WorkspaceConfig::read(&workspace).ok();
+    let git_provider = workspace_config
+        .as_ref()
+        .map(|c| c.git.provider)
+        .unwrap_or(GitProvider::Local);
+
+    // For github mode, refresh the human clone first so a concurrent remote
+    // registration of the same handler is visible before we decide to reject.
+    // Best-effort: network flakes degrade to the local file check rather than
+    // blocking new agent creation.
+    let human_dir = human_repo
+        .unwrap_or_else(|| workspace.join(".gitim-runtime").join("human"));
+    if git_provider == GitProvider::Github && human_dir.exists() {
+        let fetch = std::process::Command::new("git")
+            .args([
+                "-c", "http.lowSpeedLimit=1000",
+                "-c", "http.lowSpeedTime=10",
+                "fetch", "origin",
+            ])
+            .current_dir(&human_dir)
+            .output();
+        if let Ok(o) = &fetch {
+            if !o.status.success() {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(
+                    handler = %req.handler,
+                    stderr = %redacted_url(&stderr),
+                    "git fetch before add_agent failed; proceeding with local state",
+                );
+            }
+        } else if let Err(e) = &fetch {
+            tracing::warn!(
+                handler = %req.handler,
+                error = %e,
+                "git fetch before add_agent failed to spawn; proceeding with local state",
+            );
+        }
+    }
+
+    let meta_path = human_dir
+        .join("users")
+        .join(format!("{}.meta.yaml", req.handler));
+    if meta_path.exists() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": "handler_conflict",
+            "error": format!(
+                "handler @{} already registered in this workspace",
+                req.handler
+            )
         }));
     }
 
@@ -864,11 +921,63 @@ async fn agents_add(
         }));
     }
 
-    let bare_repo = workspace.join("repo.git");
+    let remote_url = match git_provider {
+        GitProvider::Local => workspace.join("repo.git").to_string_lossy().into_owned(),
+        GitProvider::Github => {
+            let cfg = match workspace_config.as_ref() {
+                Some(c) => c,
+                None => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": "config_missing",
+                        "error": "github mode requires workspace config with remote_url + token"
+                    }));
+                }
+            };
+            let remote = match cfg.git.remote_url.as_deref() {
+                Some(u) if !u.is_empty() => u,
+                _ => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": "missing_remote_url",
+                        "error": "workspace config lacks remote_url"
+                    }));
+                }
+            };
+            let token = match cfg.git.token.as_deref() {
+                Some(t) if !t.is_empty() => t,
+                _ => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": "missing_token",
+                        "error": "workspace config lacks token"
+                    }));
+                }
+            };
+            let (owner, repo_name) = match parse_github_url(remote) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": github_error_code(&e),
+                        "error": redacted_url(&e.to_string())
+                    }));
+                }
+            };
+            build_token_url(&owner, &repo_name, token)
+        }
+    };
+
+    tracing::info!(
+        handler = %req.handler,
+        remote = %redacted_url(&remote_url),
+        "provisioning agent",
+    );
+
     let config = AgentConfig {
         handler: req.handler.clone(),
         display_name: req.display_name.clone(),
-        remote_url: bare_repo.to_string_lossy().to_string(),
+        remote_url,
     };
 
     match provision_agent(&agents_dir, &config).await {
@@ -930,11 +1039,31 @@ async fn agents_add(
 
             Json(serde_json::json!({ "ok": true, "id": req.handler }))
         }
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": format!("provision_agent failed: {e}")
-        })),
+        Err(e) => {
+            cleanup_agent_dir(&workspace, &req.handler);
+            Json(serde_json::json!({
+                "ok": false,
+                "error": redacted_url(&format!("provision_agent failed: {e}"))
+            }))
+        }
     }
+}
+
+fn cleanup_agent_dir(workspace: &Path, handler: &str) {
+    let agent_dir = workspace.join(handler);
+    let pid_file = agent_dir.join(".gitim/run/gitim.pid");
+    if let Ok(content) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&agent_dir);
 }
 
 // -- /agents --
