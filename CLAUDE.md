@@ -83,6 +83,7 @@ CLI 完全委托 daemon 处理身份推断和仓库初始化：
 ## 约定
 - Handler：小写 a-z 0-9 连字符，1-39 字符，`system` 为保留字
 - DM 文件名：两个 handler 按字典序排列，`--` 连接
+- Plan / 需求 / 设计文档统一放 `docs/plans/<feature-slug>/`，不要散落在仓库根或新建 `plans/`
 
 ## 测试
 
