@@ -107,6 +107,10 @@ pub async fn cmd_read_card(
     match client.read_card(channel, card_id, limit, since).await {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             let meta = &d["meta"];
+            let archived = d["archived"].as_bool().unwrap_or(false);
+            if archived {
+                println!("[ARCHIVED]");
+            }
             println!(
                 "#{}/{}  [{}]  {}",
                 d["channel"].as_str().unwrap_or("?"),
