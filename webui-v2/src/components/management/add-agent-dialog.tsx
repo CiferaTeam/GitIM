@@ -14,10 +14,11 @@ import { toHandler, validateHandler } from "@/lib/client";
 import {
   PROVIDER_IDS,
   PROVIDERS,
+  type PreflightResult,
   type ProviderId,
 } from "@/lib/providers";
 import type { Agent } from "@/lib/types";
-import { Plus } from "lucide-react";
+import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -30,6 +31,8 @@ export function AddAgentDialog() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectResult, setDetectResult] = useState<PreflightResult | null>(null);
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
@@ -42,6 +45,41 @@ export function AddAgentDialog() {
     setSystemPrompt("");
     setEnvVars([]);
     setSubmitting(false);
+    setDetecting(false);
+    setDetectResult(null);
+  }
+
+  async function handleDetect() {
+    if (!provider || detecting) return;
+    setDetecting(true);
+    setDetectResult(null);
+    const res = await client.preflightProvider(provider as ProviderId);
+    if (res.ok && res.data) {
+      setDetectResult(res.data);
+    } else {
+      setDetectResult({
+        available: false,
+        provider: provider as string,
+        version: null,
+        model_used: null,
+        duration_ms: 0,
+        output_preview: null,
+        error: res.error ?? "Request failed",
+        error_kind: "other",
+      });
+    }
+    setDetecting(false);
+  }
+
+  function detectErrorMessage(result: PreflightResult): string {
+    switch (result.error_kind) {
+      case "not_installed":
+        return "CLI not found. Install claude/codex and retry.";
+      case "timeout":
+        return "Timed out.";
+      default:
+        return result.error ?? "Unknown error";
+    }
   }
 
   function handleOpenChange(next: boolean) {
@@ -56,7 +94,8 @@ export function AddAgentDialog() {
       validationError ||
       submitting ||
       !provider ||
-      !model
+      !model ||
+      !detectResult?.available
     )
       return;
 
@@ -110,6 +149,7 @@ export function AddAgentDialog() {
                 onChange={(e) => {
                   setProvider(e.target.value as ProviderId | "");
                   setModel("");
+                  setDetectResult(null);
                 }}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
@@ -120,6 +160,41 @@ export function AddAgentDialog() {
                   </option>
                 ))}
               </select>
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetect}
+                  disabled={!provider || detecting}
+                >
+                  {detecting ? (
+                    <>
+                      <Loader2 className="size-4 mr-1 animate-spin" />
+                      Detecting...
+                    </>
+                  ) : (
+                    "Detect"
+                  )}
+                </Button>
+                {detecting && (
+                  <span className="text-sm text-muted-foreground">
+                    Detecting...
+                  </span>
+                )}
+                {!detecting && detectResult?.available === true && (
+                  <span className="flex items-center gap-1 text-sm text-green-600">
+                    <CheckCircle2 className="size-4" />
+                    OK — {detectResult.duration_ms} ms
+                  </span>
+                )}
+                {!detecting && detectResult?.available === false && (
+                  <span className="flex items-center gap-1 text-sm text-red-600">
+                    <XCircle className="size-4" />
+                    {detectErrorMessage(detectResult)}
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="space-y-1.5">
@@ -244,7 +319,8 @@ export function AddAgentDialog() {
                   !!validationError ||
                   submitting ||
                   !provider ||
-                  !model
+                  !model ||
+                  !detectResult?.available
                 }
               >
                 Add
