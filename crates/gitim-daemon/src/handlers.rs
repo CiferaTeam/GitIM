@@ -804,9 +804,31 @@ async fn handle_get_thread(state: SharedState, channel: String, line_number: u64
         Err(e) => return Response::error(format!("parse error: {}", e)),
     };
 
+    // Walk `point_to` upward from the clicked line to find the true root
+    // (the topmost ancestor whose point_to == 0). Without this, clicking a
+    // reply mid-chain would show that reply as the thread's root and hide
+    // every earlier ancestor.
+    let by_line: std::collections::HashMap<u64, &_> = file
+        .entries
+        .iter()
+        .map(|e| (e.line_number(), e))
+        .collect();
+    let mut root_line = line_number;
+    let mut seen_up = std::collections::HashSet::new();
+    while let Some(entry) = by_line.get(&root_line) {
+        if !seen_up.insert(root_line) {
+            break; // cycle guard — malformed file
+        }
+        let parent = entry.point_to();
+        if parent == 0 || !by_line.contains_key(&parent) {
+            break;
+        }
+        root_line = parent;
+    }
+
     // Collect the root entry and all descendants (entries pointing to it, recursively)
     let mut thread_entries: Vec<serde_json::Value> = Vec::new();
-    let mut stack = vec![line_number];
+    let mut stack = vec![root_line];
     let mut visited = std::collections::HashSet::new();
 
     while let Some(target) = stack.pop() {
@@ -836,7 +858,7 @@ async fn handle_get_thread(state: SharedState, channel: String, line_number: u64
 
     Response::success(serde_json::json!({
         "channel": channel,
-        "root_line": line_number,
+        "root_line": root_line,
         "entries": thread_entries,
     }))
 }
