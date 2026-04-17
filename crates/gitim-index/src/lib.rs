@@ -41,6 +41,7 @@ pub struct SearchParams {
     pub current_user: Option<String>,
     pub limit: usize,
     pub offset: usize,
+    pub include_cards: bool,
 }
 
 /// 搜索结果中的单条消息
@@ -297,6 +298,50 @@ impl Index {
             }
         }
 
+        // 扫描 channels/<ch>/cards/<id>/discussion.thread
+        if channels_dir.exists() {
+            for ch_entry in std::fs::read_dir(&channels_dir).into_iter().flatten().flatten() {
+                if !ch_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let cards_dir = ch_entry.path().join("cards");
+                if !cards_dir.exists() {
+                    continue;
+                }
+                let channel_name = ch_entry.file_name().to_string_lossy().to_string();
+                for card_entry in std::fs::read_dir(&cards_dir).into_iter().flatten().flatten() {
+                    if !card_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let card_id = card_entry.file_name().to_string_lossy().to_string();
+                    let thread_path = card_entry.path().join("discussion.thread");
+                    if !thread_path.exists() {
+                        continue;
+                    }
+                    let content = match std::fs::read_to_string(&thread_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!("index rebuild: skip card {}/{}: {}", channel_name, card_id, e);
+                            continue;
+                        }
+                    };
+                    let parsed = match parse_thread(&content) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(
+                                "index rebuild: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let ident = format!("channels/{}/cards/{}", channel_name, card_id);
+                    Self::insert_messages(&tx, &ident, "card", &parsed.messages())?;
+                    total += parsed.messages().len();
+                }
+            }
+        }
+
         Self::set_commit_id(&tx, commit_id)?;
         tx.commit()?;
         Ok(total)
@@ -404,6 +449,50 @@ impl Index {
             }
         }
 
+        // 扫描 channels/<ch>/cards/<id>/discussion.thread
+        if channels_dir.exists() {
+            for ch_entry in std::fs::read_dir(&channels_dir).into_iter().flatten().flatten() {
+                if !ch_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let cards_dir = ch_entry.path().join("cards");
+                if !cards_dir.exists() {
+                    continue;
+                }
+                let channel_name = ch_entry.file_name().to_string_lossy().to_string();
+                for card_entry in std::fs::read_dir(&cards_dir).into_iter().flatten().flatten() {
+                    if !card_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let card_id = card_entry.file_name().to_string_lossy().to_string();
+                    let thread_path = card_entry.path().join("discussion.thread");
+                    if !thread_path.exists() {
+                        continue;
+                    }
+                    let content = match std::fs::read_to_string(&thread_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!("index reindex: skip card {}/{}: {}", channel_name, card_id, e);
+                            continue;
+                        }
+                    };
+                    let parsed = match parse_thread(&content) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(
+                                "index reindex: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let ident = format!("channels/{}/cards/{}", channel_name, card_id);
+                    Self::insert_messages(&tx, &ident, "card", &parsed.messages())?;
+                    total += parsed.messages().len();
+                }
+            }
+        }
+
         Self::set_commit_id(&tx, commit_id)?;
         tx.commit()?;
         Ok((conn, total))
@@ -453,14 +542,23 @@ impl Index {
             bind_values.push(Box::new(channel_type.clone()));
         }
 
-        // DM 可见性过滤
+        // Cards 默认过滤：除非显式 include_cards=true 或指定了 channel_type
+        if !params.include_cards && params.channel_type.is_none() {
+            conditions.push("m.channel_type != 'card'".to_string());
+        }
+
+        // DM 可见性过滤 (不适用于 card：卡片通过所属 channel 管理访问权限)
+        let skip_dm_filter = params.channel_type.as_deref() == Some("card");
         if let Some(ref current_user) = params.current_user {
-            let idx1 = bind_values.len() + 1;
-            conditions.push(format!(
-                "(m.channel_type = 'channel' OR (m.channel LIKE '%' || ?{} || '%'))",
-                idx1
-            ));
-            bind_values.push(Box::new(current_user.clone()));
+            if !skip_dm_filter {
+                let idx1 = bind_values.len() + 1;
+                let card_clause = if params.include_cards { " OR m.channel_type = 'card'" } else { "" };
+                conditions.push(format!(
+                    "(m.channel_type = 'channel'{} OR (m.channel LIKE '%' || ?{} || '%'))",
+                    card_clause, idx1
+                ));
+                bind_values.push(Box::new(current_user.clone()));
+            }
         }
 
         let where_clause = if conditions.is_empty() {
@@ -523,17 +621,33 @@ impl Index {
     }
 }
 
-/// 从 diff 文件路径解析出 channel_name 和 channel_type。
+/// 从 git diff 的文件路径解析 (channel_identifier, channel_type)。
+/// - "channels/<name>.thread" → (name, "channel")
+/// - "dm/<h1>--<h2>.thread" → ("<h1>--<h2>", "dm")
+/// - "channels/<ch>/cards/<id>/discussion.thread" → ("channels/<ch>/cards/<id>", "card")
 fn parse_diff_path(path_str: &str) -> Option<(String, &'static str)> {
-    if let Some(name) = path_str.strip_prefix("channels/") {
-        let name = name.strip_suffix(".thread")?;
-        Some((name.to_string(), "channel"))
-    } else if let Some(name) = path_str.strip_prefix("dm/") {
-        let name = name.strip_suffix(".thread")?;
-        Some((name.to_string(), "dm"))
-    } else {
-        None
+    if let Some(rest) = path_str.strip_prefix("channels/") {
+        // Plain channel: "channels/<name>.thread" with no nested slashes
+        if let Some(name) = rest.strip_suffix(".thread") {
+            if !name.contains('/') {
+                return Some((name.to_string(), "channel"));
+            }
+        }
+        // Card discussion: "channels/<ch>/cards/<id>/discussion.thread"
+        if let Some(card_rel) = rest.strip_suffix("/discussion.thread") {
+            let parts: Vec<&str> = card_rel.split('/').collect();
+            if parts.len() == 3 && parts[1] == "cards" {
+                let ident = format!("channels/{}/cards/{}", parts[0], parts[2]);
+                return Some((ident, "card"));
+            }
+        }
     }
+    if let Some(rest) = path_str.strip_prefix("dm/") {
+        if let Some(name) = rest.strip_suffix(".thread") {
+            return Some((name.to_string(), "dm"));
+        }
+    }
+    None
 }
 
 /// 转义 FTS5 查询中的特殊字符。将用户输入包裹在双引号中。
@@ -593,6 +707,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 2);
@@ -617,6 +732,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 2);
@@ -641,6 +757,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
@@ -666,6 +783,7 @@ mod tests {
             current_user: Some("bob".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
@@ -689,6 +807,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(result.is_ok());
     }
@@ -704,6 +823,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(matches!(result, Err(IndexError::EmptySearch)));
     }
@@ -765,6 +885,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         }).unwrap();
 
         assert_eq!(result.messages.len(), 1);
@@ -783,6 +904,33 @@ mod tests {
             Some(("alice--bob".to_string(), "dm"))
         );
         assert_eq!(parse_diff_path("users/alice.meta.yaml"), None);
+    }
+
+    #[test]
+    fn parse_diff_path_card() {
+        let result = parse_diff_path("channels/backend/cards/20260417-120000-abc/discussion.thread");
+        assert_eq!(
+            result,
+            Some(("channels/backend/cards/20260417-120000-abc".to_string(), "card"))
+        );
+    }
+
+    #[test]
+    fn parse_diff_path_channel_still_works() {
+        let result = parse_diff_path("channels/backend.thread");
+        assert_eq!(result, Some(("backend".to_string(), "channel")));
+    }
+
+    #[test]
+    fn parse_diff_path_dm_still_works() {
+        let result = parse_diff_path("dm/alice--bob.thread");
+        assert_eq!(result, Some(("alice--bob".to_string(), "dm")));
+    }
+
+    #[test]
+    fn parse_diff_path_unknown() {
+        let result = parse_diff_path("random/file.txt");
+        assert_eq!(result, None);
     }
 
     #[test]

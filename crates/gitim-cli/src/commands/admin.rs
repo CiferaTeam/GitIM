@@ -72,9 +72,10 @@ pub async fn cmd_search(
     channel_type: Option<&str>,
     limit: u64,
     offset: u64,
+    include_cards: bool,
 ) {
     match client
-        .search(query, author, channel, channel_type, Some(limit), Some(offset))
+        .search(query, author, channel, channel_type, Some(limit), Some(offset), include_cards)
         .await
     {
         Ok(resp) => {

@@ -6,43 +6,49 @@ use gitim_client::GitimClient;
 
 use crate::output::OutputMode;
 
-pub async fn cmd_create_card(
-    client: &GitimClient,
+fn print_or_exit(
+    resp: gitim_client::ApiResponse,
     mode: &OutputMode,
-    board: &str,
-    title: &str,
-    assignee: Option<&str>,
-    status: Option<&str>,
+    human_success: impl FnOnce(&serde_json::Value),
 ) {
-    match client.create_card(board, title, assignee, status).await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("创建失败: {msg}");
-                process::exit(1);
+    if !resp.ok {
+        eprintln!("Error: {}", resp.error.as_deref().unwrap_or("unknown"));
+        process::exit(1);
+    }
+    match mode {
+        OutputMode::Human => {
+            if let Some(d) = &resp.data {
+                human_success(d);
             }
-            match mode {
-                OutputMode::Human => {
-                    let card_id = resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("card_id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    println!("卡片 {card_id} 创建成功 ({board})");
-                }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
+        }
+        OutputMode::Json => {
+            let data = resp.data.unwrap_or(serde_json::Value::Null);
+            match serde_json::to_string(&data) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("Error: failed to format output: {e}");
+                    process::exit(1);
                 }
             }
         }
+    }
+}
+
+pub async fn cmd_create_card(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    title: &str,
+    labels: Option<&[String]>,
+    assignee: Option<&str>,
+    status: Option<&str>,
+) {
+    match client.create_card(channel, title, labels, assignee, status).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            let id = d["card_id"].as_str().unwrap_or("?");
+            let ch = d["channel"].as_str().unwrap_or("?");
+            println!("创建卡片 #{}/{}", ch, id);
+        }),
         Err(e) => {
             eprintln!("创建失败: {e}");
             process::exit(1);
@@ -53,56 +59,35 @@ pub async fn cmd_create_card(
 pub async fn cmd_list_cards(
     client: &GitimClient,
     mode: &OutputMode,
-    board: &str,
+    channel: Option<&str>,
+    labels: Option<&[String]>,
     status: Option<&str>,
+    assignee: Option<&str>,
 ) {
-    match client.list_cards(board, status).await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("Error: {msg}");
-                process::exit(1);
-            }
-            match mode {
-                OutputMode::Human => {
-                    let cards = resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("cards"))
-                        .and_then(|c| c.as_array());
-
-                    match cards {
-                        Some(arr) if !arr.is_empty() => {
-                            for c in arr {
-                                let st =
-                                    c.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                                let id =
-                                    c.get("card_id").and_then(|v| v.as_str()).unwrap_or("?");
-                                let title =
-                                    c.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                                let assignee =
-                                    c.get("assignee").and_then(|v| v.as_str());
-                                match assignee {
-                                    Some(a) => println!("[{st}] {id}  {title}  @{a}"),
-                                    None => println!("[{st}] {id}  {title}"),
-                                }
-                            }
-                        }
-                        _ => println!("没有卡片"),
+    match client.list_cards(channel, labels, status, assignee).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            let cards = d.get("cards").and_then(|v| v.as_array());
+            match cards {
+                Some(arr) if !arr.is_empty() => {
+                    for c in arr {
+                        let ch = c["channel"].as_str().unwrap_or("?");
+                        let id = c["card_id"].as_str().unwrap_or("?");
+                        let t = c["title"].as_str().unwrap_or("");
+                        let s = c["status"].as_str().unwrap_or("");
+                        let a = c["assignee"].as_str().unwrap_or("-");
+                        let ls: Vec<&str> = c["labels"]
+                            .as_array()
+                            .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
+                            .unwrap_or_default();
+                        println!(
+                            "#{ch}/{id}  [{s}]  {t}  @{a}  {}",
+                            if ls.is_empty() { String::new() } else { format!("[{}]", ls.join(", ")) }
+                        );
                     }
                 }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
-                }
+                _ => println!("没有卡片"),
             }
-        }
+        }),
         Err(e) => {
             eprintln!("Error: {e}");
             process::exit(1);
@@ -113,70 +98,30 @@ pub async fn cmd_list_cards(
 pub async fn cmd_read_card(
     client: &GitimClient,
     mode: &OutputMode,
-    board: &str,
+    channel: &str,
     card_id: &str,
     limit: Option<u64>,
     since: Option<u64>,
 ) {
-    match client.read_card(board, card_id, limit, since).await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("Error: {msg}");
-                process::exit(1);
-            }
-            match mode {
-                OutputMode::Human => {
-                    let entries = resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("entries"))
-                        .and_then(|e| e.as_array());
-
-                    if let Some(arr) = entries {
-                        for entry in arr {
-                            let line = entry
-                                .get("line_number")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let author = entry
-                                .get("author")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let ts = entry
-                                .get("timestamp")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let point_to = entry
-                                .get("point_to")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let body = entry
-                                .get("body")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-
-                            if point_to > 0 {
-                                println!("[L{line}] @{author} {ts} (re: L{point_to})");
-                            } else {
-                                println!("[L{line}] @{author} {ts}");
-                            }
-                            println!("  {body}");
-                        }
-                    }
-                }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
+    match client.read_card(channel, card_id, limit, since).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            let meta = &d["meta"];
+            println!(
+                "#{}/{}  [{}]  {}",
+                d["channel"].as_str().unwrap_or("?"),
+                d["card_id"].as_str().unwrap_or("?"),
+                meta["status"].as_str().unwrap_or(""),
+                meta["title"].as_str().unwrap_or(""),
+            );
+            if let Some(entries) = d["entries"].as_array() {
+                for e in entries {
+                    let ln = e["line_number"].as_u64().unwrap_or(0);
+                    let author = e["author"].as_str().unwrap_or("?");
+                    let body = e["body"].as_str().unwrap_or("");
+                    println!("L{:06} @{}: {}", ln, author, body);
                 }
             }
-        }
+        }),
         Err(e) => {
             eprintln!("Error: {e}");
             process::exit(1);
@@ -187,35 +132,20 @@ pub async fn cmd_read_card(
 pub async fn cmd_send_card_message(
     client: &GitimClient,
     mode: &OutputMode,
-    board: &str,
+    channel: &str,
     card_id: &str,
     body: &str,
     reply_to: Option<u64>,
 ) {
-    match client
-        .send_card_message(board, card_id, body, reply_to)
-        .await
-    {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("Error: {msg}");
-                process::exit(1);
-            }
-            match mode {
-                OutputMode::Human => println!("Message sent."),
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
+    match client.send_card_message(channel, card_id, body, reply_to).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            println!(
+                "L{:06} -> #{}/{}",
+                d["line_number"].as_u64().unwrap_or(0),
+                d["channel"].as_str().unwrap_or("?"),
+                d["card_id"].as_str().unwrap_or("?"),
+            );
+        }),
         Err(e) => {
             eprintln!("Error: {e}");
             process::exit(1);
@@ -226,38 +156,24 @@ pub async fn cmd_send_card_message(
 pub async fn cmd_update_card(
     client: &GitimClient,
     mode: &OutputMode,
-    board: &str,
+    channel: &str,
     card_id: &str,
     status: Option<&str>,
+    labels: Option<&[String]>,
     assignee: Option<&str>,
 ) {
-    match client.update_card(board, card_id, status, assignee).await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("更新失败: {msg}");
-                process::exit(1);
-            }
-            match mode {
-                OutputMode::Human => {
-                    let st = status.unwrap_or("none");
-                    let asg = assignee.unwrap_or("none");
-                    println!("卡片 {card_id} 已更新: status={st}, assignee={asg}");
-                }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
+    match client.update_card(channel, card_id, status, labels, assignee).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            println!(
+                "更新 #{}/{}  status={}  assignee={}",
+                d["channel"].as_str().unwrap_or("?"),
+                d["card_id"].as_str().unwrap_or("?"),
+                d["status"].as_str().unwrap_or(""),
+                d["assignee"].as_str().unwrap_or("-"),
+            );
+        }),
         Err(e) => {
-            eprintln!("更新失败: {e}");
+            eprintln!("Error: {e}");
             process::exit(1);
         }
     }

@@ -117,6 +117,9 @@ enum Commands {
         /// Offset for pagination
         #[arg(long, default_value = "0")]
         offset: u64,
+        /// Include card discussion messages in results
+        #[arg(long)]
+        include_cards: bool,
     },
 
     /// Rebuild the search index
@@ -166,12 +169,6 @@ enum Commands {
         yes: bool,
     },
 
-    /// Board (kanban) commands
-    Board {
-        #[command(subcommand)]
-        command: BoardCommands,
-    },
-
     /// Card commands
     Card {
         #[command(subcommand)]
@@ -215,52 +212,44 @@ enum DmCommands {
 }
 
 #[derive(Subcommand)]
-enum BoardCommands {
-    /// Create a new board
-    Create {
-        /// Board name
-        name: String,
-        /// Display name
-        #[arg(long)]
-        display_name: Option<String>,
-        /// Comma-separated list of statuses
-        #[arg(long)]
-        statuses: Option<String>,
-    },
-
-    /// List all boards
-    Ls,
-}
-
-#[derive(Subcommand)]
 enum CardCommands {
-    /// Create a new card
+    /// Create a new card in a channel
     Create {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card title
         title: String,
+        /// Labels (repeatable)
+        #[arg(short, long)]
+        label: Vec<String>,
         /// Assignee handler
         #[arg(long)]
         assignee: Option<String>,
-        /// Initial status
+        /// Initial status (todo/doing/done)
         #[arg(long)]
         status: Option<String>,
     },
 
-    /// List cards in a board
+    /// List cards with optional filters
     Ls {
-        /// Board name
-        board: String,
+        /// Filter by channel
+        #[arg(short, long)]
+        channel: Option<String>,
+        /// Filter by label (repeatable; all must match)
+        #[arg(short, long)]
+        label: Vec<String>,
         /// Filter by status
         #[arg(long)]
         status: Option<String>,
+        /// Filter by assignee handler
+        #[arg(long)]
+        assignee: Option<String>,
     },
 
     /// Read card discussion
     Read {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// Maximum number of entries
@@ -271,10 +260,10 @@ enum CardCommands {
         since: Option<u64>,
     },
 
-    /// Send a message to a card
-    Send {
-        /// Board name
-        board: String,
+    /// Comment on a card
+    Comment {
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// Message body
@@ -284,15 +273,21 @@ enum CardCommands {
         reply_to: Option<u64>,
     },
 
-    /// Update card status or assignee
+    /// Update card status / labels / assignee
     Update {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// New status
         #[arg(long)]
         status: Option<String>,
+        /// Replace labels (repeatable)
+        #[arg(short, long)]
+        label: Vec<String>,
+        /// Clear labels (if set, ignore --label)
+        #[arg(long)]
+        label_clear: bool,
         /// New assignee handler
         #[arg(long)]
         assignee: Option<String>,
@@ -409,6 +404,7 @@ async fn main() {
             channel_type,
             limit,
             offset,
+            include_cards,
         } => {
             commands::admin::cmd_search(
                 &client,
@@ -419,6 +415,7 @@ async fn main() {
                 channel_type.as_deref(),
                 limit,
                 offset,
+                include_cards,
             )
             .await
         }
@@ -458,81 +455,75 @@ async fn main() {
             }
             DmCommands::List => commands::dm::cmd_dm_list(&mode),
         },
-        Commands::Board { command } => match command {
-            BoardCommands::Create {
-                name,
-                display_name,
-                statuses,
-            } => {
-                let status_vec: Option<Vec<String>> = statuses
-                    .map(|s| s.split(',').map(|s| s.trim().to_string()).collect());
-                commands::board::cmd_create_board(
-                    &client,
-                    &mode,
-                    &name,
-                    display_name.as_deref(),
-                    status_vec.as_deref(),
-                )
-                .await
-            }
-            BoardCommands::Ls => commands::board::cmd_list_boards(&client, &mode).await,
-        },
         Commands::Card { command } => match command {
             CardCommands::Create {
-                board,
+                channel,
                 title,
+                label,
                 assignee,
                 status,
             } => {
                 commands::card::cmd_create_card(
-                    &client,
-                    &mode,
-                    &board,
-                    &title,
+                    &client, &mode, &channel, &title,
+                    if label.is_empty() { None } else { Some(&label) },
                     assignee.as_deref(),
                     status.as_deref(),
                 )
                 .await
             }
-            CardCommands::Ls { board, status } => {
-                commands::card::cmd_list_cards(&client, &mode, &board, status.as_deref()).await
+            CardCommands::Ls {
+                channel,
+                label,
+                status,
+                assignee,
+            } => {
+                commands::card::cmd_list_cards(
+                    &client, &mode,
+                    channel.as_deref(),
+                    if label.is_empty() { None } else { Some(&label) },
+                    status.as_deref(),
+                    assignee.as_deref(),
+                )
+                .await
             }
             CardCommands::Read {
-                board,
+                channel,
                 card_id,
                 limit,
                 since,
             } => {
-                commands::card::cmd_read_card(&client, &mode, &board, &card_id, limit, since).await
+                commands::card::cmd_read_card(&client, &mode, &channel, &card_id, limit, since).await
             }
-            CardCommands::Send {
-                board,
+            CardCommands::Comment {
+                channel,
                 card_id,
                 body,
                 reply_to,
             } => {
                 commands::card::cmd_send_card_message(
-                    &client,
-                    &mode,
-                    &board,
-                    &card_id,
-                    &body,
-                    reply_to,
+                    &client, &mode, &channel, &card_id, &body, reply_to,
                 )
                 .await
             }
             CardCommands::Update {
-                board,
+                channel,
                 card_id,
                 status,
+                label,
+                label_clear,
                 assignee,
             } => {
+                let labels_param: Option<Vec<String>> = if label_clear {
+                    Some(Vec::new())
+                } else if !label.is_empty() {
+                    Some(label)
+                } else {
+                    None
+                };
                 commands::card::cmd_update_card(
-                    &client,
-                    &mode,
-                    &board,
-                    &card_id,
+                    &client, &mode, &channel, &card_id,
                     status.as_deref(),
+                    labels_param.as_deref(),
                     assignee.as_deref(),
                 )
                 .await

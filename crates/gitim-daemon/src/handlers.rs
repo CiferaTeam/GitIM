@@ -56,7 +56,6 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
                 | Request::ArchiveChannel { .. }
-                | Request::CreateBoard { .. }
                 | Request::CreateCard { .. }
                 | Request::SendCardMessage { .. }
                 | Request::UpdateCard { .. }
@@ -155,7 +154,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             channel_type,
             limit,
             offset,
-        } => handle_search(state, query, author, channel, channel_type, limit, offset).await,
+            include_cards,
+        } => handle_search(state, query, author, channel, channel_type, limit, offset, include_cards).await,
         Request::Reindex => handle_reindex(state).await,
         Request::ArchiveChannel { channel, author } => {
             let resolved_author = match resolve_author(author, &state).await {
@@ -165,28 +165,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_archive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => handle_list_archived_channels(state).await,
-        Request::CreateBoard {
-            name,
-            display_name,
-            statuses,
-            author,
-        } => {
-            let resolved_author = match resolve_author(author, &state).await {
-                Ok(a) => a,
-                Err(r) => return r,
-            };
-            crate::board_handlers::handle_create_board(
-                state,
-                name,
-                display_name,
-                statuses,
-                resolved_author,
-            )
-            .await
-        }
         Request::CreateCard {
-            board,
+            channel,
             title,
+            labels,
             assignee,
             status,
             author,
@@ -195,28 +177,22 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            crate::board_handlers::handle_create_card(
-                state,
-                board,
-                title,
-                assignee,
-                status,
-                resolved_author,
+            crate::card_handlers::handle_create_card(
+                state, channel, title, labels, assignee, status, resolved_author,
             )
             .await
         }
-        Request::ListBoards => crate::board_handlers::handle_list_boards(state).await,
-        Request::ListCards { board, status } => {
-            crate::board_handlers::handle_list_cards(state, board, status).await
+        Request::ListCards { channel, labels, status, assignee } => {
+            crate::card_handlers::handle_list_cards(state, channel, labels, status, assignee).await
         }
         Request::ReadCard {
-            board,
+            channel,
             card_id,
             limit,
             since,
-        } => crate::board_handlers::handle_read_card(state, board, card_id, limit, since).await,
+        } => crate::card_handlers::handle_read_card(state, channel, card_id, limit, since).await,
         Request::SendCardMessage {
-            board,
+            channel,
             card_id,
             body,
             reply_to,
@@ -226,20 +202,16 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            crate::board_handlers::handle_send_card_message(
-                state,
-                board,
-                card_id,
-                body,
-                reply_to,
-                resolved_author,
+            crate::card_handlers::handle_send_card_message(
+                state, channel, card_id, body, reply_to, resolved_author,
             )
             .await
         }
         Request::UpdateCard {
-            board,
+            channel,
             card_id,
             status,
+            labels,
             assignee,
             author,
         } => {
@@ -247,13 +219,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            crate::board_handlers::handle_update_card(
-                state,
-                board,
-                card_id,
-                status,
-                assignee,
-                resolved_author,
+            crate::card_handlers::handle_update_card(
+                state, channel, card_id, status, labels, assignee, resolved_author,
             )
             .await
         }
@@ -2752,6 +2719,7 @@ async fn handle_search(
     channel_type: Option<String>,
     limit: usize,
     offset: usize,
+    include_cards: bool,
 ) -> Response {
     let current_user = state.current_user.read().await.clone();
     let index = {
@@ -2770,6 +2738,7 @@ async fn handle_search(
         current_user,
         limit,
         offset,
+        include_cards,
     };
 
     match tokio::task::spawn_blocking(move || index.search(params)).await {

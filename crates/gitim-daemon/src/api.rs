@@ -29,17 +29,24 @@ pub enum Event {
 
     #[serde(rename = "card_created")]
     CardCreated {
-        board: String,
+        channel: String,
         card_id: String,
     },
 
     #[serde(rename = "card_status_changed")]
     CardStatusChanged {
-        board: String,
+        channel: String,
         card_id: String,
         old_status: String,
         new_status: String,
         author: String,
+    },
+
+    #[serde(rename = "card_message_appended")]
+    CardMessageAppended {
+        channel: String,
+        card_id: String,
+        line_numbers: Vec<u64>,
     },
 }
 
@@ -138,6 +145,8 @@ pub enum Request {
         limit: usize,
         #[serde(default)]
         offset: usize,
+        #[serde(default)]
+        include_cards: bool,
     },
     #[serde(rename = "reindex")]
     Reindex,
@@ -149,20 +158,12 @@ pub enum Request {
     },
     #[serde(rename = "archived_channels")]
     ListArchivedChannels,
-    #[serde(rename = "create_board")]
-    CreateBoard {
-        name: String,
-        #[serde(default)]
-        display_name: Option<String>,
-        #[serde(default)]
-        statuses: Option<Vec<String>>,
-        #[serde(default)]
-        author: Option<String>,
-    },
     #[serde(rename = "create_card")]
     CreateCard {
-        board: String,
+        channel: String,
         title: String,
+        #[serde(default)]
+        labels: Option<Vec<String>>,
         #[serde(default)]
         assignee: Option<String>,
         #[serde(default)]
@@ -170,17 +171,20 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
-    #[serde(rename = "list_boards")]
-    ListBoards,
     #[serde(rename = "list_cards")]
     ListCards {
-        board: String,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        labels: Option<Vec<String>>,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        assignee: Option<String>,
     },
     #[serde(rename = "read_card")]
     ReadCard {
-        board: String,
+        channel: String,
         card_id: String,
         #[serde(default)]
         limit: Option<usize>,
@@ -189,7 +193,7 @@ pub enum Request {
     },
     #[serde(rename = "send_card_message")]
     SendCardMessage {
-        board: String,
+        channel: String,
         card_id: String,
         body: String,
         #[serde(default)]
@@ -199,10 +203,12 @@ pub enum Request {
     },
     #[serde(rename = "update_card")]
     UpdateCard {
-        board: String,
+        channel: String,
         card_id: String,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        labels: Option<Vec<String>>,
         #[serde(default)]
         assignee: Option<String>,
         #[serde(default)]

@@ -45,6 +45,7 @@ fn test_full_rebuild_then_incremental_append() {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
     assert_eq!(result.messages.len(), 1);
@@ -70,6 +71,7 @@ fn test_full_rebuild_then_incremental_append() {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
     assert_eq!(result.messages.len(), 2); // alice + charlie
@@ -115,6 +117,7 @@ fn test_dm_visibility_across_channels() {
             current_user: Some("bob".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
 
@@ -165,6 +168,7 @@ fn test_reindex_from_scratch() {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
     assert_eq!(result.messages.len(), 1);
@@ -199,6 +203,7 @@ fn test_pagination() {
             current_user: Some("alice".to_string()),
             limit: 3,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
     assert_eq!(result.messages.len(), 3);
@@ -214,6 +219,7 @@ fn test_pagination() {
             current_user: Some("alice".to_string()),
             limit: 3,
             offset: 3,
+            include_cards: false,
         })
         .unwrap();
     assert_eq!(result2.messages.len(), 3);
@@ -246,9 +252,127 @@ fn test_channel_filter() {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         })
         .unwrap();
 
     assert_eq!(result.messages.len(), 1);
     assert_eq!(result.messages[0].channel, "ops");
+}
+
+#[test]
+fn search_excludes_cards_by_default() {
+    let index = gitim_index::Index::open_in_memory().unwrap();
+
+    let mut diff = HashMap::new();
+    diff.insert(
+        "channels/foo.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120000Z", "channel msg 1"),
+            make_msg("alice", 2, "20260417T120001Z", "channel msg 2"),
+        ]
+        .join("\n"),
+    );
+    diff.insert(
+        "channels/foo/cards/xyz/discussion.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120002Z", "card msg 1"),
+            make_msg("alice", 2, "20260417T120003Z", "card msg 2"),
+        ]
+        .join("\n"),
+    );
+    index.append_from_diff(&diff, "commit-test-1").unwrap();
+
+    let result = index
+        .search(gitim_index::SearchParams {
+            query: Some("msg".to_string()),
+            author: None,
+            channel: None,
+            channel_type: None,
+            current_user: None,
+            limit: 50,
+            offset: 0,
+            include_cards: false,
+        })
+        .unwrap();
+    assert_eq!(result.total, 2, "cards should be excluded when include_cards=false");
+}
+
+#[test]
+fn search_includes_cards_when_flag_set() {
+    let index = gitim_index::Index::open_in_memory().unwrap();
+
+    let mut diff = HashMap::new();
+    diff.insert(
+        "channels/foo.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120000Z", "channel msg 1"),
+            make_msg("alice", 2, "20260417T120001Z", "channel msg 2"),
+        ]
+        .join("\n"),
+    );
+    diff.insert(
+        "channels/foo/cards/xyz/discussion.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120002Z", "card msg 1"),
+            make_msg("alice", 2, "20260417T120003Z", "card msg 2"),
+        ]
+        .join("\n"),
+    );
+    index.append_from_diff(&diff, "commit-test-2").unwrap();
+
+    let result = index
+        .search(gitim_index::SearchParams {
+            query: Some("msg".to_string()),
+            author: None,
+            channel: None,
+            channel_type: None,
+            current_user: None,
+            limit: 50,
+            offset: 0,
+            include_cards: true,
+        })
+        .unwrap();
+    assert_eq!(result.total, 4, "all 4 messages (channel + card) should be returned when include_cards=true");
+}
+
+#[test]
+fn search_with_channel_type_card_and_current_user() {
+    let index = gitim_index::Index::open_in_memory().unwrap();
+
+    let mut diff = HashMap::new();
+    diff.insert(
+        "channels/foo.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120000Z", "channel msg 1"),
+            make_msg("alice", 2, "20260417T120001Z", "channel msg 2"),
+        ]
+        .join("\n"),
+    );
+    diff.insert(
+        "channels/foo/cards/xyz/discussion.thread".to_string(),
+        [
+            make_msg("alice", 1, "20260417T120002Z", "card msg 1"),
+            make_msg("alice", 2, "20260417T120003Z", "card msg 2"),
+        ]
+        .join("\n"),
+    );
+    index.append_from_diff(&diff, "commit-test-3").unwrap();
+
+    let result = index
+        .search(gitim_index::SearchParams {
+            query: Some("msg".to_string()),
+            author: None,
+            channel: None,
+            channel_type: Some("card".to_string()),
+            current_user: Some("alice".to_string()),
+            limit: 50,
+            offset: 0,
+            include_cards: true,
+        })
+        .unwrap();
+    assert_eq!(
+        result.total, 2,
+        "channel_type=card + current_user should return card messages, not zero (DM filter must not apply)"
+    );
 }
