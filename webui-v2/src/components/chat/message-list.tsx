@@ -34,11 +34,11 @@ export function MessageList({
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
-  // O(1) reply target lookup
+  // O(1) reply target lookup — only real messages, never events (events have no body)
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const m of messages) {
-      if (m.line_number > 0) map.set(m.line_number, m);
+      if (m.line_number > 0 && m.type !== "event") map.set(m.line_number, m);
     }
     return map;
   }, [messages]);
