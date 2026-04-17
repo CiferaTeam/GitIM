@@ -501,8 +501,10 @@ async fn im_thread(
 struct AgentAddRequest {
     handler: String,
     display_name: String,
-    #[serde(default)]
-    provider: Option<String>,
+    // `provider` is required. Omitting it triggers serde's "missing field"
+    // error, which axum's Json extractor reports as a 4xx before the handler
+    // body runs — the WebUI can no longer silently fall back to Claude.
+    provider: String,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -514,7 +516,27 @@ struct AgentAddRequest {
 async fn agents_add(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<AgentAddRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Provider whitelist runs before workspace/state checks so invalid input
+    // is rejected even when the runtime isn't fully initialised — and so the
+    // router-level test can exercise this branch without provisioning.
+    match req.provider.as_str() {
+        "claude" | "codex" => {}
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("unsupported provider: {other}"),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let (workspace, already_exists) = {
         let s = state.lock().unwrap();
         let ws = match &s.workspace {
@@ -523,7 +545,8 @@ async fn agents_add(
                 return Json(serde_json::json!({
                     "ok": false,
                     "error": "workspace not set"
-                }));
+                }))
+                .into_response();
             }
         };
         let exists = s.agents.contains_key(&req.handler);
@@ -534,7 +557,8 @@ async fn agents_add(
         return Json(serde_json::json!({
             "ok": false,
             "error": format!("agent already exists: {}", req.handler)
-        }));
+        }))
+        .into_response();
     }
 
     let agents_dir = workspace.clone();
@@ -542,7 +566,8 @@ async fn agents_add(
         return Json(serde_json::json!({
             "ok": false,
             "error": format!("failed to create agents dir: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     let bare_repo = workspace.join("repo.git");
@@ -561,7 +586,8 @@ async fn agents_add(
                     return Json(serde_json::json!({
                         "ok": true,
                         "id": req.handler,
-                    }));
+                    }))
+                    .into_response();
                 }
             }
 
@@ -569,9 +595,7 @@ async fn agents_add(
             let me_path = handle.repo_root.join(".gitim/me.json");
             if let Ok(content) = std::fs::read_to_string(&me_path) {
                 if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(provider) = &req.provider {
-                        me["provider"] = serde_json::Value::String(provider.clone());
-                    }
+                    me["provider"] = serde_json::Value::String(req.provider.clone());
                     if let Some(model) = &req.model {
                         me["model"] = serde_json::Value::String(model.clone());
                     }
@@ -593,7 +617,10 @@ async fn agents_add(
                 last_activity: None,
                 messages_processed: 0,
                 repo_path: handle.repo_root.display().to_string(),
-                provider: req.provider.clone(),
+                // AgentInfo.provider stays Option<String> for back-compat with
+                // old me.json files recovered at startup; new agents always
+                // get Some(req.provider).
+                provider: Some(req.provider.clone()),
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
@@ -609,12 +636,13 @@ async fn agents_add(
                 tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
             }
 
-            Json(serde_json::json!({ "ok": true, "id": req.handler }))
+            Json(serde_json::json!({ "ok": true, "id": req.handler })).into_response()
         }
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "error": format!("provision_agent failed: {e}")
-        })),
+        }))
+        .into_response(),
     }
 }
 

@@ -138,3 +138,68 @@ async fn test_preflight_codex_returns_result_shape() {
         "body: {body}",
     );
 }
+
+// -- /agents/add provider-field guardrails --
+//
+// These tests rely on the fact that provider validation runs *before* any
+// workspace or state check — so they don't need a provisioned workspace or
+// human daemon. The happy-path "valid provider succeeds" case requires a real
+// workspace + human daemon and belongs in E2E (Task 16).
+
+fn agents_add_request(body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .uri("/agents/add")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_agents_add_missing_provider_returns_400() {
+    let (router, _state) = create_router();
+
+    // Body deliberately omits `provider`. serde's "missing field" error surfaces
+    // as a 4xx from axum's Json extractor — we accept any 4xx to stay resilient
+    // to axum version drift (some versions use 400, others 422).
+    let response = router
+        .oneshot(agents_add_request(serde_json::json!({
+            "handler": "bot",
+            "display_name": "Bot",
+        })))
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_client_error(),
+        "expected 4xx for missing provider, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_agents_add_unsupported_provider_returns_400() {
+    let (router, _state) = create_router();
+
+    let response = router
+        .oneshot(agents_add_request(serde_json::json!({
+            "handler": "bot",
+            "display_name": "Bot",
+            "provider": "gemini",
+        })))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_to_json(response).await;
+    assert_eq!(body["ok"], serde_json::Value::Bool(false));
+    let error = body["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("unsupported provider"),
+        "error should mention 'unsupported provider', got: {error}"
+    );
+    assert!(
+        error.contains("gemini"),
+        "error should echo the rejected provider name, got: {error}"
+    );
+}
