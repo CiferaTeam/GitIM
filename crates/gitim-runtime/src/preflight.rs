@@ -384,8 +384,11 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
     }
 }
 
-/// Run a real-hello preflight against the user's `claude` CLI on PATH with a
-/// 60s timeout. Called by the `/preflight/claude` HTTP endpoint.
+/// Run a real-hello preflight against the default `claude` binary.
+///
+/// Spawns `claude --print` with minimal-context flags, sends a fixed prompt,
+/// and returns a classified [`PreflightResult`]. Used by the HTTP preflight
+/// route once Task 5 wires it up.
 pub async fn preflight_claude() -> PreflightResult {
     preflight_claude_with("claude", Duration::from_secs(60)).await
 }

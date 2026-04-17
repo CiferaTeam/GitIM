@@ -17,12 +17,12 @@ fn fixture(name: &str) -> PathBuf {
 
 /// Resolve `/bin/false` → `/usr/bin/false` fallback for macOS, where
 /// `/bin/false` doesn't exist but `/usr/bin/false` does.
-fn resolve_stdbin(name: &str) -> &'static str {
+fn resolve_stdbin(name: &str) -> String {
     let a = format!("/bin/{name}");
     if std::path::Path::new(&a).is_file() {
-        Box::leak(a.into_boxed_str())
+        a
     } else {
-        Box::leak(format!("/usr/bin/{name}").into_boxed_str())
+        format!("/usr/bin/{name}")
     }
 }
 
@@ -45,7 +45,7 @@ async fn test_preflight_claude_exit_nonzero() {
     // `false` exits 1 immediately — should land in Other (either via
     // non-zero exit or parse failure, both are Other).
     let result =
-        preflight_claude_with(resolve_stdbin("false"), Duration::from_secs(5)).await;
+        preflight_claude_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -57,7 +57,7 @@ async fn test_preflight_claude_empty_output() {
     // `true` exits 0 with empty stdout — should land in Other via
     // parse/empty branch.
     let result =
-        preflight_claude_with(resolve_stdbin("true"), Duration::from_secs(5)).await;
+        preflight_claude_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
