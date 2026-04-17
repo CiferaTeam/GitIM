@@ -1,3 +1,7 @@
+//! Scrub `user:pat@` credentials from HTTPS URLs in arbitrary text for log safety.
+//! Assumes RFC 3986 percent-encoded credentials (git's default); a literal `@` in
+//! the password would leak the suffix.
+
 use regex::Regex;
 use std::sync::LazyLock;
 
