@@ -54,10 +54,10 @@ pub struct CardMeta {
     pub updated_at: String,
 }
 
-pub const MAX_LABELS: usize = 10;
-pub const MAX_LABEL_LEN: usize = 32;
+pub(crate) const MAX_LABELS: usize = 10;
+pub(crate) const MAX_LABEL_LEN: usize = 32;
 
-pub fn validate_label(label: &str) -> Result<(), CardError> {
+pub(crate) fn validate_label(label: &str) -> Result<(), CardError> {
     if label.is_empty() || label.len() > MAX_LABEL_LEN {
         return Err(CardError::LabelLengthOutOfRange(label.len(), MAX_LABEL_LEN));
     }
