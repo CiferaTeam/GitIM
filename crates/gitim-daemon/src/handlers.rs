@@ -224,6 +224,12 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             )
             .await
         }
+        // TODO(Task 7): wire to crate::card_handlers::handle_archive_card once implemented
+        Request::ArchiveCard { .. } => Response::error("archive_card not yet implemented"),
+        // TODO(Task 7): wire to crate::card_handlers::handle_unarchive_card once implemented
+        Request::UnarchiveCard { .. } => Response::error("unarchive_card not yet implemented"),
+        // TODO(Task 7): wire to crate::card_handlers::handle_list_archived_cards once implemented
+        Request::ListArchivedCards { .. } => Response::error("list_archived_cards not yet implemented"),
     }
 }
 
