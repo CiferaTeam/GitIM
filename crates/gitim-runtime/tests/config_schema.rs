@@ -137,6 +137,30 @@ fn accept_normal_path() {
     validate_workspace_path(&ws, &home).expect("should accept");
 }
 
+// Real-fs test: a symlink that points into a blacklisted cloud-sync folder
+// should be caught via canonicalization. Lexical `starts_with` alone would miss
+// this — symlinks and `..` segments both bypass prefix matching until paths are
+// resolved.
+#[cfg(unix)]
+#[test]
+fn reject_symlink_pointing_into_cloud_sync_dir() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path();
+    let dropbox = fake_home.join("Dropbox");
+    std::fs::create_dir_all(&dropbox).unwrap();
+
+    let sneaky = fake_home.join("not-dropbox-symlink");
+    symlink(&dropbox, &sneaky).unwrap();
+
+    let ws = sneaky.join("whatever");
+    let err = validate_workspace_path(&ws, fake_home).expect_err("symlink should be caught");
+    match err {
+        WorkspacePathError::CloudSyncDetected(name) => assert_eq!(name, "Dropbox"),
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn exclude_from_time_machine_sets_xattr() {

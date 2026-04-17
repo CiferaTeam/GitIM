@@ -45,10 +45,33 @@ const CLOUD_SYNC_PREFIXES: &[(&str, &str)] = &[
     ("OneDrive", "OneDrive"),
 ];
 
+// Resolve to a canonical path if possible; otherwise fall back to the canonical
+// parent plus the literal filename. Matters for pre-existing symlinks and `..`
+// segments — lexical `starts_with` misses both.
+fn canonicalize_or_parent(path: &Path) -> PathBuf {
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(canon_parent) = parent.canonicalize() {
+            if let Some(name) = path.file_name() {
+                return canon_parent.join(name);
+            }
+            return canon_parent;
+        }
+    }
+    path.to_path_buf()
+}
+
 pub fn validate_workspace_path(path: &Path, home: &Path) -> Result<(), WorkspacePathError> {
+    let canon_path = canonicalize_or_parent(path);
+    let canon_home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     for (suffix, service) in CLOUD_SYNC_PREFIXES {
-        let blacklisted = home.join(suffix);
-        if path.starts_with(&blacklisted) {
+        let blacklisted = canon_home.join(suffix);
+        let canon_blacklisted = blacklisted
+            .canonicalize()
+            .unwrap_or_else(|_| blacklisted.clone());
+        if canon_path.starts_with(&canon_blacklisted) {
             return Err(WorkspacePathError::CloudSyncDetected((*service).to_string()));
         }
     }
@@ -56,9 +79,11 @@ pub fn validate_workspace_path(path: &Path, home: &Path) -> Result<(), Workspace
 }
 
 pub fn validate_workspace_path_from_env(path: &Path) -> Result<(), WorkspacePathError> {
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
-        None => return Ok(()),
+    // `dirs::home_dir` is cross-platform — critically, it reads `USERPROFILE`
+    // on Windows where `HOME` is usually unset, so OneDrive detection actually
+    // fires there.
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
     };
     validate_workspace_path(path, &home)
 }
@@ -92,6 +117,9 @@ pub enum ConfigError {
 
     #[error("unsupported platform for github mode")]
     UnsupportedPlatform,
+
+    #[error(transparent)]
+    InvalidPath(#[from] WorkspacePathError),
 }
 
 fn config_dir(workspace: &Path) -> PathBuf {
@@ -100,6 +128,23 @@ fn config_dir(workspace: &Path) -> PathBuf {
 
 fn config_path(workspace: &Path) -> PathBuf {
     config_dir(workspace).join("config.json")
+}
+
+// Windows cannot enforce chmod-style perms on the token file, so Github mode
+// is refused up front rather than silently writing a world-readable secret.
+// Keep the platform gate as conditional compilation (matches the style used
+// for `mark_excluded_from_backups`).
+#[cfg(windows)]
+fn check_platform_supports(provider: GitProvider) -> Result<(), ConfigError> {
+    if provider == GitProvider::Github {
+        return Err(ConfigError::UnsupportedPlatform);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn check_platform_supports(_: GitProvider) -> Result<(), ConfigError> {
+    Ok(())
 }
 
 impl WorkspaceConfig {
@@ -114,17 +159,18 @@ impl WorkspaceConfig {
     }
 
     pub fn write(&self, workspace: &Path) -> Result<(), ConfigError> {
-        // Windows cannot enforce chmod-style perms on the token file, so Github mode
-        // is refused up front rather than silently writing a world-readable secret.
-        if cfg!(windows) && self.git.provider == GitProvider::Github {
-            return Err(ConfigError::UnsupportedPlatform);
-        }
+        check_platform_supports(self.git.provider)?;
 
         let dir = config_dir(workspace);
         std::fs::create_dir_all(&dir)?;
 
         let final_path = config_path(workspace);
         let tmp_path = dir.join("config.json.tmp");
+
+        // Any leftover tmp from a previous crashed write would otherwise linger
+        // until the next successful rename shadowed it — and it may contain a
+        // token. Best-effort unlink; errors here (including NotFound) are fine.
+        let _ = std::fs::remove_file(&tmp_path);
 
         let serialized = serde_json::to_string_pretty(self)?;
         std::fs::write(&tmp_path, serialized)?;
