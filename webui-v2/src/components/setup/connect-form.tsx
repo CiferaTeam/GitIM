@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
+import { SetupShell } from "./setup-shell";
 
 export function ConnectForm() {
   const port = useConnectionStore((s) => s.port);
@@ -45,59 +46,51 @@ export function ConnectForm() {
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-background text-foreground">
-      <div className="w-full max-w-sm space-y-6 px-4">
-        <div className="space-y-2 text-center">
-          <h1 className="text-xl font-bold tracking-tight">GitIM·Cell</h1>
-          <p className="text-sm text-muted-foreground">
-            Runtime 未连接，请重新启动后连接
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <label
-              htmlFor="port-input"
-              className="text-xs font-medium text-text-secondary"
-            >
-              Runtime 端口
-            </label>
-            <input
-              id="port-input"
-              data-testid="port-input"
-              type="text"
-              inputMode="numeric"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="16868"
-              className="w-full h-9 px-3 rounded-md border border-input bg-background text-sm font-mono placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-ring"
-              autoFocus
-            />
-          </div>
-
-          {error && (
-            <p data-testid="connect-error" className="text-xs text-error">
-              {error}
-            </p>
-          )}
-
-          <button
-            data-testid="connect-button"
-            type="submit"
-            disabled={checking}
-            className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-          >
-            {checking ? "连接中..." : "连接"}
-          </button>
-        </form>
-
-        <p className="text-xs text-text-muted text-center leading-relaxed">
+    <SetupShell
+      step={1}
+      title="Connect Runtime"
+      description="Link GitIM·Cell to your local runtime daemon"
+      error={error}
+      loading={checking}
+      footer={
+        <>
           请先启动 Runtime：{" "}
-          <code className="text-text-secondary">
+          <code className="text-text-secondary bg-surface px-1.5 py-0.5 rounded">
             gitim-runtime --port 16868
           </code>
-        </p>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="space-y-2">
+          <label
+            htmlFor="port-input"
+            className="text-sm font-medium text-text-secondary"
+          >
+            Runtime 端口
+          </label>
+          <input
+            id="port-input"
+            data-testid="port-input"
+            type="text"
+            inputMode="numeric"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="16868"
+            className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm font-mono placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
+            autoFocus
+          />
+        </div>
+
+        <button
+          data-testid="connect-button"
+          type="submit"
+          disabled={checking || !input.trim()}
+          className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-primary/20"
+        >
+          {checking ? "连接中..." : "连接"}
+        </button>
+      </form>
+    </SetupShell>
   );
 }

@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
+import { SetupShell } from "./setup-shell";
+import { Cloud, GitBranch, Server, Clock } from "lucide-react";
 
 const providers = [
-  { id: "local", label: "Git Local", description: "Create a bare repo in the workspace", enabled: true },
-  { id: "github", label: "GitHub", description: "Clone from a GitHub repository", enabled: false },
-  { id: "gitlab", label: "GitLab", description: "Clone from a GitLab repository", enabled: false },
+  { id: "local", label: "Git Local", description: "Create a bare repo in the workspace", enabled: true, icon: GitBranch },
+  { id: "github", label: "GitHub", description: "Clone from a GitHub repository", enabled: false, icon: Cloud },
+  { id: "gitlab", label: "GitLab", description: "Clone from a GitLab repository", enabled: false, icon: Server },
 ] as const;
 
 export function GitProviderForm() {
@@ -42,52 +44,67 @@ export function GitProviderForm() {
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-background text-foreground">
-      <div className="w-full max-w-sm space-y-6 px-4">
-        <div className="space-y-2 text-center">
-          <h1 className="text-xl font-bold tracking-tight">GitIM</h1>
-          <p className="text-sm text-muted-foreground">
-            Choose a git provider for this workspace
-          </p>
-          {workspacePath && (
-            <p className="text-xs text-text-muted font-mono truncate">
-              {workspacePath}
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-3">
-          {providers.map((p) => (
+    <SetupShell
+      step={3}
+      title="Git Provider"
+      description="Choose how to initialize version control"
+      error={error}
+      onBack={() => setStatus("connected")}
+      footer={
+        workspacePath && (
+          <span className="inline-block max-w-full truncate font-mono text-text-secondary">
+            {workspacePath}
+          </span>
+        )
+      }
+    >
+      <div className="space-y-3">
+        {providers.map((p) => {
+          const Icon = p.icon;
+          return (
             <button
               key={p.id}
               data-testid={`git-provider-${p.id}`}
               disabled={!p.enabled || submitting}
               onClick={() => handleSelect(p.id)}
-              className={`w-full text-left px-4 py-3 rounded-md border transition-colors ${
+              className={[
+                "w-full flex items-center gap-3 text-left px-4 py-3 rounded-xl border transition-all",
                 p.enabled
-                  ? "border-input hover:border-ring hover:bg-muted cursor-pointer"
-                  : "border-input/50 opacity-50 cursor-not-allowed"
-              }`}
+                  ? "border-border bg-card hover:border-primary/50 hover:bg-primary/5 cursor-pointer group"
+                  : "border-border/50 bg-card/50 opacity-60 cursor-not-allowed",
+              ].join(" ")}
             >
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">{p.label}</span>
-                {!p.enabled && (
-                  <span className="text-xs text-text-muted px-1.5 py-0.5 rounded border border-input/50">
-                    Coming Soon
-                  </span>
-                )}
+              <div className={[
+                "w-10 h-10 rounded-lg flex items-center justify-center shrink-0 transition-colors",
+                p.enabled ? "bg-surface group-hover:bg-primary/10" : "bg-surface/50",
+              ].join(" ")}>
+                <Icon className={[
+                  "size-5 transition-colors",
+                  p.enabled ? "text-text-secondary group-hover:text-primary" : "text-text-muted",
+                ].join(" ")} />
               </div>
-              <p className="text-xs text-text-muted mt-1">{p.description}</p>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold">{p.label}</span>
+                  {!p.enabled && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-text-muted px-1.5 py-0.5 rounded border border-border/50 bg-background">
+                      <Clock className="size-3" />
+                      Soon
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-text-muted mt-0.5">{p.description}</p>
+              </div>
             </button>
-          ))}
-        </div>
-
-        {error && (
-          <p data-testid="git-init-error" className="text-xs text-error text-center">
-            {error}
-          </p>
-        )}
+          );
+        })}
       </div>
-    </div>
+
+      {submitting && (
+        <p className="mt-4 text-xs text-text-muted text-center">
+          Initializing git repository...
+        </p>
+      )}
+    </SetupShell>
   );
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
+import { SetupShell } from "./setup-shell";
 
 export function WorkspaceForm() {
   const baseUrl = useConnectionStore((s) => s.baseUrl);
@@ -56,77 +57,70 @@ export function WorkspaceForm() {
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-background text-foreground">
-      <div className="w-full max-w-sm space-y-6 px-4">
-        <div className="space-y-2 text-center">
-          <h1 className="text-xl font-bold tracking-tight">GitIM</h1>
-          <p className="text-sm text-muted-foreground">
-            Set a workspace directory for this session
-          </p>
-          {runtimeVersion && (
-            <p className="text-xs text-text-muted">
-              Runtime v{runtimeVersion}
-            </p>
-          )}
+    <SetupShell
+      step={2}
+      title="Workspace"
+      description="Choose a directory for this session"
+      error={error}
+      onBack={() => setStatus("disconnected")}
+      footer={
+        runtimeVersion ? (
+          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-surface border border-border text-text-secondary">
+            Runtime v{runtimeVersion}
+          </span>
+        ) : undefined
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="space-y-2">
+          <label
+            htmlFor="workspace-input"
+            className="text-sm font-medium text-text-secondary"
+          >
+            Workspace Path
+          </label>
+          <input
+            id="workspace-input"
+            data-testid="workspace-input"
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="/path/to/workspace"
+            className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm font-mono placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
+            autoFocus
+          />
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <label
-              htmlFor="workspace-input"
-              className="text-xs font-medium text-text-secondary"
-            >
-              Workspace Path
-            </label>
-            <input
-              id="workspace-input"
-              data-testid="workspace-input"
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="/path/to/workspace"
-              className="w-full h-9 px-3 rounded-md border border-input bg-background text-sm font-mono placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-ring"
-              autoFocus
-            />
-          </div>
-
-          {error && (
-            <p data-testid="workspace-error" className="text-xs text-error">
-              {error}
-            </p>
-          )}
-
-          {needsConfirm ? (
-            <div className="flex gap-2">
-              <button
-                data-testid="workspace-confirm-button"
-                type="button"
-                disabled={submitting}
-                onClick={() => submitWorkspace(input.trim(), true)}
-                className="flex-1 h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-              >
-                Confirm
-              </button>
-              <button
-                type="button"
-                onClick={() => { setNeedsConfirm(false); setError(null); }}
-                className="flex-1 h-9 rounded-md border border-input text-sm font-medium hover:bg-muted transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
+        {needsConfirm ? (
+          <div className="flex gap-3">
             <button
-              data-testid="workspace-button"
-              type="submit"
+              data-testid="workspace-confirm-button"
+              type="button"
               disabled={submitting}
-              className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              onClick={() => submitWorkspace(input.trim(), true)}
+              className="flex-1 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-lg shadow-primary/20"
             >
-              {submitting ? "Setting up..." : "Open Workspace"}
+              Confirm
             </button>
-          )}
-        </form>
-      </div>
-    </div>
+            <button
+              type="button"
+              onClick={() => { setNeedsConfirm(false); setError(null); }}
+              className="flex-1 h-10 rounded-lg border border-border bg-card text-sm font-semibold hover:bg-surface-hover transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            data-testid="workspace-button"
+            type="submit"
+            disabled={submitting || !input.trim()}
+            className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-primary/20"
+          >
+            {submitting ? "Setting up..." : "Open Workspace"}
+          </button>
+        )}
+      </form>
+    </SetupShell>
   );
 }
