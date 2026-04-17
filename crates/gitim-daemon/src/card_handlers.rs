@@ -26,6 +26,13 @@ pub(crate) struct LocatedCard {
     pub is_archived: bool,
 }
 
+/// Resolves a card to its on-disk location (active or archived).
+///
+/// Returns `None` if the card does not exist in either location.
+/// If both locations exist (anomalous state from manual git manipulation),
+/// prefers the active location and logs a warning rather than failing —
+/// failing here would block legitimate operations on a card that merely
+/// has stale archive files left behind.
 pub(crate) fn locate_card(
     state: &SharedState,
     channel: &ChannelName,
@@ -93,6 +100,12 @@ async fn ensure_known_user(state: &SharedState, handler: &str) -> Result<(), Str
     Ok(())
 }
 
+/// Push to remote with bounded retries on push conflict.
+///
+/// If this returns `Err`, the local commit is already durable — `sync_loop` will
+/// retry the push on its next tick. Callers should surface the error to the client
+/// as a transient push failure rather than implying the operation did not happen
+/// locally.
 async fn push_with_retry(state: &SharedState, op: &str) -> Result<(), String> {
     if !state.git_storage.has_remote() {
         return Ok(());
