@@ -55,7 +55,9 @@ export function InviteDialog({
       setSubmitting(false);
       return;
     }
-    await onInvited?.();
+    try {
+      await onInvited?.();
+    } catch { /* refresh failure is non-fatal — invite已成功 */ }
     setSelected([]);
     onOpenChange(false);
     setSubmitting(false);

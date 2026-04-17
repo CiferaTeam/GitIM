@@ -28,3 +28,9 @@
 **Why:** 群聊邀请功能落地时发现前端缺少测试基建，只能靠 cargo test 覆盖后端。长期看前端逻辑（搜索过滤、多选、排除）应有单元测试。
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` 测试要点。
 **Added:** 2026-04-17 via /plan-eng-review
+
+### gitim-runtime HTTP 层 integration test
+**What:** `crates/gitim-runtime/src/http.rs` 加 integration test，覆盖 `/im/create-channel` 带 `invitees`、`/im/join` 带 `targets`、以及两个 endpoint 的 backward compat（旧请求无新字段）。
+**Why:** 群聊邀请 feature 的 HTTP 层只是 2-行透传，风险低，所以本期 defer 测试。但历史 bug（`/im/join` 把 targets 硬编码为 `&[]`）正是这种 regression。daemon 测试覆盖不到 HTTP 层布线。
+**Context:** Phase 6 code review (Claude) Important-I2. runtime tests/ 目录已有 provision / poller 模式可参考。
+**Added:** 2026-04-17 via /plan-eng-review (Phase 6 finding)
