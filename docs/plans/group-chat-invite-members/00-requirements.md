@@ -90,3 +90,38 @@ WebUI 的创建频道对话框只有 name/display/intro，频道 Header Dropdown
 | sidebar create dialog | `webui-v2/src/components/chat/sidebar.tsx:71-226` |
 | header dropdown | `webui-v2/src/components/chat/header.tsx:61-92` |
 | chat store | `webui-v2/src/hooks/use-chat-store.ts:13, 51, 65` |
+
+## Phase 3 Eng Review 决议
+
+### Step 0 scope ✓
+- 文件数 ~10，无冗余；非目标都在 follow-up 列表。
+
+### Architecture
+- **A1 serde 兼容性**：`#[serde(default)]` 保证新增 `invitees` 向后兼容
+- **A2 签名 fan-out**：`client::create_channel` 加 `invitees: &[String]`，`gitim-cli/commands/channels.rs:31` 和 `gitim-runtime/http.rs:362` 同步调整（CLI 传 `&[]`）
+- **A3 invitee 未注册** → **daemon 整体 reject**，返回明确错误；前端 Dialog inline 显示不关闭
+- **A4 members 刷新** → 复用现有 `chat-layout.tsx:87` 的 `/im/channels` refetch 模式，不引入新同步机制
+
+### Code Quality
+- **CQ1 daemon dedup**：`members = [author] ∪ invitees` 保序去重 + author 首位
+- **CQ2 错误展示**：Dialog 内 inline 显示错误，提交失败不关闭 Dialog
+- **CQ3 MemberPicker contract**：props `{ allUsers, excludeHandlers, value, onChange }`；组件不直接依赖 `useChatStore`，调用方取好传入
+
+### Tests
+- daemon `create_channel`：happy / dedup self / dedup duplicates / unregistered error / empty（regression）
+- runtime HTTP：`/im/create-channel` with invitees / `/im/join` with targets / backward compat
+- CLI：无新测试
+- webui：MemberPicker 前端测试先占位（前端测试基建记 follow-up）
+
+### Performance
+- 邀请后全量 refetch channels（MVP 可接受，SSE 精细化推送记 follow-up）
+- daemon 端单次 git commit（方案 b 的主要优势）
+
+### Follow-ups（已登记 `TODOS.md`）
+- `channels/*.meta.yaml` 并发 set-union 合并
+- SSE 推送频道 members 变更
+- webui-v2 前端测试基建
+
+---
+
+**决策记录**：Q1=A（整体 reject）、Q2=i（inline Dialog）、Q3=p（props 注入）、Q4=写入 TODOS.md。
