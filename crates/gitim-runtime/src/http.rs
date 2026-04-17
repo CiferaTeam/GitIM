@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures::stream::{Stream, StreamExt};
@@ -12,7 +13,46 @@ use tower_http::cors::CorsLayer;
 
 use crate::agent::{detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig};
 use crate::agent_loop::AgentLoop;
+use crate::git_config::{
+    mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
+    WorkspaceConfig, WorkspacePathError,
+};
+use crate::github::{check_repo_access, parse_github_url, verify_token, GithubError};
+use crate::url_redact::redacted_url;
 use gitim_client::GitimClient;
+
+/// Seam for tests: production hits github.com, tests hit a mockito server.
+/// Kept inside the runtime crate so the call sites in `git_init` don't care
+/// which backing impl is wired up — they just ask the injected client.
+#[async_trait]
+pub trait GithubApiClient: Send + Sync {
+    async fn verify_token(&self, token: &str) -> Result<(), GithubError>;
+    async fn check_repo_access(
+        &self,
+        owner: &str,
+        repo: &str,
+        token: &str,
+    ) -> Result<(), GithubError>;
+}
+
+pub struct DefaultGithubApi {
+    pub base_url: String,
+}
+
+#[async_trait]
+impl GithubApiClient for DefaultGithubApi {
+    async fn verify_token(&self, token: &str) -> Result<(), GithubError> {
+        verify_token(token, &self.base_url).await
+    }
+    async fn check_repo_access(
+        &self,
+        owner: &str,
+        repo: &str,
+        token: &str,
+    ) -> Result<(), GithubError> {
+        check_repo_access(owner, repo, token, &self.base_url).await
+    }
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -67,6 +107,12 @@ pub struct RuntimeState {
     pub activity_tx: broadcast::Sender<AgentActivityEvent>,
     /// Epoch seconds of last activity. Used by idle watchdog.
     pub last_activity: std::sync::atomic::AtomicU64,
+    pub github_api: Arc<dyn GithubApiClient>,
+    /// Tests substitute a `file://` bare so the `git clone` step doesn't need
+    /// the real internet. Production must leave this `None`; if it's ever
+    /// `Some`, the token verification step has still run against the real API
+    /// so we don't accidentally create a "demo mode" path.
+    pub clone_url_override: Option<String>,
 }
 
 impl Default for RuntimeState {
@@ -84,6 +130,10 @@ impl Default for RuntimeState {
                     .unwrap()
                     .as_secs(),
             ),
+            github_api: Arc::new(DefaultGithubApi {
+                base_url: "https://api.github.com".to_string(),
+            }),
+            clone_url_override: None,
         }
     }
 }
@@ -190,19 +240,16 @@ async fn set_workspace(
 #[derive(Deserialize)]
 struct GitInitRequest {
     provider: String,
+    #[serde(default)]
+    remote_url: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 async fn git_init(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<GitInitRequest>,
 ) -> Json<serde_json::Value> {
-    if req.provider != "local" {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("provider not supported yet: {}", req.provider)
-        }));
-    }
-
     let workspace = {
         let s = state.lock().unwrap();
         match &s.workspace {
@@ -210,17 +257,34 @@ async fn git_init(
             None => {
                 return Json(serde_json::json!({
                     "ok": false,
+                    "error_code": "workspace_not_set",
                     "error": "workspace not set"
                 }));
             }
         }
     };
 
+    match req.provider.as_str() {
+        "local" => git_init_local(&state, &workspace).await,
+        "github" => git_init_github(&state, &workspace, req.remote_url, req.token).await,
+        other => Json(serde_json::json!({
+            "ok": false,
+            "error_code": "provider_not_supported",
+            "error": format!("provider not supported: {other}")
+        })),
+    }
+}
+
+async fn git_init_local(
+    state: &SharedRuntimeState,
+    workspace: &Path,
+) -> Json<serde_json::Value> {
     let repo_path = workspace.join("repo.git");
     if let Err(e) = std::fs::create_dir_all(&repo_path) {
         return Json(serde_json::json!({
             "ok": false,
-            "error": format!("failed to create repo directory: {e}")
+            "error_code": "clone_failed",
+            "error": redacted_url(&format!("failed to create repo directory: {e}"))
         }));
     }
 
@@ -232,7 +296,7 @@ async fn git_init(
     match output {
         Ok(o) if o.status.success() => {
             let remote_url = repo_path.to_string_lossy().into_owned();
-            let display_name = detect_git_config("user.name", &workspace)
+            let display_name = detect_git_config("user.name", workspace)
                 .unwrap_or_else(|| "human".to_string());
             let handler = {
                 let h = name_to_handler(&display_name);
@@ -243,12 +307,30 @@ async fn git_init(
                 "handler": handler,
                 "display_name": display_name,
             });
-            match provision_human(&workspace, &remote_url, "git", auth).await {
+            match provision_human(workspace, &remote_url, "git", auth).await {
                 Ok(human_dir) => {
-                    let mut s = state.lock().unwrap();
-                    s.human_repo = Some(human_dir.clone());
-                    drop(s);
-                    save_runtime_config(&workspace);
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.human_repo = Some(human_dir.clone());
+                    }
+                    save_runtime_config(workspace);
+                    let config = WorkspaceConfig {
+                        workspace: workspace.to_string_lossy().into_owned(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        git: GitConfig {
+                            provider: GitProvider::Local,
+                            remote_url: None,
+                            token: None,
+                        },
+                    };
+                    if let Err(e) = config.write(workspace) {
+                        return Json(serde_json::json!({
+                            "ok": false,
+                            "error_code": "config_write_failed",
+                            "error": redacted_url(&format!("failed to write config: {e}"))
+                        }));
+                    }
+                    let _ = mark_excluded_from_backups(&workspace.join(".gitim-runtime"));
                     Json(serde_json::json!({
                         "ok": true,
                         "repo_path": repo_path.to_string_lossy(),
@@ -257,7 +339,8 @@ async fn git_init(
                 }
                 Err(e) => Json(serde_json::json!({
                     "ok": false,
-                    "error": format!("provision_human failed: {e}")
+                    "error_code": "onboard_failed",
+                    "error": redacted_url(&format!("provision_human failed: {e}"))
                 })),
             }
         }
@@ -265,13 +348,238 @@ async fn git_init(
             let stderr = String::from_utf8_lossy(&o.stderr);
             Json(serde_json::json!({
                 "ok": false,
-                "error": format!("git init failed: {stderr}")
+                "error_code": "clone_failed",
+                "error": redacted_url(&format!("git init failed: {stderr}"))
             }))
         }
         Err(e) => {
             Json(serde_json::json!({
                 "ok": false,
-                "error": format!("failed to run git: {e}")
+                "error_code": "clone_failed",
+                "error": redacted_url(&format!("failed to run git: {e}"))
+            }))
+        }
+    }
+}
+
+/// Assemble the token-carrying clone URL. Caller owns url parsing — we only
+/// stamp `x-access-token:{token}` and restore the `.git` suffix that
+/// `parse_github_url` stripped. Suffix is always singular because `parse_github_url`
+/// also strips any explicit `.git` the user provided.
+fn build_token_url(owner: &str, repo: &str, token: &str) -> String {
+    format!("https://x-access-token:{token}@github.com/{owner}/{repo}.git")
+}
+
+fn github_error_code(err: &GithubError) -> &'static str {
+    match err {
+        GithubError::InvalidToken => "invalid_token",
+        GithubError::InsufficientScope => "insufficient_scope",
+        GithubError::RepoNotFoundOrNoAccess => "token_lacks_repo_access",
+        GithubError::RateLimited => "rate_limited",
+        GithubError::NetworkError(_) => "network_error",
+        GithubError::UnexpectedStatus(_) => "network_error",
+        GithubError::ParseError(_) => "clone_failed",
+    }
+}
+
+fn cleanup_human_dir(workspace: &Path) {
+    let human_dir = workspace.join(".gitim-runtime").join("human");
+    let pid_file = human_dir.join(".gitim/run/gitim.pid");
+    if let Ok(content) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            // SIGTERM → grace → SIGKILL matches `kill_managed_daemons` in the
+            // shell binary. Shelling out to `kill(1)` keeps us off a libc dep
+            // for a single-platform-niche code path.
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
+    }
+    // Ignore NotFound — the directory may never have existed if clone failed
+    // before reaching provision_human.
+    let _ = std::fs::remove_dir_all(&human_dir);
+}
+
+async fn git_init_github(
+    state: &SharedRuntimeState,
+    workspace: &Path,
+    remote_url: Option<String>,
+    token: Option<String>,
+) -> Json<serde_json::Value> {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error_code": "missing_token",
+                "error": "github mode requires a personal access token"
+            }));
+        }
+    };
+    let remote_url = match remote_url {
+        Some(u) if !u.is_empty() => u,
+        _ => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error_code": "missing_remote_url",
+                "error": "github mode requires remote_url"
+            }));
+        }
+    };
+
+    // On Windows the config file can't be made 0600 — reject before we spend
+    // a network round-trip or touch the filesystem.
+    #[cfg(windows)]
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": "provider_not_supported",
+            "error": "github mode is not supported on Windows"
+        }));
+    }
+
+    if let Err(WorkspacePathError::CloudSyncDetected(service)) =
+        validate_workspace_path_from_env(workspace)
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": "cloud_sync_path_rejected",
+            "error": format!("workspace is inside {service} — refusing to store a token there")
+        }));
+    }
+
+    let (github_api, clone_override) = {
+        let s = state.lock().unwrap();
+        (s.github_api.clone(), s.clone_url_override.clone())
+    };
+
+    if let Err(e) = github_api.verify_token(&token).await {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": github_error_code(&e),
+            "error": redacted_url(&e.to_string())
+        }));
+    }
+
+    let (owner, repo) = match parse_github_url(&remote_url) {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error_code": github_error_code(&e),
+                "error": redacted_url(&e.to_string())
+            }));
+        }
+    };
+
+    if let Err(e) = github_api.check_repo_access(&owner, &repo, &token).await {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": github_error_code(&e),
+            "error": redacted_url(&e.to_string())
+        }));
+    }
+
+    let clone_url = clone_override.unwrap_or_else(|| build_token_url(&owner, &repo, &token));
+
+    let runtime_dir = workspace.join(".gitim-runtime");
+    if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error_code": "clone_failed",
+            "error": redacted_url(&format!("failed to create runtime dir: {e}"))
+        }));
+    }
+
+    let human_dir = runtime_dir.join("human");
+    if human_dir.exists() {
+        // A prior failed init may have left a partial clone behind. Clean it
+        // fully before retrying — provisioning is not re-entrant on partial state.
+        cleanup_human_dir(workspace);
+    }
+
+    let clone_output = std::process::Command::new("git")
+        .args(["clone", &clone_url, "human"])
+        .current_dir(&runtime_dir)
+        .output();
+
+    match clone_output {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            cleanup_human_dir(workspace);
+            return Json(serde_json::json!({
+                "ok": false,
+                "error_code": "clone_failed",
+                "error": redacted_url(&format!("git clone failed: {stderr}"))
+            }));
+        }
+        Err(e) => {
+            cleanup_human_dir(workspace);
+            return Json(serde_json::json!({
+                "ok": false,
+                "error_code": "clone_failed",
+                "error": redacted_url(&format!("failed to run git: {e}"))
+            }));
+        }
+    }
+
+    // The remote URL stored with the clone would carry the token in
+    // `.git/config` — rewrite it to the token-less public URL so any future
+    // git operation (status inspection, debug dump) doesn't leak it. Token
+    // injection for push/fetch happens through sync_loop's credential helper
+    // in Task 7, not through the origin URL.
+    let _ = std::process::Command::new("git")
+        .args(["remote", "set-url", "origin", &remote_url])
+        .current_dir(&human_dir)
+        .output();
+
+    let auth = serde_json::json!({
+        "type": "github",
+        "token": token,
+    });
+
+    match provision_human(workspace, &remote_url, "github", auth).await {
+        Ok(final_human) => {
+            {
+                let mut s = state.lock().unwrap();
+                s.human_repo = Some(final_human.clone());
+            }
+            save_runtime_config(workspace);
+            let config = WorkspaceConfig {
+                workspace: workspace.to_string_lossy().into_owned(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                git: GitConfig {
+                    provider: GitProvider::Github,
+                    remote_url: Some(remote_url.clone()),
+                    token: Some(token.clone()),
+                },
+            };
+            if let Err(e) = config.write(workspace) {
+                cleanup_human_dir(workspace);
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": "config_write_failed",
+                    "error": redacted_url(&format!("failed to write config: {e}"))
+                }));
+            }
+            let _ = mark_excluded_from_backups(&runtime_dir);
+            Json(serde_json::json!({
+                "ok": true,
+                "human_repo": final_human.to_string_lossy(),
+                "remote_url": remote_url,
+            }))
+        }
+        Err(e) => {
+            cleanup_human_dir(workspace);
+            Json(serde_json::json!({
+                "ok": false,
+                "error_code": "onboard_failed",
+                "error": redacted_url(&format!("provision_human failed: {e}"))
             }))
         }
     }

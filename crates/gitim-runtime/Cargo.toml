@@ -18,6 +18,7 @@ regex = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 dirs = "6"
 axum = "0.8"
+async-trait = "0.1"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
