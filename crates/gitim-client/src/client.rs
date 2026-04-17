@@ -352,4 +352,51 @@ impl GitimClient {
         )
         .await
     }
+
+    pub async fn archive_card(
+        &self,
+        channel: &str,
+        card_id: &str,
+        author: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "archive_card",
+            json!({
+                "channel": channel,
+                "card_id": card_id,
+                "author": author,
+            }),
+        )
+        .await
+    }
+
+    pub async fn unarchive_card(
+        &self,
+        channel: &str,
+        card_id: &str,
+        author: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "unarchive_card",
+            json!({
+                "channel": channel,
+                "card_id": card_id,
+                "author": author,
+            }),
+        )
+        .await
+    }
+
+    pub async fn list_archived_cards(
+        &self,
+        channel: Option<&str>,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "list_archived_cards",
+            json!({
+                "channel": channel,
+            }),
+        )
+        .await
+    }
 }
