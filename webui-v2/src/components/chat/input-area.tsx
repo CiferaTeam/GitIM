@@ -43,7 +43,7 @@ export function InputArea({ onSend }: InputAreaProps) {
   // Restore draft when switching channels
   useEffect(() => {
     if (!currentChannel) return;
-    setText(localStorage.getItem(draftKey(currentChannel)) ?? "");
+    setText(localStorage.getItem(draftKey(currentChannel!)) ?? "");
   }, [currentChannel]);
 
   // Auto-resize textarea up to MAX_HEIGHT
@@ -72,7 +72,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     const value = e.target.value;
     setText(value);
     setError(null);
-    localStorage.setItem(draftKey(currentChannel), value);
+    localStorage.setItem(draftKey(currentChannel!), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -98,7 +98,7 @@ export function InputArea({ onSend }: InputAreaProps) {
         setReplyTo(savedReplyTo);
         setError(res.error ?? "Send failed");
       } else {
-        localStorage.removeItem(draftKey(currentChannel));
+        localStorage.removeItem(draftKey(currentChannel!));
       }
     } catch (err) {
       setText(savedText);
