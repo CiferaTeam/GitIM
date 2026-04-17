@@ -5,8 +5,9 @@ import { MentionPopup } from "./mention-popup";
 interface InputAreaProps {
   /** Unique key for this input's scope — used for localStorage draft keying.
    *  Channel scope: the channel display name.
-   *  Card scope: "card:<channel>/<card_id>". */
-  scopeKey: string;
+   *  Card scope: "card:<channel>/<card_id>".
+   *  Pass null to hide the input (e.g. when no scope is selected). */
+  scopeKey: string | null;
   replyTo: Message | null;
   onReplyToChange: (msg: Message | null) => void;
   mentionCandidates: string[];
@@ -42,6 +43,10 @@ export function InputArea({
 
   // Restore draft when scope changes
   useEffect(() => {
+    if (!scopeKey) {
+      setText("");
+      return;
+    }
     setText(localStorage.getItem(draftKey(scopeKey)) ?? "");
   }, [scopeKey]);
 
@@ -53,7 +58,9 @@ export function InputArea({
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
 
-  if (disabled) return null;
+  if (disabled || !scopeKey) return null;
+  // After the guard above, scopeKey is non-null for the rest of render.
+  const activeScopeKey: string = scopeKey;
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
@@ -71,7 +78,7 @@ export function InputArea({
     const value = e.target.value;
     setText(value);
     setError(null);
-    localStorage.setItem(draftKey(scopeKey), value);
+    localStorage.setItem(draftKey(activeScopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -97,7 +104,7 @@ export function InputArea({
         onReplyToChange(savedReplyTo);
         setError(res.error ?? "Send failed");
       } else {
-        localStorage.removeItem(draftKey(scopeKey));
+        localStorage.removeItem(draftKey(activeScopeKey));
       }
     } catch (err) {
       setText(savedText);

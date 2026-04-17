@@ -45,6 +45,7 @@ export default function App() {
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
   const setCards = useCardStore((s) => s.setCards);
+  const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
   const port = useConnectionStore((s) => s.port);
 
@@ -137,7 +138,9 @@ export default function App() {
       if (needCardRefresh) {
         const cardRes = await client.listCards();
         if (cardRes.ok && cardRes.data) {
-          setCards(cardRes.data.cards as Card[]);
+          // Merge, not replace — preserves in-flight optimistic patches so
+          // the 3s poll cadence can't flicker the UI back before PATCH resolves.
+          mergeCards(cardRes.data.cards as Card[]);
         }
       }
 
@@ -149,7 +152,14 @@ export default function App() {
     } catch {
       // Silently skip failed polls
     }
-  }, [addMessages, incrementUnread, setChannels, setAgents, setCards, addCardMessages]);
+  }, [
+    addMessages,
+    incrementUnread,
+    setChannels,
+    setAgents,
+    mergeCards,
+    addCardMessages,
+  ]);
 
   // Init + poll loop — only run when port is available
   useEffect(() => {

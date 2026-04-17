@@ -35,6 +35,8 @@ export function CardDetail() {
   const addPendingCardMessage = useCardStore((s) => s.addPendingCardMessage);
   const markPendingCardSent = useCardStore((s) => s.markPendingCardSent);
   const markPendingCardFailed = useCardStore((s) => s.markPendingCardFailed);
+  const markCardInFlight = useCardStore((s) => s.markCardInFlight);
+  const unmarkCardInFlight = useCardStore((s) => s.unmarkCardInFlight);
 
   const pathKey = useMemo(() => cardPathKey(channel, cardId), [channel, cardId]);
   const scopeKey = useMemo(() => cardScopeKey(channel, cardId), [channel, cardId]);
@@ -103,13 +105,17 @@ export function CardDetail() {
         updated_at: nowTimestamp(),
       };
       upsertCard(next);
-      const res = await client.updateCard(card.channel, card.card_id, patch);
+      // Use channel/cardId from route params — `card.*` could be stale after the
+      // optimistic upsertCard above if any poll tick landed between reads.
+      markCardInFlight(channel, cardId);
+      const res = await client.updateCard(channel, cardId, patch);
+      unmarkCardInFlight(channel, cardId);
       if (!res.ok) {
         upsertCard(prev);
         toast.error(`Update failed: ${res.error ?? "unknown"}`);
       }
     },
-    [card, upsertCard],
+    [card, upsertCard, channel, cardId, markCardInFlight, unmarkCardInFlight],
   );
 
   const handleSend = useCallback(

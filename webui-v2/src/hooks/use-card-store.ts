@@ -27,10 +27,16 @@ interface CardState {
   cards: Card[];
   /** Discussion messages keyed by "<channel>/<card_id>". */
   cardMessagesByPath: Record<string, Message[]>;
+  /** Paths of cards with an in-flight PATCH; skip poll-driven overwrites for these. */
+  inFlightCardPaths: Set<string>;
 
   setCards: (cards: Card[]) => void;
+  /** Merge incoming cards from server, preserving any with in-flight patches. */
+  mergeCards: (cards: Card[]) => void;
   upsertCard: (card: Card) => void;
   removeCard: (channel: string, cardId: string) => void;
+  markCardInFlight: (channel: string, cardId: string) => void;
+  unmarkCardInFlight: (channel: string, cardId: string) => void;
 
   setCardMessages: (pathKey: string, messages: Message[]) => void;
   addCardMessages: (pathKey: string, messages: Message[]) => void;
@@ -47,8 +53,37 @@ interface CardState {
 export const useCardStore = create<CardState>((set) => ({
   cards: [],
   cardMessagesByPath: {},
+  inFlightCardPaths: new Set<string>(),
 
   setCards: (cards) => set({ cards }),
+
+  mergeCards: (incoming) =>
+    set((state) => {
+      // Replace each card by (channel, card_id) but keep local version
+      // whenever a PATCH is in flight for that card — otherwise the 3s
+      // poll cadence clobbers optimistic UI until the next tick.
+      const byKey = new Map<string, Card>();
+      for (const c of state.cards) {
+        byKey.set(cardPathKey(c.channel, c.card_id), c);
+      }
+      for (const c of incoming) {
+        const k = cardPathKey(c.channel, c.card_id);
+        if (state.inFlightCardPaths.has(k)) continue;
+        byKey.set(k, c);
+      }
+      // Also drop any local cards that disappeared server-side, EXCEPT in-flight ones
+      // (those are user-created and not yet committed, or being edited).
+      const serverKeys = new Set(
+        incoming.map((c) => cardPathKey(c.channel, c.card_id)),
+      );
+      const next: Card[] = [];
+      for (const [k, c] of byKey) {
+        if (serverKeys.has(k) || state.inFlightCardPaths.has(k)) {
+          next.push(c);
+        }
+      }
+      return { cards: next };
+    }),
 
   upsertCard: (card) =>
     set((state) => {
@@ -69,6 +104,20 @@ export const useCardStore = create<CardState>((set) => ({
         (c) => !(c.channel === channel && c.card_id === cardId),
       ),
     })),
+
+  markCardInFlight: (channel, cardId) =>
+    set((state) => {
+      const next = new Set(state.inFlightCardPaths);
+      next.add(cardPathKey(channel, cardId));
+      return { inFlightCardPaths: next };
+    }),
+
+  unmarkCardInFlight: (channel, cardId) =>
+    set((state) => {
+      const next = new Set(state.inFlightCardPaths);
+      next.delete(cardPathKey(channel, cardId));
+      return { inFlightCardPaths: next };
+    }),
 
   setCardMessages: (pathKey, messages) =>
     set((state) => ({

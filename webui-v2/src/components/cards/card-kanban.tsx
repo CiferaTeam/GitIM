@@ -17,11 +17,14 @@ import { CardKanbanColumn } from "./card-kanban-column";
 import { CardCreateDialog } from "./card-create-dialog";
 
 function readFilterFromURL(params: URLSearchParams): CardFilterState {
+  const assignee = params.get("assignee");
   return {
     channels: params.getAll("channel"),
     labels: params.getAll("label"),
-    assignee: params.get("assignee"),
-    mineOnly: params.get("mine") === "1",
+    // Canonical "my cards" form is assignee=__me__; both the toggle and the
+    // URL bind to the same field to keep a single source of truth.
+    assignee: assignee === "__me__" ? null : assignee,
+    mineOnly: assignee === "__me__",
   };
 }
 
@@ -29,8 +32,11 @@ function writeFilterToURL(filter: CardFilterState): URLSearchParams {
   const p = new URLSearchParams();
   for (const ch of filter.channels) p.append("channel", ch);
   for (const l of filter.labels) p.append("label", l);
-  if (filter.assignee) p.set("assignee", filter.assignee);
-  if (filter.mineOnly) p.set("mine", "1");
+  if (filter.mineOnly) {
+    p.set("assignee", "__me__");
+  } else if (filter.assignee) {
+    p.set("assignee", filter.assignee);
+  }
   return p;
 }
 
@@ -39,6 +45,8 @@ export function CardKanban() {
   const cards = useCardStore((s) => s.cards);
   const setCards = useCardStore((s) => s.setCards);
   const upsertCard = useCardStore((s) => s.upsertCard);
+  const markCardInFlight = useCardStore((s) => s.markCardInFlight);
+  const unmarkCardInFlight = useCardStore((s) => s.unmarkCardInFlight);
   const allLabels = useCardStore(selectAllLabels);
   const currentUser = useChatStore((s) => s.currentUser);
 
@@ -86,16 +94,18 @@ export function CardKanban() {
       const prev = card;
       // Optimistic update
       upsertCard({ ...card, status: newStatus });
+      markCardInFlight(card.channel, card.card_id);
       const res = await client.updateCard(card.channel, card.card_id, {
         status: newStatus,
       });
+      unmarkCardInFlight(card.channel, card.card_id);
       if (!res.ok) {
         // Rollback
         upsertCard(prev);
         toast.error(`Failed to update: ${res.error ?? "unknown"}`);
       }
     },
-    [upsertCard],
+    [upsertCard, markCardInFlight, unmarkCardInFlight],
   );
 
   const hasFilter =
