@@ -213,6 +213,11 @@ impl GitimClient {
             .await
     }
 
+    pub async fn unarchive_channel(&self, channel: &str) -> Result<ApiResponse, ClientError> {
+        self.request("unarchive_channel", json!({ "channel": channel }))
+            .await
+    }
+
     pub async fn list_archived_channels(&self) -> Result<ApiResponse, ClientError> {
         self.request("archived_channels", json!({})).await
     }

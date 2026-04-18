@@ -83,6 +83,12 @@ enum Commands {
         name: String,
     },
 
+    /// Unarchive a channel
+    UnarchiveChannel {
+        /// Channel name
+        name: String,
+    },
+
     /// List archived channels
     ArchivedChannels,
 
@@ -415,6 +421,9 @@ async fn main() {
         }
         Commands::ArchiveChannel { name } => {
             commands::channels::cmd_archive_channel(&client, &mode, &name).await
+        }
+        Commands::UnarchiveChannel { name } => {
+            commands::channels::cmd_unarchive_channel(&client, &mode, &name).await
         }
         Commands::ArchivedChannels => {
             commands::channels::cmd_archived_channels(&client, &mode).await

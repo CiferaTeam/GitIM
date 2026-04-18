@@ -130,6 +130,39 @@ pub async fn cmd_archive_channel(
     }
 }
 
+pub async fn cmd_unarchive_channel(
+    client: &GitimClient,
+    mode: &OutputMode,
+    name: &str,
+) {
+    match client.unarchive_channel(name).await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("取消归档失败: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => println!("频道 #{name} 已取消归档"),
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("取消归档失败: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_archived_channels(client: &GitimClient, mode: &OutputMode) {
     match client.list_archived_channels().await {
         Ok(resp) => {
