@@ -3,6 +3,7 @@ import { NavLink } from "react-router";
 const navItems = [
   { to: "/management", label: "Agents" },
   { to: "/chat", label: "Chat" },
+  { to: "/cards", label: "Cards" },
 ];
 
 export function NavTabs() {

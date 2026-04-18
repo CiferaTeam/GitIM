@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Navigate, Route, Routes } from "react-router";
+import { CardDetail } from "./components/cards/card-detail";
+import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
@@ -7,9 +9,10 @@ import { AgentList } from "./components/management/agent-list";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
+import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
-import type { Agent, Channel, Message, PollChange } from "./lib/types";
+import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
@@ -41,6 +44,9 @@ export default function App() {
   const addMessages = useChatStore((s) => s.addMessages);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const setAgents = useAgentStore((s) => s.setAgents);
+  const setCards = useCardStore((s) => s.setCards);
+  const mergeCards = useCardStore((s) => s.mergeCards);
+  const addCardMessages = useCardStore((s) => s.addCardMessages);
   const port = useConnectionStore((s) => s.port);
 
   // Mutable refs for poll loop — avoids stale closures
@@ -82,8 +88,25 @@ export default function App() {
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
       let needChannelRefresh = false;
+      let needCardRefresh = false;
 
       for (const change of changes) {
+        // Card events: channel string is "card:<channel>/<card_id>"
+        if (change.kind === "card_meta" || change.kind === "card_thread") {
+          if (change.kind === "card_meta") {
+            // Only meta changes (status/labels/assignee/creation) require a
+            // list refresh; thread-only changes are applied in-place below.
+            needCardRefresh = true;
+          } else if (change.entries?.length) {
+            const parsed = parseCardScope(change.channel);
+            if (parsed) {
+              const pathKey = `${parsed.channel}/${parsed.cardId}`;
+              addCardMessages(pathKey, change.entries as Message[]);
+            }
+          }
+          continue;
+        }
+
         const displayName = apiToDisplay(change.channel);
         const knownChannel = channelsRef.current.some(
           (c) => c.name === displayName
@@ -115,6 +138,15 @@ export default function App() {
         }
       }
 
+      if (needCardRefresh) {
+        const cardRes = await client.listCards();
+        if (cardRes.ok && cardRes.data) {
+          // Merge, not replace — preserves in-flight optimistic patches so
+          // the 3s poll cadence can't flicker the UI back before PATCH resolves.
+          mergeCards(cardRes.data.cards as Card[]);
+        }
+      }
+
       // Periodically refresh agents (real backend)
       const agentsRes = await client.listAgents();
       if (agentsRes.ok && agentsRes.data) {
@@ -123,20 +155,28 @@ export default function App() {
     } catch {
       // Silently skip failed polls
     }
-  }, [addMessages, incrementUnread, setChannels, setAgents]);
+  }, [
+    addMessages,
+    incrementUnread,
+    setChannels,
+    setAgents,
+    mergeCards,
+    addCardMessages,
+  ]);
 
   // Init + poll loop — only run when port is available
   useEffect(() => {
     if (!port) return;
 
     async function init() {
-      const [healthRes, meRes, channelsRes, usersRes, agentsRes] =
+      const [healthRes, meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
           client.health(),
           client.me(),
           client.channels(),
           client.users(),
           client.listAgents(),
+          client.listCards(),
         ]);
 
       // Restore cursor from localStorage keyed by workspace
@@ -152,6 +192,8 @@ export default function App() {
         setUsers(usersRes.data.users as string[]);
       if (agentsRes.ok && agentsRes.data)
         setAgents(agentsRes.data.agents as Agent[]);
+      if (cardsRes.ok && cardsRes.data)
+        setCards(cardsRes.data.cards as Card[]);
 
       setConnected(true);
     }
@@ -164,7 +206,7 @@ export default function App() {
     return () => {
       clearInterval(pollHandle);
     };
-  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
+  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setCards, setConnected, runPoll]);
 
   return (
     <SetupGate>
@@ -175,6 +217,8 @@ export default function App() {
           <Route path="/management" element={<ManagementPage />} />
           <Route path="/management/:agentId" element={<AgentDetail />} />
           <Route path="/chat" element={<ChatPage />} />
+          <Route path="/cards" element={<CardKanban />} />
+          <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
         </Route>
       </Routes>
     </SetupGate>

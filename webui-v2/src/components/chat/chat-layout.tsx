@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, LogIn } from "lucide-react";
+import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
 import { Button } from "../ui/button";
+import { ChannelCardDrawer } from "../cards/channel-card-drawer";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -24,6 +26,15 @@ export function ChatLayout() {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
+  const isGuest = useChatStore((s) => s.isGuest);
+  const users = useChatStore((s) => s.users);
+  const messages = useChatStore((s) => s.messages);
+  const replyTo = useChatStore((s) => s.replyTo);
+  const highlightLine = useChatStore((s) => s.highlightLine);
+  const pendingScrollLine = useChatStore((s) => s.pendingScrollLine);
+  const threadRoot = useChatStore((s) => s.threadRoot);
+  const threadMessages = useChatStore((s) => s.threadMessages);
+  const agents = useAgentStore((s) => s.agents);
 
   const selectChannel = useChatStore((s) => s.selectChannel);
   const clearUnread = useChatStore((s) => s.clearUnread);
@@ -32,14 +43,20 @@ export function ChatLayout() {
   const markPendingSent = useChatStore((s) => s.markPendingSent);
   const markPendingFailed = useChatStore((s) => s.markPendingFailed);
   const setReplyTo = useChatStore((s) => s.setReplyTo);
+  const setHighlightLine = useChatStore((s) => s.setHighlightLine);
+  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
   const setThreadRoot = useChatStore((s) => s.setThreadRoot);
   const setThreadMessages = useChatStore((s) => s.setThreadMessages);
   const setChannels = useChatStore((s) => s.setChannels);
-  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
   const pushNav = useChatStore((s) => s.pushNav);
   const navHistory = useChatStore((s) => s.navHistory);
 
-  // Show join banner for channels the user hasn't joined
+  const mentionCandidates = useMemo(() => {
+    const agentIds = agents.map((a) => a.id);
+    const set = new Set([...users, ...agentIds]);
+    return [...set];
+  }, [users, agents]);
+
   const currentChannelData = currentChannel
     ? channels.find((c) => c.name === currentChannel)
     : null;
@@ -48,9 +65,16 @@ export function ChatLayout() {
     currentChannelData.kind === "channel" &&
     !currentChannelData.members.includes(currentUser);
 
-  // UserCard popover state
   const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
   const [userCardPosition, setUserCardPosition] = useState<{ x: number; y: number } | null>(null);
+
+  // Card drawer state — auto-close when switching channels.
+  const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
+  useEffect(() => {
+    // Intentional: UX contract is "switching context closes transient overlays".
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCardDrawerOpen(false);
+  }, [currentChannel]);
 
   const handleChannelSelect = useCallback(
     async (name: string) => {
@@ -60,7 +84,6 @@ export function ChatLayout() {
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
       const res = await client.read(apiChannel, 50);
-      // Guard: discard result if the user switched channels during the await
       if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
       }
@@ -68,7 +91,6 @@ export function ChatLayout() {
     [selectChannel, clearUnread, setMessages, setThreadRoot]
   );
 
-  // Auto-select "general" when entering chat with no channel focused
   useEffect(() => {
     if (currentChannel) return;
     const general = channels.find((c) => c.name === "general");
@@ -81,12 +103,10 @@ export function ChatLayout() {
     if (!currentChannel) return;
     const res = await client.joinChannel(currentChannel);
     if (!res.ok) return;
-    // Refresh channel list to pick up updated members
     const chRes = await client.channels();
     if (chRes.ok && chRes.data) {
       setChannels(chRes.data.channels as Channel[]);
     }
-    // Now load messages
     const apiChannel = toApiChannel(currentChannel);
     const readRes = await client.read(apiChannel, 50);
     if (readRes.ok && readRes.data) {
@@ -101,8 +121,6 @@ export function ChatLayout() {
       const exists = channels.some((c) => c.name === displayName);
       if (!exists) {
         const newChannel = { name: displayName, kind: "dm" as const, unreadCount: 0, hasMention: false, members: parts };
-        // Add to the store so it appears in the sidebar immediately
-        // DM will be created on the backend when the first message is sent
         setChannels([...channels, newChannel]);
       }
       await handleChannelSelect(displayName);
@@ -167,8 +185,6 @@ export function ChatLayout() {
     [currentChannel, setThreadRoot, setThreadMessages]
   );
 
-  // --- Interactive fragment handlers ---
-
   const handleMentionClick = useCallback(
     (handler: string, event: React.MouseEvent) => {
       setUserCardHandler(handler);
@@ -192,7 +208,6 @@ export function ChatLayout() {
 
   const handleChannelClick = useCallback(
     (channel: string) => {
-      // Push current location onto nav stack before jumping
       if (currentChannel) {
         pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
       }
@@ -203,11 +218,9 @@ export function ChatLayout() {
 
   const handleMessageLinkClick = useCallback(
     (channel: string, line: number) => {
-      // Push current location onto nav stack before jumping
       if (currentChannel) {
         pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
       }
-      // Set pending scroll target BEFORE switching channel
       setPendingScrollLine(line);
       handleChannelSelect(channel);
     },
@@ -226,7 +239,6 @@ export function ChatLayout() {
     if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
       setMessages(res.data.entries as Message[]);
     }
-    // Restore scroll position after messages render
     requestAnimationFrame(() => {
       const el = document.querySelector("[data-message-scroll]");
       if (el) el.scrollTop = entry.scrollTop;
@@ -238,17 +250,30 @@ export function ChatLayout() {
     setUserCardPosition(null);
   }, []);
 
+  const handlePendingScrollClear = useCallback(() => {
+    setPendingScrollLine(null);
+  }, [setPendingScrollLine]);
+
+  const handleThreadClose = useCallback(() => {
+    setThreadRoot(null);
+  }, [setThreadRoot]);
+
   return (
     <div className="flex h-full overflow-hidden">
-      {/* Left: sidebar */}
       <Sidebar
         onChannelSelect={handleChannelSelect}
         onStartDm={handleStartDm}
       />
 
-      {/* Center: main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ChatHeader onStartDm={handleStartDm}>
+        <ChatHeader
+          onStartDm={handleStartDm}
+          onOpenCards={
+            currentChannel && currentChannelData?.kind === "channel"
+              ? () => setCardDrawerOpen(true)
+              : undefined
+          }
+        >
           {navHistory.length > 0 && (
             <button
               onClick={handleNavBack}
@@ -261,7 +286,6 @@ export function ChatLayout() {
           )}
         </ChatHeader>
 
-        {/* Join banner for non-members (messages still visible below) */}
         {showJoinBanner && (
           <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
             <span className="text-xs text-muted-foreground">
@@ -275,6 +299,13 @@ export function ChatLayout() {
         )}
 
         <MessageList
+          messages={messages}
+          scopeKey={currentChannel}
+          replyTo={replyTo}
+          highlightLine={highlightLine}
+          pendingScrollLine={pendingScrollLine}
+          onHighlightLineChange={setHighlightLine}
+          onPendingScrollClear={handlePendingScrollClear}
           onReply={handleReply}
           onShowThread={handleShowThread}
           onMentionClick={handleMentionClick}
@@ -282,11 +313,22 @@ export function ChatLayout() {
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
         />
-        <InputArea onSend={handleSend} />
+        {currentChannel && (
+          <InputArea
+            scopeKey={currentChannel}
+            replyTo={replyTo}
+            onReplyToChange={setReplyTo}
+            mentionCandidates={mentionCandidates}
+            disabled={isGuest}
+            onSend={handleSend}
+          />
+        )}
       </div>
 
-      {/* Right: thread panel */}
       <ThreadPanel
+        root={threadRoot}
+        messages={threadMessages}
+        onClose={handleThreadClose}
         onReplyInThread={handleReply}
         onMentionClick={handleMentionClick}
         onChannelClick={handleChannelClick}
@@ -294,13 +336,20 @@ export function ChatLayout() {
         onUserProfileClick={handleUserProfileClick}
       />
 
-      {/* UserCard popover */}
       {userCardHandler && userCardPosition && (
         <UserCard
           handler={userCardHandler}
           position={userCardPosition}
           onClose={handleCloseUserCard}
           onStartDm={handleStartDm}
+        />
+      )}
+
+      {currentChannel && currentChannelData?.kind === "channel" && (
+        <ChannelCardDrawer
+          channel={currentChannel}
+          open={cardDrawerOpen}
+          onOpenChange={setCardDrawerOpen}
         />
       )}
     </div>

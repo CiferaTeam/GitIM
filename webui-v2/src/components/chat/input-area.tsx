@@ -1,34 +1,37 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { useAgentStore } from "../../hooks/use-agent-store";
-import { useChatStore } from "../../hooks/use-chat-store";
-import type { ApiResponse } from "../../lib/types";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import type { ApiResponse, Message } from "../../lib/types";
 import { MentionPopup } from "./mention-popup";
 import { CornerDownLeft, X } from "lucide-react";
 
 interface InputAreaProps {
+  /** Unique key for this input's scope — used for localStorage draft keying.
+   *  Channel scope: the channel display name.
+   *  Card scope: "card:<channel>/<card_id>".
+   *  Pass null to hide the input (e.g. when no scope is selected). */
+  scopeKey: string | null;
+  replyTo: Message | null;
+  onReplyToChange: (msg: Message | null) => void;
+  mentionCandidates: string[];
+  disabled?: boolean;
   onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
+  placeholder?: string;
 }
 
 const MAX_HEIGHT = 200;
 
-function draftKey(channel: string) {
-  return `gitim:draft:${channel}`;
+function draftKey(scopeKey: string) {
+  return `gitim:draft:${scopeKey}`;
 }
 
-export function InputArea({ onSend }: InputAreaProps) {
-  const currentChannel = useChatStore((s) => s.currentChannel);
-  const replyTo = useChatStore((s) => s.replyTo);
-  const setReplyTo = useChatStore((s) => s.setReplyTo);
-  const users = useChatStore((s) => s.users);
-  const agents = useAgentStore((s) => s.agents);
-  const isGuest = useChatStore((s) => s.isGuest);
-
-  const mentionCandidates = useMemo(() => {
-    const agentIds = agents.map((a) => a.id);
-    const set = new Set([...users, ...agentIds]);
-    return [...set];
-  }, [users, agents]);
-
+export function InputArea({
+  scopeKey,
+  replyTo,
+  onReplyToChange,
+  mentionCandidates,
+  disabled,
+  onSend,
+  placeholder,
+}: InputAreaProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,11 +42,16 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Restore draft when scope changes
   useEffect(() => {
-    if (!currentChannel) return;
-    setText(localStorage.getItem(draftKey(currentChannel!)) ?? "");
-  }, [currentChannel]);
+    if (!scopeKey) {
+      setText("");
+      return;
+    }
+    setText(localStorage.getItem(draftKey(scopeKey)) ?? "");
+  }, [scopeKey]);
 
+  // Auto-resize textarea up to MAX_HEIGHT
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -51,7 +59,9 @@ export function InputArea({ onSend }: InputAreaProps) {
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
 
-  if (!currentChannel || isGuest) return null;
+  if (disabled || !scopeKey) return null;
+  // After the guard above, scopeKey is non-null for the rest of render.
+  const activeScopeKey: string = scopeKey;
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
@@ -69,7 +79,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     const value = e.target.value;
     setText(value);
     setError(null);
-    localStorage.setItem(draftKey(currentChannel!), value);
+    localStorage.setItem(draftKey(activeScopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -82,7 +92,7 @@ export function InputArea({ onSend }: InputAreaProps) {
     const savedReplyTo = replyTo;
 
     setText("");
-    setReplyTo(null);
+    onReplyToChange(null);
     setMentionOpen(false);
     setSending(true);
     setError(null);
@@ -91,14 +101,14 @@ export function InputArea({ onSend }: InputAreaProps) {
       const res = await onSend(trimmed, savedReplyTo?.line_number ?? 0);
       if (!res.ok) {
         setText(savedText);
-        setReplyTo(savedReplyTo);
+        onReplyToChange(savedReplyTo);
         setError(res.error ?? "Send failed");
       } else {
-        localStorage.removeItem(draftKey(currentChannel!));
+        localStorage.removeItem(draftKey(activeScopeKey));
       }
     } catch (err) {
       setText(savedText);
-      setReplyTo(savedReplyTo);
+      onReplyToChange(savedReplyTo);
       setError(err instanceof Error ? err.message : "Send failed");
     } finally {
       setSending(false);
@@ -108,7 +118,7 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Escape" && !mentionOpen) {
-      setReplyTo(null);
+      onReplyToChange(null);
       return;
     }
 
@@ -142,7 +152,6 @@ export function InputArea({ onSend }: InputAreaProps) {
 
   return (
     <div className="border-t border-border bg-card/60 px-4 py-3 shrink-0">
-      {/* Reply bar */}
       {replyTo && (
         <div className="mb-2 flex items-center gap-2 rounded-lg border border-border/60 bg-surface/60 px-3 py-1.5 text-xs text-text-muted">
           <span className="flex-1 truncate">
@@ -152,7 +161,7 @@ export function InputArea({ onSend }: InputAreaProps) {
               : replyTo.body}
           </span>
           <button
-            onClick={() => setReplyTo(null)}
+            onClick={() => onReplyToChange(null)}
             className="ml-1 shrink-0 hover:text-foreground transition-colors p-0.5 rounded hover:bg-surface-hover"
             aria-label="Clear reply"
           >
@@ -161,7 +170,6 @@ export function InputArea({ onSend }: InputAreaProps) {
         </div>
       )}
 
-      {/* Input wrapper */}
       <div className="relative">
         {mentionOpen && (
           <MentionPopup
@@ -179,7 +187,10 @@ export function InputArea({ onSend }: InputAreaProps) {
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           disabled={sending}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+          placeholder={
+            placeholder ??
+            "Type a message... (Enter to send, Shift+Enter for newline)"
+          }
           className="w-full resize-none rounded-xl border border-border bg-background px-4 py-2.5 text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 disabled:opacity-50 transition-all overflow-y-auto pr-10"
           style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />

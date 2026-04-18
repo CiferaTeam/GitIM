@@ -2,7 +2,7 @@
  * Unified client — all methods hit the real runtime HTTP API.
  * Agent methods fall back to mock if runtime is unreachable.
  */
-import type { Agent, ApiResponse } from "./types";
+import type { Agent, ApiResponse, Card, CardStatus, Message } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -144,6 +144,113 @@ export function validateChannelName(name: string): string | null {
   if (name.startsWith("-") || name.endsWith("-")) return "Cannot start or end with a hyphen";
   if (name.includes("--")) return "Cannot contain consecutive hyphens";
   return null;
+}
+
+// --- Card API: real runtime HTTP ---
+
+export interface CreateCardOpts {
+  labels?: string[];
+  assignee?: string | null;
+  status?: CardStatus;
+}
+
+export async function createCard(
+  channel: string,
+  title: string,
+  opts: CreateCardOpts = {},
+): Promise<ApiResponse<{ channel: string; card_id: string; title: string }>> {
+  const payload: Record<string, unknown> = { channel, title };
+  if (opts.labels && opts.labels.length > 0) payload.labels = opts.labels;
+  if (opts.assignee) payload.assignee = opts.assignee;
+  if (opts.status) payload.status = opts.status;
+  const res = await fetch(`${baseUrl()}/im/cards`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return await res.json();
+}
+
+export interface ListCardsQuery {
+  channel?: string | null;
+  labels?: string[];
+  status?: CardStatus | null;
+  assignee?: string | null;
+}
+
+export async function listCards(
+  query: ListCardsQuery = {},
+): Promise<ApiResponse<{ cards: Card[] }>> {
+  const params = new URLSearchParams();
+  if (query.channel) params.set("channel", query.channel);
+  if (query.status) params.set("status", query.status);
+  if (query.assignee) params.set("assignee", query.assignee);
+  if (query.labels) {
+    for (const l of query.labels) params.append("label", l);
+  }
+  const qs = params.toString();
+  const url = qs ? `${baseUrl()}/im/cards?${qs}` : `${baseUrl()}/im/cards`;
+  const res = await fetch(url);
+  return await res.json();
+}
+
+export interface ReadCardQuery {
+  limit?: number;
+  since?: number;
+}
+
+export async function readCard(
+  channel: string,
+  cardId: string,
+  query: ReadCardQuery = {},
+): Promise<ApiResponse<{ meta: Card; entries: Message[] }>> {
+  const params = new URLSearchParams();
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.since != null) params.set("since", String(query.since));
+  const qs = params.toString();
+  const base = `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`;
+  const url = qs ? `${base}?${qs}` : base;
+  const res = await fetch(url);
+  return await res.json();
+}
+
+export async function sendCardMessage(
+  channel: string,
+  cardId: string,
+  body: string,
+  replyTo?: number,
+): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body, reply_to: replyTo }),
+    },
+  );
+  return await res.json();
+}
+
+export interface UpdateCardPatch {
+  status?: CardStatus;
+  labels?: string[];
+  assignee?: string | null;
+}
+
+export async function updateCard(
+  channel: string,
+  cardId: string,
+  patch: UpdateCardPatch,
+): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  return await res.json();
 }
 
 // --- Preflight ---

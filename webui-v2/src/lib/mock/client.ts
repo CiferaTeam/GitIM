@@ -157,7 +157,7 @@ export async function send(
   };
 
   existing.push(msg);
-  pushChange({ channel: key, kind: "message" });
+  pushChange({ channel: key, kind: "channel" });
 
   return { ok: true, data: { line_number, status: "pushed" } };
 }

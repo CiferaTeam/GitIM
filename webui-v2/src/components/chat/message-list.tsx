@@ -1,10 +1,23 @@
 import { useRef, useEffect, useMemo, useState } from "react";
-import { useChatStore } from "../../hooks/use-chat-store";
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
 import { MessageSquare, Hash } from "lucide-react";
 
 interface MessageListProps {
+  messages: Message[];
+  /** Identifier for the current scope (channel name, card path, etc.).
+   *  null = no scope selected — show "select a channel" empty state. */
+  scopeKey: string | null;
+  replyTo: Message | null;
+  highlightLine: number | null;
+  pendingScrollLine: number | null;
+  onHighlightLineChange: (line: number | null) => void;
+  onPendingScrollClear: () => void;
+  /** Custom empty-state hint when scope is selected but has no messages. */
+  emptyHint?: string;
+  /** Custom empty-state hint when scope is null. */
+  noScopeHint?: string;
+
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
   onMentionClick?: (handler: string, event: React.MouseEvent) => void;
@@ -14,6 +27,15 @@ interface MessageListProps {
 }
 
 export function MessageList({
+  messages,
+  scopeKey,
+  replyTo,
+  highlightLine,
+  pendingScrollLine,
+  onHighlightLineChange,
+  onPendingScrollClear,
+  emptyHint,
+  noScopeHint,
   onReply,
   onShowThread,
   onMentionClick,
@@ -21,15 +43,6 @@ export function MessageList({
   onMessageLinkClick,
   onUserProfileClick,
 }: MessageListProps) {
-  const messages = useChatStore((s) => s.messages);
-  const currentChannel = useChatStore((s) => s.currentChannel);
-  const replyTo = useChatStore((s) => s.replyTo);
-  const highlightLine = useChatStore((s) => s.highlightLine);
-  const setHighlightLine = useChatStore((s) => s.setHighlightLine);
-
-  const pendingScrollLine = useChatStore((s) => s.pendingScrollLine);
-  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
-
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(messages.length);
 
@@ -55,9 +68,9 @@ export function MessageList({
         ) as HTMLElement | null;
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "center" });
-          setHighlightLine(pendingScrollLine);
+          onHighlightLineChange(pendingScrollLine);
         }
-        setPendingScrollLine(null);
+        onPendingScrollClear();
       });
       return;
     }
@@ -65,13 +78,13 @@ export function MessageList({
     if (messages.length > prev && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, pendingScrollLine, setHighlightLine, setPendingScrollLine]);
+  }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);
 
   useEffect(() => {
     if (highlightLine === null) return;
-    const t = setTimeout(() => setHighlightLine(null), 1500);
+    const t = setTimeout(() => onHighlightLineChange(null), 1500);
     return () => clearTimeout(t);
-  }, [highlightLine, setHighlightLine]);
+  }, [highlightLine, onHighlightLineChange]);
 
   function handleScrollTo(lineNumber: number) {
     if (!scrollRef.current) return;
@@ -80,7 +93,7 @@ export function MessageList({
     ) as HTMLElement | null;
     if (el) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      setHighlightLine(lineNumber);
+      onHighlightLineChange(lineNumber);
     }
   }
 
@@ -90,8 +103,7 @@ export function MessageList({
     setTimeout(() => setCopiedLine(null), 1500);
   }
 
-  // Empty states
-  if (!currentChannel) {
+  if (!scopeKey) {
     return (
       <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
         <div className="text-center space-y-4 max-w-xs">
@@ -99,7 +111,9 @@ export function MessageList({
             <MessageSquare className="size-6 text-primary" />
           </div>
           <div>
-            <p className="text-foreground font-medium">Select a channel</p>
+            <p className="text-foreground font-medium">
+              {noScopeHint ?? "Select a channel"}
+            </p>
             <p className="text-sm text-text-muted mt-1">
               Choose a channel or DM from the sidebar to start chatting
             </p>
@@ -118,10 +132,10 @@ export function MessageList({
           </div>
           <div>
             <p className="text-foreground font-medium">
-              #{currentChannel}
+              {scopeKey.startsWith("card:") ? "Card discussion" : `#${scopeKey}`}
             </p>
             <p className="text-sm text-text-muted mt-2">
-              No messages yet. Send the first message to get started.
+              {emptyHint ?? "No messages yet. Send the first message to get started."}
             </p>
           </div>
         </div>
