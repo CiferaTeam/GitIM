@@ -13,12 +13,15 @@ const STATUS_LABEL: Record<CardStatus, string> = {
 export interface CardKanbanColumnProps {
   status: CardStatus;
   cards: Card[];
+  /** Archived cards for this column, rendered muted below active cards. Empty when "Show archived" is off. */
+  archivedCards?: Card[];
   onStatusChange: (card: Card, newStatus: CardStatus) => void;
 }
 
 export function CardKanbanColumn({
   status,
   cards,
+  archivedCards = [],
   onStatusChange,
 }: CardKanbanColumnProps) {
   const [showAllDone, setShowAllDone] = useState(false);
@@ -28,14 +31,17 @@ export function CardKanbanColumn({
   const visible = shouldCollapse ? cards.slice(0, DONE_INITIAL_LIMIT) : cards;
   const hidden = cards.length - visible.length;
 
+  const hasArchived = archivedCards.length > 0;
+  const totalCount = cards.length + archivedCards.length;
+
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-[#1c1c1e] rounded-lg border border-border">
       <header className="flex items-center justify-between px-3 py-2 border-b border-border">
         <h2 className="text-sm font-medium">{STATUS_LABEL[status]}</h2>
-        <span className="text-xs text-muted-foreground">{cards.length}</span>
+        <span className="text-xs text-muted-foreground">{totalCount}</span>
       </header>
       <div className="flex-1 overflow-y-auto p-2 space-y-2">
-        {cards.length === 0 ? (
+        {cards.length === 0 && !hasArchived ? (
           <p className="text-xs text-muted-foreground/60 text-center py-4">
             No cards
           </p>
@@ -55,6 +61,23 @@ export function CardKanbanColumn({
               >
                 Show all ({hidden} more)
               </button>
+            )}
+            {hasArchived && (
+              <>
+                {cards.length > 0 && (
+                  <div className="pt-2 pb-1 text-[10px] uppercase tracking-wider text-text-faint text-center border-t border-border/60 mt-2">
+                    Archived · {archivedCards.length}
+                  </div>
+                )}
+                {archivedCards.map((card) => (
+                  <CardKanbanCell
+                    key={`archived-${card.channel}/${card.card_id}`}
+                    card={card}
+                    archived
+                    onStatusChange={onStatusChange}
+                  />
+                ))}
+              </>
             )}
           </>
         )}

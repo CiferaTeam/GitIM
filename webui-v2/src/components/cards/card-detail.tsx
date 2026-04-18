@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { InputArea } from "@/components/chat/input-area";
 import { MessageList } from "@/components/chat/message-list";
 import { useAgentStore } from "@/hooks/use-agent-store";
@@ -29,7 +30,14 @@ export function CardDetail() {
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
 
-  const card = useCardStore((s) => selectCardById(s, channel, cardId));
+  const activeCard = useCardStore((s) => selectCardById(s, channel, cardId));
+  const archivedCard = useCardStore((s) =>
+    s.archivedCards.find((c) => c.channel === channel && c.card_id === cardId),
+  );
+  // Pick from archived fallback so the drawer can still render card meta after
+  // the archive move removed it from `cards`. `archived` state below is the
+  // source of truth for UI; `card` just provides title/labels/etc to render.
+  const card = activeCard ?? archivedCard;
   const upsertCard = useCardStore((s) => s.upsertCard);
   const setCardMessages = useCardStore((s) => s.setCardMessages);
   const addPendingCardMessage = useCardStore((s) => s.addPendingCardMessage);
@@ -37,6 +45,8 @@ export function CardDetail() {
   const markPendingCardFailed = useCardStore((s) => s.markPendingCardFailed);
   const markCardInFlight = useCardStore((s) => s.markCardInFlight);
   const unmarkCardInFlight = useCardStore((s) => s.unmarkCardInFlight);
+  const markArchived = useCardStore((s) => s.markArchived);
+  const markUnarchived = useCardStore((s) => s.markUnarchived);
 
   const pathKey = useMemo(() => cardPathKey(channel, cardId), [channel, cardId]);
   const scopeKey = useMemo(() => cardScopeKey(channel, cardId), [channel, cardId]);
@@ -47,6 +57,8 @@ export function CardDetail() {
 
   const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [archived, setArchived] = useState<boolean>(false);
+  const [archiveInFlight, setArchiveInFlight] = useState<boolean>(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [highlightLine, setHighlightLine] = useState<number | null>(null);
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
@@ -80,7 +92,13 @@ export function CardDetail() {
         setLoadStatus("not_found");
         return;
       }
-      upsertCard(res.data.meta);
+      setArchived(res.data.archived);
+      // Only upsert into active `cards` when not archived; otherwise the poll
+      // merge would immediately drop it anyway, and we'd flash a stale entry
+      // in the filtered kanban. archivedCard fallback above handles rendering.
+      if (!res.data.archived) {
+        upsertCard(res.data.meta);
+      }
       setCardMessages(pathKey, res.data.entries);
       setLoadStatus("ok");
     })();
@@ -158,6 +176,41 @@ export function CardDetail() {
     ],
   );
 
+  const handleArchive = useCallback(async () => {
+    if (archiveInFlight) return;
+    setArchiveInFlight(true);
+    const res = await client.archiveCard(channel, cardId);
+    setArchiveInFlight(false);
+    if (!res.ok) {
+      toast.error(`Failed to archive: ${res.error ?? "unknown"}`);
+      return;
+    }
+    markArchived(channel, cardId);
+    setArchived(true);
+    toast.success("Card archived");
+    // Close drawer — the card is gone from the active board. Nav back so the
+    // user returns to whatever they came from (kanban or elsewhere).
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/cards");
+    }
+  }, [archiveInFlight, channel, cardId, markArchived, navigate]);
+
+  const handleUnarchive = useCallback(async () => {
+    if (archiveInFlight) return;
+    setArchiveInFlight(true);
+    const res = await client.unarchiveCard(channel, cardId);
+    setArchiveInFlight(false);
+    if (!res.ok) {
+      toast.error(`Failed to unarchive: ${res.error ?? "unknown"}`);
+      return;
+    }
+    markUnarchived(channel, cardId);
+    setArchived(false);
+    toast.success("Card restored");
+  }, [archiveInFlight, channel, cardId, markUnarchived]);
+
   function handleBack() {
     if (window.history.length > 1) {
       navigate(-1);
@@ -213,9 +266,42 @@ export function CardDetail() {
         <span className="text-muted-foreground">
           #{channel} / <span className="font-mono">{cardId}</span>
         </span>
+        <div className="ml-auto">
+          {archived ? (
+            <Button
+              variant="default"
+              size="xs"
+              onClick={handleUnarchive}
+              disabled={archiveInFlight}
+              className="gap-1"
+            >
+              <ArchiveRestore className="h-3 w-3" />
+              Unarchive
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={handleArchive}
+              disabled={archiveInFlight}
+              className="gap-1 text-muted-foreground hover:text-foreground"
+              title="Archive this card"
+            >
+              <Archive className="h-3 w-3" />
+              Archive
+            </Button>
+          )}
+        </div>
       </div>
 
-      <CardMetaBar card={card} onUpdate={handleUpdate} />
+      {archived && (
+        <div className="px-4 py-2 border-b border-border bg-muted/40 text-xs text-muted-foreground flex items-center gap-2">
+          <Archive className="h-3.5 w-3.5 shrink-0" />
+          <span>This card is archived. Edits are disabled.</span>
+        </div>
+      )}
+
+      <CardMetaBar card={card} onUpdate={handleUpdate} disabled={archived} />
 
       <MessageList
         messages={messages}
@@ -225,21 +311,23 @@ export function CardDetail() {
         pendingScrollLine={pendingScrollLine}
         onHighlightLineChange={setHighlightLine}
         onPendingScrollClear={() => setPendingScrollLine(null)}
-        emptyHint="Write the first note…"
+        emptyHint={archived ? "No notes to add — card is archived." : "Write the first note…"}
         onReply={setReplyTo}
         onShowThread={() => {
           /* thread panel not wired for card detail yet */
         }}
       />
 
-      <InputArea
-        scopeKey={scopeKey}
-        replyTo={replyTo}
-        onReplyToChange={setReplyTo}
-        mentionCandidates={mentionCandidates}
-        onSend={handleSend}
-        placeholder="Write a note (Enter to send, Shift+Enter for newline)"
-      />
+      {!archived && (
+        <InputArea
+          scopeKey={scopeKey}
+          replyTo={replyTo}
+          onReplyToChange={setReplyTo}
+          mentionCandidates={mentionCandidates}
+          onSend={handleSend}
+          placeholder="Write a note (Enter to send, Shift+Enter for newline)"
+        />
+      )}
     </div>
   );
 }

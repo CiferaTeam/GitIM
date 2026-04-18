@@ -203,7 +203,7 @@ export async function readCard(
   channel: string,
   cardId: string,
   query: ReadCardQuery = {},
-): Promise<ApiResponse<{ meta: Card; entries: Message[] }>> {
+): Promise<ApiResponse<{ meta: Card; entries: Message[]; archived: boolean }>> {
   const params = new URLSearchParams();
   if (query.limit != null) params.set("limit", String(query.limit));
   if (query.since != null) params.set("since", String(query.since));

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Hash, AtSign, Plus, Search } from "lucide-react";
+import { Hash, AtSign, ArchiveRestore, ChevronRight, Plus, Search } from "lucide-react";
+import { toast } from "sonner";
 import { useChatStore } from "../../hooks/use-chat-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
@@ -42,9 +43,15 @@ function isSelfDm(channel: Channel, currentUser: string): boolean {
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
+  const archivedChannels = useChatStore((s) => s.archivedChannels);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
+  const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
+  const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
+
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [archivedLoaded, setArchivedLoaded] = useState(false);
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -140,6 +147,45 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   function handleUserSelect(user: string) {
     setDmSearchOpen(false);
     onStartDm(user);
+  }
+
+  async function handleToggleArchivedSection() {
+    const next = !archivedOpen;
+    setArchivedOpen(next);
+    // Fetch archived channels the first time the section is opened.
+    // Session cache: subsequent opens skip the fetch; unarchive updates the
+    // local list directly.
+    if (next && !archivedLoaded) {
+      const res = await client.listArchivedChannels();
+      if (res.ok && res.data) {
+        setArchivedChannels(res.data.channels);
+        setArchivedLoaded(true);
+      } else {
+        toast.error(
+          `Failed to load archived channels: ${res.error ?? "unknown"}`,
+        );
+      }
+    }
+  }
+
+  async function handleUnarchiveChannel(name: string) {
+    const res = await client.unarchiveChannel(name);
+    if (!res.ok) {
+      toast.error(`Failed to unarchive #${name}: ${res.error ?? "unknown"}`);
+      return;
+    }
+    markChannelUnarchived(name);
+    toast.success(`#${name} restored`);
+    // Refresh channel list so the restored channel picks up full metadata
+    // (kind, members) in the active `channels` store.
+    try {
+      const chRes = await client.channels();
+      if (chRes.ok && chRes.data) {
+        setChannels(chRes.data.channels as Channel[]);
+      }
+    } catch {
+      /* refresh is best-effort; markChannelUnarchived already seeded the entry */
+    }
   }
 
   return (
@@ -254,6 +300,61 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Archived channels section — collapsed by default; lazy-loaded on expand. */}
+      <div className="px-3 py-2 border-t border-border/60 shrink-0">
+        <button
+          type="button"
+          onClick={handleToggleArchivedSection}
+          className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-text-muted hover:text-text-secondary hover:bg-surface/40 transition-colors"
+          aria-expanded={archivedOpen}
+        >
+          <ChevronRight
+            className={[
+              "size-3 transition-transform duration-150",
+              archivedOpen ? "rotate-90" : "",
+            ].join(" ")}
+          />
+          <span className="uppercase font-semibold tracking-wider">Archived</span>
+          {archivedChannels.length > 0 && (
+            <span className="ml-1 text-text-faint font-mono">
+              {archivedChannels.length}
+            </span>
+          )}
+        </button>
+        {archivedOpen && (
+          <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
+            {archivedChannels.length === 0 ? (
+              <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                {archivedLoaded ? "No archived channels" : "Loading…"}
+              </li>
+            ) : (
+              archivedChannels.map((ch) => (
+                <li
+                  key={ch.name}
+                  className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40 transition-all group"
+                  title="Archived — not selectable. Click the restore button to unarchive."
+                >
+                  <Hash className="size-3 text-text-faint shrink-0" />
+                  <span className="truncate flex-1">{ch.name}</span>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    title={`Unarchive #${ch.name}`}
+                    className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleUnarchiveChannel(ch.name);
+                    }}
+                  >
+                    <ArchiveRestore className="size-3" />
+                  </Button>
+                </li>
+              ))
+            )}
+          </ul>
+        )}
+      </div>
 
       {/* DMs section */}
       <div className="px-3 pt-3 pb-4 border-t border-border/60 flex flex-col min-h-0 max-h-[45%]">

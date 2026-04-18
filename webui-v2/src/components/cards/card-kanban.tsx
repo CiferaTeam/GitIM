@@ -43,6 +43,8 @@ function writeFilterToURL(filter: CardFilterState): URLSearchParams {
 export function CardKanban() {
   const [searchParams, setSearchParams] = useSearchParams();
   const cards = useCardStore((s) => s.cards);
+  const archivedCards = useCardStore((s) => s.archivedCards);
+  const showArchived = useCardStore((s) => s.showArchived);
   const setCards = useCardStore((s) => s.setCards);
   const upsertCard = useCardStore((s) => s.upsertCard);
   const markCardInFlight = useCardStore((s) => s.markCardInFlight);
@@ -83,11 +85,29 @@ export function CardKanban() {
     return sortByUpdatedDesc(selectFilteredCards(cards, cf, currentUser));
   }, [cards, filter, currentUser]);
 
+  const filteredArchivedCards = useMemo(() => {
+    if (!showArchived) return [];
+    const cf: CardFilter = {
+      channels: filter.channels.length > 0 ? filter.channels : undefined,
+      labels: filter.labels.length > 0 ? filter.labels : undefined,
+      assignee: filter.mineOnly
+        ? "__me__"
+        : filter.assignee ?? undefined,
+    };
+    return sortByUpdatedDesc(selectFilteredCards(archivedCards, cf, currentUser));
+  }, [archivedCards, showArchived, filter, currentUser]);
+
   const byStatus = useMemo(() => {
     const g: Record<CardStatus, Card[]> = { todo: [], doing: [], done: [] };
     for (const c of filteredCards) g[c.status].push(c);
     return g;
   }, [filteredCards]);
+
+  const archivedByStatus = useMemo(() => {
+    const g: Record<CardStatus, Card[]> = { todo: [], doing: [], done: [] };
+    for (const c of filteredArchivedCards) g[c.status].push(c);
+    return g;
+  }, [filteredArchivedCards]);
 
   const handleStatusChange = useCallback(
     async (card: Card, newStatus: CardStatus) => {
@@ -131,12 +151,12 @@ export function CardKanban() {
         labelSuggestions={allLabels}
       />
 
-      {cards.length === 0 ? (
+      {cards.length === 0 && filteredArchivedCards.length === 0 ? (
         <EmptyState
           title="No cards yet"
           hint="Create a card from any channel or with the button above."
         />
-      ) : filteredCards.length === 0 ? (
+      ) : filteredCards.length === 0 && filteredArchivedCards.length === 0 ? (
         <EmptyState
           title="No cards match these filters"
           hint="Try clearing a filter."
@@ -147,16 +167,19 @@ export function CardKanban() {
           <CardKanbanColumn
             status="todo"
             cards={byStatus.todo}
+            archivedCards={archivedByStatus.todo}
             onStatusChange={handleStatusChange}
           />
           <CardKanbanColumn
             status="doing"
             cards={byStatus.doing}
+            archivedCards={archivedByStatus.doing}
             onStatusChange={handleStatusChange}
           />
           <CardKanbanColumn
             status="done"
             cards={byStatus.done}
+            archivedCards={archivedByStatus.done}
             onStatusChange={handleStatusChange}
           />
         </div>

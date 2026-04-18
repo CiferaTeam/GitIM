@@ -35,9 +35,11 @@ export interface CardMetaBarProps {
     labels?: string[];
     assignee?: string | null;
   }) => Promise<void>;
+  /** When true, all meta edit controls (status, assignee, labels) render read-only. */
+  disabled?: boolean;
 }
 
-export function CardMetaBar({ card, onUpdate }: CardMetaBarProps) {
+export function CardMetaBar({ card, onUpdate, disabled = false }: CardMetaBarProps) {
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
   const allLabels = useCardStore(selectAllLabels);
@@ -48,6 +50,51 @@ export function CardMetaBar({ card, onUpdate }: CardMetaBarProps) {
   }, [users, agents]);
 
   const [assigneeOpen, setAssigneeOpen] = useState(false);
+
+  // Read-only rendering when disabled — keeps meta visible (status, assignee,
+  // labels) so the user still sees what the card looked like, just without
+  // the dropdown/popover affordances.
+  if (disabled) {
+    return (
+      <div className="border-b border-border px-4 py-3 flex flex-col gap-2">
+        <h1 className="text-lg font-semibold leading-tight">{card.title}</h1>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span
+            className={cn(
+              "rounded px-2 py-0.5 font-medium capitalize",
+              STATUS_CLASS[card.status],
+            )}
+          >
+            {card.status}
+          </span>
+          <span className="text-muted-foreground">·</span>
+          {card.assignee ? (
+            <span className="font-mono text-foreground">@{card.assignee}</span>
+          ) : (
+            <span className="text-muted-foreground">Unassigned</span>
+          )}
+          {card.labels.length > 0 && (
+            <>
+              <span className="text-muted-foreground">·</span>
+              <div className="flex flex-wrap gap-1">
+                {card.labels.map((l) => (
+                  <span
+                    key={l}
+                    className="rounded-sm px-1.5 py-0.5 text-[10px] bg-muted text-muted-foreground"
+                  >
+                    {l}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          created by @{card.created_by} · card id {card.card_id}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="border-b border-border px-4 py-3 flex flex-col gap-2">

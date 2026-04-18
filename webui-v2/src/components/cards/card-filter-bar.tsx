@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Archive, Check, ChevronDown } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -8,7 +9,9 @@ import {
 } from "@/components/ui/popover";
 import { LabelChipInput } from "@/components/ui/label-chip-input";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import * as client from "@/lib/client";
 import { cn } from "@/lib/utils";
 
 export interface CardFilterState {
@@ -40,6 +43,9 @@ export function CardFilterBar({
   const channels = useChatStore((s) => s.channels);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
+  const showArchived = useCardStore((s) => s.showArchived);
+  const toggleShowArchived = useCardStore((s) => s.toggleShowArchived);
+  const setArchivedCards = useCardStore((s) => s.setArchivedCards);
 
   const channelOptions = useMemo(
     () => channels.filter((c) => c.kind === "channel").map((c) => c.name),
@@ -56,6 +62,22 @@ export function CardFilterBar({
     value.labels.length > 0 ||
     !!value.assignee ||
     value.mineOnly;
+
+  async function handleToggleArchived() {
+    const nextShow = !showArchived;
+    toggleShowArchived();
+    // Refetch whenever we turn on — stale archived lists are worse than one
+    // extra request, and the UX cost of stale is high (user sees wrong cards).
+    if (nextShow) {
+      const ch = value.channels.length === 1 ? value.channels[0] : undefined;
+      const res = await client.listArchivedCards(ch);
+      if (res.ok && res.data) {
+        setArchivedCards(res.data.cards);
+      } else {
+        toast.error(`Failed to load archived cards: ${res.error ?? "unknown"}`);
+      }
+    }
+  }
 
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-[#232326] flex-wrap">
@@ -89,6 +111,22 @@ export function CardFilterBar({
         />
         <span>My cards</span>
       </label>
+      <Button
+        variant={showArchived ? "default" : "ghost"}
+        size="sm"
+        onClick={handleToggleArchived}
+        className={cn(
+          "gap-1.5 text-xs",
+          showArchived
+            ? "bg-accent-muted text-[#60a5fa] hover:bg-accent-muted hover:text-[#60a5fa]"
+            : "text-muted-foreground",
+        )}
+        aria-pressed={showArchived}
+        title={showArchived ? "Hide archived cards" : "Show archived cards"}
+      >
+        <Archive className="h-3 w-3" />
+        <span>Archived</span>
+      </Button>
       {hasAny && (
         <Button
           variant="ghost"
