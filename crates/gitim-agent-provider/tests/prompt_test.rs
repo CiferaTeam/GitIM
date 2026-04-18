@@ -89,6 +89,34 @@ fn prompt_context_handler_is_interpolated() {
 }
 
 #[test]
+fn gitim_api_exposes_card_and_archive_commands() {
+    let provider =
+        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+    let api = provider.prompt_gitim_api(&ctx);
+
+    // Card base commands
+    assert!(api.contains("gitim card create"));
+    assert!(api.contains("gitim card ls"));
+    assert!(api.contains("gitim card read"));
+    assert!(api.contains("gitim card comment"));
+    assert!(api.contains("gitim card update"));
+
+    // Card archive triplet
+    assert!(api.contains("gitim card archive"));
+    assert!(api.contains("gitim card unarchive"));
+    assert!(api.contains("gitim card archived"));
+
+    // Channel archive triplet
+    assert!(api.contains("gitim archive-channel"));
+    assert!(api.contains("gitim unarchive-channel"));
+    assert!(api.contains("gitim archived-channels"));
+}
+
+#[test]
 fn codex_provider_uses_agents_md() {
     let provider =
         gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
