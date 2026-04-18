@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AtSign, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
 import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
 import { Button } from "../ui/button";
@@ -22,6 +23,7 @@ interface ChatHeaderProps {
 }
 
 export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps) {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
@@ -44,7 +46,8 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
   );
 
   async function refreshChannels() {
-    const chRes = await client.channels();
+    if (!activeSlug) return;
+    const chRes = await client.channels(activeSlug);
     if (chRes.ok && chRes.data) {
       setChannels(chRes.data.channels as Channel[]);
     }

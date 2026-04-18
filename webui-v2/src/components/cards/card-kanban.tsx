@@ -10,6 +10,7 @@ import {
   sortByUpdatedDesc,
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Card, CardFilter, CardStatus } from "@/lib/types";
 import { CardFilterBar, EMPTY_CARD_FILTER, type CardFilterState } from "./card-filter-bar";
@@ -42,6 +43,7 @@ function writeFilterToURL(filter: CardFilterState): URLSearchParams {
 
 export function CardKanban() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const cards = useCardStore((s) => s.cards);
   const setCards = useCardStore((s) => s.setCards);
   const upsertCard = useCardStore((s) => s.upsertCard);
@@ -57,13 +59,14 @@ export function CardKanban() {
 
   const [createOpen, setCreateOpen] = useState(false);
 
-  // Refetch on mount
+  // Refetch on mount and whenever the active workspace changes
   useEffect(() => {
+    if (!activeSlug) return;
     (async () => {
-      const res = await client.listCards();
+      const res = await client.listCards(activeSlug);
       if (res.ok && res.data) setCards(res.data.cards);
     })();
-  }, [setCards]);
+  }, [activeSlug, setCards]);
 
   const handleFilterChange = useCallback(
     (next: CardFilterState) => {
@@ -91,12 +94,13 @@ export function CardKanban() {
 
   const handleStatusChange = useCallback(
     async (card: Card, newStatus: CardStatus) => {
+      if (!activeSlug) return;
       const prev = card;
       // Mark in-flight before optimistic upsert so any interleaving poll
       // tick sees the guard before it can observe the optimistic state.
       markCardInFlight(card.channel, card.card_id);
       upsertCard({ ...card, status: newStatus });
-      const res = await client.updateCard(card.channel, card.card_id, {
+      const res = await client.updateCard(activeSlug, card.channel, card.card_id, {
         status: newStatus,
       });
       unmarkCardInFlight(card.channel, card.card_id);
@@ -106,7 +110,7 @@ export function CardKanban() {
         toast.error(`Failed to update: ${res.error ?? "unknown"}`);
       }
     },
-    [upsertCard, markCardInFlight, unmarkCardInFlight],
+    [activeSlug, upsertCard, markCardInFlight, unmarkCardInFlight],
   );
 
   const hasFilter =

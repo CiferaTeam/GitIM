@@ -14,6 +14,7 @@ import { LabelChipInput } from "@/components/ui/label-chip-input";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useCardStore, selectAllLabels } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Card, CardStatus } from "@/lib/types";
 
@@ -32,6 +33,7 @@ export function CardCreateDialog({
   presetChannel,
 }: CardCreateDialogProps) {
   const navigate = useNavigate();
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const channels = useChatStore((s) => s.channels);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
@@ -76,9 +78,13 @@ export function CardCreateDialog({
 
   async function handleSubmit() {
     if (!canSubmit) return;
+    if (!activeSlug) {
+      setError("No workspace selected");
+      return;
+    }
     setSubmitting(true);
     setError(null);
-    const res = await client.createCard(channel, title.trim(), {
+    const res = await client.createCard(activeSlug, channel, title.trim(), {
       labels: labels.length > 0 ? labels : undefined,
       assignee: assignee || undefined,
       status,

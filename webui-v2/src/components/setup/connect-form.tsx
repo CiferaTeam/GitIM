@@ -37,7 +37,7 @@ export function ConnectForm() {
 
       setPort(p);
       setRuntimeVersion(data.version ?? null);
-      setStatus("connected");
+      setStatus("ready");
     } catch {
       setError(`无法连接 127.0.0.1:${p}，请确认 Runtime 已启动`);
     } finally {

@@ -9,6 +9,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { toHandler, validateHandler } from "@/lib/client";
 import {
@@ -23,6 +24,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function AddAgentDialog() {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const addAgent = useAgentStore((s) => s.addAgent);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -106,6 +108,10 @@ export function AddAgentDialog() {
       !detectResult?.available
     )
       return;
+    if (!activeSlug) {
+      toast.error("No workspace selected");
+      return;
+    }
 
     const envMap: Record<string, string> = {};
     for (const { key, value } of envVars) {
@@ -115,6 +121,7 @@ export function AddAgentDialog() {
     setSubmitting(true);
     try {
       const res = await client.addAgent(
+        activeSlug,
         name.trim(),
         provider,
         systemPrompt.trim(),

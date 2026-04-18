@@ -54,6 +54,28 @@ export interface ApiResponse<T = Record<string, unknown>> {
   ok: boolean;
   data?: T;
   error?: string;
+  error_code?: string;
+}
+
+export type WorkspaceProvider = "local" | "github";
+
+export interface WorkspaceSummary {
+  slug: string;
+  workspace_name: string;
+  path: string;
+  provider: WorkspaceProvider;
+  initialized: boolean;
+  agents_count?: number;
+}
+
+export type CreateWorkspaceGit =
+  | { provider: "local" }
+  | { provider: "github"; remote_url: string; token: string };
+
+export interface CreateWorkspaceRequest {
+  path: string;
+  workspace_name?: string;
+  git: CreateWorkspaceGit;
 }
 
 export type PollChangeKind =

@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { toast } from "sonner";
 
@@ -27,9 +28,14 @@ export function RemoveAgentDialog({
   onRemoved,
 }: RemoveAgentDialogProps) {
   const removeAgent = useAgentStore((s) => s.removeAgent);
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
 
   async function handleConfirm() {
-    const res = await client.removeAgent(agentId);
+    if (!activeSlug) {
+      toast.error("No workspace selected");
+      return;
+    }
+    const res = await client.removeAgent(activeSlug, agentId);
     if (res.ok) {
       removeAgent(agentId);
       onOpenChange(false);

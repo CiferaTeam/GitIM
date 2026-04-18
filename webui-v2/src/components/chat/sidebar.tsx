@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Hash, AtSign, Plus, Search } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
 import { AgentStatusPanel } from "./agent-status-panel";
@@ -40,6 +41,7 @@ function isSelfDm(channel: Channel, currentUser: string): boolean {
 }
 
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const currentChannel = useChatStore((s) => s.currentChannel);
@@ -69,6 +71,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   async function handleCreateChannel() {
+    if (!activeSlug) {
+      setCreateError("No workspace selected");
+      return;
+    }
     const name = createName.trim().toLowerCase();
     const validation = client.validateChannelName(name);
     if (validation) {
@@ -79,6 +85,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     setCreateError("");
     try {
       const res = await client.createChannel(
+        activeSlug,
         name,
         createDisplayName.trim() || undefined,
         createIntro.trim() || undefined,
@@ -95,7 +102,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       return;
     }
     try {
-      const chRes = await client.channels();
+      const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
         setChannels(chRes.data.channels as Channel[]);
       }

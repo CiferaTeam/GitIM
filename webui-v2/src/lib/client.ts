@@ -1,8 +1,20 @@
 /**
- * Unified client — all methods hit the real runtime HTTP API.
+ * Unified client - all methods hit the real runtime HTTP API.
  * Agent methods fall back to mock if runtime is unreachable.
+ *
+ * Workspace-scoped methods take `slug` as the first parameter.
+ * Global (unscoped) methods: health, listWorkspaces, createWorkspace,
+ * deleteWorkspace, getWorkspace, preflightProvider.
  */
-import type { Agent, ApiResponse, Card, CardStatus, Message } from "./types";
+import type {
+  Agent,
+  ApiResponse,
+  Card,
+  CardStatus,
+  CreateWorkspaceRequest,
+  Message,
+  WorkspaceSummary,
+} from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -11,6 +23,10 @@ import { useConnectionStore } from "@/hooks/use-connection-store";
 
 function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
+}
+
+function wsBase(slug: string): string {
+  return `${baseUrl()}/workspaces/${encodeURIComponent(slug)}`;
 }
 
 // --- Health ---
@@ -22,15 +38,81 @@ export async function health(): Promise<ApiResponse> {
   return { ok: true, data };
 }
 
-// --- IM methods: real runtime HTTP ---
+// --- Workspace CRUD (global, no slug) ---
 
-export async function me(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/me`);
+export async function listWorkspaces(): Promise<
+  ApiResponse<{ workspaces: WorkspaceSummary[] }>
+> {
+  try {
+    const res = await fetch(`${baseUrl()}/workspaces`);
+    const data = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function createWorkspace(
+  req: CreateWorkspaceRequest,
+): Promise<ApiResponse<{ slug: string; workspace_name: string; path: string; provider: string }>> {
+  try {
+    const res = await fetch(`${baseUrl()}/workspaces`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      return {
+        ok: false,
+        error: data.error ?? `HTTP ${res.status}`,
+        error_code: data.error_code,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function getWorkspace(slug: string): Promise<ApiResponse> {
+  try {
+    const res = await fetch(wsBase(slug));
+    const data = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
+  try {
+    const res = await fetch(wsBase(slug), { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// --- IM methods: real runtime HTTP (all scoped to a workspace) ---
+
+export async function me(slug: string): Promise<ApiResponse> {
+  const res = await fetch(`${wsBase(slug)}/im/me`);
   return await res.json();
 }
 
-export async function poll(since?: string): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/poll`, {
+export async function poll(slug: string, since?: string): Promise<ApiResponse> {
+  const res = await fetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ since }),
@@ -38,18 +120,19 @@ export async function poll(since?: string): Promise<ApiResponse> {
   return await res.json();
 }
 
-export async function channels(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/channels`);
+export async function channels(slug: string): Promise<ApiResponse> {
+  const res = await fetch(`${wsBase(slug)}/im/channels`);
   return await res.json();
 }
 
 export async function send(
+  slug: string,
   channel: string,
   body: string,
   _author?: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/send`, {
+  const res = await fetch(`${wsBase(slug)}/im/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, body, reply_to: replyTo }),
@@ -58,6 +141,7 @@ export async function send(
 }
 
 export async function createChannel(
+  slug: string,
   name: string,
   displayName?: string,
   introduction?: string,
@@ -67,7 +151,7 @@ export async function createChannel(
   if (invitees && invitees.length > 0) {
     payload.invitees = invitees;
   }
-  const res = await fetch(`${baseUrl()}/im/create-channel`, {
+  const res = await fetch(`${wsBase(slug)}/im/create-channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -75,12 +159,16 @@ export async function createChannel(
   return await res.json();
 }
 
-export async function joinChannel(channel: string, targets?: string[]): Promise<ApiResponse> {
+export async function joinChannel(
+  slug: string,
+  channel: string,
+  targets?: string[],
+): Promise<ApiResponse> {
   const payload: Record<string, unknown> = { channel };
   if (targets && targets.length > 0) {
     payload.targets = targets;
   }
-  const res = await fetch(`${baseUrl()}/im/join`, {
+  const res = await fetch(`${wsBase(slug)}/im/join`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -89,10 +177,11 @@ export async function joinChannel(channel: string, targets?: string[]): Promise<
 }
 
 export async function read(
+  slug: string,
   channel: string,
   limit?: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/read`, {
+  const res = await fetch(`${wsBase(slug)}/im/read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, limit }),
@@ -101,10 +190,11 @@ export async function read(
 }
 
 export async function thread(
+  slug: string,
   channel: string,
   line: number,
 ): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/thread`, {
+  const res = await fetch(`${wsBase(slug)}/im/thread`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, line }),
@@ -112,8 +202,8 @@ export async function thread(
   return await res.json();
 }
 
-export async function users(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/im/users`);
+export async function users(slug: string): Promise<ApiResponse> {
+  const res = await fetch(`${wsBase(slug)}/im/users`);
   return await res.json();
 }
 
@@ -146,7 +236,7 @@ export function validateChannelName(name: string): string | null {
   return null;
 }
 
-// --- Card API: real runtime HTTP ---
+// --- Card API: real runtime HTTP (all scoped to a workspace) ---
 
 export interface CreateCardOpts {
   labels?: string[];
@@ -155,6 +245,7 @@ export interface CreateCardOpts {
 }
 
 export async function createCard(
+  slug: string,
   channel: string,
   title: string,
   opts: CreateCardOpts = {},
@@ -163,7 +254,7 @@ export async function createCard(
   if (opts.labels && opts.labels.length > 0) payload.labels = opts.labels;
   if (opts.assignee) payload.assignee = opts.assignee;
   if (opts.status) payload.status = opts.status;
-  const res = await fetch(`${baseUrl()}/im/cards`, {
+  const res = await fetch(`${wsBase(slug)}/im/cards`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -179,6 +270,7 @@ export interface ListCardsQuery {
 }
 
 export async function listCards(
+  slug: string,
   query: ListCardsQuery = {},
 ): Promise<ApiResponse<{ cards: Card[] }>> {
   const params = new URLSearchParams();
@@ -189,7 +281,7 @@ export async function listCards(
     for (const l of query.labels) params.append("label", l);
   }
   const qs = params.toString();
-  const url = qs ? `${baseUrl()}/im/cards?${qs}` : `${baseUrl()}/im/cards`;
+  const url = qs ? `${wsBase(slug)}/im/cards?${qs}` : `${wsBase(slug)}/im/cards`;
   const res = await fetch(url);
   return await res.json();
 }
@@ -200,6 +292,7 @@ export interface ReadCardQuery {
 }
 
 export async function readCard(
+  slug: string,
   channel: string,
   cardId: string,
   query: ReadCardQuery = {},
@@ -208,20 +301,21 @@ export async function readCard(
   if (query.limit != null) params.set("limit", String(query.limit));
   if (query.since != null) params.set("since", String(query.since));
   const qs = params.toString();
-  const base = `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`;
+  const base = `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`;
   const url = qs ? `${base}?${qs}` : base;
   const res = await fetch(url);
   return await res.json();
 }
 
 export async function sendCardMessage(
+  slug: string,
   channel: string,
   cardId: string,
   body: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
   const res = await fetch(
-    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
+    `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -238,12 +332,13 @@ export interface UpdateCardPatch {
 }
 
 export async function updateCard(
+  slug: string,
   channel: string,
   cardId: string,
   patch: UpdateCardPatch,
 ): Promise<ApiResponse> {
   const res = await fetch(
-    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,
+    `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -253,7 +348,7 @@ export async function updateCard(
   return await res.json();
 }
 
-// --- Preflight ---
+// --- Preflight (global, no slug) ---
 
 export async function preflightProvider(
   provider: ProviderId,
@@ -286,11 +381,11 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
   };
 }
 
-// --- Agent API: real runtime HTTP ---
+// --- Agent API: real runtime HTTP (all scoped to a workspace) ---
 
-export async function listAgents(): Promise<ApiResponse> {
+export async function listAgents(slug: string): Promise<ApiResponse> {
   try {
-    const res = await fetch(`${baseUrl()}/agents`);
+    const res = await fetch(`${wsBase(slug)}/agents`);
     const data = await res.json();
     if (!data.ok) return data;
     const agents = (data.agents ?? []).map(mapBackendAgent);
@@ -300,9 +395,9 @@ export async function listAgents(): Promise<ApiResponse> {
   }
 }
 
-export async function getAgent(id: string): Promise<ApiResponse> {
+export async function getAgent(slug: string, id: string): Promise<ApiResponse> {
   try {
-    const res = await fetch(`${baseUrl()}/agents/${id}`);
+    const res = await fetch(`${wsBase(slug)}/agents/${id}`);
     const data = await res.json();
     if (!data.ok) return data;
     return { ok: true, data: { agent: mapBackendAgent(data.agent) } };
@@ -312,6 +407,7 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 }
 
 export async function addAgent(
+  slug: string,
   name: string,
   provider: ProviderId,
   systemPrompt: string,
@@ -320,7 +416,7 @@ export async function addAgent(
 ): Promise<ApiResponse> {
   try {
     const handler = toHandler(name);
-    const res = await fetch(`${baseUrl()}/agents/add`, {
+    const res = await fetch(`${wsBase(slug)}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -335,7 +431,7 @@ export async function addAgent(
     const data = await res.json();
     if (!data.ok) return data;
     // Fetch the full agent info from backend (has repo_path etc.)
-    const agentRes = await getAgent(data.id ?? handler);
+    const agentRes = await getAgent(slug, data.id ?? handler);
     if (agentRes.ok && agentRes.data?.agent) {
       return agentRes;
     }
@@ -357,9 +453,9 @@ export async function addAgent(
   }
 }
 
-export async function removeAgent(id: string): Promise<ApiResponse> {
+export async function removeAgent(slug: string, id: string): Promise<ApiResponse> {
   try {
-    const res = await fetch(`${baseUrl()}/agents/remove`, {
+    const res = await fetch(`${wsBase(slug)}/agents/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -370,9 +466,9 @@ export async function removeAgent(id: string): Promise<ApiResponse> {
   }
 }
 
-export async function startAgent(id: string): Promise<ApiResponse> {
+export async function startAgent(slug: string, id: string): Promise<ApiResponse> {
   try {
-    const res = await fetch(`${baseUrl()}/agents/start`, {
+    const res = await fetch(`${wsBase(slug)}/agents/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -385,9 +481,9 @@ export async function startAgent(id: string): Promise<ApiResponse> {
   }
 }
 
-export async function stopAgent(id: string): Promise<ApiResponse> {
+export async function stopAgent(slug: string, id: string): Promise<ApiResponse> {
   try {
-    const res = await fetch(`${baseUrl()}/agents/stop`, {
+    const res = await fetch(`${wsBase(slug)}/agents/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),

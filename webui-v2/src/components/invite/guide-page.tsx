@@ -38,7 +38,7 @@ export function GuidePage({ onComplete }: GuidePageProps) {
       // Persist port + version in connection store so SetupGate picks it up
       setPort(p);
       if (data.version) setRuntimeVersion(data.version as string);
-      setStatus(data.initialized ? "ready" : "connected");
+      setStatus("ready");
 
       onComplete();
     } catch {

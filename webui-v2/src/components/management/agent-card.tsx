@@ -7,6 +7,7 @@ import {
   CardHeader,
 } from "@/components/ui/card";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
@@ -70,6 +71,7 @@ interface AgentCardProps {
 }
 
 export function AgentCard({ agent }: AgentCardProps) {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const navigate = useNavigate();
   const [removeOpen, setRemoveOpen] = useState(false);
@@ -77,15 +79,16 @@ export function AgentCard({ agent }: AgentCardProps) {
   const isRunning = agent.status !== "offline";
 
   async function handleToggle() {
+    if (!activeSlug) return;
     if (isRunning) {
-      const res = await client.stopAgent(agent.id);
+      const res = await client.stopAgent(activeSlug, agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
       } else if (!res.ok) {
         toast.error(res.error ?? "Failed to stop agent");
       }
     } else {
-      const res = await client.startAgent(agent.id);
+      const res = await client.startAgent(activeSlug, agent.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent.id, res.data.agent as Partial<Agent>);
       } else if (!res.ok) {

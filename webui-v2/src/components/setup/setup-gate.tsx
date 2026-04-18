@@ -1,25 +1,27 @@
 import { useEffect, type ReactNode } from "react";
-import {
-  useConnectionStore,
-  type ConnectionStatus,
-} from "../../hooks/use-connection-store";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 import { ConnectForm } from "./connect-form";
-import { GithubSetupForm } from "./github-setup-form";
-import { GitProviderForm } from "./git-provider-form";
-import { WorkspaceForm } from "./workspace-form";
 import { SetupShell } from "./setup-shell";
 
 interface SetupGateProps {
   children: ReactNode;
 }
 
+/**
+ * Blocks the app shell until the runtime is reachable.
+ *
+ * Workspace provisioning is handled downstream by `App` via
+ * `useWorkspaceStore`: if the runtime has zero workspaces, the app shows
+ * a first-run "create your first workspace" screen; otherwise the user
+ * switches between workspaces via the `WorkspaceSwitcher` in the header.
+ */
 export function SetupGate({ children }: SetupGateProps) {
   const status = useConnectionStore((s) => s.status);
   const port = useConnectionStore((s) => s.port);
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
 
-  // On mount: if we have a stored port, try to connect automatically
+  // On mount: if we have a stored port, try to connect automatically.
   useEffect(() => {
     if (status !== "checking") return;
     if (!port) {
@@ -39,7 +41,7 @@ export function SetupGate({ children }: SetupGateProps) {
 
         if (data.service === "gitim-runtime") {
           if (data.version) setRuntimeVersion(data.version as string);
-          setStatus(data.initialized ? "ready" : "connected");
+          setStatus("ready");
         } else {
           setStatus("disconnected");
         }
@@ -63,13 +65,9 @@ export function SetupGate({ children }: SetupGateProps) {
     );
   }
 
-  const screens: Record<Exclude<ConnectionStatus, "checking">, ReactNode> = {
-    disconnected: <ConnectForm />,
-    connected: <WorkspaceForm />,
-    workspace_set: <GitProviderForm />,
-    github_setup: <GithubSetupForm />,
-    ready: <>{children}</>,
-  };
+  if (status === "disconnected") {
+    return <ConnectForm />;
+  }
 
-  return <>{screens[status]}</>;
+  return <>{children}</>;
 }

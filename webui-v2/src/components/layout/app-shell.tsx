@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Outlet } from "react-router";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -15,20 +16,23 @@ export function AppShell({ children }: AppShellProps) {
     <div className="h-screen flex flex-col bg-background text-foreground">
       {/* Top bar */}
       <header className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
-        {/* Left: logo + connection status */}
-        <div className="flex items-center gap-2.5 min-w-[140px]">
-          <span className="font-bold text-sm tracking-tight text-foreground">
+        {/* Left: logo + workspace switcher + connection status */}
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-bold text-sm tracking-tight text-foreground shrink-0">
             GitIM<span className="text-primary">·</span>Cell
           </span>
           <span
             className={[
-              "inline-block w-2 h-2 rounded-full",
+              "inline-block w-2 h-2 rounded-full shrink-0",
               connected
                 ? "bg-success shadow-[0_0_6px_rgba(74,222,128,0.6)]"
                 : "bg-error",
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
+          <div className="ml-1 min-w-0">
+            <WorkspaceSwitcher />
+          </div>
         </div>
 
         {/* Center: nav tabs */}
