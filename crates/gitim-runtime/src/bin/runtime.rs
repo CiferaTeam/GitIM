@@ -107,14 +107,19 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let (router, state) = gitim_runtime::http::create_router();
 
-    // Recover previous workspace from ~/.gitim/runtime.json
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
     // If config.json's token was edited while the runtime was down, clones
     // still carry the old token. Resync on startup so fetch/push don't fail.
-    let recovered_workspace = state.lock().unwrap().workspace.clone();
-    if let Some(workspace) = recovered_workspace {
-        if let Err(e) = gitim_runtime::token_propagation::propagate_token(&workspace) {
+    let recovered_paths: Vec<PathBuf> = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .values()
+        .map(|w| w.path.clone())
+        .collect();
+    for workspace in &recovered_paths {
+        if let Err(e) = gitim_runtime::token_propagation::propagate_token(workspace) {
             tracing::warn!(error = %e, "token propagation on startup failed");
         }
     }
@@ -195,13 +200,14 @@ async fn shutdown_signal() {
 fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
     let s = state.lock().unwrap();
 
-    // Collect all repo roots that have daemons
     let mut repos: Vec<PathBuf> = Vec::new();
-    if let Some(ref human) = s.human_repo {
-        repos.push(human.clone());
-    }
-    for agent in s.agents.values() {
-        repos.push(PathBuf::from(&agent.repo_path));
+    for ws in s.workspaces.values() {
+        if let Some(ref human) = ws.human_repo {
+            repos.push(human.clone());
+        }
+        for agent in ws.agents.values() {
+            repos.push(PathBuf::from(&agent.repo_path));
+        }
     }
     drop(s);
 

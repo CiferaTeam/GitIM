@@ -148,16 +148,31 @@ async fn test_preflight_codex_returns_result_shape() {
 
 fn agents_add_request(body: serde_json::Value) -> Request<Body> {
     Request::builder()
-        .uri("/agents/add")
+        .uri("/workspaces/test-ws/agents/add")
         .method("POST")
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
 
+/// Inject a placeholder workspace so the /workspaces/{slug}/agents/add route
+/// resolves. Provider validation runs before workspace state is read, so these
+/// tests exercise the validation branch alone.
+fn inject_ws(state: &gitim_runtime::http::SharedRuntimeState) {
+    use std::path::PathBuf;
+    let mut s = state.lock().unwrap();
+    let ctx = gitim_runtime::workspace::WorkspaceContext::new(
+        "test-ws".to_string(),
+        "test-ws".to_string(),
+        PathBuf::from("/tmp/test-ws"),
+    );
+    s.workspaces.insert("test-ws".to_string(), ctx);
+}
+
 #[tokio::test]
 async fn test_agents_add_missing_provider_returns_400() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
 
     // Body deliberately omits `provider`. serde's "missing field" error surfaces
     // as a 4xx from axum's Json extractor — we accept any 4xx to stay resilient
@@ -179,7 +194,8 @@ async fn test_agents_add_missing_provider_returns_400() {
 
 #[tokio::test]
 async fn test_agents_add_unsupported_provider_returns_400() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
 
     let response = router
         .oneshot(agents_add_request(serde_json::json!({

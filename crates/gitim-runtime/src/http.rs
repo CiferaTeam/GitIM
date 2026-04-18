@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
@@ -15,7 +14,7 @@ use crate::agent::{detect_git_config, name_to_handler, provision_agent, provisio
 use crate::agent_loop::AgentLoop;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
-    WorkspaceConfig, WorkspacePathError,
+    WorkspaceConfig,
 };
 use crate::github::{check_repo_access, parse_github_url, verify_token, GithubError};
 use gitim_client::GitimClient;
@@ -58,15 +57,7 @@ impl GithubApiClient for DefaultGithubApi {
 struct HealthResponse {
     service: &'static str,
     version: &'static str,
-    initialized: bool,
-    workspace: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceRequest {
-    path: String,
-    #[serde(default)]
-    confirm: bool,
+    workspaces_count: usize,
 }
 
 /// Real-time agent activity event, broadcast via SSE.
@@ -106,11 +97,6 @@ pub struct AgentInfo {
 }
 
 pub struct RuntimeState {
-    pub workspace: Option<PathBuf>,
-    pub human_repo: Option<PathBuf>,
-    pub poll_cursor: Option<String>,
-    pub agents: HashMap<String, AgentInfo>,
-    pub activity_tx: broadcast::Sender<AgentActivityEvent>,
     /// Epoch seconds of last activity. Used by idle watchdog.
     pub last_activity: std::sync::atomic::AtomicU64,
     pub github_api: Arc<dyn GithubApiClient>,
@@ -134,7 +120,6 @@ impl RuntimeState {
 
 impl Default for RuntimeState {
     fn default() -> Self {
-        let (activity_tx, _) = broadcast::channel(128);
         // E2E test seam: env vars let a compiled binary point at a stub
         // github API + a local `file://` bare repo instead of github.com.
         // Unset in production; Rust integration tests still override directly
@@ -143,11 +128,6 @@ impl Default for RuntimeState {
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
         Self {
-            workspace: None,
-            human_repo: None,
-            poll_cursor: None,
-            agents: HashMap::new(),
-            activity_tx,
             last_activity: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -175,214 +155,87 @@ pub fn touch_activity(state: &SharedRuntimeState) {
     );
 }
 
-/// Check if any agent is currently running.
+/// Check if any agent is currently running across all workspaces.
 pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
     let s = state.lock().unwrap();
-    s.agents.values().any(|a| a.status == "running")
+    s.workspaces
+        .values()
+        .flat_map(|w| w.agents.values())
+        .any(|a| a.status == "running")
 }
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = state.lock().unwrap();
-    let initialized = s.workspace.is_some() && s.human_repo.is_some();
-    let workspace = s.workspace.as_ref().map(|p| p.to_string_lossy().into_owned());
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
-        initialized,
-        workspace,
+        workspaces_count: s.workspaces.len(),
     })
 }
 
-async fn set_workspace(
-    State(state): State<SharedRuntimeState>,
-    Json(req): Json<WorkspaceRequest>,
-) -> Json<serde_json::Value> {
-    let path = PathBuf::from(&req.path);
+pub struct WorkspaceSlug(pub String);
 
-    if path.exists() {
-        if !path.is_dir() {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("path exists but is not a directory: {}", req.path)
-            }));
-        }
-        // Non-empty directory: ask for confirmation
-        let is_empty = match std::fs::read_dir(&path) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(e) => {
-                return Json(serde_json::json!({
+impl<S> axum::extract::FromRequestParts<S> for WorkspaceSlug
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::Path;
+        use axum::response::IntoResponse;
+        let Path(slug): Path<String> = Path::from_request_parts(parts, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        crate::slug::validate(&slug).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
                     "ok": false,
-                    "error": format!("cannot read directory: {e}")
-                }));
-            }
-        };
-        if !is_empty && !req.confirm {
-            return Json(serde_json::json!({
-                "ok": false,
-                "needs_confirm": true,
-                "error": format!("directory is not empty: {}", req.path)
-            }));
-        }
-    } else {
-        // Create directory if it doesn't exist
-        if let Err(e) = std::fs::create_dir_all(&path) {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to create directory: {e}")
-            }));
-        }
-    }
-
-    // Create marker directory and write config
-    let marker_dir = path.join(".gitim-runtime");
-    if let Err(e) = std::fs::create_dir_all(&marker_dir) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to create .gitim-runtime: {e}")
-        }));
-    }
-
-    let config = serde_json::json!({
-        "workspace": req.path,
-        "created_at": chrono::Utc::now().to_rfc3339(),
-    });
-    let config_path = marker_dir.join("config.json");
-    if let Err(e) = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to write config: {e}")
-        }));
-    }
-
-    let mut s = state.lock().unwrap();
-    s.workspace = Some(path);
-
-    Json(serde_json::json!({ "ok": true }))
-}
-
-#[derive(Deserialize)]
-struct GitInitRequest {
-    provider: String,
-    #[serde(default)]
-    remote_url: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
-}
-
-async fn git_init(
-    State(state): State<SharedRuntimeState>,
-    Json(req): Json<GitInitRequest>,
-) -> Json<serde_json::Value> {
-    let workspace = {
-        let s = state.lock().unwrap();
-        match &s.workspace {
-            Some(p) => p.clone(),
-            None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "workspace_not_set",
-                    "error": "workspace not set"
-                }));
-            }
-        }
-    };
-
-    match req.provider.as_str() {
-        "local" => git_init_local(&state, &workspace).await,
-        "github" => git_init_github(&state, &workspace, req.remote_url, req.token).await,
-        other => Json(serde_json::json!({
-            "ok": false,
-            "error_code": "provider_not_supported",
-            "error": format!("provider not supported: {other}")
-        })),
-    }
-}
-
-async fn git_init_local(
-    state: &SharedRuntimeState,
-    workspace: &Path,
-) -> Json<serde_json::Value> {
-    let repo_path = workspace.join("repo.git");
-    if let Err(e) = std::fs::create_dir_all(&repo_path) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "clone_failed",
-            "error": redacted_url(&format!("failed to create repo directory: {e}"))
-        }));
-    }
-
-    let output = std::process::Command::new("git")
-        .args(["init", "--bare"])
-        .current_dir(&repo_path)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let remote_url = repo_path.to_string_lossy().into_owned();
-            let display_name = detect_git_config("user.name", workspace)
-                .unwrap_or_else(|| "human".to_string());
-            let handler = {
-                let h = name_to_handler(&display_name);
-                if h.is_empty() { "human".to_string() } else { h }
-            };
-            let auth = serde_json::json!({
-                "type": "git",
-                "handler": handler,
-                "display_name": display_name,
-            });
-            match provision_human(workspace, &remote_url, "git", auth).await {
-                Ok(human_dir) => {
-                    {
-                        let mut s = state.lock().unwrap();
-                        s.human_repo = Some(human_dir.clone());
-                    }
-                    save_runtime_config(workspace);
-                    let config = WorkspaceConfig {
-                        workspace: workspace.to_string_lossy().into_owned(),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        git: GitConfig {
-                            provider: GitProvider::Local,
-                            remote_url: None,
-                            token: None,
-                        },
-                    };
-                    if let Err(e) = config.write(workspace) {
-                        return Json(serde_json::json!({
-                            "ok": false,
-                            "error_code": "config_write_failed",
-                            "error": redacted_url(&format!("failed to write config: {e}"))
-                        }));
-                    }
-                    let _ = mark_excluded_from_backups(&workspace.join(".gitim-runtime"));
-                    Json(serde_json::json!({
-                        "ok": true,
-                        "repo_path": repo_path.to_string_lossy(),
-                        "human_repo": human_dir.to_string_lossy()
-                    }))
-                }
-                Err(e) => Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "onboard_failed",
-                    "error": redacted_url(&format!("provision_human failed: {e}"))
+                    "error": format!("invalid slug: {e}")
                 })),
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "clone_failed",
-                "error": redacted_url(&format!("git init failed: {stderr}"))
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "clone_failed",
-                "error": redacted_url(&format!("failed to run git: {e}"))
-            }))
-        }
+            )
+                .into_response()
+        })?;
+        Ok(WorkspaceSlug(slug))
     }
+}
+
+fn not_found_workspace() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+    )
+        .into_response()
+}
+
+fn with_workspace_snapshot<F, R>(
+    state: &SharedRuntimeState,
+    slug: &str,
+    f: F,
+) -> Result<R, axum::response::Response>
+where
+    F: FnOnce(&crate::workspace::WorkspaceContext) -> R,
+{
+    let s = state.lock().unwrap();
+    let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
+    Ok(f(ctx))
+}
+
+fn with_workspace_mut<F, R>(
+    state: &SharedRuntimeState,
+    slug: &str,
+    f: F,
+) -> Result<R, axum::response::Response>
+where
+    F: FnOnce(&mut crate::workspace::WorkspaceContext) -> R,
+{
+    let mut s = state.lock().unwrap();
+    let ctx = s.workspaces.get_mut(slug).ok_or_else(not_found_workspace)?;
+    Ok(f(ctx))
 }
 
 /// Assemble the token-carrying clone URL. Caller owns url parsing — we only
@@ -427,236 +280,61 @@ fn cleanup_human_dir(workspace: &Path) {
     let _ = std::fs::remove_dir_all(&human_dir);
 }
 
-async fn git_init_github(
-    state: &SharedRuntimeState,
-    workspace: &Path,
-    remote_url: Option<String>,
-    token: Option<String>,
-) -> Json<serde_json::Value> {
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error_code": "missing_token",
-                "error": "github mode requires a personal access token"
-            }));
-        }
-    };
-    let remote_url = match remote_url {
-        Some(u) if !u.is_empty() => u,
-        _ => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error_code": "missing_remote_url",
-                "error": "github mode requires remote_url"
-            }));
-        }
-    };
-
-    // On Windows the config file can't be made 0600 — reject before we spend
-    // a network round-trip or touch the filesystem.
-    #[cfg(windows)]
-    {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "provider_not_supported",
-            "error": "github mode is not supported on Windows"
-        }));
-    }
-
-    if let Err(WorkspacePathError::CloudSyncDetected(service)) =
-        validate_workspace_path_from_env(workspace)
-    {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "cloud_sync_path_rejected",
-            "error": format!("workspace is inside {service} — refusing to store a token there")
-        }));
-    }
-
-    let (github_api, clone_override) = {
-        let s = state.lock().unwrap();
-        (s.github_api.clone(), s.clone_url_override.clone())
-    };
-
-    if let Err(e) = github_api.verify_token(&token).await {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": github_error_code(&e),
-            "error": redacted_url(&e.to_string())
-        }));
-    }
-
-    let (owner, repo) = match parse_github_url(&remote_url) {
-        Ok(t) => t,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error_code": github_error_code(&e),
-                "error": redacted_url(&e.to_string())
-            }));
-        }
-    };
-
-    if let Err(e) = github_api.check_repo_access(&owner, &repo, &token).await {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": github_error_code(&e),
-            "error": redacted_url(&e.to_string())
-        }));
-    }
-
-    let clone_url = clone_override
-        .clone()
-        .unwrap_or_else(|| build_token_url(&owner, &repo, &token));
-
-    let runtime_dir = workspace.join(".gitim-runtime");
-    if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "clone_failed",
-            "error": redacted_url(&format!("failed to create runtime dir: {e}"))
-        }));
-    }
-
-    let human_dir = runtime_dir.join("human");
-    if human_dir.exists() {
-        // A prior failed init may have left a partial clone behind. Clean it
-        // fully before retrying — provisioning is not re-entrant on partial state.
-        cleanup_human_dir(workspace);
-    }
-
-    let clone_output = std::process::Command::new("git")
-        .args(["clone", &clone_url, "human"])
-        .current_dir(&runtime_dir)
-        .output();
-
-    match clone_output {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            cleanup_human_dir(workspace);
-            return Json(serde_json::json!({
-                "ok": false,
-                "error_code": "clone_failed",
-                "error": redacted_url(&format!("git clone failed: {stderr}"))
-            }));
-        }
-        Err(e) => {
-            cleanup_human_dir(workspace);
-            return Json(serde_json::json!({
-                "ok": false,
-                "error_code": "clone_failed",
-                "error": redacted_url(&format!("failed to run git: {e}"))
-            }));
-        }
-    }
-
-    // The remote URL stored with the clone would carry the token in
-    // `.git/config` — rewrite it to the token-less public URL so any future
-    // git operation (status inspection, debug dump) doesn't leak it. Token
-    // injection for push/fetch happens through sync_loop's credential helper
-    // in Task 7, not through the origin URL.
-    //
-    // When `clone_url_override` is set (E2E tests use `file://`), the clone
-    // URL already has no token so there's nothing to scrub — keep the
-    // `file://` origin so the daemon's push target matches the stub bare.
-    if clone_override.is_none() {
-        let _ = std::process::Command::new("git")
-            .args(["remote", "set-url", "origin", &remote_url])
-            .current_dir(&human_dir)
-            .output();
-    }
-
-    let auth = serde_json::json!({
-        "type": "github",
-        "token": token,
-    });
-
-    match provision_human(workspace, &remote_url, "github", auth).await {
-        Ok(final_human) => {
-            {
-                let mut s = state.lock().unwrap();
-                s.human_repo = Some(final_human.clone());
-            }
-            save_runtime_config(workspace);
-            let config = WorkspaceConfig {
-                workspace: workspace.to_string_lossy().into_owned(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                git: GitConfig {
-                    provider: GitProvider::Github,
-                    remote_url: Some(remote_url.clone()),
-                    token: Some(token.clone()),
-                },
-            };
-            if let Err(e) = config.write(workspace) {
-                cleanup_human_dir(workspace);
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "config_write_failed",
-                    "error": redacted_url(&format!("failed to write config: {e}"))
-                }));
-            }
-            let _ = mark_excluded_from_backups(&runtime_dir);
-            Json(serde_json::json!({
-                "ok": true,
-                "human_repo": final_human.to_string_lossy(),
-                "remote_url": remote_url,
-            }))
-        }
-        Err(e) => {
-            cleanup_human_dir(workspace);
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "onboard_failed",
-                "error": redacted_url(&format!("provision_human failed: {e}"))
-            }))
-        }
-    }
-}
-
 // -- IM helpers --
 
-fn human_client(state: &SharedRuntimeState) -> Result<GitimClient, Json<serde_json::Value>> {
+fn human_client(
+    state: &SharedRuntimeState,
+    slug: &str,
+) -> Result<GitimClient, axum::response::Response> {
+    use axum::response::IntoResponse;
     let s = state.lock().unwrap();
-    match &s.human_repo {
+    let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
+    match &ctx.human_repo {
         Some(p) => Ok(GitimClient::new(p)),
         None => Err(Json(serde_json::json!({
             "ok": false,
             "error": "human daemon not initialized"
-        }))),
+        }))
+        .into_response()),
     }
 }
 
-fn api_response_to_json(result: Result<gitim_client::ApiResponse, gitim_client::ClientError>) -> Json<serde_json::Value> {
+fn api_response_to_json(
+    result: Result<gitim_client::ApiResponse, gitim_client::ClientError>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     match result {
         Ok(resp) => Json(serde_json::json!({
             "ok": resp.ok,
             "data": resp.data,
             "error": resp.error,
-        })),
+        }))
+        .into_response(),
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "error": e.to_string(),
-        })),
+        }))
+        .into_response(),
     }
 }
 
 // -- /im/me --
 
-async fn im_me(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
-    let human_repo = {
-        let s = state.lock().unwrap();
-        match &s.human_repo {
-            Some(p) => p.clone(),
-            None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": "human daemon not initialized"
-                }));
-            }
+async fn im_me(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let human_repo = match with_workspace_snapshot(&state, &slug, |ctx| ctx.human_repo.clone()) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "human daemon not initialized"
+            }))
+            .into_response();
         }
+        Err(r) => return r,
     };
 
     let me_path = human_repo.join(".gitim/me.json");
@@ -669,23 +347,29 @@ async fn im_me(State(state): State<SharedRuntimeState>) -> Json<serde_json::Valu
                     "display_name": me.get("display_name").and_then(|v| v.as_str()).unwrap_or("Unknown"),
                     "guest": me.get("guest").and_then(|v| v.as_bool()).unwrap_or(false),
                 }
-            })),
+            }))
+            .into_response(),
             Err(e) => Json(serde_json::json!({
                 "ok": false,
                 "error": format!("failed to parse me.json: {e}")
-            })),
+            }))
+            .into_response(),
         },
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "error": format!("failed to read me.json: {e}")
-        })),
+        }))
+        .into_response(),
     }
 }
 
 // -- /im/channels --
 
-async fn im_channels(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+async fn im_channels(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -707,9 +391,10 @@ struct CreateChannelRequest {
 
 async fn im_create(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<CreateChannelRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -731,9 +416,10 @@ struct JoinRequest {
 
 async fn im_join(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<JoinRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -751,9 +437,10 @@ struct SendRequest {
 
 async fn im_send(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<SendRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -771,9 +458,10 @@ struct ReadRequest {
 
 async fn im_read(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<ReadRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -789,26 +477,34 @@ struct PollRequest {
 
 async fn im_poll(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<PollRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
 
-    let cursor = {
-        let s = state.lock().unwrap();
-        req.since.clone().or_else(|| s.poll_cursor.clone())
+    let cursor = match with_workspace_snapshot(&state, &slug, |ctx| {
+        req.since.clone().or_else(|| ctx.poll_cursor.clone())
+    }) {
+        Ok(c) => c,
+        Err(r) => return r,
     };
 
     let result = client.poll(cursor.as_deref()).await;
 
-    // Update poll_cursor from response commit_id if present
     if let Ok(ref resp) = result {
         if resp.ok {
-            if let Some(commit_id) = resp.data.as_ref().and_then(|d| d.get("commit_id")).and_then(|v| v.as_str()) {
-                let mut s = state.lock().unwrap();
-                s.poll_cursor = Some(commit_id.to_string());
+            if let Some(commit_id) = resp
+                .data
+                .as_ref()
+                .and_then(|d| d.get("commit_id"))
+                .and_then(|v| v.as_str())
+            {
+                let _ = with_workspace_mut(&state, &slug, |ctx| {
+                    ctx.poll_cursor = Some(commit_id.to_string());
+                });
             }
         }
     }
@@ -818,8 +514,11 @@ async fn im_poll(
 
 // -- /im/users --
 
-async fn im_users(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+async fn im_users(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -836,9 +535,10 @@ struct ThreadRequest {
 
 async fn im_thread(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<ThreadRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -861,9 +561,10 @@ struct CreateCardRequest {
 
 async fn im_create_card(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<CreateCardRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
@@ -895,9 +596,10 @@ struct ListCardsQuery {
 
 async fn im_list_cards(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     axum::extract::Query(q): axum::extract::Query<ListCardsQuery>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
@@ -919,10 +621,18 @@ struct ReadCardQuery {
 
 async fn im_read_card(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((slug, channel, card_id)): axum::extract::Path<(String, String, String)>,
     axum::extract::Query(q): axum::extract::Query<ReadCardQuery>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
@@ -940,10 +650,18 @@ struct SendCardMessageRequest {
 
 async fn im_send_card_message(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((slug, channel, card_id)): axum::extract::Path<(String, String, String)>,
     Json(req): Json<SendCardMessageRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
@@ -966,10 +684,18 @@ struct UpdateCardRequest {
 
 async fn im_update_card(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((slug, channel, card_id)): axum::extract::Path<(String, String, String)>,
     Json(req): Json<UpdateCardRequest>,
-) -> Json<serde_json::Value> {
-    let client = match human_client(&state) {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
@@ -1007,14 +733,14 @@ struct AgentAddRequest {
 
 async fn agents_add(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentAddRequest>,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    // Provider whitelist runs before workspace/state checks so invalid input
-    // is rejected even when the runtime isn't fully initialised — and so the
-    // router-level test can exercise this branch without provisioning.
+    // Provider whitelist runs before workspace lookup so invalid input is
+    // rejected even when the runtime has no workspaces yet.
     // `mock` is permitted because existing E2E tests (agent-interaction.spec.ts)
     // provision an agent with provider=mock; the UI still only offers
     // claude/codex per Q1 scope.
@@ -1034,19 +760,13 @@ async fn agents_add(
 
     let (workspace, human_repo, already_exists) = {
         let s = state.lock().unwrap();
-        let ws = match &s.workspace {
-            Some(p) => p.clone(),
-            None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": "workspace not set"
-                }))
-                .into_response();
-            }
+        let ctx = match s.workspaces.get(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
         };
-        let human = s.human_repo.clone();
-        let exists = s.agents.contains_key(&req.handler);
-        (ws, human, exists)
+        let human = ctx.human_repo.clone();
+        let exists = ctx.agents.contains_key(&req.handler);
+        (ctx.path.clone(), human, exists)
     };
 
     if already_exists {
@@ -1191,12 +911,14 @@ async fn agents_add(
             // Recheck after async provision to prevent duplicate loops from concurrent requests
             {
                 let s = state.lock().unwrap();
-                if s.agents.contains_key(&req.handler) {
-                    return Json(serde_json::json!({
-                        "ok": true,
-                        "id": req.handler,
-                    }))
-                    .into_response();
+                if let Some(ctx) = s.workspaces.get(&slug) {
+                    if ctx.agents.contains_key(&req.handler) {
+                        return Json(serde_json::json!({
+                            "ok": true,
+                            "id": req.handler,
+                        }))
+                        .into_response();
+                    }
                 }
             }
 
@@ -1238,7 +960,11 @@ async fn agents_add(
             };
             {
                 let mut s = state.lock().unwrap();
-                s.agents.insert(req.handler.clone(), info);
+                if let Some(ctx) = s.workspaces.get_mut(&slug) {
+                    ctx.agents.insert(req.handler.clone(), info);
+                } else {
+                    return not_found_workspace();
+                }
             }
 
             // Defensive: provision already stamped the new clone with the
@@ -1248,8 +974,7 @@ async fn agents_add(
                 tracing::warn!(error = %e, "token propagation after add_agent failed");
             }
 
-            // Auto-start the agent loop
-            if let Err(e) = start_agent_loop(&state, &req.handler) {
+            if let Err(e) = start_agent_loop(&state, &slug, &req.handler) {
                 tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
             }
 
@@ -1285,10 +1010,18 @@ fn cleanup_agent_dir(workspace: &Path, handler: &str) {
 
 // -- /agents --
 
-async fn agents_list(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
-    let s = state.lock().unwrap();
-    let agents: Vec<&AgentInfo> = s.agents.values().collect();
-    Json(serde_json::json!({ "ok": true, "agents": agents }))
+async fn agents_list(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match with_workspace_snapshot(&state, &slug, |ctx| {
+        let agents: Vec<AgentInfo> = ctx.agents.values().cloned().collect();
+        Json(serde_json::json!({ "ok": true, "agents": agents }))
+    }) {
+        Ok(j) => j.into_response(),
+        Err(r) => r,
+    }
 }
 
 // -- /agents/start --
@@ -1299,10 +1032,18 @@ struct AgentIdRequest {
 }
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
-fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), String> {
-    let (repo_root, handler, provider, model, system_prompt, env) = {
+fn start_agent_loop(
+    state: &SharedRuntimeState,
+    slug: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let (repo_root, handler, provider, model, system_prompt, env, activity_tx) = {
         let s = state.lock().unwrap();
-        match s.agents.get(agent_id) {
+        let ctx = s
+            .workspaces
+            .get(slug)
+            .ok_or_else(|| format!("unknown workspace: {slug}"))?;
+        match ctx.agents.get(agent_id) {
             None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
                 return Ok(()); // idempotent: already running is ok
@@ -1314,6 +1055,7 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
                 info.model.clone(),
                 info.system_prompt.clone(),
                 info.env.clone(),
+                ctx.activity_tx.clone(),
             ),
         }
     };
@@ -1328,23 +1070,21 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
     let mut agent_loop = AgentLoop::with_config(&repo_root, &loop_config)
         .map_err(|e| format!("failed to create agent loop: {e}"))?;
 
-    // Wire up activity broadcast
-    {
-        let s = state.lock().unwrap();
-        agent_loop.set_activity_tx(s.activity_tx.clone());
-    }
+    agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
 
     let owned_id = agent_id.to_string();
+    let owned_slug = slug.to_string();
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        // Initialize poller cursor (same as run() does)
         if let Err(e) = agent_loop.init().await {
             tracing::error!(error = %e, "agent loop init failed");
             let mut s = state_clone.lock().unwrap();
-            if let Some(info) = s.agents.get_mut(&owned_id) {
-                info.loop_handle = None;
-                info.status = "error".to_string();
+            if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
+                if let Some(info) = ctx.agents.get_mut(&owned_id) {
+                    info.loop_handle = None;
+                    info.status = "error".to_string();
+                }
             }
             return;
         }
@@ -1358,10 +1098,12 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
                 Ok(true) => {
                     consecutive_errors = 0;
                     if let Ok(mut s) = state_clone.try_lock() {
-                        if let Some(info) = s.agents.get_mut(&owned_id) {
-                            info.messages_processed += 1;
-                            info.last_activity =
-                                Some(chrono::Utc::now().to_rfc3339());
+                        if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
+                            if let Some(info) = ctx.agents.get_mut(&owned_id) {
+                                info.messages_processed += 1;
+                                info.last_activity =
+                                    Some(chrono::Utc::now().to_rfc3339());
+                            }
                         }
                     }
                     touch_activity(&state_clone);
@@ -1392,9 +1134,11 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
     let abort_handle = handle.abort_handle();
     {
         let mut s = state.lock().unwrap();
-        if let Some(info) = s.agents.get_mut(agent_id) {
-            info.loop_handle = Some(abort_handle);
-            info.status = "running".to_string();
+        if let Some(ctx) = s.workspaces.get_mut(slug) {
+            if let Some(info) = ctx.agents.get_mut(agent_id) {
+                info.loop_handle = Some(abort_handle);
+                info.status = "running".to_string();
+            }
         }
     }
 
@@ -1403,9 +1147,10 @@ fn start_agent_loop(state: &SharedRuntimeState, agent_id: &str) -> Result<(), St
 
 async fn agents_start(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentIdRequest>,
 ) -> Json<serde_json::Value> {
-    match start_agent_loop(&state, &req.id) {
+    match start_agent_loop(&state, &slug, &req.id) {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
@@ -1415,12 +1160,24 @@ async fn agents_start(
 
 async fn agents_get(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    axum::extract::Path((slug, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
     let s = state.lock().unwrap();
-    match s.agents.get(&id) {
-        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })),
-        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })),
+    let ctx = match s.workspaces.get(&slug) {
+        Some(c) => c,
+        None => return not_found_workspace(),
+    };
+    match ctx.agents.get(&id) {
+        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
+        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response(),
     }
 }
 
@@ -1428,24 +1185,29 @@ async fn agents_get(
 
 async fn agents_remove(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentIdRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let mut s = state.lock().unwrap();
-    match s.agents.remove(&req.id) {
+    let ctx = match s.workspaces.get_mut(&slug) {
+        Some(c) => c,
+        None => return not_found_workspace(),
+    };
+    match ctx.agents.remove(&req.id) {
         Some(info) => {
             if let Some(handle) = &info.loop_handle {
                 handle.abort();
             }
-            // Kill the agent's daemon process
             let pid_file = PathBuf::from(&info.repo_path).join(".gitim/run/gitim.pid");
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(pid) = content.trim().parse::<u32>() {
                     let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
                 }
             }
-            Json(serde_json::json!({ "ok": true }))
+            Json(serde_json::json!({ "ok": true })).into_response()
         }
-        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })),
+        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response(),
     }
 }
 
@@ -1453,16 +1215,23 @@ async fn agents_remove(
 
 async fn agents_stop(
     State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentIdRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let abort_handle = {
         let mut s = state.lock().unwrap();
-        match s.agents.get_mut(&req.id) {
+        let ctx = match s.workspaces.get_mut(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get_mut(&req.id) {
             None => {
                 return Json(serde_json::json!({
                     "ok": false,
                     "error": format!("agent not found: {}", req.id)
-                }));
+                }))
+                .into_response();
             }
             Some(info) => {
                 let handle = info.loop_handle.take();
@@ -1476,18 +1245,16 @@ async fn agents_stop(
         handle.abort();
     }
 
-    Json(serde_json::json!({ "ok": true }))
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 // -- /agents/events (SSE) --
 
 async fn agents_events(
     State(state): State<SharedRuntimeState>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let rx = {
-        let s = state.lock().unwrap();
-        s.activity_tx.subscribe()
-    };
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, axum::response::Response> {
+    let rx = with_workspace_snapshot(&state, &slug, |ctx| ctx.activity_tx.subscribe())?;
 
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
         futures::future::ready(match result {
@@ -1499,61 +1266,57 @@ async fn agents_events(
         })
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-// -- persistence helpers --
-
-fn runtime_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gitim/runtime.json"))
-}
-
-fn save_runtime_config(workspace: &Path) {
-    if let Some(config_path) = runtime_config_path() {
-        if let Some(parent) = config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let config = serde_json::json!({ "workspace": workspace.to_string_lossy() });
-        let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap());
-    }
-}
-
-/// Recover workspace state from `~/.gitim/runtime.json` on startup.
-/// Restores workspace path, human daemon, and agent daemons.
+/// Recover all workspaces listed in `~/.gitim/runtime.json` on startup. Each
+/// workspace is recovered in its own task so one slow daemon doesn't stall
+/// the rest.
 pub async fn recover_from_config(state: SharedRuntimeState) {
-    let config_path = match runtime_config_path() {
-        Some(p) if p.exists() => p,
-        _ => return,
-    };
-
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let config: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let workspace_str = match config["workspace"].as_str() {
-        Some(s) => s,
-        None => return,
-    };
-
-    let workspace = PathBuf::from(workspace_str);
-    if !workspace.exists() {
-        tracing::warn!("saved workspace {} no longer exists, skipping recovery", workspace_str);
+    let cfg = crate::user_config::read();
+    if cfg.workspaces.is_empty() {
         return;
     }
+    tracing::info!("recovering {} workspace(s)", cfg.workspaces.len());
 
-    tracing::info!("recovering workspace from {}", workspace_str);
+    let mut tasks = Vec::new();
+    for entry in cfg.workspaces {
+        let workspace = PathBuf::from(&entry.path);
+        if !workspace.exists() {
+            tracing::warn!(slug=%entry.slug, path=%entry.path, "workspace path missing; skip");
+            continue;
+        }
+        let state = state.clone();
+        tasks.push(tokio::spawn(async move {
+            recover_single_workspace(state, entry.slug, entry.workspace_name, workspace).await;
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
+}
+
+async fn recover_single_workspace(
+    state: SharedRuntimeState,
+    slug: String,
+    workspace_name: String,
+    workspace: PathBuf,
+) {
     {
         let mut s = state.lock().unwrap();
-        s.workspace = Some(workspace.clone());
+        if s.workspaces.contains_key(&slug) {
+            tracing::warn!(slug=%slug, "slug already present; skipping duplicate recovery");
+            return;
+        }
+        let mut ctx = crate::workspace::WorkspaceContext::new(
+            slug.clone(),
+            workspace_name,
+            workspace.clone(),
+        );
+        ctx.git_config = WorkspaceConfig::read(&workspace).ok();
+        s.workspaces.insert(slug.clone(), ctx);
     }
 
-    // Recover human daemon: branch on provider from WorkspaceConfig so github-mode
-    // workspaces don't get re-onboarded with a spurious "git"-mode identity (which
-    // would clobber me.json and push a bogus users/human.meta.yaml).
     let human_dir = workspace.join(".gitim-runtime/human");
     if human_dir.exists() {
         let workspace_cfg = WorkspaceConfig::read(&workspace).ok();
@@ -1599,23 +1362,29 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         match provision_human(&workspace, &remote_url, &git_server, auth).await {
             Ok(dir) => {
                 let mut s = state.lock().unwrap();
-                s.human_repo = Some(dir);
-                tracing::info!("human daemon recovered");
+                if let Some(ctx) = s.workspaces.get_mut(&slug) {
+                    ctx.human_repo = Some(dir);
+                }
+                tracing::info!(slug=%slug, "human daemon recovered");
             }
-            Err(e) => tracing::warn!("failed to recover human daemon: {e}"),
+            Err(e) => tracing::warn!(slug=%slug, error=%e, "failed to recover human daemon"),
         }
     }
 
-    recover_agents_from_workspace(state, &workspace).await;
+    recover_agents_for_workspace(state, &slug, &workspace).await;
 }
 
 /// Scan a workspace directory for agent sub-dirs and recover each into
-/// `state`. Agents with a missing or unsupported `provider` field in
-/// `me.json` are inserted in `status = "error"` and skip daemon startup +
-/// loop auto-start — so broken configs don't stall the recovery loop. Split
-/// out from `recover_from_config` so tests can exercise it without mutating
-/// the global `~/.gitim/runtime.json`.
-pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace: &Path) {
+/// the workspace context for `slug`. Agents with a missing or unsupported
+/// `provider` field in `me.json` are inserted in `status = "error"` and skip
+/// daemon startup + loop auto-start — so broken configs don't stall the
+/// recovery loop. The workspace context must already exist in state (the
+/// caller inserts it before calling us).
+pub async fn recover_agents_for_workspace(
+    state: SharedRuntimeState,
+    slug: &str,
+    workspace: &Path,
+) {
     let entries = match std::fs::read_dir(workspace) {
         Ok(e) => e,
         Err(_) => return,
@@ -1652,8 +1421,6 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        // Provider must be present AND one of the supported values. Anything
-        // else registers the agent in error state and skips daemon startup.
         let provider_raw = me["provider"].as_str();
         let provider_error = match provider_raw {
             None => Some(format!(
@@ -1670,23 +1437,19 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
 
         if let Some(msg) = provider_error {
             tracing::warn!("agent @{handler} recovered in error state: {msg}");
-            // Broadcast the failure so SSE subscribers (WebUI /agents/events)
-            // see recovery errors in the same activity stream as runtime
-            // errors. Send may return Err when no one is subscribed — that's
-            // fine, it's the broadcast channel's documented behavior.
             let activity_tx = {
                 let s = state.lock().unwrap();
-                s.activity_tx.clone()
+                s.workspaces.get(slug).expect("ws exists").activity_tx.clone()
             };
             let _ = activity_tx.send(AgentActivityEvent {
                 agent_id: handler.clone(),
-                workspace_id: String::new(),
+                workspace_id: slug.to_string(),
                 event_type: "error".to_string(),
                 detail: msg.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
             let mut s = state.lock().unwrap();
-            s.agents.insert(handler.clone(), AgentInfo {
+            s.workspaces.get_mut(slug).expect("ws exists").agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
                 handler: handler.clone(),
                 display_name,
@@ -1701,12 +1464,9 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
                 error_message: Some(msg),
                 loop_handle: None,
             });
-            // Intentional: skip ensure_daemon + start_agent_loop — a broken
-            // agent should not hold a daemon socket or run the AI loop.
             continue;
         }
 
-        // Valid provider — start daemon and auto-start loop.
         let root = dir.clone();
         match tokio::task::spawn_blocking(move || gitim_client::ensure_daemon(&root)).await {
             Ok(Ok(())) => {}
@@ -1722,7 +1482,7 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
 
         {
             let mut s = state.lock().unwrap();
-            s.agents.insert(handler.clone(), AgentInfo {
+            s.workspaces.get_mut(slug).expect("ws exists").agents.insert(handler.clone(), AgentInfo {
                 id: handler.clone(),
                 handler: handler.clone(),
                 display_name,
@@ -1739,8 +1499,7 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
             });
         }
 
-        // Auto-start the agent loop on recovery
-        match start_agent_loop(&state, &handler) {
+        match start_agent_loop(&state, slug, &handler) {
             Ok(()) => tracing::info!("agent @{handler} recovered and started"),
             Err(e) => tracing::warn!("agent @{handler} recovered but auto-start failed: {e}"),
         }
@@ -1787,15 +1546,10 @@ async fn activity_middleware(
     next.run(request).await
 }
 
-// -- Global /workspaces CRUD (Task 5) --
+// -- Global /workspaces CRUD --
 //
-// These routes are the multi-workspace entry points: list, create, read, delete.
-// Legacy `/workspace` + `/git/init` still exist until Task 6 wires the rest of
-// the workspace-scoped handlers and the front-end cuts over — do not remove
-// them here. The old handlers mutate `RuntimeState.workspace` / `.human_repo`
-// (the legacy singleton fields); these new handlers write `RuntimeState.workspaces`
-// (the HashMap) + `~/.gitim/runtime.json` (new schema) and never touch the
-// legacy fields.
+// Multi-workspace entry points: list, create, read, delete. Writes
+// `RuntimeState.workspaces` + `~/.gitim/runtime.json`.
 
 #[derive(Deserialize)]
 struct WorkspacesCreateGit {
@@ -2326,6 +2080,33 @@ async fn workspaces_create(
 pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
+    let ws_router = Router::new()
+        .route("/im/me", get(im_me))
+        .route("/im/channels", get(im_channels))
+        .route("/im/create-channel", post(im_create))
+        .route("/im/join", post(im_join))
+        .route("/im/send", post(im_send))
+        .route("/im/read", post(im_read))
+        .route("/im/poll", post(im_poll))
+        .route("/im/users", get(im_users))
+        .route("/im/thread", post(im_thread))
+        .route("/im/cards", post(im_create_card).get(im_list_cards))
+        .route(
+            "/im/cards/{channel}/{card_id}",
+            get(im_read_card).patch(im_update_card),
+        )
+        .route(
+            "/im/cards/{channel}/{card_id}/messages",
+            post(im_send_card_message),
+        )
+        .route("/agents", get(agents_list))
+        .route("/agents/events", get(agents_events))
+        .route("/agents/add", post(agents_add))
+        .route("/agents/start", post(agents_start))
+        .route("/agents/stop", post(agents_stop))
+        .route("/agents/remove", post(agents_remove))
+        .route("/agents/{id}", get(agents_get));
+
     let router = Router::new()
         .route("/health", get(health))
         .route(
@@ -2336,29 +2117,7 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
             "/workspaces/{slug}",
             get(workspaces_get).delete(workspaces_delete),
         )
-        .route("/workspace", post(set_workspace))
-        .route("/git/init", post(git_init))
-        .route("/im/me", get(im_me))
-        .route("/im/channels", get(im_channels))
-        .route("/im/create-channel", post(im_create))
-        .route("/im/join", post(im_join))
-        .route("/im/send", post(im_send))
-        .route("/im/read", post(im_read))
-        .route("/im/poll", post(im_poll))
-        .route("/im/users", get(im_users))
-        .route("/im/thread", post(im_thread))
-        .route("/im/cards", post(im_create_card))
-        .route("/im/cards", get(im_list_cards))
-        .route("/im/cards/{channel}/{card_id}", get(im_read_card))
-        .route("/im/cards/{channel}/{card_id}/messages", post(im_send_card_message))
-        .route("/im/cards/{channel}/{card_id}", axum::routing::patch(im_update_card))
-        .route("/agents", get(agents_list))
-        .route("/agents/events", get(agents_events))
-        .route("/agents/add", post(agents_add))
-        .route("/agents/start", post(agents_start))
-        .route("/agents/stop", post(agents_stop))
-        .route("/agents/remove", post(agents_remove))
-        .route("/agents/{id}", get(agents_get))
+        .nest("/workspaces/{slug}", ws_router)
         .route("/preflight/{provider}", get(preflight_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

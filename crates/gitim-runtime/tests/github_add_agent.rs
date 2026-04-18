@@ -10,6 +10,7 @@ use common::{ensure_daemon_in_path, short_tempdir};
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::github::GithubError;
 use gitim_runtime::http::{create_router, GithubApiClient, SharedRuntimeState};
+use gitim_runtime::workspace::WorkspaceContext;
 
 struct MockGithubApi {
     verify_result: Mutex<Option<Result<(), GithubError>>>,
@@ -81,14 +82,12 @@ async fn post_json(
     resp.json().await.unwrap()
 }
 
-async fn setup_workspace(addr: SocketAddr, ws: &Path) {
-    let resp = post_json(
-        addr,
-        "/workspace",
-        serde_json::json!({ "path": ws.to_string_lossy(), "confirm": true }),
-    )
-    .await;
-    assert_eq!(resp["ok"], true, "workspace setup failed: {resp:?}");
+/// Inject a WorkspaceContext directly so add_agent has a slug to look up.
+/// Does not run real provisioning; the tests seed .gitim-runtime/ separately.
+fn inject_workspace(state: &SharedRuntimeState, slug: &str, ws: &Path) {
+    let mut s = state.lock().unwrap();
+    let ctx = WorkspaceContext::new(slug.to_string(), slug.to_string(), ws.to_path_buf());
+    s.workspaces.insert(slug.to_string(), ctx);
 }
 
 fn setup_fake_bare(tmp_dir: &Path) -> PathBuf {
@@ -184,10 +183,10 @@ async fn add_agent_rejects_existing_handler_in_github_mode() {
     std::fs::create_dir_all(&ws).unwrap();
 
     let api = Arc::new(MockGithubApi::all_ok());
-    let (addr, server, _state) = spawn_server_with(api, None).await;
-    setup_workspace(addr, &ws).await;
+    let (addr, server, state) = spawn_server_with(api, None).await;
+    inject_workspace(&state, "test-ws", &ws);
 
-    // Simulate the post-/git/init state: github config + a seeded human clone
+    // Simulate the post-provision state: github config + a seeded human clone
     // containing an existing agent's user file. The daemon wasn't run, so
     // add_agent has to reject based purely on the file presence check.
     write_workspace_config(
@@ -200,7 +199,7 @@ async fn add_agent_rejects_existing_handler_in_github_mode() {
 
     let resp = post_json(
         addr,
-        "/agents/add",
+        "/workspaces/test-ws/agents/add",
         serde_json::json!({
             "handler": "agent-a",
             "display_name": "Agent A",
@@ -211,8 +210,6 @@ async fn add_agent_rejects_existing_handler_in_github_mode() {
 
     assert_eq!(resp["ok"], false, "should reject duplicate handler: {resp:?}");
     assert_eq!(resp["error_code"], "handler_conflict");
-    // Response must not leak the token anywhere, even if the error path
-    // accidentally formats the remote URL.
     let raw = serde_json::to_string(&resp).unwrap();
     assert!(
         !raw.contains("ghp_TESTSENTINEL_xyz"),
@@ -229,15 +226,15 @@ async fn add_agent_rejects_existing_handler_in_local_mode() {
     std::fs::create_dir_all(&ws).unwrap();
 
     let api = Arc::new(MockGithubApi::all_ok());
-    let (addr, server, _state) = spawn_server_with(api, None).await;
-    setup_workspace(addr, &ws).await;
+    let (addr, server, state) = spawn_server_with(api, None).await;
+    inject_workspace(&state, "test-ws", &ws);
 
     write_workspace_config(&ws, GitProvider::Local, None, None);
     seed_human_clone(&ws, &["taken"]);
 
     let resp = post_json(
         addr,
-        "/agents/add",
+        "/workspaces/test-ws/agents/add",
         serde_json::json!({
             "handler": "taken",
             "display_name": "Taken",
@@ -265,11 +262,11 @@ async fn add_agent_github_mode_clones_with_token_url() {
 
     let api = Arc::new(MockGithubApi::all_ok());
     let clone_override = Some(format!("file://{}", bare.display()));
-    let (addr, server, _state) = spawn_server_with(api, clone_override).await;
+    let (addr, server, state) = spawn_server_with(api, clone_override).await;
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
+    inject_workspace(&state, "test-ws", &ws);
 
     write_workspace_config(
         &ws,
@@ -285,7 +282,7 @@ async fn add_agent_github_mode_clones_with_token_url() {
 
     let resp = post_json(
         addr,
-        "/agents/add",
+        "/workspaces/test-ws/agents/add",
         serde_json::json!({
             "handler": "agent-b",
             "display_name": "Agent B",
@@ -304,25 +301,24 @@ async fn add_agent_github_mode_clones_with_token_url() {
 
 #[tokio::test]
 async fn add_agent_github_mode_without_workspace_config_fails_gracefully() {
-    // Safety net: if someone calls /agents/add without having run /git/init,
-    // workspace config is missing — we should fail cleanly, not panic on
-    // unwrap().
+    // Safety net: if someone calls add_agent without a workspace config,
+    // we should fail cleanly, not panic on unwrap().
     ensure_daemon_in_path();
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
     let api = Arc::new(MockGithubApi::all_ok());
-    let (addr, server, _state) = spawn_server_with(api, None).await;
-    setup_workspace(addr, &ws).await;
-    // Intentionally don't call write_workspace_config — leave the set_workspace
-    // legacy schema in place. add_agent should still work (fall back to local).
+    let (addr, server, state) = spawn_server_with(api, None).await;
+    inject_workspace(&state, "test-ws", &ws);
+    // Intentionally don't call write_workspace_config — no workspace config
+    // file present. add_agent should still work (fall back to local mode).
 
     seed_human_clone(&ws, &["existing"]);
 
     let resp = post_json(
         addr,
-        "/agents/add",
+        "/workspaces/test-ws/agents/add",
         serde_json::json!({
             "handler": "existing",
             "display_name": "Existing",

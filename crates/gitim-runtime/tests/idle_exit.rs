@@ -27,7 +27,12 @@ fn has_active_agents_with_running() {
     let (_, state) = gitim_runtime::http::create_router();
     {
         let mut s = state.lock().unwrap();
-        s.agents.insert(
+        let mut ctx = gitim_runtime::workspace::WorkspaceContext::new(
+            "test-ws".to_string(),
+            "test-ws".to_string(),
+            std::path::PathBuf::from("/tmp/test-ws"),
+        );
+        ctx.agents.insert(
             "test-agent".to_string(),
             gitim_runtime::http::AgentInfo {
                 id: "test-agent".to_string(),
@@ -45,6 +50,7 @@ fn has_active_agents_with_running() {
                 loop_handle: None,
             },
         );
+        s.workspaces.insert("test-ws".to_string(), ctx);
     }
     assert!(gitim_runtime::http::has_active_agents(&state));
 }
