@@ -121,15 +121,6 @@ impl AgentLoop {
         })
     }
 
-    /// Attach a broadcast sender for agent activity events.
-    ///
-    /// Legacy entry point: leaves `workspace_id` empty on emitted events.
-    /// New call sites should use [`set_activity_tx_with_workspace`] so SSE
-    /// subscribers can filter by workspace.
-    pub fn set_activity_tx(&mut self, tx: broadcast::Sender<AgentActivityEvent>) {
-        self.activity_tx = Some(tx);
-    }
-
     /// Attach a broadcast sender and tag emitted events with a workspace slug.
     pub fn set_activity_tx_with_workspace(
         &mut self,

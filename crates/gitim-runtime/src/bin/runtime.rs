@@ -200,6 +200,6 @@ async fn shutdown_signal() {
 fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
     let s = state.lock().unwrap();
     for ws in s.workspaces.values() {
-        gitim_runtime::workspace::kill_daemons(ws);
+        gitim_runtime::workspace::kill_daemons_blocking(ws);
     }
 }

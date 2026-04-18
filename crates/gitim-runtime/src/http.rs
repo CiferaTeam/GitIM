@@ -62,8 +62,9 @@ struct HealthResponse {
 
 /// Real-time agent activity event, broadcast via SSE.
 ///
-/// `workspace_id` is empty when the event originates from a caller that has
-/// not yet been migrated to per-workspace context (legacy SSE path).
+/// `workspace_id` always carries the originating workspace's slug so SSE
+/// subscribers can route or filter events. Events are published on the
+/// workspace-scoped `broadcast::Sender` held in `WorkspaceContext`.
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentActivityEvent {
     pub agent_id: String,
@@ -963,6 +964,7 @@ async fn agents_add(
                 if let Some(ctx) = s.workspaces.get_mut(&slug) {
                     ctx.agents.insert(req.handler.clone(), info);
                 } else {
+                    cleanup_agent_dir(&workspace, &req.handler);
                     return not_found_workspace();
                 }
             }
@@ -1634,10 +1636,11 @@ async fn workspaces_get(
     }
 }
 
-/// Remove the workspace entry from memory and the user config file. This is
-/// intentionally minimal: per the plan, Task 8 owns graceful daemon shutdown
-/// and we leave on-disk files alone (local-file preservation is a product
-/// decision, not an oversight).
+/// Remove the workspace entry from memory and the user config file.
+/// On-disk user files at `workspace` root are preserved — only `.gitim-runtime/`
+/// artifacts are cleaned by the daemon-kill path. If the config file write
+/// fails the caller is told (500), because the API would otherwise lie about
+/// durable state (workspace gone from memory, resurrects on restart).
 async fn workspaces_delete(
     State(state): State<SharedRuntimeState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
@@ -1645,30 +1648,47 @@ async fn workspaces_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let removed = {
+    let mut removed = {
         let mut s = state.lock().unwrap();
-        s.workspaces.remove(&slug)
+        match s.workspaces.remove(&slug) {
+            Some(ctx) => ctx,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+                )
+                    .into_response();
+            }
+        }
     };
-    if removed.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
-        )
-            .into_response();
+
+    // Abort in-process agent loop tasks before killing their daemons. Mirrors
+    // the cleanup `/agents/remove` and `/agents/stop` already perform — without
+    // this the tokio tasks survive workspace removal and keep polling repos
+    // whose daemons are gone (silently erroring forever).
+    for agent in removed.agents.values_mut() {
+        if let Some(handle) = agent.loop_handle.take() {
+            handle.abort();
+        }
     }
 
-    if let Some(ctx) = removed.as_ref() {
-        crate::workspace::kill_daemons(ctx);
-    }
+    crate::workspace::kill_daemons(&removed).await;
 
-    // Persist removal to ~/.gitim/runtime.json so recovery skips this
-    // workspace on next start. Failures here are logged but don't fail the
-    // response: the HashMap removal above already succeeded, so making the
-    // user re-click would be misleading.
     let mut cfg = crate::user_config::read();
     if cfg.remove(&slug) {
         if let Err(e) = crate::user_config::write(&cfg) {
-            tracing::warn!(slug = %slug, error = %e, "failed to persist workspace removal");
+            tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": "config_write_failed",
+                    "error": format!(
+                        "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
+                    ),
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -1919,18 +1939,36 @@ async fn workspaces_create(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| basename_raw.clone());
 
-    // TOCTOU-safe slug reservation: slug derivation + placeholder insertion
-    // must happen under the same lock so two concurrent creates with the
-    // same basename can't collide on the same suffix.
+    // TOCTOU-safe slug reservation: path-uniqueness check + slug derivation +
+    // placeholder insertion all happen under the same lock. Without this, a
+    // second POST for an already-registered path would allocate a fresh slug,
+    // and a provisioning failure would run `cleanup_partial_workspace` against
+    // the shared directory — killing the live workspace's daemon and deleting
+    // its `.gitim-runtime/` tree.
     let slug = {
         let mut s = state.lock().unwrap();
+
+        if let Some(existing) = s.workspaces.values().find(|w| w.path == workspace) {
+            let existing_slug = existing.slug.clone();
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": "workspace_path_exists",
+                    "error": format!(
+                        "workspace at {} already registered as slug \"{}\"",
+                        workspace.display(), existing_slug,
+                    ),
+                    "existing_slug": existing_slug,
+                })),
+            )
+                .into_response();
+        }
+
         let candidate = crate::slug::normalize(&basename_raw);
         let existing: std::collections::HashSet<String> = s.workspaces.keys().cloned().collect();
         let slug = crate::slug::resolve(&candidate, &existing);
 
-        // Defensive: `resolve` must not hand back a slug that's already taken.
-        // If it does, something is badly wrong — log and fail the request
-        // rather than stomping an existing workspace.
         if s.workspaces.contains_key(&slug) {
             return (
                 StatusCode::CONFLICT,
@@ -2060,7 +2098,18 @@ async fn workspaces_create(
         path: workspace.to_string_lossy().into_owned(),
     });
     if let Err(e) = crate::user_config::write(&user_cfg) {
-        tracing::warn!(slug = %slug, error = %e, "failed to persist workspace entry");
+        tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
+        state.lock().unwrap().workspaces.remove(&slug);
+        cleanup_partial_workspace(&workspace);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "error_code": "config_write_failed",
+                "error": format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
+            })),
+        )
+            .into_response();
     }
 
     (

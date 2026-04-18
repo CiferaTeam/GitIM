@@ -526,3 +526,149 @@ async fn workspace_scoped_route_unknown_slug_returns_404() {
     assert_eq!(body["ok"], false);
     assert_eq!(body["error"], "unknown workspace");
 }
+
+// -- 16. POST rejects already-registered path ------------------------------
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_duplicate_path() {
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+
+    // Seed with an existing workspace at a concrete path.
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("first-workspace");
+    std::fs::create_dir(&ws_path).unwrap();
+    inject_workspace(
+        &state,
+        "first-workspace",
+        "first-workspace",
+        &ws_path,
+        GitProvider::Local,
+    );
+
+    // Second POST with the same path must fail with `workspace_path_exists`
+    // BEFORE any provisioning or slug allocation. The existing workspace's
+    // daemon + .gitim-runtime/ stay untouched.
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "workspace_path_exists");
+    assert_eq!(body["existing_slug"], "first-workspace");
+
+    // The seeded workspace is still in state — the duplicate attempt didn't
+    // mutate anything.
+    let s = state.lock().unwrap();
+    assert_eq!(s.workspaces.len(), 1);
+    assert!(s.workspaces.contains_key("first-workspace"));
+}
+
+// -- 17. POST failure does not leak placeholder state ----------------------
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_failure_cleans_up_placeholder() {
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+
+    // `/dev/null/...` can't host `repo.git` — `create_dir_all` in
+    // `provision_local_workspace` fails with ENOTDIR, the handler takes the
+    // rollback path and removes the placeholder. Without rollback, this would
+    // leave a half-initialized `WorkspaceContext` in state visible to later
+    // requests.
+    let (status, _body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": "/dev/null/nonexistent-workspace-path",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let s = state.lock().unwrap();
+    assert!(
+        s.workspaces.is_empty(),
+        "failed create left placeholder in state: {:?}",
+        s.workspaces.keys().collect::<Vec<_>>()
+    );
+}
+
+// -- 18. DELETE aborts in-process agent loop handles -----------------------
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn delete_workspace_aborts_agent_loop_handles() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("loop-test");
+    std::fs::create_dir(&ws_path).unwrap();
+    inject_workspace(&state, "loop-test", "loop-test", &ws_path, GitProvider::Local);
+
+    // Spawn a tokio task that runs until aborted, and hand its AbortHandle to
+    // the injected agent's `loop_handle`. This stands in for a real
+    // `start_agent_loop`-spawned task: what we care about is that DELETE flips
+    // the abort bit.
+    let notify = Arc::new(Notify::new());
+    let notify_clone = notify.clone();
+    let task = tokio::spawn(async move {
+        notify_clone.notify_one();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+    let abort_handle = task.abort_handle();
+
+    notify.notified().await;
+
+    {
+        let mut s = state.lock().unwrap();
+        let ctx = s.workspaces.get_mut("loop-test").unwrap();
+        let mut agent_info = gitim_runtime::http::AgentInfo {
+            id: "a".into(),
+            handler: "a".into(),
+            display_name: "a".into(),
+            status: "running".into(),
+            last_activity: None,
+            messages_processed: 0,
+            repo_path: ws_path.join("a").to_string_lossy().into_owned(),
+            provider: Some("claude".into()),
+            model: None,
+            system_prompt: None,
+            env: Default::default(),
+            error_message: None,
+            loop_handle: None,
+        };
+        agent_info.loop_handle = Some(abort_handle);
+        ctx.agents.insert("a".into(), agent_info);
+    }
+
+    let (status, _) = send(router, "DELETE", "/workspaces/loop-test", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // After DELETE, the spawned task must observe its abort flag. Awaiting the
+    // JoinHandle yields `Err(JoinError::is_cancelled)` once the abort fires.
+    // Give it a bounded wait so this test stays fast if the fix regresses.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+    let join_result = result.expect("agent loop task was not aborted within 2s");
+    assert!(
+        join_result.is_err() && join_result.unwrap_err().is_cancelled(),
+        "task should have been aborted",
+    );
+}

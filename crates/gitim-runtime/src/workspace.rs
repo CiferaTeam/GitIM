@@ -43,16 +43,37 @@ impl WorkspaceContext {
 /// already-dead processes are silently ignored. Matches the sequence used by
 /// `cleanup_human_dir` so callers get consistent shutdown behavior whether a
 /// workspace is dropped via DELETE or the runtime itself is exiting.
-pub fn kill_daemons(ctx: &WorkspaceContext) {
+pub async fn kill_daemons(ctx: &WorkspaceContext) {
     if let Some(human) = &ctx.human_repo {
-        kill_pid_at(human);
+        kill_pid_at(human).await;
     }
     for agent in ctx.agents.values() {
-        kill_pid_at(Path::new(&agent.repo_path));
+        kill_pid_at(Path::new(&agent.repo_path)).await;
     }
 }
 
-fn kill_pid_at(repo: &Path) {
+/// Synchronous variant for non-async contexts (runtime shutdown path in the
+/// binary). Uses `std::thread::sleep` — acceptable outside the axum worker
+/// pool. Keep in sync with `kill_daemons`.
+pub fn kill_daemons_blocking(ctx: &WorkspaceContext) {
+    if let Some(human) = &ctx.human_repo {
+        kill_pid_at_blocking(human);
+    }
+    for agent in ctx.agents.values() {
+        kill_pid_at_blocking(Path::new(&agent.repo_path));
+    }
+}
+
+async fn kill_pid_at(repo: &Path) {
+    let pid_file = repo.join(".gitim/run/gitim.pid");
+    let Ok(content) = std::fs::read_to_string(&pid_file) else { return; };
+    let Ok(pid) = content.trim().parse::<u32>() else { return; };
+    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+}
+
+fn kill_pid_at_blocking(repo: &Path) {
     let pid_file = repo.join(".gitim/run/gitim.pid");
     let Ok(content) = std::fs::read_to_string(&pid_file) else { return; };
     let Ok(pid) = content.trim().parse::<u32>() else { return; };
