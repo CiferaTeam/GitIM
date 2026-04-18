@@ -115,6 +115,17 @@ pub struct RuntimeState {
     /// `Some`, the token verification step has still run against the real API
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
+    pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+}
+
+impl RuntimeState {
+    pub fn get(&self, slug: &str) -> Option<&crate::workspace::WorkspaceContext> {
+        self.workspaces.get(slug)
+    }
+
+    pub fn get_mut(&mut self, slug: &str) -> Option<&mut crate::workspace::WorkspaceContext> {
+        self.workspaces.get_mut(slug)
+    }
 }
 
 impl Default for RuntimeState {
@@ -141,6 +152,7 @@ impl Default for RuntimeState {
             ),
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
+            workspaces: HashMap::new(),
         }
     }
 }
