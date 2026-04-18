@@ -207,6 +207,14 @@
 - **gitim-index 的 `include_archived` flag** — 搜索目前不会命中 archived 文件，待 index 层单独处理。
 - **Board 其它操作**（label 详解、assignee 详解、状态转换规则）在 prompts 里一笔带过即可，不展开教程。
 
+### 落地后发现的 follow-ups（Phase 6 review）
+
+- **Runtime HTTP 测试深度不足**：T3 的 6 个 HTTP 测试全部短路在 `human_handler()` "daemon not initialized" 分支（runtime_http.rs:206-303），覆盖到路由注册但没验证 me.json 读取、author 注入、api_response_to_json 包装的端到端路径。T3 Step 4 曾承诺 "启真实 daemon + runtime 各跑一条 happy path"，实际 shipped 为 route-reachability shape test。建议后续加一条走 `test_agents_add_creates_agent` 起 daemon 的模式，覆盖一个 `archive_card` happy-path。
+- **`Channel.kind` TS union 不含 `"archived_channel"`**：daemon 的 `/im/channels/archived` 返回项 `kind: "archived_channel"`，现前端多处用 `as Channel[]` 强转。建议后续把 union 扩为 `"channel" | "dm" | "archived_channel"`，去掉所有 cast。
+- **Sidebar unarchive 后 `client.channels()` 刷新 race**：daemon 侧 commit 同步 + 同一 daemon 重读，实际低风险，但 `markChannelUnarchived` + refetch replace 是两步操作，理论上中间 race 会抹掉种子。加 merge-不 replace 策略或注释说明。
+- **`setArchivedChannels` 合成字段**：use-chat-store.ts:92-98 把 archived channels 的 `unreadCount`/`hasMention` 默认填 0/false 。TS 把它们当必填字段，daemon 未返回。若 `Channel` 类型改为可选，这段 synth 就能删。
+- **fetch 错误处理不统一**：webui-v2 的 6 个新 fetch wrapper 未检查 `!res.ok`，跟仓内既有 style 一致（全仓问题，非本 branch 引入）。调用处 card-filter-bar 有 try/catch，card-detail 和 sidebar 部分未加。后续可统一封装 `safeFetch`。
+
 ---
 
 ## Test strategy
