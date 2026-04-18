@@ -2,7 +2,7 @@
  * Unified client — all methods hit the real runtime HTTP API.
  * Agent methods fall back to mock if runtime is unreachable.
  */
-import type { Agent, ApiResponse, Card, CardStatus, Message } from "./types";
+import type { Agent, ApiResponse, Card, CardStatus, Channel, Message } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -250,6 +250,61 @@ export async function updateCard(
       body: JSON.stringify(patch),
     },
   );
+  return await res.json();
+}
+
+// --- Archive API: runtime derives author from workspace me.json, so no body needed. ---
+
+export async function archiveCard(
+  channel: string,
+  cardId: string,
+): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/archive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function unarchiveCard(
+  channel: string,
+  cardId: string,
+): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/unarchive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function listArchivedCards(
+  channel?: string,
+): Promise<ApiResponse<{ cards: Card[] }>> {
+  const qs = channel ? `?channel=${encodeURIComponent(channel)}` : "";
+  const res = await fetch(`${baseUrl()}/im/cards/archived${qs}`);
+  return await res.json();
+}
+
+export async function archiveChannel(name: string): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/channels/${encodeURIComponent(name)}/archive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function unarchiveChannel(name: string): Promise<ApiResponse> {
+  const res = await fetch(
+    `${baseUrl()}/im/channels/${encodeURIComponent(name)}/unarchive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function listArchivedChannels(): Promise<
+  ApiResponse<{ channels: Channel[] }>
+> {
+  const res = await fetch(`${baseUrl()}/im/channels/archived`);
   return await res.json();
 }
 

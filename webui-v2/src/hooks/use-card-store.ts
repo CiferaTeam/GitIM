@@ -25,6 +25,10 @@ export function parseCardScope(channelStr: string): {
 
 interface CardState {
   cards: Card[];
+  /** Archived cards — flat list across channels; selectors can filter per-channel. */
+  archivedCards: Card[];
+  /** UI toggle: whether the Archived view is visible in CardsPanel. */
+  showArchived: boolean;
   /** Discussion messages keyed by "<channel>/<card_id>". */
   cardMessagesByPath: Record<string, Message[]>;
   /** Paths of cards with an in-flight PATCH; skip poll-driven overwrites for these. */
@@ -37,6 +41,13 @@ interface CardState {
   removeCard: (channel: string, cardId: string) => void;
   markCardInFlight: (channel: string, cardId: string) => void;
   unmarkCardInFlight: (channel: string, cardId: string) => void;
+
+  setArchivedCards: (cards: Card[]) => void;
+  toggleShowArchived: () => void;
+  /** Optimistic: move a card from `cards` → `archivedCards`. */
+  markArchived: (channel: string, cardId: string) => void;
+  /** Optimistic: move a card from `archivedCards` → `cards`. */
+  markUnarchived: (channel: string, cardId: string) => void;
 
   setCardMessages: (pathKey: string, messages: Message[]) => void;
   addCardMessages: (pathKey: string, messages: Message[]) => void;
@@ -52,6 +63,8 @@ interface CardState {
 
 export const useCardStore = create<CardState>((set) => ({
   cards: [],
+  archivedCards: [],
+  showArchived: false,
   cardMessagesByPath: {},
   inFlightCardPaths: new Set<string>(),
 
@@ -117,6 +130,47 @@ export const useCardStore = create<CardState>((set) => ({
       const next = new Set(state.inFlightCardPaths);
       next.delete(cardPathKey(channel, cardId));
       return { inFlightCardPaths: next };
+    }),
+
+  setArchivedCards: (cards) => set({ archivedCards: cards }),
+
+  toggleShowArchived: () =>
+    set((state) => ({ showArchived: !state.showArchived })),
+
+  markArchived: (channel, cardId) =>
+    set((state) => {
+      const card = state.cards.find(
+        (c) => c.channel === channel && c.card_id === cardId,
+      );
+      const nextCards = state.cards.filter(
+        (c) => !(c.channel === channel && c.card_id === cardId),
+      );
+      // Only push to archived when we actually had the card locally, AND
+      // when it's not already in archivedCards (dedup by channel + card_id).
+      const alreadyArchived = state.archivedCards.some(
+        (c) => c.channel === channel && c.card_id === cardId,
+      );
+      const nextArchived =
+        card && !alreadyArchived
+          ? [...state.archivedCards, card]
+          : state.archivedCards;
+      return { cards: nextCards, archivedCards: nextArchived };
+    }),
+
+  markUnarchived: (channel, cardId) =>
+    set((state) => {
+      const card = state.archivedCards.find(
+        (c) => c.channel === channel && c.card_id === cardId,
+      );
+      const nextArchived = state.archivedCards.filter(
+        (c) => !(c.channel === channel && c.card_id === cardId),
+      );
+      const alreadyActive = state.cards.some(
+        (c) => c.channel === channel && c.card_id === cardId,
+      );
+      const nextCards =
+        card && !alreadyActive ? [...state.cards, card] : state.cards;
+      return { cards: nextCards, archivedCards: nextArchived };
     }),
 
   setCardMessages: (pathKey, messages) =>
