@@ -292,6 +292,29 @@ enum CardCommands {
         #[arg(long)]
         assignee: Option<String>,
     },
+
+    /// Archive a card
+    Archive {
+        /// Channel name
+        channel: String,
+        /// Card ID
+        card_id: String,
+    },
+
+    /// Unarchive a card
+    Unarchive {
+        /// Channel name
+        channel: String,
+        /// Card ID
+        card_id: String,
+    },
+
+    /// List archived cards
+    Archived {
+        /// Filter by channel name
+        #[arg(short, long)]
+        channel: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -527,6 +550,15 @@ async fn main() {
                     assignee.as_deref(),
                 )
                 .await
+            }
+            CardCommands::Archive { channel, card_id } => {
+                commands::card::cmd_archive_card(&client, &mode, &channel, &card_id).await
+            }
+            CardCommands::Unarchive { channel, card_id } => {
+                commands::card::cmd_unarchive_card(&client, &mode, &channel, &card_id).await
+            }
+            CardCommands::Archived { channel } => {
+                commands::card::cmd_archived_cards(&client, &mode, channel.as_deref()).await
             }
         },
     }

@@ -5,6 +5,7 @@ use std::process;
 use gitim_client::GitimClient;
 
 use crate::output::OutputMode;
+use super::{get_repo_root, read_my_handler};
 
 fn print_or_exit(
     resp: gitim_client::ApiResponse,
@@ -106,6 +107,10 @@ pub async fn cmd_read_card(
     match client.read_card(channel, card_id, limit, since).await {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             let meta = &d["meta"];
+            let archived = d["archived"].as_bool().unwrap_or(false);
+            if archived {
+                println!("[ARCHIVED]");
+            }
             println!(
                 "#{}/{}  [{}]  {}",
                 d["channel"].as_str().unwrap_or("?"),
@@ -171,6 +176,80 @@ pub async fn cmd_update_card(
                 d["status"].as_str().unwrap_or(""),
                 d["assignee"].as_str().unwrap_or("-"),
             );
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_archive_card(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    card_id: &str,
+) {
+    let repo_root = get_repo_root();
+    let author = read_my_handler(&repo_root);
+    match client.archive_card(channel, card_id, &author).await {
+        Ok(resp) => print_or_exit(resp, mode, |_| {
+            println!("已归档卡片 #{}/{}", channel, card_id);
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_unarchive_card(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    card_id: &str,
+) {
+    let repo_root = get_repo_root();
+    let author = read_my_handler(&repo_root);
+    match client.unarchive_card(channel, card_id, &author).await {
+        Ok(resp) => print_or_exit(resp, mode, |_| {
+            println!("已取消归档卡片 #{}/{}", channel, card_id);
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_archived_cards(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: Option<&str>,
+) {
+    match client.list_archived_cards(channel).await {
+        Ok(resp) => print_or_exit(resp, mode, |d| {
+            let cards = d.get("cards").and_then(|v| v.as_array());
+            match cards {
+                Some(arr) if !arr.is_empty() => {
+                    for c in arr {
+                        let ch = c["channel"].as_str().unwrap_or("?");
+                        let id = c["card_id"].as_str().unwrap_or("?");
+                        let t = c["title"].as_str().unwrap_or("");
+                        let s = c["status"].as_str().unwrap_or("");
+                        let a = c["assignee"].as_str().unwrap_or("-");
+                        let ls: Vec<&str> = c["labels"]
+                            .as_array()
+                            .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
+                            .unwrap_or_default();
+                        println!(
+                            "#{ch}/{id}  [{s}]  {t}  @{a}  {}",
+                            if ls.is_empty() { String::new() } else { format!("[{}]", ls.join(", ")) }
+                        );
+                    }
+                }
+                _ => println!("没有已归档的卡片"),
+            }
         }),
         Err(e) => {
             eprintln!("Error: {e}");
