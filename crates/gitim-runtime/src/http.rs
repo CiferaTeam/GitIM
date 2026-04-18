@@ -1787,11 +1787,555 @@ async fn activity_middleware(
     next.run(request).await
 }
 
+// -- Global /workspaces CRUD (Task 5) --
+//
+// These routes are the multi-workspace entry points: list, create, read, delete.
+// Legacy `/workspace` + `/git/init` still exist until Task 6 wires the rest of
+// the workspace-scoped handlers and the front-end cuts over — do not remove
+// them here. The old handlers mutate `RuntimeState.workspace` / `.human_repo`
+// (the legacy singleton fields); these new handlers write `RuntimeState.workspaces`
+// (the HashMap) + `~/.gitim/runtime.json` (new schema) and never touch the
+// legacy fields.
+
+#[derive(Deserialize)]
+struct WorkspacesCreateGit {
+    provider: String,
+    #[serde(default)]
+    remote_url: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkspacesCreateRequest {
+    path: String,
+    #[serde(default)]
+    workspace_name: Option<String>,
+    git: WorkspacesCreateGit,
+}
+
+#[derive(Serialize)]
+struct WorkspaceSummary {
+    slug: String,
+    workspace_name: String,
+    path: String,
+    provider: GitProvider,
+    initialized: bool,
+}
+
+fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSummary {
+    let provider = ctx
+        .git_config
+        .as_ref()
+        .map(|c| c.git.provider)
+        .unwrap_or(GitProvider::Local);
+    WorkspaceSummary {
+        slug: ctx.slug.clone(),
+        workspace_name: ctx.workspace_name.clone(),
+        path: ctx.path.to_string_lossy().into_owned(),
+        provider,
+        initialized: ctx.human_repo.is_some(),
+    }
+}
+
+async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+    let s = state.lock().unwrap();
+    let mut list: Vec<WorkspaceSummary> = s.workspaces.values().map(workspace_summary).collect();
+    // Deterministic order makes the response stable for tests and WebUI.
+    list.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Json(serde_json::json!({ "workspaces": list }))
+}
+
+async fn workspaces_get(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let s = state.lock().unwrap();
+    match s.workspaces.get(&slug) {
+        Some(ctx) => {
+            let provider = ctx
+                .git_config
+                .as_ref()
+                .map(|c| c.git.provider)
+                .unwrap_or(GitProvider::Local);
+            let body = serde_json::json!({
+                "slug": ctx.slug,
+                "workspace_name": ctx.workspace_name,
+                "path": ctx.path.to_string_lossy(),
+                "provider": provider,
+                "initialized": ctx.human_repo.is_some(),
+                "agents_count": ctx.agents.len(),
+                "human_repo": ctx.human_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            });
+            Json(body).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Remove the workspace entry from memory and the user config file. This is
+/// intentionally minimal: per the plan, Task 8 owns graceful daemon shutdown
+/// and we leave on-disk files alone (local-file preservation is a product
+/// decision, not an oversight).
+async fn workspaces_delete(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let removed = {
+        let mut s = state.lock().unwrap();
+        s.workspaces.remove(&slug)
+    };
+    if removed.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+        )
+            .into_response();
+    }
+
+    // TODO(task-8): graceful daemon shutdown (SIGTERM + 5s + SIGKILL per
+    // WorkspaceContext). For now the daemon process backing this workspace
+    // may keep running until the runtime exits; that's acceptable per Task 5
+    // scope — Task 8 fills this in.
+
+    // Persist removal to ~/.gitim/runtime.json so recovery skips this
+    // workspace on next start. Failures here are logged but don't fail the
+    // response: the HashMap removal above already succeeded, so making the
+    // user re-click would be misleading.
+    let mut cfg = crate::user_config::read();
+    if cfg.remove(&slug) {
+        if let Err(e) = crate::user_config::write(&cfg) {
+            tracing::warn!(slug = %slug, error = %e, "failed to persist workspace removal");
+        }
+    }
+
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Best-effort rollback for a failed `POST /workspaces`. Kills any daemon the
+/// partial provisioning started, then removes `.gitim-runtime/` (which holds
+/// `human/` + any token-carrying config). We do NOT delete user-owned files
+/// at `workspace` root (e.g. the local bare `repo.git`) — those existed before
+/// we touched the directory or were created by us but are safe to leave; the
+/// plan's "file hygiene" rule is to preserve local files.
+fn cleanup_partial_workspace(workspace: &Path) {
+    cleanup_human_dir(workspace);
+    let runtime_dir = workspace.join(".gitim-runtime");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+/// Provision a local-mode workspace: init bare at `{path}/repo.git` and run
+/// `provision_human`. Mirrors `git_init_local` but operates on an arbitrary
+/// workspace path (not the legacy singleton) and returns the provisioned
+/// `human_dir` + a `WorkspaceConfig` instead of mutating `RuntimeState`
+/// directly. Returns `Err((error_code, message))` — the HTTP layer maps those
+/// into the standard `{ ok: false, error_code, error }` body.
+async fn provision_local_workspace(
+    workspace: &Path,
+) -> Result<(PathBuf, WorkspaceConfig), (&'static str, String)> {
+    let repo_path = workspace.join("repo.git");
+    std::fs::create_dir_all(&repo_path).map_err(|e| {
+        (
+            "clone_failed",
+            redacted_url(&format!("failed to create repo directory: {e}")),
+        )
+    })?;
+
+    let output = std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| ("clone_failed", redacted_url(&format!("failed to run git: {e}"))))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err((
+            "clone_failed",
+            redacted_url(&format!("git init failed: {stderr}")),
+        ));
+    }
+
+    let remote_url = repo_path.to_string_lossy().into_owned();
+    let display_name =
+        detect_git_config("user.name", workspace).unwrap_or_else(|| "human".to_string());
+    let handler = {
+        let h = name_to_handler(&display_name);
+        if h.is_empty() { "human".to_string() } else { h }
+    };
+    let auth = serde_json::json!({
+        "type": "git",
+        "handler": handler,
+        "display_name": display_name,
+    });
+
+    let human_dir = provision_human(workspace, &remote_url, "git", auth)
+        .await
+        .map_err(|e| {
+            (
+                "onboard_failed",
+                redacted_url(&format!("provision_human failed: {e}")),
+            )
+        })?;
+
+    let config = WorkspaceConfig {
+        workspace: workspace.to_string_lossy().into_owned(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+        },
+    };
+    config.write(workspace).map_err(|e| {
+        (
+            "config_write_failed",
+            redacted_url(&format!("failed to write config: {e}")),
+        )
+    })?;
+    let _ = mark_excluded_from_backups(&workspace.join(".gitim-runtime"));
+
+    Ok((human_dir, config))
+}
+
+/// Provision a github-mode workspace: verify token → check repo access →
+/// clone → `provision_human`. Mirrors `git_init_github` but targets an
+/// arbitrary workspace path. Windows is rejected consistent with the
+/// workspace-github-mode scope.
+async fn provision_github_workspace(
+    state: &SharedRuntimeState,
+    workspace: &Path,
+    remote_url: String,
+    token: String,
+) -> Result<(PathBuf, WorkspaceConfig), (&'static str, String)> {
+    #[cfg(windows)]
+    {
+        let _ = (state, workspace, remote_url, token);
+        return Err((
+            "provider_not_supported",
+            "github mode is not supported on Windows".to_string(),
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        let (github_api, clone_override) = {
+            let s = state.lock().unwrap();
+            (s.github_api.clone(), s.clone_url_override.clone())
+        };
+
+        github_api
+            .verify_token(&token)
+            .await
+            .map_err(|e| (github_error_code(&e), redacted_url(&e.to_string())))?;
+
+        let (owner, repo) = parse_github_url(&remote_url)
+            .map_err(|e| (github_error_code(&e), redacted_url(&e.to_string())))?;
+
+        github_api
+            .check_repo_access(&owner, &repo, &token)
+            .await
+            .map_err(|e| (github_error_code(&e), redacted_url(&e.to_string())))?;
+
+        let clone_url = clone_override
+            .clone()
+            .unwrap_or_else(|| build_token_url(&owner, &repo, &token));
+
+        let runtime_dir = workspace.join(".gitim-runtime");
+        std::fs::create_dir_all(&runtime_dir).map_err(|e| {
+            (
+                "clone_failed",
+                redacted_url(&format!("failed to create runtime dir: {e}")),
+            )
+        })?;
+
+        let human_dir = runtime_dir.join("human");
+        if human_dir.exists() {
+            // Prior failed provisioning may have left a half-built clone;
+            // `provision_human` is not re-entrant over partial state.
+            cleanup_human_dir(workspace);
+        }
+
+        let clone_output = std::process::Command::new("git")
+            .args(["clone", &clone_url, "human"])
+            .current_dir(&runtime_dir)
+            .output()
+            .map_err(|e| {
+                cleanup_human_dir(workspace);
+                ("clone_failed", redacted_url(&format!("failed to run git: {e}")))
+            })?;
+        if !clone_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clone_output.stderr);
+            cleanup_human_dir(workspace);
+            return Err((
+                "clone_failed",
+                redacted_url(&format!("git clone failed: {stderr}")),
+            ));
+        }
+
+        // Scrub the token from the clone's origin URL so `git remote -v`
+        // and any diagnostic dump stop leaking it. When an override is
+        // active (e2e tests point at a `file://` bare) skip this — that URL
+        // never carried a token to begin with.
+        if clone_override.is_none() {
+            let _ = std::process::Command::new("git")
+                .args(["remote", "set-url", "origin", &remote_url])
+                .current_dir(&human_dir)
+                .output();
+        }
+
+        let auth = serde_json::json!({
+            "type": "github",
+            "token": token,
+        });
+        let final_human = provision_human(workspace, &remote_url, "github", auth)
+            .await
+            .map_err(|e| {
+                cleanup_human_dir(workspace);
+                (
+                    "onboard_failed",
+                    redacted_url(&format!("provision_human failed: {e}")),
+                )
+            })?;
+
+        let config = WorkspaceConfig {
+            workspace: workspace.to_string_lossy().into_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            git: GitConfig {
+                provider: GitProvider::Github,
+                remote_url: Some(remote_url.clone()),
+                token: Some(token.clone()),
+            },
+        };
+        config.write(workspace).map_err(|e| {
+            cleanup_human_dir(workspace);
+            (
+                "config_write_failed",
+                redacted_url(&format!("failed to write config: {e}")),
+            )
+        })?;
+        let _ = mark_excluded_from_backups(&runtime_dir);
+
+        Ok((final_human, config))
+    }
+}
+
+async fn workspaces_create(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<WorkspacesCreateRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let workspace = PathBuf::from(&req.path);
+
+    // Path validation: only cloud-sync rejection today. Do this before
+    // touching `state` so concurrent callers with bad paths fail fast and
+    // don't race for a slug.
+    if let Err(crate::git_config::WorkspacePathError::CloudSyncDetected(service)) =
+        validate_workspace_path_from_env(&workspace)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error_code": "cloud_sync_path_rejected",
+                "error": format!("workspace is inside {service} — refusing to store a token there"),
+            })),
+        )
+            .into_response();
+    }
+
+    // `workspace_name` defaults to the basename *as-is* (case/spaces/unicode
+    // preserved) so the UI can show a human-friendly label even when the slug
+    // is the ASCII-only normalized form.
+    let basename_raw = workspace
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(String::new);
+    let workspace_name = req
+        .workspace_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| basename_raw.clone());
+
+    // TOCTOU-safe slug reservation: slug derivation + placeholder insertion
+    // must happen under the same lock so two concurrent creates with the
+    // same basename can't collide on the same suffix.
+    let slug = {
+        let mut s = state.lock().unwrap();
+        let candidate = crate::slug::normalize(&basename_raw);
+        let existing: std::collections::HashSet<String> = s.workspaces.keys().cloned().collect();
+        let slug = crate::slug::resolve(&candidate, &existing);
+
+        // Defensive: `resolve` must not hand back a slug that's already taken.
+        // If it does, something is badly wrong — log and fail the request
+        // rather than stomping an existing workspace.
+        if s.workspaces.contains_key(&slug) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": "slug_conflict_unexpected",
+                    "error": format!("slug collision not resolved: {slug}"),
+                })),
+            )
+                .into_response();
+        }
+        let placeholder = crate::workspace::WorkspaceContext::new(
+            slug.clone(),
+            workspace_name.clone(),
+            workspace.clone(),
+        );
+        s.workspaces.insert(slug.clone(), placeholder);
+        slug
+    };
+
+    // Async provisioning runs without the state lock held. On any failure
+    // below we must re-lock and drop the placeholder so a retry can succeed.
+    let provider_str = req.git.provider.as_str();
+    let provisioned = match provider_str {
+        "local" => provision_local_workspace(&workspace).await,
+        "github" => {
+            let token = match req.git.token.as_ref() {
+                Some(t) if !t.is_empty() => t.clone(),
+                _ => {
+                    state.lock().unwrap().workspaces.remove(&slug);
+                    cleanup_partial_workspace(&workspace);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error_code": "missing_token",
+                            "error": "github mode requires a personal access token",
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let remote_url = match req.git.remote_url.as_ref() {
+                Some(u) if !u.is_empty() => u.clone(),
+                _ => {
+                    state.lock().unwrap().workspaces.remove(&slug);
+                    cleanup_partial_workspace(&workspace);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error_code": "missing_remote_url",
+                            "error": "github mode requires remote_url",
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            provision_github_workspace(&state, &workspace, remote_url, token).await
+        }
+        other => {
+            state.lock().unwrap().workspaces.remove(&slug);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": "provider_not_supported",
+                    "error": format!("provider not supported: {other}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let (human_dir, config) = match provisioned {
+        Ok(x) => x,
+        Err((error_code, message)) => {
+            state.lock().unwrap().workspaces.remove(&slug);
+            cleanup_partial_workspace(&workspace);
+            // All provisioning failures surface as 400: they're all "your input
+            // or environment caused this" (bad token, bad URL, clone failed).
+            // None are 500-class — the runtime itself is still fine.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error_code": error_code,
+                    "error": message,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Success: fill the placeholder with real provisioning results, then
+    // persist to ~/.gitim/runtime.json so the workspace survives a restart.
+    let provider_for_response;
+    {
+        let mut s = state.lock().unwrap();
+        match s.workspaces.get_mut(&slug) {
+            Some(ctx) => {
+                ctx.human_repo = Some(human_dir);
+                ctx.git_config = Some(config.clone());
+            }
+            None => {
+                // Extremely unlikely — would mean a DELETE raced in during
+                // provisioning. Roll back the filesystem side and fail.
+                cleanup_partial_workspace(&workspace);
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": "slug_conflict_unexpected",
+                        "error": "workspace slot disappeared during provisioning",
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        provider_for_response = config.git.provider;
+    }
+
+    let mut user_cfg = crate::user_config::read();
+    user_cfg.upsert(crate::user_config::WorkspaceEntry {
+        slug: slug.clone(),
+        workspace_name: workspace_name.clone(),
+        path: workspace.to_string_lossy().into_owned(),
+    });
+    if let Err(e) = crate::user_config::write(&user_cfg) {
+        tracing::warn!(slug = %slug, error = %e, "failed to persist workspace entry");
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "ok": true,
+            "slug": slug,
+            "workspace_name": workspace_name,
+            "path": workspace.to_string_lossy(),
+            "provider": provider_for_response,
+        })),
+    )
+        .into_response()
+}
+
 pub fn create_router() -> (Router, SharedRuntimeState) {
     let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
 
     let router = Router::new()
         .route("/health", get(health))
+        .route(
+            "/workspaces",
+            get(workspaces_list).post(workspaces_create),
+        )
+        .route(
+            "/workspaces/{slug}",
+            get(workspaces_get).delete(workspaces_delete),
+        )
         .route("/workspace", post(set_workspace))
         .route("/git/init", post(git_init))
         .route("/im/me", get(im_me))
@@ -1824,4 +2368,179 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .with_state(state.clone());
 
     (router, state)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `/workspaces` request/response types (Task 5).
+    //! Full HTTP integration coverage — lifecycle with real filesystem,
+    //! slug collisions, 404s, error bodies — lives in
+    //! `tests/http_workspaces.rs` (Task 10).
+
+    use super::*;
+
+    #[test]
+    fn workspaces_create_request_deserializes_local() {
+        let body = serde_json::json!({
+            "path": "/tmp/ws",
+            "workspace_name": "My Workspace",
+            "git": { "provider": "local" }
+        });
+        let req: WorkspacesCreateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.path, "/tmp/ws");
+        assert_eq!(req.workspace_name.as_deref(), Some("My Workspace"));
+        assert_eq!(req.git.provider, "local");
+        assert!(req.git.token.is_none());
+        assert!(req.git.remote_url.is_none());
+    }
+
+    #[test]
+    fn workspaces_create_request_defaults_workspace_name() {
+        let body = serde_json::json!({
+            "path": "/tmp/ws",
+            "git": { "provider": "local" }
+        });
+        let req: WorkspacesCreateRequest = serde_json::from_value(body).unwrap();
+        assert!(req.workspace_name.is_none());
+    }
+
+    #[test]
+    fn workspaces_create_request_deserializes_github() {
+        let body = serde_json::json!({
+            "path": "/tmp/ws",
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/org/repo",
+                "token": "ghp_x"
+            }
+        });
+        let req: WorkspacesCreateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.git.provider, "github");
+        assert_eq!(req.git.remote_url.as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(req.git.token.as_deref(), Some("ghp_x"));
+    }
+
+    #[test]
+    fn workspace_summary_round_trips() {
+        let summary = WorkspaceSummary {
+            slug: "frontend".to_string(),
+            workspace_name: "Frontend".to_string(),
+            path: "/ws/frontend".to_string(),
+            provider: GitProvider::Local,
+            initialized: false,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["slug"], "frontend");
+        assert_eq!(json["workspace_name"], "Frontend");
+        assert_eq!(json["path"], "/ws/frontend");
+        assert_eq!(json["provider"], "local");
+        assert_eq!(json["initialized"], false);
+    }
+
+    #[test]
+    fn workspace_summary_derives_provider_from_git_config() {
+        let mut ctx = crate::workspace::WorkspaceContext::new(
+            "fe".to_string(),
+            "FE".to_string(),
+            PathBuf::from("/ws/fe"),
+        );
+        ctx.git_config = Some(WorkspaceConfig {
+            workspace: "/ws/fe".to_string(),
+            created_at: "2026-04-18T00:00:00Z".to_string(),
+            git: GitConfig {
+                provider: GitProvider::Github,
+                remote_url: Some("https://github.com/o/r".to_string()),
+                token: Some("tok".to_string()),
+            },
+        });
+        ctx.human_repo = Some(PathBuf::from("/ws/fe/.gitim-runtime/human"));
+        let summary = workspace_summary(&ctx);
+        assert_eq!(summary.slug, "fe");
+        assert_eq!(summary.provider, GitProvider::Github);
+        assert!(summary.initialized);
+    }
+
+    #[test]
+    fn workspace_summary_defaults_provider_when_config_missing() {
+        let ctx = crate::workspace::WorkspaceContext::new(
+            "fe".to_string(),
+            "FE".to_string(),
+            PathBuf::from("/ws/fe"),
+        );
+        let summary = workspace_summary(&ctx);
+        assert_eq!(summary.provider, GitProvider::Local);
+        assert!(!summary.initialized);
+    }
+
+    #[tokio::test]
+    async fn workspaces_get_returns_404_for_unknown_slug() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "unknown workspace");
+    }
+
+    #[tokio::test]
+    async fn workspaces_delete_returns_404_for_unknown_slug() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/workspaces/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "unknown workspace");
+    }
+
+    #[tokio::test]
+    async fn workspaces_list_empty() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspaces"], serde_json::json!([]));
+    }
 }
