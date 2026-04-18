@@ -32,5 +32,31 @@
 ### gitim-runtime HTTP 层 integration test
 **What:** `crates/gitim-runtime/src/http.rs` 加 integration test，覆盖 `/im/create-channel` 带 `invitees`、`/im/join` 带 `targets`、以及两个 endpoint 的 backward compat（旧请求无新字段）。
 **Why:** 群聊邀请 feature 的 HTTP 层只是 2-行透传，风险低，所以本期 defer 测试。但历史 bug（`/im/join` 把 targets 硬编码为 `&[]`）正是这种 regression。daemon 测试覆盖不到 HTTP 层布线。
-**Context:** Phase 6 code review (Claude) Important-I2. runtime tests/ 目录已有 provision / poller 模式可参考。
+**Context:** Phase 6 code review (Claude) Important-I2. runtime tests/ 目录已有 provision / poller 模式可参考。**2026-04-18 update**：multi-workspace 改造顺手补了 `tests/http_workspaces.rs` + `tests/multi_workspace.rs`(共 +24 tests),workspace CRUD + SSE 层已覆盖。剩余 `/im/*` `/agents/*` nested 路由的端到端 integration 覆盖仍缺。
 **Added:** 2026-04-17 via /plan-eng-review (Phase 6 finding)
+
+### Global `GET/DELETE /workspaces/:slug` 不走 `WorkspaceSlug` 校验
+**What:** `crates/gitim-runtime/src/http.rs:1603, 1641` 两个全局 workspace routes 直接用 `axum::extract::Path<String>`,跳过 `slug::validate` 的 regex。nested 路由 `/workspaces/:slug/...` 走 extractor,会返 400;两个全局路由对非法 slug 返回 404。
+**Why:** 验证一致性。非法 slug 两条路返回不同状态码,路由表对 API 消费者语义不统一。
+**Pros:** 小改动,路由更整齐。
+**Cons:** 实际非法 slug 都到不了任何有意义的逻辑(HashMap lookup 必 miss),所以现状不产生 bug,只是 API 面的美观问题。
+**Context:** 2026-04-18 Codex review P2 for multi-workspace-runtime feature。
+**Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
+
+### WebUI `activeSlug` 失联时的自动 fallback
+**What:** `webui-v2/src/hooks/use-workspace-store.ts`: 当 `activeSlug` 引用的 workspace 被其它客户端(或另一台机)删除后,poll 轮询 / SSE 重连发现 404/stream 关闭时,应自动 trigger `fetchAll()` 并切到第一个可用 workspace。当前仅在 `fetchAll` 内部修复(启动 + 本地 create/remove 时触发),线上 workspace 消失时 UI 卡住。
+**Why:** 多设备或多 runtime 实例场景下 workspace 列表会异步变化。
+**Context:** 2026-04-18 Codex review P2 for multi-workspace-runtime feature。`use-agent-activity.ts:56` 的 `onerror` 当前是 no-op。
+**Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
+
+### `recover_from_config` 对同 path 多 slug 条目的去重
+**What:** `crates/gitim-runtime/src/http.rs` `recover_from_config` 只按 slug 去重。如果手改 `~/.gitim/runtime.json` 塞了同 path 不同 slug,两个 recovery 任务会并发操作同一 `.gitim-runtime/human` + agents 子目录,造成 daemon 双开。
+**Why:** `POST /workspaces` 已拒同 path(本次改造),但 hand-edit config.json 是常见操作,边界仍需守护。
+**Context:** 2026-04-18 Codex review P2 for multi-workspace-runtime feature。
+**Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
+
+### `recover_agents_for_workspace` 的 `.expect("ws exists")` 改为 warn+skip
+**What:** `crates/gitim-runtime/src/http.rs:1442, 1452, 1485` 的 `.expect("ws exists")` 在 recovery storm 下可能 panic 整个 runtime。改为 `tracing::warn!` + `continue`,保持 best-effort 语义。
+**Why:** 现状 invariant 对(caller 先 insert ctx 再 call),但 future-proof 一下。
+**Context:** 2026-04-18 Claude review P2 for multi-workspace-runtime feature。
+**Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
