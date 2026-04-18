@@ -168,7 +168,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_archive_channel(state, channel, resolved_author).await
         }
         Request::UnarchiveChannel { channel, author } => {
-            handle_unarchive_channel(state, channel, author).await
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_unarchive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => handle_list_archived_channels(state).await,
         Request::CreateCard {

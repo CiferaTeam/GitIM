@@ -180,7 +180,8 @@ pub enum Request {
     #[serde(rename = "unarchive_channel")]
     UnarchiveChannel {
         channel: String,
-        author: String,
+        #[serde(default)]
+        author: Option<String>,
     },
     #[serde(rename = "archived_channels")]
     ListArchivedChannels,
@@ -362,7 +363,7 @@ mod tests {
         match req {
             Request::UnarchiveChannel { channel, author } => {
                 assert_eq!(channel, "design");
-                assert_eq!(author, "lewis");
+                assert_eq!(author, Some("lewis".to_string()));
             }
             _ => panic!("wrong variant"),
         }
