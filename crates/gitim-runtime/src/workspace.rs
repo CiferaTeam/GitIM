@@ -75,11 +75,35 @@ mod tests {
         for i in 0..128 {
             let event = AgentActivityEvent {
                 agent_id: "a".to_string(),
+                workspace_id: ctx.slug.clone(),
                 event_type: "tool_use".to_string(),
                 detail: format!("evt-{i}"),
                 timestamp: "2026-04-18T00:00:00Z".to_string(),
             };
             assert!(ctx.activity_tx.send(event).is_ok(), "send {i} failed");
         }
+    }
+
+    #[test]
+    fn per_workspace_broadcast_isolated() {
+        let a = WorkspaceContext::new(
+            "a".to_string(),
+            "A".to_string(),
+            PathBuf::from("/a"),
+        );
+        let b = WorkspaceContext::new(
+            "b".to_string(),
+            "B".to_string(),
+            PathBuf::from("/b"),
+        );
+        let mut rx_a = a.activity_tx.subscribe();
+        let _ = b.activity_tx.send(AgentActivityEvent {
+            agent_id: "x".to_string(),
+            workspace_id: "b".to_string(),
+            event_type: "t".to_string(),
+            detail: "d".to_string(),
+            timestamp: "2026".to_string(),
+        });
+        assert!(rx_a.try_recv().is_err());
     }
 }

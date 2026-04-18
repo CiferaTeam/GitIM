@@ -70,9 +70,13 @@ struct WorkspaceRequest {
 }
 
 /// Real-time agent activity event, broadcast via SSE.
+///
+/// `workspace_id` is empty when the event originates from a caller that has
+/// not yet been migrated to per-workspace context (legacy SSE path).
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentActivityEvent {
     pub agent_id: String,
+    pub workspace_id: String,
     pub event_type: String, // "tool_use", "thinking", "done", "error"
     pub detail: String,
     pub timestamp: String, // ISO8601
@@ -1676,6 +1680,7 @@ pub async fn recover_agents_from_workspace(state: SharedRuntimeState, workspace:
             };
             let _ = activity_tx.send(AgentActivityEvent {
                 agent_id: handler.clone(),
+                workspace_id: String::new(),
                 event_type: "error".to_string(),
                 detail: msg.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
