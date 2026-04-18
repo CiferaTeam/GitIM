@@ -70,11 +70,21 @@ export function CardFilterBar({
     // extra request, and the UX cost of stale is high (user sees wrong cards).
     if (nextShow) {
       const ch = value.channels.length === 1 ? value.channels[0] : undefined;
-      const res = await client.listArchivedCards(ch);
-      if (res.ok && res.data) {
-        setArchivedCards(res.data.cards);
-      } else {
-        toast.error(`Failed to load archived cards: ${res.error ?? "unknown"}`);
+      try {
+        const res = await client.listArchivedCards(ch);
+        if (res.ok && res.data) {
+          setArchivedCards(res.data.cards);
+        } else {
+          // Revert — "show archived = ON + empty list" is indistinguishable
+          // from "no archived cards" and misleads the user.
+          toggleShowArchived();
+          toast.error(`Failed to load archived cards: ${res.error ?? "unknown"}`);
+        }
+      } catch (err) {
+        toggleShowArchived();
+        toast.error(
+          `Failed to load archived cards: ${err instanceof Error ? err.message : "unknown"}`,
+        );
       }
     }
   }

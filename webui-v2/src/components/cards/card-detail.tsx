@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
@@ -63,6 +63,18 @@ export function CardDetail() {
   const [highlightLine, setHighlightLine] = useState<number | null>(null);
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
 
+  // Tracks whether this component is still mounted, for gating post-await
+  // side-effects (setState, toast, navigate) in archive/unarchive handlers.
+  // Prevents setState-on-unmounted warnings and orphan toasts when the user
+  // navigates away mid-flight.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const mentionCandidates = useMemo(() => {
     const set = new Set<string>([...users, ...agents.map((a) => a.id)]);
     return [...set];
@@ -72,9 +84,13 @@ export function CardDetail() {
     let aborted = false;
     // Intentional: set loading state synchronously when (channel, cardId) change
     // so the fetch-then-update cycle has a correct UI story.
+    // Also reset `archived` so navigating from an archived card to an active one
+    // doesn't flash the banner + hidden input on the new card before the fetch
+    // settles.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadStatus("loading");
     setLoadError(null);
+    setArchived(false);
     (async () => {
       const res = await client.readCard(channel, cardId, { limit: 100 });
       if (aborted) return;
@@ -180,6 +196,8 @@ export function CardDetail() {
     if (archiveInFlight) return;
     setArchiveInFlight(true);
     const res = await client.archiveCard(channel, cardId);
+    // Gate all post-await effects — user may have navigated away mid-flight.
+    if (!isMountedRef.current) return;
     setArchiveInFlight(false);
     if (!res.ok) {
       toast.error(`Failed to archive: ${res.error ?? "unknown"}`);
@@ -201,6 +219,8 @@ export function CardDetail() {
     if (archiveInFlight) return;
     setArchiveInFlight(true);
     const res = await client.unarchiveCard(channel, cardId);
+    // Gate all post-await effects — user may have navigated away mid-flight.
+    if (!isMountedRef.current) return;
     setArchiveInFlight(false);
     if (!res.ok) {
       toast.error(`Failed to unarchive: ${res.error ?? "unknown"}`);
