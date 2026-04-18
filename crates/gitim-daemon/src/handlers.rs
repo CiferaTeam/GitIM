@@ -1522,7 +1522,10 @@ async fn handle_unarchive_channel(
         }
     }
 
-    // 10. Emit SSE event
+    // 10. Remove channel from thread_cache (symmetry with archive_channel)
+    state.thread_cache.write().await.remove(&channel);
+
+    // 11. Emit SSE event
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let _ = state.event_tx.send(Event::ChannelUnarchived {
         channel: channel_name.to_string(),
@@ -1532,7 +1535,7 @@ async fn handle_unarchive_channel(
 
     info!("channel '{}' unarchived by @{}", channel, author);
 
-    // 11. Return success
+    // 12. Return success
     Response::success(serde_json::json!({
         "channel": channel,
         "unarchived_by": author,
