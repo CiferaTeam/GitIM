@@ -62,6 +62,13 @@ pub enum Event {
         card_id: String,
         author: String,
     },
+
+    #[serde(rename = "channel_unarchived")]
+    ChannelUnarchived {
+        channel: String,
+        author: String,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +176,11 @@ pub enum Request {
         channel: String,
         #[serde(default)]
         author: Option<String>,
+    },
+    #[serde(rename = "unarchive_channel")]
+    UnarchiveChannel {
+        channel: String,
+        author: String,
     },
     #[serde(rename = "archived_channels")]
     ListArchivedChannels,
@@ -341,6 +353,36 @@ mod tests {
         assert!(json.contains("\"channel\":\"design\""));
         assert!(json.contains("\"card_id\":\"card-2\""));
         assert!(json.contains("\"author\":\"carol\""));
+    }
+
+    #[test]
+    fn test_unarchive_channel_request_roundtrip() {
+        let json = r#"{"method":"unarchive_channel","channel":"design","author":"lewis"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::UnarchiveChannel { channel, author } => {
+                assert_eq!(channel, "design");
+                assert_eq!(author, "lewis");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_channel_unarchived_event_roundtrip() {
+        let ev = Event::ChannelUnarchived {
+            channel: "design".to_string(),
+            author: "lewis".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"channel_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"channel\":\"design\""));
+        assert!(json.contains("\"author\":\"lewis\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
     }
 }
 
