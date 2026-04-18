@@ -199,28 +199,7 @@ async fn shutdown_signal() {
 
 fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
     let s = state.lock().unwrap();
-
-    let mut repos: Vec<PathBuf> = Vec::new();
     for ws in s.workspaces.values() {
-        if let Some(ref human) = ws.human_repo {
-            repos.push(human.clone());
-        }
-        for agent in ws.agents.values() {
-            repos.push(PathBuf::from(&agent.repo_path));
-        }
-    }
-    drop(s);
-
-    for repo in &repos {
-        let pid_file = repo.join(".gitim/run/gitim.pid");
-        if let Ok(content) = std::fs::read_to_string(&pid_file) {
-            if let Ok(pid) = content.trim().parse::<u32>() {
-                // Use `kill` command to send SIGTERM
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .output();
-                eprintln!("killed daemon pid {pid} at {}", repo.display());
-            }
-        }
+        gitim_runtime::workspace::kill_daemons(ws);
     }
 }

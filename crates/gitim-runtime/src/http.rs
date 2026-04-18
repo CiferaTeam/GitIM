@@ -1657,10 +1657,9 @@ async fn workspaces_delete(
             .into_response();
     }
 
-    // TODO(task-8): graceful daemon shutdown (SIGTERM + 5s + SIGKILL per
-    // WorkspaceContext). For now the daemon process backing this workspace
-    // may keep running until the runtime exits; that's acceptable per Task 5
-    // scope — Task 8 fills this in.
+    if let Some(ctx) = removed.as_ref() {
+        crate::workspace::kill_daemons(ctx);
+    }
 
     // Persist removal to ~/.gitim/runtime.json so recovery skips this
     // workspace on next start. Failures here are logged but don't fail the
