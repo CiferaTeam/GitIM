@@ -11,6 +11,7 @@ pub mod preflight;
 pub mod slug;
 pub mod state;
 pub mod token_propagation;
+pub mod user_config;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};
 pub use agent_loop::{AgentLoop, detect_steering_trigger, format_changes_as_prompt};
