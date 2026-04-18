@@ -43,6 +43,8 @@ interface CardState {
   unmarkCardInFlight: (channel: string, cardId: string) => void;
 
   setArchivedCards: (cards: Card[]) => void;
+  /** Add-or-replace an archived card by (channel, card_id). */
+  upsertArchivedCard: (card: Card) => void;
   toggleShowArchived: () => void;
   /** Optimistic: move a card from `cards` → `archivedCards`. */
   markArchived: (channel: string, cardId: string) => void;
@@ -133,6 +135,19 @@ export const useCardStore = create<CardState>((set) => ({
     }),
 
   setArchivedCards: (cards) => set({ archivedCards: cards }),
+
+  upsertArchivedCard: (card) =>
+    set((state) => {
+      const idx = state.archivedCards.findIndex(
+        (c) => c.channel === card.channel && c.card_id === card.card_id,
+      );
+      if (idx === -1) {
+        return { archivedCards: [...state.archivedCards, card] };
+      }
+      const next = state.archivedCards.slice();
+      next[idx] = card;
+      return { archivedCards: next };
+    }),
 
   toggleShowArchived: () =>
     set((state) => ({ showArchived: !state.showArchived })),

@@ -116,8 +116,14 @@ export const useChatStore = create<ChatState>((set) => ({
       const channel = state.archivedChannels.find((c) => c.name === name);
       const nextArchived = state.archivedChannels.filter((c) => c.name !== name);
       const alreadyActive = state.channels.some((c) => c.name === name);
+      // Normalize kind → "channel". Daemon tags archived items with
+      // kind: "archived_channel" (runtime value outside the TS union), so
+      // without this rewrite the sidebar's `kind === "channel"` filter would
+      // skip the restored channel until a client.channels() refresh lands.
       const nextChannels =
-        channel && !alreadyActive ? [...state.channels, channel] : state.channels;
+        channel && !alreadyActive
+          ? [...state.channels, { ...channel, kind: "channel" as const }]
+          : state.channels;
       return { channels: nextChannels, archivedChannels: nextArchived };
     }),
 

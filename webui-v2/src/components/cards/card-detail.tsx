@@ -39,6 +39,7 @@ export function CardDetail() {
   // source of truth for UI; `card` just provides title/labels/etc to render.
   const card = activeCard ?? archivedCard;
   const upsertCard = useCardStore((s) => s.upsertCard);
+  const upsertArchivedCard = useCardStore((s) => s.upsertArchivedCard);
   const setCardMessages = useCardStore((s) => s.setCardMessages);
   const addPendingCardMessage = useCardStore((s) => s.addPendingCardMessage);
   const markPendingCardSent = useCardStore((s) => s.markPendingCardSent);
@@ -109,10 +110,14 @@ export function CardDetail() {
         return;
       }
       setArchived(res.data.archived);
-      // Only upsert into active `cards` when not archived; otherwise the poll
-      // merge would immediately drop it anyway, and we'd flash a stale entry
-      // in the filtered kanban. archivedCard fallback above handles rendering.
-      if (!res.data.archived) {
+      // Cache meta into the appropriate bucket. For active cards, upsert into
+      // `cards` so poll merges align. For archived, upsert into `archivedCards`
+      // — otherwise direct-URL loads (bookmark / refresh / deep link) find
+      // nothing in either bucket and the drawer falls into the "failed to
+      // load" branch despite a successful fetch.
+      if (res.data.archived) {
+        upsertArchivedCard(res.data.meta);
+      } else {
         upsertCard(res.data.meta);
       }
       setCardMessages(pathKey, res.data.entries);
@@ -121,7 +126,7 @@ export function CardDetail() {
     return () => {
       aborted = true;
     };
-  }, [channel, cardId, pathKey, upsertCard, setCardMessages]);
+  }, [channel, cardId, pathKey, upsertCard, upsertArchivedCard, setCardMessages]);
 
   const handleUpdate = useCallback(
     async (patch: {
