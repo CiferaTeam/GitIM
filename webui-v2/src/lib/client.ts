@@ -39,6 +39,40 @@ export async function health(): Promise<ApiResponse> {
   return { ok: true, data };
 }
 
+// --- Runtime self-update ---
+
+export interface UpdateAndRestartData {
+  job_id: string;
+  target_version: string;
+  started_at: string;
+}
+
+/**
+ * POST /runtime/update-and-restart — kicks off self-update (Task 6/7).
+ * Returns 202 on accept. After accept, the runtime HTTP server will stop
+ * responding until the new binary re-binds the port; callers are expected
+ * to poll `health()` to detect the transition.
+ */
+export async function updateAndRestart(): Promise<ApiResponse<UpdateAndRestartData>> {
+  try {
+    const res = await fetch(`${baseUrl()}/runtime/update-and-restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: data.detail ?? data.error ?? `HTTP ${res.status}`,
+        error_code: data.error_code,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 // --- Workspace CRUD (global, no slug) ---
 
 export async function listWorkspaces(): Promise<
