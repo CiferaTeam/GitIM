@@ -1645,7 +1645,12 @@ pub async fn recover_agents_for_workspace(
         }
 
         let root = dir.clone();
-        match tokio::task::spawn_blocking(move || gitim_client::ensure_daemon(&root)).await {
+        let log_path = crate::daemon_log::daemon_log_path(&dir);
+        match tokio::task::spawn_blocking(move || {
+            gitim_client::ensure_daemon_with_log(&root, &log_path)
+        })
+        .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::warn!("failed to start daemon for @{handler}: {e}");

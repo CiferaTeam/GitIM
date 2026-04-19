@@ -173,7 +173,7 @@ impl AgentLoop {
             cwd: Some(self.repo_root.clone()),
             model: self.model.clone(),
             system_prompt,
-            max_turns: Some(20),
+            max_turns: Some(32),
             resume_token: self.session_token.clone(),
             ..Default::default()
         }
@@ -400,7 +400,7 @@ impl AgentLoop {
 
 /// Extract a short snippet from tool input for logging.
 fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
-    const MAX: usize = 60;
+    const MAX: usize = 512;
     let raw = match tool {
         "Bash" => input["command"].as_str().unwrap_or("").to_string(),
         "Read" | "Write" => input["file_path"].as_str().unwrap_or("").to_string(),

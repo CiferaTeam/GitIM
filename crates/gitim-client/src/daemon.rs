@@ -39,8 +39,30 @@ pub fn is_daemon_running(repo_root: &Path) -> bool {
 }
 
 /// Ensure the daemon is running, spawning it if necessary.
-/// Waits for the socket file to appear before returning.
+///
+/// Daemon stdout/stderr are discarded. For setups that need to capture daemon
+/// logs (e.g. runtime-managed daemons), use
+/// [`ensure_daemon_with_log`] instead.
 pub fn ensure_daemon(repo_root: &Path) -> Result<(), ClientError> {
+    spawn_daemon(repo_root, DaemonStdio::Null)
+}
+
+/// Ensure the daemon is running, redirecting its stdout and stderr to
+/// `log_path`. Appends — existing content is preserved.
+///
+/// The caller is responsible for choosing a stable path (e.g. runtime names
+/// each daemon's log after `<workspace>-<handler>`). The parent directory is
+/// created if missing.
+pub fn ensure_daemon_with_log(repo_root: &Path, log_path: &Path) -> Result<(), ClientError> {
+    spawn_daemon(repo_root, DaemonStdio::LogFile(log_path.to_path_buf()))
+}
+
+enum DaemonStdio {
+    Null,
+    LogFile(PathBuf),
+}
+
+fn spawn_daemon(repo_root: &Path, stdio: DaemonStdio) -> Result<(), ClientError> {
     let sock_path = repo_root.join(".gitim/run/gitim.sock");
 
     if is_daemon_running(repo_root) {
@@ -49,6 +71,34 @@ pub fn ensure_daemon(repo_root: &Path) -> Result<(), ClientError> {
 
     clean_stale_files(repo_root);
 
+    let (stdout, stderr) = match &stdio {
+        DaemonStdio::Null => (Stdio::null(), Stdio::null()),
+        DaemonStdio::LogFile(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ClientError::ConnectionFailed(format!(
+                        "failed to create daemon log dir {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| {
+                    ClientError::ConnectionFailed(format!(
+                        "failed to open daemon log {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            let clone = file.try_clone().map_err(|e| {
+                ClientError::ConnectionFailed(format!("failed to clone daemon log fd: {e}"))
+            })?;
+            (Stdio::from(file), Stdio::from(clone))
+        }
+    };
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -56,8 +106,8 @@ pub fn ensure_daemon(repo_root: &Path) -> Result<(), ClientError> {
             Command::new("gitim-daemon")
                 .current_dir(repo_root)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr)
                 .pre_exec(|| {
                     libc::setsid();
                     Ok(())
@@ -72,8 +122,8 @@ pub fn ensure_daemon(repo_root: &Path) -> Result<(), ClientError> {
         Command::new("gitim-daemon")
             .current_dir(repo_root)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
             .spawn()
             .map_err(|e| ClientError::ConnectionFailed(format!("failed to spawn daemon: {e}")))?;
     }

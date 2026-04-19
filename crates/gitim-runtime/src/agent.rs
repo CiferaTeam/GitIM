@@ -4,9 +4,10 @@ use std::process::Command;
 use serde_json::json;
 use tracing::info;
 
-use gitim_client::{ensure_daemon, GitimClient};
+use gitim_client::{ensure_daemon_with_log, GitimClient};
 use gitim_sync::url_redact::redacted_url;
 
+use crate::daemon_log::daemon_log_path;
 use crate::error::RuntimeError;
 
 /// Read a git config key from the given directory.
@@ -71,7 +72,8 @@ pub async fn provision_human(
     std::fs::create_dir_all(human_dir.join(".gitim"))?;
 
     let root = human_dir.clone();
-    tokio::task::spawn_blocking(move || ensure_daemon(&root))
+    let log_path = daemon_log_path(&human_dir);
+    tokio::task::spawn_blocking(move || ensure_daemon_with_log(&root, &log_path))
         .await
         .map_err(|e| RuntimeError::DaemonStartFailed(
             gitim_client::ClientError::ConnectionFailed(format!("task panicked: {e}"))
@@ -143,7 +145,8 @@ pub async fn provision_agent(
 
     // Start daemon (idempotent — skips if already running)
     let root = repo_root.clone();
-    tokio::task::spawn_blocking(move || ensure_daemon(&root))
+    let log_path = daemon_log_path(&repo_root);
+    tokio::task::spawn_blocking(move || ensure_daemon_with_log(&root, &log_path))
         .await
         .map_err(|e| RuntimeError::DaemonStartFailed(
             gitim_client::ClientError::ConnectionFailed(format!("task panicked: {e}"))

@@ -86,7 +86,12 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .join(".gitim");
     std::fs::create_dir_all(&gitim_dir)?;
 
-    let log_path = gitim_dir.join("runtime.log");
+    // Runtime + per-daemon logs both live in ~/.gitim/logs/ so a single
+    // tail over the directory surfaces all agent activity.
+    let log_path = gitim_runtime::daemon_log::runtime_log_path();
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let pid_path = gitim_dir.join("runtime.pid");
     let log_file = std::fs::File::create(&log_path)?;
 
