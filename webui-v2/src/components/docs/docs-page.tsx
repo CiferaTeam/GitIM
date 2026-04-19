@@ -176,7 +176,7 @@ export function DocsPage() {
                 Resource owner must be the account (or org) that owns the workspace repo.
               </p>
               <Screenshot
-                src="pending:/docs-images/github-token/01-token-basics.png"
+                src="/docs-images/github-token/01-token-basics.png"
                 caption="Name · Expiration · Resource owner"
               />
             </Step>
@@ -188,7 +188,7 @@ export function DocsPage() {
                 <code className="font-mono text-xs"> $workspace/.gitim-runtime/config.json</code>, so minimise its blast radius.
               </p>
               <Screenshot
-                src="pending:/docs-images/github-token/02-repo-access.png"
+                src="/docs-images/github-token/02-repo-access.png"
                 caption="Only select repositories → workspace repo"
               />
             </Step>
@@ -205,7 +205,7 @@ export function DocsPage() {
                 Do not grant anything else. Specifically, you do not need Issues, Pull requests, Actions, or any account-level permissions.
               </p>
               <Screenshot
-                src="pending:/docs-images/github-token/03-permissions.png"
+                src="/docs-images/github-token/03-permissions.png"
                 caption="Contents: Read and write (Metadata: Read is auto)"
               />
             </Step>
@@ -217,7 +217,7 @@ export function DocsPage() {
                 GitHub only shows the token once — if you lose it, generate a new one.
               </p>
               <Screenshot
-                src="pending:/docs-images/github-token/04-generated.png"
+                src="/docs-images/github-token/04-generated.png"
                 caption="Copy the github_pat_... value once; it is not shown again"
               />
             </Step>
