@@ -382,10 +382,13 @@
 ## Known Risks & Future Work
 
 1. **CSRF / 跨源攻击面**:runtime 继承当前 `CorsLayer::permissive()`,本次 endpoint 同其它 endpoint 一样对 cross-origin 开放。不引入新攻击面类别(下载 URL 硬编码指向 `CiferaTeam/gitim-releases`,攻击者无法注入代码),但整站 CSRF / data-exfil 问题需**另立 issue** 整治。TL;DR:恶意本地站点能诱导用户 runtime 升到官方 latest,不能执行任意代码。
-2. **新 runtime 启动失败无自动 fallback**:若替换后新 `gitim-runtime` 因 regression 起不来,老进程已退出、端口空、前端 30s 超时。用户必须终端 `gitim runtime start` 手动恢复。Future work:A/B binary slot + fork-exec 前对子进程握手(3s 内响应 `/health` 才真退出)。
-3. **同时触发多次更新**:前端按钮点后立刻 disable,但若用户有多个 WebUI 标签页,并发 POST 是可能的。runtime 在异步阶段未做全局 lock,第二次 POST 可能撞在 replace_binaries 中间。v1 接受此概率极低的 race(单用户多标签);plan review 若认为需要,Task 6 handler 入口加 `update_in_progress: AtomicBool` 简单互斥。
-4. **Windows 支持**:与 `install.sh` 一致,v1 not scoped。
-5. **自动后台升级 / 静默升级**:明确不做。每次升级需用户在 UI 主动确认。
+2. **新 runtime 启动失败无自动 fallback**:若替换后新 `gitim-runtime` 因 regression 起不来,老进程已退出、端口空、前端 30s 超时。用户必须终端 `gitim runtime start` 手动恢复。当前缓解:`replace_binaries` 用 `keep_backup=true` 在异步阶段保留 `.old` 备份到 spawn 成功后才清理,所以失败时文件系统上仍有旧 binary 可用;但没自动恢复机制。Future work:A/B binary slot + fork-exec 前对子进程握手(3s 内响应 `/health` 才真退出)。
+3. **前端错误态无 dismiss / retry**:error 状态下 UpdateIndicator 显示红色叹号 + 错误文字,但没有"重试"或"关闭"按钮。用户要么等 1 小时自动 re-check,要么刷新页面。v1 接受。
+4. **端口重绑定 race**:老 runtime `exit(0)` 和新 runtime bind 同端口之间有小窗口。已在 `run_shell` 里加 10×100ms retry(AddrInUse → 等 100ms 重试),实践上足够。如果仍有问题,后续可以考虑 `SO_REUSEPORT`。
+5. **`update_last_error` 字段无 reader**:Task 7 在 RuntimeState 加了 `update_last_error: Option<String>` 记录异步阶段错误,但 v1 前端不查询它(只等 30s 超时)。Future work:加 `GET /runtime/update-status` endpoint 让前端能拿到"为啥失败",减少"Update may have failed" 这种模糊提示。
+6. **Windows 支持**:与 `install.sh` 一致,v1 not scoped。
+7. **自动后台升级 / 静默升级**:明确不做。每次升级需用户在 UI 主动确认。
+8. **版本比较使用 semver triple**:`parseVersion` 在前后端(gitim-updater 和 webui-v2 hook)都要求严格 `X.Y.Z` 格式,拒绝 `X.Y.Z.W` 和 pre-release 后缀。对当前 release 约定安全,但如果未来发 `v0.5.0-rc1` 之类 tag,前端不会提示升级。
 
 ---
 
