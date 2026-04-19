@@ -220,9 +220,16 @@ export function MessageBody({
   onMessageLinkClick,
   onUserProfileClick,
 }: MessageBodyProps) {
-  const fragments = useMemo(() => parseMessageBody(body), [body]);
+  // Agents that drive `gitim send` via shell-quoted argv often emit literal
+  // backslash-n sequences in the body because bash double-quotes don't process
+  // escapes. Normalize to real newlines at render time so the UI looks right
+  // even when the stored body wasn't split into continuation lines.
+  const fragments = useMemo(
+    () => parseMessageBody(body.replace(/\\n/g, "\n")),
+    [body],
+  );
   return (
-    <>
+    <span className="whitespace-pre-wrap">
       {fragments.map((fragment, index) => (
         <FragmentRenderer
           key={index}
@@ -234,6 +241,6 @@ export function MessageBody({
           onUserProfileClick={onUserProfileClick}
         />
       ))}
-    </>
+    </span>
   );
 }

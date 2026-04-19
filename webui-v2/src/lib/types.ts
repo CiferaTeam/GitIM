@@ -26,6 +26,9 @@ export interface Message {
   timestamp: string; // 20260317T120000Z
   body: string;
   event_type?: string;
+  /** Event payload. For `event_type: "join"` may contain `{ targets: [...] }`
+   * identifying users who were added (vs self-join when omitted). */
+  meta?: { targets?: string[] } & Record<string, unknown>;
   _status?: MessageStatus;
   _pendingId?: string;
 }

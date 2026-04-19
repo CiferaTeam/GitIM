@@ -153,12 +153,21 @@ export function MessageList({
         const key = msg._pendingId ?? msg.line_number;
 
         if (msg.type === "event") {
-          const eventText =
-            msg.event_type === "join"
-              ? `@${msg.author} joined the channel`
-              : msg.event_type === "leave"
-                ? `@${msg.author} left the channel`
-                : msg.body ?? `${msg.author}: ${msg.event_type}`;
+          const targets = msg.meta?.targets ?? [];
+          let eventText: string;
+          if (msg.event_type === "join") {
+            eventText =
+              targets.length > 0
+                ? `@${msg.author} added ${targets.map((t) => `@${t}`).join(", ")}`
+                : `@${msg.author} joined the channel`;
+          } else if (msg.event_type === "leave") {
+            eventText =
+              targets.length > 0
+                ? `@${msg.author} removed ${targets.map((t) => `@${t}`).join(", ")}`
+                : `@${msg.author} left the channel`;
+          } else {
+            eventText = msg.body ?? `${msg.author}: ${msg.event_type}`;
+          }
           return (
             <div key={key} className="flex justify-center py-2">
               <span className="text-[11px] text-text-muted/70 italic bg-surface/40 px-2 py-0.5 rounded-full">
