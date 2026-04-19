@@ -769,6 +769,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitim-updater"
+version = "0.4.2"
+dependencies = [
+ "flate2",
+ "reqwest",
+ "serde_json",
+ "tar",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
