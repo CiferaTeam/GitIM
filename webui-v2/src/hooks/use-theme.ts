@@ -1,24 +1,15 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type Theme =
-  | "dark"
-  | "light"
-  | "cyberpunk"
-  | "pixel"
-  | "pink"
-  | "chinese"
-  | "system";
-
-type ResolvedTheme = Exclude<Theme, "system">;
+export type Theme = "dark" | "light" | "system";
 
 interface ThemeState {
   theme: Theme;
-  resolved: ResolvedTheme;
+  resolved: "dark" | "light";
   setTheme: (theme: Theme) => void;
 }
 
-function resolveTheme(theme: Theme): ResolvedTheme {
+function resolveTheme(theme: Theme): "dark" | "light" {
   if (theme !== "system") return theme;
   return window.matchMedia("(prefers-color-scheme: dark)").matches
     ? "dark"
@@ -28,8 +19,8 @@ function resolveTheme(theme: Theme): ResolvedTheme {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      theme: "system",
-      resolved: resolveTheme("system"),
+      theme: "dark",
+      resolved: resolveTheme("dark"),
       setTheme: (theme) => set({ theme, resolved: resolveTheme(theme) }),
     }),
     {

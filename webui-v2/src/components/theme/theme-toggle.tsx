@@ -1,13 +1,4 @@
-import {
-  Moon,
-  Sun,
-  Monitor,
-  Zap,
-  Gamepad2,
-  Heart,
-  Scroll,
-  Check,
-} from "lucide-react";
+import { Moon, Sun, Monitor, Check } from "lucide-react";
 import { useThemeStore, type Theme } from "../../hooks/use-theme";
 import {
   DropdownMenu,
@@ -17,20 +8,8 @@ import {
 } from "../ui/dropdown-menu";
 
 const OPTIONS: { value: Theme; label: string; icon: React.ReactNode }[] = [
-  { value: "light", label: "Light", icon: <Sun className="size-4" /> },
   { value: "dark", label: "Dark", icon: <Moon className="size-4" /> },
-  {
-    value: "cyberpunk",
-    label: "Cyberpunk",
-    icon: <Zap className="size-4" />,
-  },
-  { value: "pixel", label: "Pixel", icon: <Gamepad2 className="size-4" /> },
-  { value: "pink", label: "Pink", icon: <Heart className="size-4" /> },
-  {
-    value: "chinese",
-    label: "Chinese",
-    icon: <Scroll className="size-4" />,
-  },
+  { value: "light", label: "Light", icon: <Sun className="size-4" /> },
   { value: "system", label: "System", icon: <Monitor className="size-4" /> },
 ];
 
@@ -49,7 +28,7 @@ export function ThemeToggle() {
           {current.icon}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[160px]">
+      <DropdownMenuContent align="end" className="min-w-[140px]">
         {OPTIONS.map((option) => (
           <DropdownMenuItem
             key={option.value}

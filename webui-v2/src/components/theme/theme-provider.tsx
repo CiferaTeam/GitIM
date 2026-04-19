@@ -1,14 +1,7 @@
 import { useEffect } from "react";
 import { useThemeStore, initThemeListener } from "../../hooks/use-theme";
 
-const THEME_CLASSES = [
-  "dark",
-  "light",
-  "cyberpunk",
-  "pixel",
-  "pink",
-  "chinese",
-];
+const THEME_CLASSES = ["dark", "light"];
 
 interface ThemeProviderProps {
   children: React.ReactNode;
