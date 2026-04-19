@@ -41,6 +41,11 @@ function isSelfDm(channel: Channel, currentUser: string): boolean {
   return parts.length === 2 && parts[0] === currentUser && parts[1] === currentUser;
 }
 
+function isMyDm(channel: Channel, currentUser: string): boolean {
+  const parts = channel.name.split("--");
+  return parts.length === 2 && (parts[0] === currentUser || parts[1] === currentUser);
+}
+
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentUser = useChatStore((s) => s.currentUser);
@@ -131,12 +136,15 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const dmChannels = channels
     .filter((c) => c.kind === "dm")
     .sort((a, b) => {
-      const aSelf = isSelfDm(a, currentUser);
-      const bSelf = isSelfDm(b, currentUser);
-      if (aSelf && !bSelf) return -1;
-      if (!aSelf && bSelf) return 1;
+      const aMy = isMyDm(a, currentUser);
+      const bMy = isMyDm(b, currentUser);
+      if (aMy && !bMy) return -1;
+      if (!aMy && bMy) return 1;
       return a.name.localeCompare(b.name);
     });
+
+  const myDmChannels = dmChannels.filter((c) => isMyDm(c, currentUser));
+  const otherDmChannels = dmChannels.filter((c) => !isMyDm(c, currentUser));
 
   const filteredRegularChannels = channelQuery.trim()
     ? regularChannels.filter((c) =>
@@ -411,7 +419,28 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         </div>
 
         <div className="overflow-y-auto -mx-1 px-1 space-y-0.5">
-          {dmChannels.map((ch) => {
+          {myDmChannels.map((ch) => {
+            const label = dmDisplayName(ch, currentUser);
+            return (
+              <ChannelItem
+                key={ch.name}
+                icon={<AtSign className="size-3.5 text-text-muted" />}
+                label={label}
+                unread={ch.unreadCount}
+                hasMention={ch.hasMention}
+                active={currentChannel === ch.name}
+                onClick={() => onChannelSelect(ch.name)}
+              />
+            );
+          })}
+          {otherDmChannels.length > 0 && myDmChannels.length > 0 && (
+            <div className="pt-2 pb-0.5 px-2">
+              <p className="text-[10px] font-semibold uppercase text-text-faint tracking-wider">
+                Others
+              </p>
+            </div>
+          )}
+          {otherDmChannels.map((ch) => {
             const label = dmDisplayName(ch, currentUser);
             return (
               <ChannelItem
