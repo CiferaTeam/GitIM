@@ -10,6 +10,49 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const STALE_FILES: &[&str] = &["gitim.pid", "gitim.sock", "gitim.port", "gitim.lock"];
 
+/// Resolve the `gitim-daemon` binary to spawn.
+///
+/// Prefers a sibling binary next to the currently running executable
+/// (e.g. `~/.gitim/bin/gitim-daemon` when the runtime itself lives in
+/// `~/.gitim/bin/`). Falls back to a bare `"gitim-daemon"` — letting the
+/// OS resolve via `PATH` — if any step fails: no `current_exe`, no
+/// parent dir, no sibling file, or canonicalize error.
+///
+/// The fallback matters for `cargo test` and dev builds where
+/// `target/debug/` has no sibling daemon binary.
+pub(crate) fn resolve_daemon_binary() -> PathBuf {
+    resolve_daemon_binary_from(std::env::current_exe().ok())
+}
+
+/// Pure core of [`resolve_daemon_binary`] — takes the `current_exe` as a
+/// parameter so tests can inject fake paths without mocking global state.
+/// Canonicalize errors are absorbed into the PATH fallback (defensible:
+/// a non-canonicalizable exe path is abnormal, and spawning via PATH is
+/// the historical behavior).
+///
+/// Sibling-existence check uses `is_file()` only — not exec-bit. The
+/// binary ships via `install.sh` / `replace_binaries` which both chmod
+/// 0o755, so in practice a sibling `gitim-daemon` is always executable.
+/// A broken file will surface as a spawn error with a useful message.
+pub(crate) fn resolve_daemon_binary_from(current_exe: Option<PathBuf>) -> PathBuf {
+    let fallback = PathBuf::from("gitim-daemon");
+    let Some(exe) = current_exe else {
+        return fallback;
+    };
+    let Ok(canonical) = exe.canonicalize() else {
+        return fallback;
+    };
+    let Some(parent) = canonical.parent() else {
+        return fallback;
+    };
+    let candidate = parent.join("gitim-daemon");
+    if candidate.is_file() {
+        candidate
+    } else {
+        fallback
+    }
+}
+
 /// Traverse upward from `from`, return the first ancestor containing `.gitim/`.
 pub fn find_repo_root(from: &Path) -> Option<PathBuf> {
     let mut dir = from.to_path_buf();
@@ -99,11 +142,13 @@ fn spawn_daemon(repo_root: &Path, stdio: DaemonStdio) -> Result<(), ClientError>
         }
     };
 
+    let daemon_bin = resolve_daemon_binary();
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            Command::new("gitim-daemon")
+            Command::new(&daemon_bin)
                 .current_dir(repo_root)
                 .stdin(Stdio::null())
                 .stdout(stdout)
@@ -119,7 +164,7 @@ fn spawn_daemon(repo_root: &Path, stdio: DaemonStdio) -> Result<(), ClientError>
 
     #[cfg(not(unix))]
     {
-        Command::new("gitim-daemon")
+        Command::new(&daemon_bin)
             .current_dir(repo_root)
             .stdin(Stdio::null())
             .stdout(stdout)
@@ -174,5 +219,49 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let found = find_repo_root(tmp.path());
         assert_eq!(found, None);
+    }
+
+    /// Simulates `~/.gitim/bin/{gitim-runtime, gitim-daemon}` install layout:
+    /// when current_exe sits next to a real `gitim-daemon` file, resolution
+    /// returns the absolute sibling path so PATH order cannot hijack spawn.
+    #[test]
+    fn resolve_prefers_sibling_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_runtime = bin_dir.join("gitim-runtime");
+        let fake_daemon = bin_dir.join("gitim-daemon");
+        fs::write(&fake_runtime, b"#!/bin/sh\n").unwrap();
+        fs::write(&fake_daemon, b"#!/bin/sh\n").unwrap();
+
+        let resolved = resolve_daemon_binary_from(Some(fake_runtime.clone()));
+
+        // Compare against canonicalized expectation — on macOS the tempfile
+        // path is under /var/folders but canonicalize resolves to
+        // /private/var/folders.
+        let expected = fake_daemon.canonicalize().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// Dev-build / cargo-test scenario: `target/debug/gitim-client-*` has
+    /// no sibling daemon → resolver falls back to PATH-resolution.
+    #[test]
+    fn resolve_falls_back_when_no_sibling() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_runtime = bin_dir.join("gitim-runtime");
+        fs::write(&fake_runtime, b"#!/bin/sh\n").unwrap();
+        // Deliberately no gitim-daemon sibling.
+
+        let resolved = resolve_daemon_binary_from(Some(fake_runtime));
+        assert_eq!(resolved, PathBuf::from("gitim-daemon"));
+    }
+
+    /// `current_exe()` errored (passed as None) → PATH fallback.
+    #[test]
+    fn resolve_falls_back_when_current_exe_unavailable() {
+        let resolved = resolve_daemon_binary_from(None);
+        assert_eq!(resolved, PathBuf::from("gitim-daemon"));
     }
 }
