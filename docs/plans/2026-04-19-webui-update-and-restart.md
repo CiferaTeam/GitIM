@@ -390,6 +390,7 @@
 7. **Windows 支持**:与 `install.sh` 一致,v1 not scoped。
 8. **自动后台升级 / 静默升级**:明确不做。每次升级需用户在 UI 主动确认。
 9. **版本比较使用 semver triple**:`parseVersion` 在前后端(gitim-updater 和 webui-v2 hook)都要求严格 `X.Y.Z` 格式,拒绝 `X.Y.Z.W` 和 pre-release 后缀。对当前 release 约定安全,但如果未来发 `v0.5.0-rc1` 之类 tag,前端不会提示升级。
+10. **升级期间其他 route 不 quiesce**:`update_in_progress` flag 只阻止重复的 update 请求,对 `/workspaces/*/im/send` 等其它 route 无效。异步阶段 kill_managed_daemons + replace_binaries 期间(~几百 ms 到数秒),另一个 tab 如果调 IM/agent route 会遇到 daemon 消失、HTTP 仍通的状态。实际表现:那次调用失败,用户可能看到错误。不会损坏数据(daemon 还没重启,只是行为像"暂时离线")。Future work:进入异步阶段时给 router 挂 middleware 返 `503 Service Unavailable` for non-update routes 直到 exit。
 
 ---
 
