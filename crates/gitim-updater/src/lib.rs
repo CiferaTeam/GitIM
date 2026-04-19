@@ -45,14 +45,19 @@ pub enum UpdateError {
 /// Parse a `major.minor.patch` version string, tolerating an optional leading `v`.
 ///
 /// Returns `None` for malformed input (missing component, non-numeric, pre-release
-/// suffix, etc.). Empty string -> `None`.
+/// suffix, etc.). Empty string -> `None`. Four-segment inputs like `"1.2.3.4"` and
+/// pre-release suffixes are rejected — this is **stricter than** the original CLI
+/// helper (`crates/gitim-cli/src/commands/update.rs`), which silently discarded
+/// trailing segments. The tighter contract is intentional: fail-closed on anything
+/// we don't fully understand.
 pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let s = s.strip_prefix('v').unwrap_or(s);
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
-    // Reject trailing segments (e.g. "1.2.3.4") to match existing CLI semantics.
+    // Reject trailing segments (e.g. "1.2.3.4"). Tightens CLI semantics — the
+    // original silently accepted the first three parts and dropped the rest.
     if parts.next().is_some() {
         return None;
     }

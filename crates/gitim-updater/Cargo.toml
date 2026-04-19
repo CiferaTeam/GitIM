@@ -5,9 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# reqwest + thiserror used by Task 1 pure helpers; the rest are reserved
+# for Task 2 IO helpers (see docs/plans/2026-04-19-webui-update-and-restart.md).
+# Do not prune the reserved block on a drive-by cleanup — it will break Task 2.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+thiserror.workspace = true
+# Reserved for Task 2:
 flate2 = "1"
 tar = "0.4"
-thiserror.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

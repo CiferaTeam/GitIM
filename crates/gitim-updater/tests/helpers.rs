@@ -35,6 +35,12 @@ fn parse_version_two_component_is_none() {
 }
 
 #[test]
+fn parse_version_four_component_is_none() {
+    // Stricter than the CLI original: trailing segments → None, not silently discarded.
+    assert_eq!(parse_version("1.2.3.4"), None);
+}
+
+#[test]
 fn is_newer_older_remote_returns_false() {
     assert!(!is_newer("0.4.0", "0.3.9"));
 }
