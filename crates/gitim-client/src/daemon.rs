@@ -40,6 +40,7 @@ pub(crate) fn resolve_daemon_binary_from(current_exe: Option<PathBuf>) -> PathBu
         return fallback;
     };
     let Ok(canonical) = exe.canonicalize() else {
+        tracing::warn!(exe = %exe.display(), "cannot canonicalize current_exe; falling back to PATH for gitim-daemon");
         return fallback;
     };
     let Some(parent) = canonical.parent() else {
@@ -263,5 +264,14 @@ mod tests {
     fn resolve_falls_back_when_current_exe_unavailable() {
         let resolved = resolve_daemon_binary_from(None);
         assert_eq!(resolved, PathBuf::from("gitim-daemon"));
+    }
+
+    #[test]
+    fn resolve_falls_back_when_current_exe_does_not_exist() {
+        let bogus = std::path::PathBuf::from("/definitely/does/not/exist/gitim-runtime");
+        assert_eq!(
+            resolve_daemon_binary_from(Some(bogus)),
+            std::path::PathBuf::from("gitim-daemon"),
+        );
     }
 }
