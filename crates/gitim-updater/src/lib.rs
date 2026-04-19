@@ -16,12 +16,13 @@ pub const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
 /// Binaries shipped in every release tarball, in install order.
 pub const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
 
-/// Errors the updater can surface to callers.
+/// All failure modes across fetch / download / extract / install.
 ///
-/// Variants marked with `#[from]` chain the underlying error so loggers and
-/// callers can keep context (the wrapped error's `Display` is flattened by
-/// `thiserror`). Pure helpers in this module only ever return
-/// `UnsupportedPlatform`; the rest are reserved for upcoming IO functions.
+/// Variants with `#[from]` chain the underlying error for context.
+/// `MissingBinary` is constructed by callers (not by this crate yet) —
+/// it's the variant the Task 6 runtime endpoint returns when an extracted
+/// archive is missing one of `BINARIES`, before the async install phase
+/// starts.
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error("unsupported platform: os={os}, arch={arch}")]
@@ -158,6 +159,12 @@ pub async fn download_and_extract(url: &str, dest: &Path) -> Result<(), UpdateEr
     let mut archive = tar::Archive::new(decoder);
     // Archive corruption / malformed tar entries -> Extract (semantic mismatch
     // with the archive contract), not raw Io.
+    //
+    // `tar` 0.4's default `Archive::unpack` rejects absolute paths and `..`
+    // traversal — we rely on that for defense in depth. Do not call
+    // `archive.set_preserve_permissions(true)` or relax the path checks
+    // without re-evaluating the trust model (release tarballs from the
+    // official repo are trusted, but multiple consumers now call this).
     archive
         .unpack(dest)
         .map_err(|e| UpdateError::Extract(format!("tar unpack failed: {e}")))?;
@@ -182,12 +189,19 @@ fn walkdir(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
+            // `file_type()` does NOT follow symlinks; `path.is_dir()` does.
+            // A self-referential symlink in a malformed tarball would otherwise
+            // trigger infinite recursion here.
+            let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
-            if path.is_dir() {
+            if ft.is_dir() {
                 results.extend(walkdir(&path));
-            } else {
+            } else if ft.is_file() {
                 results.push(path);
             }
+            // Symlinks are intentionally skipped — release tarballs from
+            // CiferaTeam/gitim-releases do not contain symlinks, and this
+            // guards against symlink loops if a malformed archive appears.
         }
     }
     results
@@ -238,7 +252,7 @@ pub fn replace_binaries(
 
     for bin_name in BINARIES {
         let Some(src) = find_binary(src_dir, bin_name) else {
-            eprintln!("Warning: {bin_name} not found in archive, skipping");
+            tracing::warn!(binary = %bin_name, "not found in archive, skipping");
             continue;
         };
         let dest = install_dir.join(bin_name);
@@ -287,14 +301,20 @@ fn rollback(renames: &[(PathBuf, PathBuf)]) {
     for (dest, backup) in renames.iter().rev() {
         // Clear any partial file sitting at `dest` so the rename can land.
         if dest.exists() {
-            let _ = std::fs::remove_file(dest);
+            if let Err(e) = std::fs::remove_file(dest) {
+                tracing::warn!(
+                    path = %dest.display(),
+                    error = %e,
+                    "rollback: failed to remove partial copy"
+                );
+            }
         }
         if let Err(e) = std::fs::rename(backup, dest) {
-            eprintln!(
-                "Warning: rollback failed to restore {} from {}: {}",
-                dest.display(),
-                backup.display(),
-                e
+            tracing::warn!(
+                from = %backup.display(),
+                to = %dest.display(),
+                error = %e,
+                "rollback: failed to restore backup"
             );
         }
     }
