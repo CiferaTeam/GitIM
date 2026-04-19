@@ -8,6 +8,8 @@ license.workspace = true
 gitim-client = { path = "../gitim-client" }
 gitim-agent-provider = { path = "../gitim-agent-provider" }
 gitim-sync = { path = "../gitim-sync" }
+gitim-updater = { path = "../gitim-updater" }
+uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

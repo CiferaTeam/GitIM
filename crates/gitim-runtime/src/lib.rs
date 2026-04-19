@@ -12,6 +12,7 @@ pub mod preflight;
 pub mod slug;
 pub mod state;
 pub mod token_propagation;
+pub mod update;
 pub mod user_config;
 pub mod workspace;
 

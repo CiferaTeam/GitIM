@@ -114,6 +114,11 @@ pub struct RuntimeState {
     /// disk — on Linux `std::env::current_exe()` returns `<path> (deleted)`
     /// for an inode whose dentry has been unlinked.
     pub canonical_exe_path: PathBuf,
+    /// Guard against concurrent self-update runs. Set when the sync phase of
+    /// `POST /runtime/update-and-restart` begins; cleared when the async phase
+    /// finishes or any step fails. A second request arriving while this is
+    /// `true` gets a `409 concurrent_update`.
+    pub update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeState {
@@ -156,6 +161,7 @@ impl Default for RuntimeState {
             clone_url_override,
             workspaces: HashMap::new(),
             canonical_exe_path,
+            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -2390,6 +2396,10 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         )
         .nest("/workspaces/{slug}", ws_router)
         .route("/preflight/{provider}", get(preflight_handler))
+        .route(
+            "/runtime/update-and-restart",
+            post(crate::update::update_and_restart),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             activity_middleware,
