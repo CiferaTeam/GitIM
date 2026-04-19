@@ -43,7 +43,7 @@ export function CardKanbanColumn({
   return (
     <div
       className={cn(
-        "flex-1 min-w-0 flex flex-col bg-[#1c1c1e] rounded-lg border border-border transition-colors",
+        "flex-1 min-w-0 flex flex-col bg-kanban-column-bg rounded-lg border border-border transition-colors",
         dropActive && "border-[#3b82f6] bg-[#1e2030]",
       )}
       onDragOver={(e) => {

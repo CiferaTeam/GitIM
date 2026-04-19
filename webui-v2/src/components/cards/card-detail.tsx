@@ -273,7 +273,7 @@ export function CardDetail() {
         </p>
         <button
           onClick={() => navigate("/cards")}
-          className="mt-2 text-xs text-[#60a5fa] hover:underline"
+          className="mt-2 text-xs text-primary hover:underline"
         >
           ← Back to cards
         </button>

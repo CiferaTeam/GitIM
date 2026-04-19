@@ -52,7 +52,7 @@ function FirstRunScreen() {
             Create your first workspace to get started.
           </p>
         </div>
-        <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-black/20 p-6">
+        <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-[var(--color-shadow)] p-6">
           <CreateWorkspaceForm fullWidth />
         </div>
       </div>

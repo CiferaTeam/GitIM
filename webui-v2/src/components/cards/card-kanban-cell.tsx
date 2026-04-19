@@ -13,8 +13,8 @@ import { CARD_DRAG_MIME, encodeCardDrag } from "./card-drag";
 
 const STATUS_CLASS: Record<CardStatus, string> = {
   todo: "bg-muted text-muted-foreground",
-  doing: "bg-[#60a5fa18] text-[#60a5fa]",
-  done: "bg-[#4ade8018] text-[#4ade80]",
+  doing: "bg-status-doing-bg text-status-doing",
+  done: "bg-status-done-bg text-status-done",
 };
 
 const STATUSES: CardStatus[] = ["todo", "doing", "done"];
@@ -91,7 +91,7 @@ export function CardKanbanCell({
       }}
       onDragEnd={() => setDragging(false)}
       className={cn(
-        "group rounded-md border border-border bg-[#232326] hover:bg-[#2a2a2e] p-3 cursor-pointer transition-colors flex flex-col gap-2",
+        "group rounded-md border border-border bg-kanban-card-bg hover:bg-kanban-card-hover p-3 cursor-pointer transition-colors flex flex-col gap-2",
         archived && "opacity-55 hover:opacity-75",
         !archived && "hover:cursor-grab active:cursor-grabbing",
         dragging && "opacity-40",

@@ -65,7 +65,7 @@ export function SetupShell({
                     className={[
                       "w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300",
                       isActive
-                        ? "bg-primary border-primary text-white shadow-[0_0_12px_rgba(96,165,250,0.4)]"
+                        ? "bg-primary border-primary text-white shadow-[0_0_12px_var(--color-glow-primary)]"
                         : isCompleted
                           ? "bg-primary border-primary text-white"
                           : "bg-card border-border text-text-muted",
@@ -92,7 +92,7 @@ export function SetupShell({
         </div>
 
         {/* Card */}
-        <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-black/20 p-6">
+        <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-[var(--color-shadow)] p-6">
           {onBack && !loading && (
             <button
               onClick={onBack}

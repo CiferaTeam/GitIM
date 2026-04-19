@@ -92,7 +92,7 @@ export function MemberPicker({
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggle(handle)}
-                      className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[#60a5fa]"
+                      className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-primary"
                     />
                     <span className="font-mono text-xs text-foreground">
                       @{handle}

@@ -8,7 +8,7 @@ const EMPTY_ACTIVITIES: AgentActivityEvent[] = [];
 function StatusDot({ status }: { status: string }) {
   const color =
     status === "running"
-      ? "bg-success shadow-[0_0_4px_rgba(74,222,128,0.5)]"
+      ? "bg-success shadow-[0_0_4px_var(--color-glow-success-soft)]"
       : status === "error"
         ? "bg-error shadow-[0_0_4px_rgba(248,113,113,0.4)]"
         : "bg-text-muted";

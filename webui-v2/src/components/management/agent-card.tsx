@@ -100,7 +100,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   return (
     <>
       <Card
-        className="relative overflow-hidden cursor-pointer hover:shadow-lg hover:shadow-black/20 transition-all duration-200 hover:border-border-strong bg-card/60 group"
+        className="relative overflow-hidden cursor-pointer hover:shadow-lg hover:shadow-[var(--color-shadow)] transition-all duration-200 hover:border-border-strong bg-card/60 group"
         onClick={() => navigate(`/management/${agent.id}`)}
       >
         {/* Status bar */}

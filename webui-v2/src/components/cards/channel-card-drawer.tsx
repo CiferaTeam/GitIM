@@ -14,8 +14,8 @@ import { CardCreateDialog } from "./card-create-dialog";
 
 const STATUS_DOT: Record<CardStatus, string> = {
   todo: "bg-muted-foreground/50",
-  doing: "bg-[#60a5fa]",
-  done: "bg-[#4ade80]",
+  doing: "bg-status-doing",
+  done: "bg-status-done",
 };
 
 export interface ChannelCardDrawerProps {
@@ -72,7 +72,7 @@ export function ChannelCardDrawer({
       />
       {/* Panel */}
       <aside
-        className="fixed right-0 top-0 bottom-0 z-50 w-96 bg-[#1c1c1e] border-l border-border flex flex-col shadow-xl animate-in slide-in-from-right duration-200"
+        className="fixed right-0 top-0 bottom-0 z-50 w-96 bg-drawer-bg border-l border-border flex flex-col shadow-xl animate-in slide-in-from-right duration-200"
         role="dialog"
         aria-label={`Cards in #${channel}`}
       >

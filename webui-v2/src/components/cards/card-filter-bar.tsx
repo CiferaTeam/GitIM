@@ -127,7 +127,7 @@ export function CardFilterBar({
   }, [showArchived, channelsKey, fetchArchived]);
 
   return (
-    <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-[#232326] flex-wrap">
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-filter-bar-bg flex-wrap">
       <ChannelMulti
         options={channelOptions}
         selected={value.channels}
@@ -154,7 +154,7 @@ export function CardFilterBar({
           type="checkbox"
           checked={value.mineOnly}
           onChange={(e) => onChange({ ...value, mineOnly: e.target.checked })}
-          className="accent-[#60a5fa]"
+          className="accent-primary"
         />
         <span>My cards</span>
       </label>
@@ -165,7 +165,7 @@ export function CardFilterBar({
         className={cn(
           "gap-1.5 text-xs",
           showArchived
-            ? "bg-accent-muted text-[#60a5fa] hover:bg-accent-muted hover:text-[#60a5fa]"
+            ? "bg-accent-muted text-primary hover:bg-accent-muted hover:text-[#60a5fa]"
             : "text-muted-foreground",
         )}
         aria-pressed={showArchived}

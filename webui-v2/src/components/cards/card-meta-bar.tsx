@@ -23,8 +23,8 @@ const STATUSES: CardStatus[] = ["todo", "doing", "done"];
 
 const STATUS_CLASS: Record<CardStatus, string> = {
   todo: "bg-muted text-muted-foreground",
-  doing: "bg-[#60a5fa18] text-[#60a5fa]",
-  done: "bg-[#4ade8018] text-[#4ade80]",
+  doing: "bg-status-doing-bg text-status-doing",
+  done: "bg-status-done-bg text-status-done",
 };
 
 export interface CardMetaBarProps {

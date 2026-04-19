@@ -27,7 +27,7 @@ export function AppShell({ children }: AppShellProps) {
             className={[
               "inline-block w-2 h-2 rounded-full shrink-0",
               connected
-                ? "bg-success shadow-[0_0_6px_rgba(74,222,128,0.6)]"
+                ? "bg-success shadow-[0_0_6px_var(--color-glow-success)]"
                 : "bg-error",
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
