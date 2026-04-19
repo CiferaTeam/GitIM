@@ -54,6 +54,7 @@
   --color-glow-primary: rgba(96, 165, 250, 0.4);
   --color-glow-success: rgba(74, 222, 128, 0.6);
   --color-glow-success-soft: rgba(74, 222, 128, 0.5);
+  --color-glow-error: rgba(248, 113, 113, 0.4);
   --color-selection-bg: rgba(96, 165, 250, 0.3);
   --color-radial-glow: rgba(96, 165, 250, 0.08);
 }
@@ -149,6 +150,7 @@
     --color-glow-primary: rgba(37, 99, 235, 0.35);
     --color-glow-success: rgba(34, 197, 94, 0.5);
     --color-glow-success-soft: rgba(34, 197, 94, 0.4);
+    --color-glow-error: rgba(239, 68, 68, 0.35);
     --color-selection-bg: rgba(37, 99, 235, 0.2);
     --color-radial-glow: rgba(37, 99, 235, 0.05);
   }

@@ -165,7 +165,7 @@ export function CardFilterBar({
         className={cn(
           "gap-1.5 text-xs",
           showArchived
-            ? "bg-accent-muted text-primary hover:bg-accent-muted hover:text-[#60a5fa]"
+            ? "bg-accent-muted text-primary hover:bg-accent-muted hover:text-primary"
             : "text-muted-foreground",
         )}
         aria-pressed={showArchived}

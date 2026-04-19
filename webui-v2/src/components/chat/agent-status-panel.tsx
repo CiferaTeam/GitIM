@@ -10,7 +10,7 @@ function StatusDot({ status }: { status: string }) {
     status === "running"
       ? "bg-success shadow-[0_0_4px_var(--color-glow-success-soft)]"
       : status === "error"
-        ? "bg-error shadow-[0_0_4px_rgba(248,113,113,0.4)]"
+        ? "bg-error shadow-[0_0_4px_var(--color-glow-error)]"
         : "bg-text-muted";
 
   return (
