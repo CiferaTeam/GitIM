@@ -663,12 +663,10 @@ name = "gitim-cli"
 version = "0.4.2"
 dependencies = [
  "clap",
- "flate2",
  "gitim-client",
+ "gitim-updater",
  "regex",
- "reqwest",
  "serde_json",
- "tar",
  "tempfile",
  "tokio",
 ]
