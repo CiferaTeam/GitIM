@@ -34,6 +34,20 @@ xattr = "1"
 name = "gitim-runtime"
 path = "src/bin/runtime.rs"
 
+# Test-only stand-in for `gitim-runtime`. The update E2E tarball is built
+# around copies of this binary; the `CARGO_BIN_EXE_fake-gitim-runtime` env var
+# lets the test locate the compiled artifact without hard-coding a target path.
+#
+# `required-features` / guards don't exist for plain bins, so we rely on the
+# bin not being referenced from production code. It is compiled whenever the
+# crate is built — acceptable cost for a ~70-line support file.
+[[bin]]
+name = "fake-gitim-runtime"
+path = "tests/support/fake_runtime.rs"
+test = false
+doc = false
+bench = false
+
 [dev-dependencies]
 serial_test = "3"
 mockito = "1"

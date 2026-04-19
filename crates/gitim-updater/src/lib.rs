@@ -105,16 +105,38 @@ pub fn detect_platform() -> Result<String, UpdateError> {
     Ok(format!("{os_name}-{arch_name}"))
 }
 
+// Base-URL overrides used by the runtime E2E test. Unset in production; when
+// absent the defaults produce the same strings the original hard-coded URLs
+// did, so the existing URL-contract tests (`download_url_contract`,
+// `latest_release_api_url_contract`) continue to pass untouched. The
+// indirection is a **test-only seam** — callers never pass URLs explicitly.
+//
+// Deliberately read inside the helper (not at `static` init) so a test setting
+// the env var takes effect in the current process without reloading.
+fn releases_api_base() -> String {
+    std::env::var("GITIM_RELEASES_API_URL")
+        .unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
+fn releases_download_base() -> String {
+    std::env::var("GITIM_RELEASES_DOWNLOAD_BASE")
+        .unwrap_or_else(|_| "https://github.com".to_string())
+}
+
 /// GitHub release asset URL for the given tag + platform.
 pub fn download_url(tag: &str, platform: &str) -> String {
     format!(
-        "https://github.com/{RELEASES_REPO}/releases/download/{tag}/gitim-{tag}-{platform}.tar.gz"
+        "{base}/{RELEASES_REPO}/releases/download/{tag}/gitim-{tag}-{platform}.tar.gz",
+        base = releases_download_base(),
     )
 }
 
 /// GitHub "latest release" API URL.
 pub fn latest_release_api_url() -> String {
-    format!("https://api.github.com/repos/{RELEASES_REPO}/releases/latest")
+    format!(
+        "{base}/repos/{RELEASES_REPO}/releases/latest",
+        base = releases_api_base(),
+    )
 }
 
 // -- IO helpers -------------------------------------------------------------

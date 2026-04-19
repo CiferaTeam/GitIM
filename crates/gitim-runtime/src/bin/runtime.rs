@@ -133,6 +133,10 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     let (router, state) = gitim_runtime::http::create_router_with_exe(canonical_exe);
+    // Record the port we're about to bind so the self-update async phase can
+    // pass the same `--port` to the replacement runtime. `run_shell` is the
+    // single writer; nothing else in the crate needs to mutate this.
+    state.lock().unwrap().listen_port = port;
 
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
@@ -174,7 +178,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 eprintln!("no activity for 24h — shutting down");
                 cleanup_pid_file();
-                kill_managed_daemons(&idle_state);
+                gitim_runtime::workspace::kill_managed_daemons(&idle_state);
                 std::process::exit(0);
             }
         }
@@ -204,7 +208,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     // Kill all managed daemons on shutdown
     cleanup_pid_file();
-    kill_managed_daemons(&state);
+    gitim_runtime::workspace::kill_managed_daemons(&state);
     eprintln!("all daemons stopped");
     Ok(())
 }
@@ -222,9 +226,3 @@ async fn shutdown_signal() {
     eprintln!("\nshutting down...");
 }
 
-fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
-    let s = state.lock().unwrap();
-    for ws in s.workspaces.values() {
-        gitim_runtime::workspace::kill_daemons_blocking(ws);
-    }
-}

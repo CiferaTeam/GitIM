@@ -119,6 +119,19 @@ pub struct RuntimeState {
     /// finishes or any step fails. A second request arriving while this is
     /// `true` gets a `409 concurrent_update`.
     pub update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    /// Most recent async-phase failure from `/runtime/update-and-restart`.
+    /// Written by the async phase on error (replace / fork-exec) so a future
+    /// diagnostic endpoint or log export can surface what went wrong. v1 has
+    /// no UI that reads this — the WebUI just polls `/health` for the new
+    /// version and times out on failure — but we still capture the detail so
+    /// it isn't silently lost.
+    pub update_last_error: Option<String>,
+    /// TCP port the runtime's HTTP server is bound to. Set by `run_shell`
+    /// after argument parsing so the async self-update phase knows which
+    /// `--port` to pass when fork-exec'ing the replacement binary. Tests that
+    /// go through `create_router()` / `create_router_with_exe()` leave the
+    /// default; the E2E test overrides it before driving the async phase.
+    pub listen_port: u16,
 }
 
 impl RuntimeState {
@@ -162,6 +175,12 @@ impl Default for RuntimeState {
             workspaces: HashMap::new(),
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_last_error: None,
+            // Default matches `DEFAULT_PORT` in `bin/runtime.rs`. Kept in sync
+            // by convention, not by a shared constant — the bin crate can't
+            // depend on the lib's private defaults and vice versa without
+            // adding a public const.
+            listen_port: 16868,
         }
     }
 }

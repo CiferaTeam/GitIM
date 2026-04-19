@@ -1,14 +1,25 @@
 //! Self-update endpoint: `POST /runtime/update-and-restart`.
 //!
-//! Two-phase flow. This file implements the **synchronous** phase: validate
-//! install dir, resolve target version, download + extract + sanity-check the
-//! new tarball into a tempdir. If every step passes we spawn the async phase
-//! (Task 7 fills that in) and return `202 Accepted` with a job id.
+//! Two-phase flow.
 //!
-//! Any failure in the sync phase returns a structured error body with one of
-//! the codes in [`error_codes`] and an appropriate HTTP status. The sync phase
-//! is pure preflight — nothing on disk outside a tempdir is mutated, so
-//! rolling back a sync failure costs nothing.
+//! **Sync phase** (`run_sync_phase`): validate install dir, resolve target
+//! version, download + extract + sanity-check the new tarball into a tempdir.
+//! On success returns `202 Accepted` with a job id and spawns the async phase.
+//! Any failure returns a structured error with one of the codes in
+//! [`error_codes`] and an appropriate HTTP status. Nothing on disk outside
+//! the tempdir is mutated, so rolling back a sync failure costs nothing.
+//!
+//! **Async phase** (`run_async_phase`): kill every managed daemon, atomically
+//! replace the three binaries on disk (rolling back on failure), spawn a
+//! fresh runtime with the same `--port`, and `std::process::exit(0)` so the
+//! replacement can bind the TCP port. The handler's caller sees the socket
+//! close briefly and then comes back with the new `/health` version once the
+//! child is bound — we cannot avoid that gap, only keep it short.
+//!
+//! Ordering is load-bearing: if we exited before `spawn`, no child ever
+//! starts; if we waited for the child to be healthy we'd still hold the port
+//! and it would fail to bind. The frontend bridges the gap with a polling
+//! loop on `/health`.
 //!
 //! The `update_in_progress` atomic on [`crate::http::RuntimeState`] guards
 //! against two concurrent updates colliding mid-replace. Clients that hit this
@@ -347,30 +358,198 @@ pub async fn update_and_restart(State(state): State<SharedRuntimeState>) -> Resp
         "update_and_restart: sync phase ok, spawning async phase",
     );
 
-    // --- Task 7 async phase stub. ---
+    // --- Async phase: kill daemons → replace → fork-exec → exit. ---
     //
-    // Task 7 replaces this with: kill daemons → replace_binaries → fork-exec
-    // the new runtime. For Task 6 we just log and clear the flag after a
-    // short delay so the endpoint's contract (202 + job id) is testable end
-    // to end without touching the installed binaries.
-    //
-    // We keep ownership of `tmp` in the spawned task — dropping it here would
-    // delete the extracted binaries before the async phase could install them.
-    let guard_clone = guard.clone();
+    // We hand the tempdir ownership into the spawned task so the extracted
+    // tarball survives until `replace_binaries` has copied the files into
+    // place. Any earlier drop would delete the source files out from under
+    // us.
+    let state_clone = state.clone();
     let job_id = job.job_id.clone();
     tokio::spawn(async move {
-        tracing::info!(%job_id, "update_and_restart: async phase stub entered");
-        // Prevent the tempdir + new_runtime path from being moved away from
-        // the task's scope, which would drop + delete the extracted binaries
-        // the moment the spawn body returned.
-        let _tmp = tmp;
-        let _new_runtime = new_runtime;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        guard_clone.store(false, Ordering::SeqCst);
-        tracing::info!(%job_id, "update_and_restart: async phase stub released guard");
+        run_async_phase(state_clone, job_id, tmp).await;
     });
 
     (StatusCode::ACCEPTED, Json(job)).into_response()
+}
+
+/// Outcome of the async phase's pre-exit work. `Done` means the child is
+/// spawned and the parent is ready to exit; `Failed` means we've already
+/// logged + recorded the error and released the guard. Returned by
+/// [`run_async_install_and_spawn`] so callers (the handler, which exits, and
+/// the integration test, which does not) share the same pre-exit code path.
+///
+/// Public for the `update_e2e` integration test. Production code only has
+/// one caller ([`run_async_phase`]) which matches on the variant and then
+/// either `exit(0)`s or logs and returns — neither branch treats the enum
+/// as ergonomic API, so keep consumers at arm's length.
+pub enum AsyncPhaseOutcome {
+    Done { child_pid: u32 },
+    Failed { detail: String },
+}
+
+/// Full async phase. Runs install + fork-exec; on success calls
+/// `std::process::exit(0)` and never returns. On failure returns normally.
+async fn run_async_phase(
+    state: SharedRuntimeState,
+    job_id: String,
+    tmp: tempfile::TempDir,
+) {
+    let outcome = run_async_install_and_spawn(state, job_id.clone(), tmp).await;
+    match outcome {
+        AsyncPhaseOutcome::Done { child_pid } => {
+            tracing::info!(%job_id, %child_pid, "update_and_restart: exiting parent process");
+            // No return from here. The spawned child is responsible for
+            // serving HTTP from this point forward.
+            std::process::exit(0);
+        }
+        AsyncPhaseOutcome::Failed { detail } => {
+            tracing::warn!(%job_id, %detail, "update_and_restart: async phase ended in failure");
+        }
+    }
+}
+
+/// Everything-but-exit portion of the async phase. Kill daemons, replace
+/// binaries, fork-exec the child, clean up `.old` backups. Returns the child
+/// PID so the caller can decide whether to `exit(0)` (production) or just
+/// observe the child (tests).
+///
+/// On any failure we record the detail in `state.update_last_error`, release
+/// the concurrency guard, and return `Failed(detail)`; the old process stays
+/// alive. On success the concurrency guard is intentionally **left set** —
+/// we're about to exit, and no further handler on this process will ever run.
+///
+/// `tmp` must be held across `replace_binaries` so the source files aren't
+/// dropped prematurely. It's released at the end of this function.
+pub async fn run_async_install_and_spawn(
+    state: SharedRuntimeState,
+    job_id: String,
+    tmp: tempfile::TempDir,
+) -> AsyncPhaseOutcome {
+    tracing::info!(%job_id, "update_and_restart: async phase entered");
+
+    // Snapshot the bits the async phase needs *before* any failure branch so
+    // we don't hold the mutex across blocking work.
+    let (install_dir, canonical_exe, listen_port, guard) = {
+        let s = state.lock().unwrap();
+        let install = s
+            .canonical_exe_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        (
+            install,
+            s.canonical_exe_path.clone(),
+            s.listen_port,
+            s.update_in_progress.clone(),
+        )
+    };
+
+    // Step 1: kill managed daemons.
+    //
+    // `kill_managed_daemons` uses `std::thread::sleep` (500ms grace); wrap in
+    // `spawn_blocking` so we don't park an axum worker on it.
+    let state_for_kill = state.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::workspace::kill_managed_daemons(&state_for_kill);
+    })
+    .await;
+    tracing::info!(%job_id, "update_and_restart: managed daemons killed");
+
+    // Step 2: atomically replace the three binaries. `keep_backup = true` so
+    // the old binaries remain on disk as `.old` — defense in depth against a
+    // mid-flight failure between replace and fork-exec. We clean them up at
+    // the end of step 4 once the child is confirmed spawned.
+    let src_dir = tmp.path().to_path_buf();
+    let install_dir_for_replace = install_dir.clone();
+    let replace_result = tokio::task::spawn_blocking(move || {
+        gitim_updater::replace_binaries(&src_dir, &install_dir_for_replace, /* keep_backup */ true)
+    })
+    .await;
+
+    let installed = match replace_result {
+        Ok(Ok(installed)) => installed,
+        Ok(Err(e)) => {
+            let detail = format!("replace_binaries failed: {e}");
+            record_async_error(&state, &guard, &job_id, detail.clone());
+            return AsyncPhaseOutcome::Failed { detail };
+        }
+        Err(join_err) => {
+            let detail = format!("replace_binaries task panicked: {join_err}");
+            record_async_error(&state, &guard, &job_id, detail.clone());
+            return AsyncPhaseOutcome::Failed { detail };
+        }
+    };
+    tracing::info!(%job_id, ?installed, "update_and_restart: binaries replaced");
+
+    // Step 3: fork-exec the new runtime with the same `--port`. We do *not*
+    // wait — the child bind is what releases the port once the parent exits.
+    let port_str = listen_port.to_string();
+    let spawn_result = std::process::Command::new(&canonical_exe)
+        .args(["--port", &port_str])
+        .stdin(std::process::Stdio::null())
+        // Inherit stdout/stderr so the child's logs land in the same place as
+        // the parent's — daemonized runtimes already have these redirected to
+        // `~/.gitim/logs/`.
+        .spawn();
+
+    let child = match spawn_result {
+        Ok(c) => c,
+        Err(e) => {
+            let detail = format!("fork-exec new runtime failed: {e}");
+            record_async_error(&state, &guard, &job_id, detail.clone());
+            return AsyncPhaseOutcome::Failed { detail };
+        }
+    };
+    let child_pid = child.id();
+    // `std::process::Child::drop` is a no-op (neither waits nor kills), so
+    // letting `child` go out of scope here is safe: the OS child process
+    // keeps running either way. On the production path the parent's
+    // subsequent `exit(0)` hands the child off to init/launchd anyway.
+    drop(child);
+    tracing::info!(
+        %job_id,
+        %child_pid,
+        "update_and_restart: spawned replacement runtime"
+    );
+
+    // Step 4: cleanup `.old` backups. Best-effort — a leftover `.old` isn't
+    // fatal; it just means the next update cycle will race its own rename.
+    for bin in gitim_updater::BINARIES {
+        let backup = backup_path(&install_dir.join(bin));
+        let _ = std::fs::remove_file(backup);
+    }
+
+    // Release `tmp` explicitly. Its destructor removes the extracted tarball
+    // contents now that `replace_binaries` has copied what we need.
+    drop(tmp);
+
+    AsyncPhaseOutcome::Done { child_pid }
+}
+
+/// Append `.old` to `path` in the same way `gitim-updater` does. Kept here
+/// (as a small duplicate) rather than making the updater's internal helper
+/// public: the updater contract is opaque on what extension it uses, and we
+/// only need the literal `.old` convention to clean up after a successful
+/// replace.
+fn backup_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".old");
+    std::path::PathBuf::from(s)
+}
+
+fn record_async_error(
+    state: &SharedRuntimeState,
+    guard: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    job_id: &str,
+    detail: String,
+) {
+    tracing::error!(%job_id, %detail, "update_and_restart: async phase failed");
+    {
+        let mut s = state.lock().unwrap();
+        s.update_last_error = Some(detail);
+    }
+    guard.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
