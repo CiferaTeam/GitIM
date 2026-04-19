@@ -245,6 +245,12 @@ export default function App() {
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
 
+    // Guard against React 19 Strict Mode's simulated unmount: if cleanup
+    // ran before init() resolved, skip the setInterval so we don't leak an
+    // orphan poll loop that keeps firing alongside the real mount's loop.
+    let cancelled = false;
+    let pollHandle: ReturnType<typeof setInterval> | undefined;
+
     async function init(slug: string) {
       const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
@@ -254,6 +260,8 @@ export default function App() {
           client.listAgents(slug),
           client.listCards(slug),
         ]);
+
+      if (cancelled) return;
 
       // Restore cursor from localStorage keyed by slug (stable identifier).
       workspaceRef.current = slug;
@@ -272,13 +280,14 @@ export default function App() {
       setConnected(true);
     }
 
-    let pollHandle: ReturnType<typeof setInterval>;
     init(activeSlug).then(() => {
+      if (cancelled) return;
       pollHandle = setInterval(runPoll, POLL_INTERVAL_MS);
     });
 
     return () => {
-      clearInterval(pollHandle);
+      cancelled = true;
+      if (pollHandle !== undefined) clearInterval(pollHandle);
     };
   }, [
     port,
