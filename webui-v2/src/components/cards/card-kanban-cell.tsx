@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import type { Card, CardStatus } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { CARD_DRAG_MIME, encodeCardDrag } from "./card-drag";
 
 const STATUS_CLASS: Record<CardStatus, string> = {
   todo: "bg-muted text-muted-foreground",
@@ -53,6 +55,7 @@ export function CardKanbanCell({
   onStatusChange,
 }: CardKanbanCellProps) {
   const navigate = useNavigate();
+  const [dragging, setDragging] = useState(false);
 
   const visibleLabels = card.labels.slice(0, 3);
   const overflow = card.labels.length - visibleLabels.length;
@@ -60,9 +63,38 @@ export function CardKanbanCell({
   return (
     <div
       onClick={() => navigate(`/cards/${card.channel}/${card.card_id}`)}
+      draggable={!archived}
+      onDragStart={(e) => {
+        if (archived) {
+          e.preventDefault();
+          return;
+        }
+        // Bail when the drag started on an interactive descendant (e.g. the
+        // status dropdown trigger). Without this, a tiny pointer movement
+        // while clicking the pill drags the card instead of opening the menu.
+        if (
+          e.target instanceof Element &&
+          e.target.closest("[data-no-drag]")
+        ) {
+          e.preventDefault();
+          return;
+        }
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData(
+          CARD_DRAG_MIME,
+          encodeCardDrag({
+            channel: card.channel,
+            card_id: card.card_id,
+          }),
+        );
+        setDragging(true);
+      }}
+      onDragEnd={() => setDragging(false)}
       className={cn(
         "group rounded-md border border-border bg-[#232326] hover:bg-[#2a2a2e] p-3 cursor-pointer transition-colors flex flex-col gap-2",
         archived && "opacity-55 hover:opacity-75",
+        !archived && "hover:cursor-grab active:cursor-grabbing",
+        dragging && "opacity-40",
       )}
     >
       <div className="flex items-start justify-between gap-2">
@@ -81,6 +113,7 @@ export function CardKanbanCell({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
+                data-no-drag
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
                   "shrink-0 rounded px-2 py-0.5 text-xs font-medium capitalize",
