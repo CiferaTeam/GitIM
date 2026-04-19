@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -120,6 +121,9 @@ export function CardCreateDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New card</DialogTitle>
+          <DialogDescription>
+            Create a task card in a channel. Assignee and labels are optional.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-3">

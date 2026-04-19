@@ -21,6 +21,10 @@ import { CardMetaBar } from "./card-meta-bar";
 
 type LoadStatus = "loading" | "ok" | "not_found" | "error";
 
+// Stable empty-array reference: zustand compares selector output by Object.is,
+// so `?? []` would return a fresh array every call and loop useSyncExternalStore.
+const EMPTY_MESSAGES: Message[] = [];
+
 export function CardDetail() {
   const params = useParams();
   const navigate = useNavigate();
@@ -55,7 +59,7 @@ export function CardDetail() {
   const scopeKey = useMemo(() => cardScopeKey(channel, cardId), [channel, cardId]);
 
   const messages = useCardStore(
-    (s) => s.cardMessagesByPath[pathKey] ?? [],
+    (s) => s.cardMessagesByPath[pathKey] ?? EMPTY_MESSAGES,
   );
 
   const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
