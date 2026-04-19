@@ -61,7 +61,7 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
         <>
           请先启动 Runtime：{" "}
           <code className="text-text-secondary bg-surface px-1.5 py-0.5 rounded">
-            gitim-runtime --port 16868
+            gitim-runtime --port 16868 -d
           </code>
         </>
       }

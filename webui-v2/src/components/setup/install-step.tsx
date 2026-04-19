@@ -4,7 +4,7 @@ import { SetupShell } from "./setup-shell";
 
 const INSTALL_CMD =
   "curl -sSf https://raw.githubusercontent.com/CiferaTeam/gitim-releases/main/install.sh | sh";
-const RUN_CMD = "gitim-runtime --port 16868";
+const RUN_CMD = "gitim-runtime --port 16868 -d";
 const RELEASES_URL =
   "https://github.com/CiferaTeam/gitim-releases/releases/latest";
 
@@ -40,7 +40,12 @@ export function InstallStep({ onContinue }: InstallStepProps) {
           number={2}
           title="Start the runtime"
           cmd={RUN_CMD}
-          note="Leave it running in a terminal. Default port is 16868."
+          note={
+            <>
+              <code className="font-mono">-d</code> runs it in the background, so you can close the terminal.
+              The runtime auto-exits after 24h of no activity — no need to babysit it.
+            </>
+          }
         />
 
         <div className="text-xs text-text-muted leading-relaxed">
@@ -78,7 +83,7 @@ function NumberedBlock({
   number: number;
   title: string;
   cmd: string;
-  note: string;
+  note: React.ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
 
