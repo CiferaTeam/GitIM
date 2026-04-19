@@ -1248,11 +1248,17 @@ async fn handle_create_channel(
         return Response::error(format!("failed to write channel meta: {}", e));
     }
 
-    // 7. Write .thread with join event
-    // Only the creator's join event is recorded. Invitees appear in members (meta.yaml)
-    // but do NOT receive a synthetic thread event — by design, see needs doc.
+    // 7. Write .thread with join event.
+    // Creator's event carries invitees as targets, so it renders as
+    // "@alice added @bob, @carol" — same shape as `handle_join_channel` emits
+    // for subsequent invites. Empty targets when no invitees.
     let thread_path = channels_dir.join(format!("{}.thread", channel_name));
-    let join_line = format_event(1, &handler, &now, "join", &serde_json::json!({}));
+    let payload = if meta.members.len() > 1 {
+        serde_json::json!({ "targets": &meta.members[1..] })
+    } else {
+        serde_json::json!({})
+    };
+    let join_line = format_event(1, &handler, &now, "join", &payload);
     if let Err(e) = std::fs::write(&thread_path, &join_line) {
         return Response::error(format!("failed to write channel thread: {}", e));
     }
@@ -2942,6 +2948,75 @@ mod tests {
             vec!["alice".to_string()],
             "no invitees → members should only contain author; got: {:?}",
             meta.members
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_writes_invitees_as_join_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+        register_test_user(&state, "bob").await;
+        register_test_user(&state, "carol").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "team-echo".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec!["bob".to_string(), "carol".to_string()],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel failed: {:?}", resp.error);
+
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/team-echo.thread"),
+        )
+        .expect("thread should exist");
+
+        assert!(
+            thread.contains("[@alice]") && thread.contains("[E:join]"),
+            "thread should contain creator's E:join event; got: {}",
+            thread
+        );
+        assert!(
+            thread.contains("\"targets\":[\"bob\",\"carol\"]"),
+            "thread should carry invitees as targets in order; got: {}",
+            thread
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_empty_invitees_has_no_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+        register_test_user(&state, "alice").await;
+
+        let resp = handle_request(
+            Request::CreateChannel {
+                name: "solo-echo".to_string(),
+                display_name: None,
+                introduction: None,
+                author: Some("alice".to_string()),
+                invitees: vec![],
+            },
+            state.clone(),
+        )
+        .await;
+        assert!(resp.ok, "create_channel failed: {:?}", resp.error);
+
+        let thread = std::fs::read_to_string(
+            state.repo_root.join("channels/solo-echo.thread"),
+        )
+        .expect("thread should exist");
+
+        assert!(
+            !thread.contains("targets"),
+            "empty invitees should not produce a targets payload; got: {}",
+            thread
         );
     }
 

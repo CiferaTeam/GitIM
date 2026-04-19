@@ -18,7 +18,7 @@ WebUI 的创建频道对话框只有 name/display/intro，频道 Header Dropdown
 1. **创建时可选人**
 2. **创建后可加人**（任意群内成员都能再拉人，不止创建者）
 3. **邀请语义** — 直接把对方加入 `ChannelMeta.members`（被动入群，无对方确认流程）
-4. **Thread 不留痕** — 本期不写 "system: X invited Y"
+4. **Thread 留痕** — 创建时写一条 `E:join` 事件,带 `targets` 数组(同 `handle_join_channel -t` 的格式),前端 `message-list.tsx` 渲染为 "@alice added @bob, @carol"
 5. **权限** — caller 必须是 channel 的现有 member（复用 `handle_join_channel` 既有校验）
 
 ## 技术方案
@@ -67,13 +67,12 @@ WebUI 的创建频道对话框只有 name/display/intro，频道 Header Dropdown
 ## 非目标（本期不做）
 - 邀请需对方接受的流程
 - 移除/踢出成员
-- 邀请事件 `.thread` 留痕
 - 邀请权限分级
 - `gitim create-channel -t` CLI 参数
 - `channels/*.meta.yaml` 并发 merge driver（现 `gitim-sync/conflict.rs` 只处理 `.thread` 行号，同时邀请不同人会触发 git 冲突 marker，记 follow-up）
 
 ## 测试要点
-- daemon：`handle_create_channel` with invitees → 验证 meta.members 集合正确；invitees 含未注册 handle → 报错
+- daemon：`handle_create_channel` with invitees → 验证 meta.members 集合正确且 `.thread` L1 的 `E:join` 事件 payload 含 `targets`；invitees 含未注册 handle → 报错
 - runtime HTTP：`/im/join` with targets → 底层 client 收到正确 targets；`/im/create-channel` with invitees → 透传正确
 - webui：MemberPicker 搜索过滤；创建/邀请对话框提交后 members 刷新
 
