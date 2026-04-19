@@ -3,6 +3,7 @@ import { Outlet, useNavigate } from "react-router";
 import { HelpCircle } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
+import { UpdateIndicator } from "../update-indicator";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -40,8 +41,9 @@ export function AppShell({ children }: AppShellProps) {
         {/* Center: nav tabs */}
         <NavTabs />
 
-        {/* Right: help + current user */}
+        {/* Right: update indicator + help + current user */}
         <div className="flex items-center justify-end gap-2 min-w-[140px]">
+          <UpdateIndicator />
           <button
             type="button"
             onClick={() => navigate("/docs")}
