@@ -107,6 +107,13 @@ pub struct RuntimeState {
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+    /// Canonicalized path to the runtime binary captured at startup. The
+    /// update endpoint (self-replace) uses this to (a) validate the install
+    /// dir in strict mode, and (b) fork-exec a new runtime after the binary
+    /// is swapped. We must capture this BEFORE the binary is replaced on
+    /// disk — on Linux `std::env::current_exe()` returns `<path> (deleted)`
+    /// for an inode whose dentry has been unlinked.
+    pub canonical_exe_path: PathBuf,
 }
 
 impl RuntimeState {
@@ -128,6 +135,16 @@ impl Default for RuntimeState {
         let base_url = std::env::var("GITIM_TEST_GITHUB_API_BASE")
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
+        // Best-effort canonical exe for test constructors. Production boots
+        // via `run_shell()` which computes + passes the real path into
+        // `create_router_with_exe` — this fallback only matters in unit/IT
+        // tests that call `RuntimeState::default()` / `create_router()`
+        // directly. A placeholder at `/nonexistent/gitim-runtime` keeps
+        // Task 6/7 strict-mode checks safe: the update endpoint will refuse
+        // to self-replace a path that doesn't exist.
+        let canonical_exe_path = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .unwrap_or_else(|_| PathBuf::from("/nonexistent/gitim-runtime"));
         Self {
             last_activity: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
@@ -138,6 +155,7 @@ impl Default for RuntimeState {
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
             workspaces: HashMap::new(),
+            canonical_exe_path,
         }
     }
 }
@@ -2305,9 +2323,24 @@ async fn workspaces_create(
         .into_response()
 }
 
+/// Assemble the axum router with a fresh `RuntimeState`. The canonical exe
+/// path is resolved from `RuntimeState::default()` — fine for tests, but
+/// production must call `create_router_with_exe` so the pre-replacement
+/// binary path is captured before any self-update can happen.
 pub fn create_router() -> (Router, SharedRuntimeState) {
-    let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
+    build_router(Arc::new(Mutex::new(RuntimeState::default())))
+}
 
+/// Production entry point: caller supplies the canonical exe path captured
+/// at startup (before any binary self-replace). Task 6/7 self-update reads
+/// this from `state.canonical_exe_path`.
+pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRuntimeState) {
+    let mut inner = RuntimeState::default();
+    inner.canonical_exe_path = canonical_exe_path;
+    build_router(Arc::new(Mutex::new(inner)))
+}
+
+fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
     let ws_router = Router::new()
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))

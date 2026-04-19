@@ -81,10 +81,6 @@ fn parse_port(args: &[String]) -> Option<u16> {
 
 fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
-    let gitim_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gitim");
-    std::fs::create_dir_all(&gitim_dir)?;
 
     // Runtime + per-daemon logs both live in ~/.gitim/logs/ so a single
     // tail over the directory surfaces all agent activity.
@@ -92,9 +88,12 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let pid_path = gitim_dir.join("runtime.pid");
     let log_file = std::fs::File::create(&log_path)?;
 
+    // PID file ownership lives with the process actually serving HTTP —
+    // `run_shell()` writes it at startup. That way a future self-replace
+    // path (fork-exec a fresh runtime with new binary) doesn't need to
+    // also remember to rewrite the PID file from the exiting parent.
     let child = std::process::Command::new(exe)
         .args(["--port", &port.to_string()])
         .stdin(std::process::Stdio::null())
@@ -102,7 +101,6 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .stderr(log_file)
         .spawn()?;
 
-    std::fs::write(&pid_path, child.id().to_string())?;
     eprintln!("runtime started in background (pid: {}, port: {port})", child.id());
     eprintln!("log: {}", log_path.display());
 
@@ -110,7 +108,25 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let (router, state) = gitim_runtime::http::create_router();
+    // Capture canonical exe BEFORE any self-replace could run. After
+    // replace_binaries swaps the on-disk file, Linux `current_exe()` returns
+    // "<path> (deleted)" for this inode — too late then. Stored in
+    // RuntimeState so the Task 6/7 update endpoint can strict-mode-check the
+    // install dir and pick the fork-exec target.
+    let canonical_exe = std::env::current_exe()?.canonicalize()?;
+
+    // Whoever is actually serving HTTP owns the PID file. On normal boot
+    // this is just us writing our own pid; on self-replace restart the
+    // freshly spawned runtime overwrites whatever the dying parent left.
+    let pid_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gitim/runtime.pid");
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+
+    let (router, state) = gitim_runtime::http::create_router_with_exe(canonical_exe);
 
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
