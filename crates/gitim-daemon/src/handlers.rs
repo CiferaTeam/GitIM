@@ -347,6 +347,13 @@ async fn handle_send(
         std::fs::create_dir_all(parent).ok();
     }
 
+    // Serialize the read-compute-append-commit sequence. Without this, two
+    // concurrent Send requests can both observe the same last_line and race
+    // into duplicate line numbers. The guard is released right before we
+    // start awaiting the (potentially slow) push result so pushes don't
+    // block other writers.
+    let write_guard = state.thread_write_lock.lock().await;
+
     // Read existing content and parse
     let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
     let existing_file = match parse_thread(&existing) {
@@ -453,6 +460,10 @@ async fn handle_send(
             "written"
         }
     };
+
+    // File is on disk and (if possible) committed — safe to let the next
+    // writer race past us. Push await below must not hold the lock.
+    drop(write_guard);
 
     // Record in pending_push and optionally set up push-result channel.
     // Only wait for push if we have a remote AND the sync loop is actually running.
@@ -1628,6 +1639,11 @@ async fn write_channel_event(
         _ => return Response::error(format!("unknown event type: {}", event_type)),
     }
 
+    // Serialize the read-compute-append-commit sequence. Concurrent joins
+    // (e.g. `join -t lewis` and `join -t claude01` fired back-to-back by an
+    // agent) must not both observe the same last_line and write duplicates.
+    let _write_guard = state.thread_write_lock.lock().await;
+
     // Read .thread for next line number
     let thread_path = state
         .repo_root
@@ -1640,6 +1656,28 @@ async fn write_channel_event(
     };
     let next_line = existing_file.last_line_number() + 1;
 
+    // Re-check join/leave rules against the latest on-disk state so a write
+    // that waited behind another writer doesn't append a now-invalid event
+    // (e.g. duplicate join after the other writer already added the target).
+    let latest_meta: ChannelMeta = match std::fs::read_to_string(&meta_path) {
+        Ok(content) => match serde_yaml::from_str(&content) {
+            Ok(m) => m,
+            Err(e) => return Response::error(format!("failed to parse channel meta: {}", e)),
+        },
+        Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
+    };
+    let latest_members: Vec<&str> =
+        latest_meta.members.iter().map(|s| s.as_str()).collect();
+    let revalidate = match event_type {
+        "join" => im_rules::validate_join(&author, &target_refs, &user_refs, &latest_members),
+        "leave" => im_rules::validate_leave(&author, &target_refs, &user_refs, &latest_members),
+        _ => Ok(()),
+    };
+    if let Err(e) = revalidate {
+        return Response::error(format!("{} validation failed: {}", event_type, e));
+    }
+    channel_meta = latest_meta;
+
     // Build event meta and format
     let meta = if targets.is_empty() {
         serde_json::json!({})
@@ -1648,6 +1686,15 @@ async fn write_channel_event(
     };
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let new_content = format_event(next_line, &handler, &now, event_type, &meta);
+
+    // Compliance check: same belt-and-suspenders defense used on the message
+    // path. Under the lock this can't fail on concurrency; it still catches
+    // any out-of-band thread mutation (e.g. a hand-edit).
+    let allowed_refs: Vec<&str> =
+        channel_meta.members.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = validate_append(&existing, &new_content, &user_refs, &allowed_refs) {
+        return Response::error(format!("compliance check failed: {}", e));
+    }
 
     // Append to .thread
     use std::io::Write;

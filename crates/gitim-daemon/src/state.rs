@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Notify, RwLock};
+use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
 pub type SharedState = Arc<AppState>;
 
@@ -43,6 +43,14 @@ pub struct AppState {
     /// Readers can check this to surface "PAT expired" to the UI; the flag stays
     /// set until daemon restart (v1).
     pub auth_failed: Arc<AtomicBool>,
+    /// Serializes the read-parse-compute-append-commit sequence that every
+    /// `.thread` writer goes through. Without it, two tokio tasks can each
+    /// observe `last_line = N`, both compute `N+1`, and both append the same
+    /// line number — producing duplicate L-numbers and corrupting the protocol
+    /// invariant that line numbers are strictly monotonic. Single global lock
+    /// is sufficient: git commits are already serialized by the index lock, so
+    /// fine-grained per-thread concurrency would only save the no-op case.
+    pub thread_write_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -76,6 +84,7 @@ impl AppState {
                     .as_secs(),
             ),
             auth_failed: Arc::new(AtomicBool::new(false)),
+            thread_write_lock: Mutex::new(()),
         }
     }
 
