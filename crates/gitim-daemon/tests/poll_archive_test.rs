@@ -142,7 +142,7 @@ async fn archived_channel_meta_uses_bare_channel_name() {
 
     let archive_req: Request = serde_json::from_value(serde_json::json!({
         "method": "archive_channel",
-        "name": "weird-name",
+        "channel": "weird-name",
         "author": "alice",
     }))
     .unwrap();
