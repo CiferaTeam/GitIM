@@ -187,7 +187,26 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     eprintln!("runtime shell listening on http://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Self-update path fork-execs a fresh runtime and then `exit(0)`s the
+    // parent. The child can briefly race the parent for the listening port:
+    // parent hasn't released it yet when child first calls bind. Retry a few
+    // times on AddrInUse so the child survives that ~100ms window instead of
+    // dying and leaving the frontend polling a dead `/health`.
+    // 10 x 100ms = 1s max wait, well over the observed race window.
+    let listener = {
+        let mut attempts = 0;
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) if attempts < 10 && e.kind() == std::io::ErrorKind::AddrInUse => {
+                    attempts += 1;
+                    tracing::warn!(?e, attempts, "port in use (likely restart race), retrying in 100ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
     let mut server = tokio::spawn(async move {
         axum::serve(listener, router).await
     });

@@ -16,10 +16,14 @@
 //! close briefly and then comes back with the new `/health` version once the
 //! child is bound — we cannot avoid that gap, only keep it short.
 //!
-//! Ordering is load-bearing: if we exited before `spawn`, no child ever
-//! starts; if we waited for the child to be healthy we'd still hold the port
-//! and it would fail to bind. The frontend bridges the gap with a polling
-//! loop on `/health`.
+//! Ordering is load-bearing. The sequence is: parent spawns child (child is
+//! suspended in its own bind-retry loop, waiting for the port to free up),
+//! parent exits — which releases the listening port — and the child's retry
+//! then succeeds. If we waited for the child to be healthy before exiting,
+//! we'd still hold the port and the child would never bind. The retry loop
+//! in the child's `run_shell` covers the small window where the parent is
+//! on its way out but hasn't released the socket yet. The frontend bridges
+//! the user-visible gap with a polling loop on `/health`.
 //!
 //! The `update_in_progress` atomic on [`crate::http::RuntimeState`] guards
 //! against two concurrent updates colliding mid-replace. Clients that hit this

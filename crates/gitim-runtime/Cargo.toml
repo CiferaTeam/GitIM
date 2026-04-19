@@ -30,6 +30,14 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1"
 
+[features]
+# Gates the `fake-gitim-runtime` test-support binary and the `update_e2e`
+# integration test. Without this feature, plain `cargo build --release` (or
+# `cargo install --path`) does NOT produce the fake binary — keeps test
+# helpers out of production artifacts. Enable via
+# `cargo test -p gitim-runtime --features test-support --test update_e2e`.
+test-support = []
+
 [[bin]]
 name = "gitim-runtime"
 path = "src/bin/runtime.rs"
@@ -38,15 +46,22 @@ path = "src/bin/runtime.rs"
 # around copies of this binary; the `CARGO_BIN_EXE_fake-gitim-runtime` env var
 # lets the test locate the compiled artifact without hard-coding a target path.
 #
-# `required-features` / guards don't exist for plain bins, so we rely on the
-# bin not being referenced from production code. It is compiled whenever the
-# crate is built — acceptable cost for a ~70-line support file.
+# Gated behind the `test-support` feature so plain `cargo build --release`
+# (or `cargo install --path`) does NOT drop this helper into the production
+# artifact set. The `update_e2e` integration test declares the same feature
+# via `required-features`, so the two travel together.
 [[bin]]
 name = "fake-gitim-runtime"
 path = "tests/support/fake_runtime.rs"
 test = false
 doc = false
 bench = false
+required-features = ["test-support"]
+
+[[test]]
+name = "update_e2e"
+path = "tests/update_e2e.rs"
+required-features = ["test-support"]
 
 [dev-dependencies]
 serial_test = "3"

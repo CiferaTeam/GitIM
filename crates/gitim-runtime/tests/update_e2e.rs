@@ -1,5 +1,22 @@
 //! End-to-end tests for the self-update async phase (Task 7).
 //!
+//! ## Running these tests
+//!
+//! This integration test is gated behind the `test-support` feature because it
+//! depends on the `fake-gitim-runtime` helper binary, which is also gated
+//! (see `Cargo.toml`). Plain `cargo test -p gitim-runtime` will SKIP this
+//! file — that is intentional, so the helper binary doesn't leak into plain
+//! `cargo build --release` artifacts.
+//!
+//! Run explicitly with:
+//!
+//! ```text
+//! cargo test -p gitim-runtime --features test-support --test update_e2e
+//! ```
+//!
+//! CI should invoke the same command — the default `cargo test` will NOT
+//! exercise the async-phase end-to-end path.
+//!
 //! ## Scope
 //!
 //! The plan's gold-standard E2E is:
