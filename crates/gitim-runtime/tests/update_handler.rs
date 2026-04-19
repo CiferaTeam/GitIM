@@ -4,8 +4,10 @@
 //!
 //! - The **install-dir strict check**: several flavours of non-canonical,
 //!   dev-tree, and missing paths all get `403 runtime_not_installed`.
-//! - The **concurrency guard**: second call while `update_in_progress=true`
-//!   returns `409 concurrent_update`.
+//! - The **concurrency guard primitive**: the `AtomicBool::swap` contract the
+//!   handler relies on for 409. (We don't exercise the full HTTP 409 path
+//!   here — see `atomic_swap_supports_guard_contract` and the inline note in
+//!   `update.rs` for why.)
 //! - The **status-code mapping**: every error code declared in the plan has
 //!   a matching HTTP status documented via a unit assertion in `update.rs`
 //!   (`status_for_maps_expected_codes` — lib test).
@@ -112,7 +114,7 @@ async fn rejects_runtime_with_nonexistent_parent() {
 // -- concurrency guard ------------------------------------------------------
 
 #[tokio::test]
-async fn second_call_while_update_in_progress_returns_409() {
+async fn atomic_swap_supports_guard_contract() {
     // Flip the guard before calling. A real update-in-flight would have
     // already set this; we simulate that state without needing to race two
     // requests (which would be flaky on CI). The install-dir check runs

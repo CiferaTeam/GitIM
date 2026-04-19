@@ -124,31 +124,44 @@ pub(crate) fn strict_install_dir_check(exe: &Path) -> Result<(), UpdateError> {
 /// to (a) exit successfully inside the timeout and (b) print a stdout line
 /// containing the target version — a freshly-built binary that reports the
 /// wrong version means the tarball was mis-packed for the tag we fetched.
+///
+/// The child is spawned explicitly with `kill_on_drop(true)` so that a
+/// timeout doesn't leak a zombie process holding file descriptors into the
+/// tempdir: dropping the `wait_with_output` future drops the inner `Child`,
+/// which sends SIGKILL.
 async fn sanity_check_new_runtime(
     new_runtime: &Path,
     target_version: &str,
 ) -> Result<(), UpdateError> {
-    let result = tokio::time::timeout(
-        SANITY_CHECK_TIMEOUT,
-        tokio::process::Command::new(new_runtime)
-            .arg("--version")
-            .output(),
-    )
-    .await;
+    let child = tokio::process::Command::new(new_runtime)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| UpdateError {
+            error_code: error_codes::SANITY_CHECK_FAILED.into(),
+            detail: format!("failed to spawn new runtime for sanity check: {e}"),
+        })?;
 
-    let output = match result {
-        Ok(Ok(o)) => o,
+    let output = match tokio::time::timeout(SANITY_CHECK_TIMEOUT, child.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             return Err(UpdateError {
                 error_code: error_codes::SANITY_CHECK_FAILED.into(),
-                detail: format!("failed to exec new runtime --version: {e}"),
+                detail: format!("sanity check exec error: {e}"),
             });
         }
         Err(_) => {
+            // `kill_on_drop(true)` handles the actual kill when the timeout
+            // future is dropped at end of this branch — the inner
+            // `wait_with_output` future owns the `Child`, and dropping it
+            // drops the `Child`, which SIGKILLs the process.
             return Err(UpdateError {
                 error_code: error_codes::SANITY_CHECK_FAILED.into(),
                 detail: format!(
-                    "new runtime --version timed out after {}s",
+                    "sanity check timed out after {}s",
                     SANITY_CHECK_TIMEOUT.as_secs()
                 ),
             });
@@ -159,8 +172,8 @@ async fn sanity_check_new_runtime(
         return Err(UpdateError {
             error_code: error_codes::SANITY_CHECK_FAILED.into(),
             detail: format!(
-                "new runtime --version exited with status {}",
-                output.status
+                "sanity check exited with status {:?}",
+                output.status.code()
             ),
         });
     }
@@ -169,13 +182,13 @@ async fn sanity_check_new_runtime(
     // a bare version (`gitim-runtime 0.4.2`) while the tag carries `v` —
     // accept either representation in the output.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let bare = target_version.strip_prefix('v').unwrap_or(target_version);
-    if !stdout.contains(bare) {
+    let expected = target_version.strip_prefix('v').unwrap_or(target_version);
+    if !stdout.contains(expected) {
         return Err(UpdateError {
             error_code: error_codes::SANITY_CHECK_FAILED.into(),
             detail: format!(
-                "new runtime --version output did not mention target version {target_version}: {}",
-                stdout.trim()
+                "sanity check output did not contain {expected}: stdout={:?}",
+                stdout
             ),
         });
     }
@@ -293,6 +306,12 @@ pub async fn update_and_restart(State(state): State<SharedRuntimeState>) -> Resp
 
     // Concurrency guard. `swap(true, SeqCst)` returns the previous value —
     // if it was already true we know another update is live and bail with 409.
+    //
+    // Note: no end-to-end 409 test; relies on `AtomicBool::swap` contract.
+    // Reaching this branch from an integration test would require mocking
+    // `$HOME` so the strict install-dir check passes — see
+    // `tests/update_handler.rs::atomic_swap_supports_guard_contract` which
+    // exercises the swap primitive directly instead.
     let guard = {
         let s = state.lock().unwrap();
         s.update_in_progress.clone()
@@ -338,16 +357,17 @@ pub async fn update_and_restart(State(state): State<SharedRuntimeState>) -> Resp
     // We keep ownership of `tmp` in the spawned task — dropping it here would
     // delete the extracted binaries before the async phase could install them.
     let guard_clone = guard.clone();
+    let job_id = job.job_id.clone();
     tokio::spawn(async move {
+        tracing::info!(%job_id, "update_and_restart: async phase stub entered");
         // Prevent the tempdir + new_runtime path from being moved away from
         // the task's scope, which would drop + delete the extracted binaries
         // the moment the spawn body returned.
         let _tmp = tmp;
         let _new_runtime = new_runtime;
-        tracing::info!("update_and_restart: async phase stub (Task 7 replaces this)");
         tokio::time::sleep(Duration::from_millis(100)).await;
         guard_clone.store(false, Ordering::SeqCst);
-        tracing::info!("update_and_restart: async phase stub complete, guard released");
+        tracing::info!(%job_id, "update_and_restart: async phase stub released guard");
     });
 
     (StatusCode::ACCEPTED, Json(job)).into_response()
@@ -429,7 +449,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.error_code, error_codes::SANITY_CHECK_FAILED);
-        assert!(err.detail.contains("did not mention target version"));
+        assert!(err.detail.contains("did not contain"));
     }
 
     fn which_sleep() -> PathBuf {
