@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { Card, CardStatus } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { CardKanbanCell } from "./card-kanban-cell";
+import { CARD_DRAG_MIME, decodeCardDrag } from "./card-drag";
 
 const DONE_INITIAL_LIMIT = 20;
 
@@ -16,6 +18,8 @@ export interface CardKanbanColumnProps {
   /** Archived cards for this column, rendered muted below active cards. Empty when "Show archived" is off. */
   archivedCards?: Card[];
   onStatusChange: (card: Card, newStatus: CardStatus) => void;
+  /** Called when a card is dropped from another column. Same-column drops are ignored upstream. */
+  onCardDropped: (channel: string, cardId: string, newStatus: CardStatus) => void;
 }
 
 export function CardKanbanColumn({
@@ -23,8 +27,10 @@ export function CardKanbanColumn({
   cards,
   archivedCards = [],
   onStatusChange,
+  onCardDropped,
 }: CardKanbanColumnProps) {
   const [showAllDone, setShowAllDone] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
 
   const shouldCollapse =
     status === "done" && !showAllDone && cards.length > DONE_INITIAL_LIMIT;
@@ -35,7 +41,38 @@ export function CardKanbanColumn({
   const totalCount = cards.length + archivedCards.length;
 
   return (
-    <div className="flex-1 min-w-0 flex flex-col bg-[#1c1c1e] rounded-lg border border-border">
+    <div
+      className={cn(
+        "flex-1 min-w-0 flex flex-col bg-[#1c1c1e] rounded-lg border border-border transition-colors",
+        dropActive && "border-[#3b82f6] bg-[#1e2030]",
+      )}
+      onDragOver={(e) => {
+        // Only react to our own card-drag payload. Without this we'd light up
+        // the column for any random text/file drag from outside the page.
+        if (!e.dataTransfer.types.includes(CARD_DRAG_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!dropActive) setDropActive(true);
+      }}
+      onDragLeave={(e) => {
+        // dragleave fires when crossing into child elements too; only clear
+        // when the cursor leaves the column's bounding box.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDropActive(false);
+      }}
+      onDrop={(e) => {
+        setDropActive(false);
+        const raw = e.dataTransfer.getData(CARD_DRAG_MIME);
+        if (!raw) return;
+        e.preventDefault();
+        const payload = decodeCardDrag(raw);
+        if (!payload) return;
+        // No same-status short-circuit here: from_status is frozen at dragstart
+        // and may be stale if a poll updated the card mid-drag. The parent
+        // re-checks against live store state.
+        onCardDropped(payload.channel, payload.card_id, status);
+      }}
+    >
       <header className="flex items-center justify-between px-3 py-2 border-b border-border">
         <h2 className="text-sm font-medium">{STATUS_LABEL[status]}</h2>
         <span className="text-xs text-muted-foreground">{totalCount}</span>

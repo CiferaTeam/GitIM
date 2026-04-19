@@ -133,6 +133,19 @@ export function CardKanban() {
     [activeSlug, upsertCard, markCardInFlight, unmarkCardInFlight],
   );
 
+  const handleCardDropped = useCallback(
+    (channel: string, cardId: string, newStatus: CardStatus) => {
+      // Look up against the current store snapshot — the dragged card lives in
+      // a different column than the drop target, so it's not in `byStatus`.
+      const card = useCardStore
+        .getState()
+        .cards.find((c) => c.channel === channel && c.card_id === cardId);
+      if (!card || card.status === newStatus) return;
+      void handleStatusChange(card, newStatus);
+    },
+    [handleStatusChange],
+  );
+
   const hasFilter =
     filter.channels.length > 0 ||
     filter.labels.length > 0 ||
@@ -173,18 +186,21 @@ export function CardKanban() {
             cards={byStatus.todo}
             archivedCards={archivedByStatus.todo}
             onStatusChange={handleStatusChange}
+            onCardDropped={handleCardDropped}
           />
           <CardKanbanColumn
             status="doing"
             cards={byStatus.doing}
             archivedCards={archivedByStatus.doing}
             onStatusChange={handleStatusChange}
+            onCardDropped={handleCardDropped}
           />
           <CardKanbanColumn
             status="done"
             cards={byStatus.done}
             archivedCards={archivedByStatus.done}
             onStatusChange={handleStatusChange}
+            onCardDropped={handleCardDropped}
           />
         </div>
       )}
