@@ -36,11 +36,6 @@ function dmDisplayName(channel: Channel, currentUser: string): string {
   return `${a} ↔ ${b}`;
 }
 
-function isSelfDm(channel: Channel, currentUser: string): boolean {
-  const parts = channel.name.split("--");
-  return parts.length === 2 && parts[0] === currentUser && parts[1] === currentUser;
-}
-
 function isMyDm(channel: Channel, currentUser: string): boolean {
   const parts = channel.name.split("--");
   return parts.length === 2 && (parts[0] === currentUser || parts[1] === currentUser);
@@ -58,7 +53,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
 
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [archivedLoaded, setArchivedLoaded] = useState(false);
+  const [archivedLoading, setArchivedLoading] = useState(false);
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -167,19 +162,24 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   async function handleToggleArchivedSection() {
     const next = !archivedOpen;
     setArchivedOpen(next);
-    // Fetch archived channels the first time the section is opened.
-    // Session cache: subsequent opens skip the fetch; unarchive updates the
-    // local list directly.
-    if (next && !archivedLoaded) {
+    // Always refetch when opening: the archive list can change out-of-band
+    // (another agent archives, CLI archive, etc.) and a session cache would
+    // hide those events. The payload is small; the cost is one HTTP call
+    // per expand.
+    if (next) {
       if (!activeSlug) return;
-      const res = await client.listArchivedChannels(activeSlug);
-      if (res.ok && res.data) {
-        setArchivedChannels(res.data.channels);
-        setArchivedLoaded(true);
-      } else {
-        toast.error(
-          `Failed to load archived channels: ${res.error ?? "unknown"}`,
-        );
+      setArchivedLoading(true);
+      try {
+        const res = await client.listArchivedChannels(activeSlug);
+        if (res.ok && res.data) {
+          setArchivedChannels(res.data.channels);
+        } else {
+          toast.error(
+            `Failed to load archived channels: ${res.error ?? "unknown"}`,
+          );
+        }
+      } finally {
+        setArchivedLoading(false);
       }
     }
   }
@@ -343,7 +343,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
             {archivedChannels.length === 0 ? (
               <li className="px-2 py-1.5 text-[11px] text-text-muted">
-                {archivedLoaded ? "No archived channels" : "Loading…"}
+                {archivedLoading ? "Loading…" : "No archived channels"}
               </li>
             ) : (
               archivedChannels.map((ch) => (

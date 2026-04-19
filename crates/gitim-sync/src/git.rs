@@ -147,8 +147,14 @@ impl GitStorage {
 
     pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let range = format!("{}..{}", from, to);
+        // `--no-renames` is load-bearing: `git mv` (how we archive channels
+        // and cards) produces a pure rename that git happily reports as
+        // `rename from/to` with no `---`/`+++` headers — which parse_diff_output
+        // would silently skip. Forcing rename decomposition turns every
+        // archival into a delete + add pair, and the new path's full
+        // content lands in the returned map.
         let output = Command::new("git")
-            .args(["diff", &range])
+            .args(["diff", "--no-renames", &range])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -161,7 +167,7 @@ impl GitStorage {
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "@{upstream}..HEAD", "--", pattern])
+            .args(["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {

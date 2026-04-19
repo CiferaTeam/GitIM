@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { Outlet } from "react-router";
+import { Outlet, useNavigate } from "react-router";
+import { HelpCircle } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { NavTabs } from "./nav-tabs";
@@ -9,6 +10,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
+  const navigate = useNavigate();
   const connected = useChatStore((s) => s.connected);
   const currentUser = useChatStore((s) => s.currentUser);
 
@@ -38,8 +40,16 @@ export function AppShell({ children }: AppShellProps) {
         {/* Center: nav tabs */}
         <NavTabs />
 
-        {/* Right: current user */}
-        <div className="flex items-center justify-end min-w-[140px]">
+        {/* Right: help + current user */}
+        <div className="flex items-center justify-end gap-2 min-w-[140px]">
+          <button
+            type="button"
+            onClick={() => navigate("/docs")}
+            title="Documentation"
+            className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
+          >
+            <HelpCircle className="size-4" />
+          </button>
           {currentUser ? (
             <span className="text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border">
               @{currentUser}

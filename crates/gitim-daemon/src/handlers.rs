@@ -1070,6 +1070,29 @@ async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
         } else if let Some(name) = path_str.strip_prefix("dm/") {
             let name = name.strip_suffix(".thread").unwrap_or(name);
             (format!("dm:{}", name.replace("--", ",")), "dm")
+        } else if let Some(name) = path_str.strip_prefix("archive/channels/") {
+            // A channel showing up in `archive/channels/` means it was just
+            // archived (or was created and archived inside this diff range).
+            // Emit a `channel_meta` event so the client refetches both the
+            // active and archived lists — otherwise the record silently
+            // vanishes from every UI surface.
+            if name.contains('/') {
+                // Nested path (e.g. archive/channels/X/cards/...) — not our
+                // business here; skip cleanly instead of letting the suffix
+                // strippers mangle the name.
+                continue;
+            }
+            let ch_name = name
+                .strip_suffix(".thread")
+                .or_else(|| name.strip_suffix(".meta.yaml"));
+            if let Some(ch_name) = ch_name {
+                changes.push(serde_json::json!({
+                    "channel": ch_name,
+                    "kind": "channel_meta",
+                    "entries": [],
+                }));
+            }
+            continue;
         } else {
             continue;
         };

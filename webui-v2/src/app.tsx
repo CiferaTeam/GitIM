@@ -7,6 +7,7 @@ import { ChatLayout } from "./components/chat/chat-layout";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
+import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
@@ -86,6 +87,7 @@ function WorkspaceIncomplete({ slug }: { slug: string }) {
 export default function App() {
   const setCurrentUser = useChatStore((s) => s.setCurrentUser);
   const setChannels = useChatStore((s) => s.setChannels);
+  const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
   const setUsers = useChatStore((s) => s.setUsers);
   const setConnected = useChatStore((s) => s.setConnected);
   const addMessages = useChatStore((s) => s.addMessages);
@@ -153,6 +155,7 @@ export default function App() {
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
       let needChannelRefresh = false;
+      let needArchivedRefresh = false;
       let needCardRefresh = false;
 
       for (const change of changes) {
@@ -179,6 +182,13 @@ export default function App() {
 
         if (!knownChannel || change.kind === "channel_meta") {
           needChannelRefresh = true;
+          // An unknown channel that produced activity + a meta event is
+          // almost certainly one that was created and archived out-of-band
+          // (e.g. by an agent). Refetch archived so the record shows up
+          // there instead of just vanishing from the UI.
+          if (change.kind === "channel_meta" || !knownChannel) {
+            needArchivedRefresh = true;
+          }
           if (!knownChannel) continue;
         }
 
@@ -203,6 +213,13 @@ export default function App() {
         }
       }
 
+      if (needArchivedRefresh) {
+        const arRes = await client.listArchivedChannels(slug);
+        if (arRes.ok && arRes.data) {
+          setArchivedChannels(arRes.data.channels as Channel[]);
+        }
+      }
+
       if (needCardRefresh) {
         const cardRes = await client.listCards(slug);
         if (cardRes.ok && cardRes.data) {
@@ -224,6 +241,7 @@ export default function App() {
     addMessages,
     incrementUnread,
     setChannels,
+    setArchivedChannels,
     setAgents,
     mergeCards,
     addCardMessages,
@@ -323,6 +341,7 @@ export default function App() {
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/cards" element={<CardKanban />} />
             <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
+            <Route path="/docs" element={<DocsPage />} />
           </Route>
         </Routes>
       );
