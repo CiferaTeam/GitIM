@@ -27,6 +27,7 @@ export function ChatLayout() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
+  const archivedChannels = useChatStore((s) => s.archivedChannels);
   const currentUser = useChatStore((s) => s.currentUser);
   const isGuest = useChatStore((s) => s.isGuest);
   const users = useChatStore((s) => s.users);
@@ -62,7 +63,16 @@ export function ChatLayout() {
   const currentChannelData = currentChannel
     ? channels.find((c) => c.name === currentChannel)
     : null;
+  // An archived channel is one the user opens from the Archived section — it
+  // never shows up in the active `channels` list. Read-only view: message
+  // fetch already works (daemon's read handler falls back to archive/
+  // automatically), but writes must be blocked.
+  const isArchivedView =
+    !!currentChannel &&
+    !currentChannelData &&
+    archivedChannels.some((c) => c.name === currentChannel);
   const showJoinBanner =
+    !isArchivedView &&
     !!currentChannelData &&
     currentChannelData.kind === "channel" &&
     !currentChannelData.members.includes(currentUser);
@@ -303,6 +313,14 @@ export function ChatLayout() {
           </div>
         )}
 
+        {isArchivedView && (
+          <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
+            <span className="text-xs text-muted-foreground">
+              #{currentChannel} is archived — read only. Unarchive from the sidebar to resume the conversation.
+            </span>
+          </div>
+        )}
+
         <MessageList
           messages={messages}
           scopeKey={currentChannel}
@@ -318,7 +336,7 @@ export function ChatLayout() {
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
         />
-        {currentChannel && (
+        {currentChannel && !isArchivedView && (
           <InputArea
             scopeKey={currentChannel}
             replyTo={replyTo}

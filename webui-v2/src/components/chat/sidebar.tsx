@@ -346,28 +346,37 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 {archivedLoading ? "Loading…" : "No archived channels"}
               </li>
             ) : (
-              archivedChannels.map((ch) => (
-                <li
-                  key={ch.name}
-                  className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40 transition-all group"
-                  title="Archived — not selectable. Click the restore button to unarchive."
-                >
-                  <Hash className="size-3 text-text-faint shrink-0" />
-                  <span className="truncate flex-1">{ch.name}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    title={`Unarchive #${ch.name}`}
-                    className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleUnarchiveChannel(ch.name);
-                    }}
+              archivedChannels.map((ch) => {
+                const isActive = currentChannel === ch.name;
+                return (
+                  <li
+                    key={ch.name}
+                    className={[
+                      "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
+                      isActive
+                        ? "bg-surface/60 text-foreground opacity-100"
+                        : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
+                    ].join(" ")}
+                    title="Archived — read only. Click to view; use the restore button to unarchive."
+                    onClick={() => onChannelSelect(ch.name)}
                   >
-                    <ArchiveRestore className="size-3" />
-                  </Button>
-                </li>
-              ))
+                    <Hash className="size-3 text-text-faint shrink-0" />
+                    <span className="truncate flex-1">{ch.name}</span>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      title={`Unarchive #${ch.name}`}
+                      className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleUnarchiveChannel(ch.name);
+                      }}
+                    >
+                      <ArchiveRestore className="size-3" />
+                    </Button>
+                  </li>
+                );
+              })
             )}
           </ul>
         )}
