@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Outlet, useNavigate } from "react-router";
-import { HelpCircle, X } from "lucide-react";
+import { HelpCircle } from "lucide-react";
+import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
@@ -51,7 +52,7 @@ export function AppShell({ children }: AppShellProps) {
             title="Twitter / X"
             className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
           >
-            <X className="size-4" />
+            <TwitterXIcon className="size-4" />
           </a>
           <button
             type="button"
