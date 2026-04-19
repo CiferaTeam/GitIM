@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
 import { ArrowLeft, Play, Pause, Trash2 } from "lucide-react";
@@ -43,6 +44,7 @@ function avatarColor(name: string) {
 export function AgentDetail() {
   const { agentId } = useParams<{ agentId: string }>();
   const navigate = useNavigate();
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const agents = useAgentStore((s) => s.agents);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const [removeOpen, setRemoveOpen] = useState(false);
@@ -67,15 +69,16 @@ export function AgentDetail() {
   const isRunning = agent.status !== "offline";
 
   async function handleToggle() {
+    if (!activeSlug) return;
     if (isRunning) {
-      const res = await client.stopAgent(agent!.id);
+      const res = await client.stopAgent(activeSlug, agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
       } else if (!res.ok) {
         toast.error(res.error ?? "Failed to stop agent");
       }
     } else {
-      const res = await client.startAgent(agent!.id);
+      const res = await client.startAgent(activeSlug, agent!.id);
       if (res.ok && res.data?.agent) {
         updateAgent(agent!.id, res.data.agent as Partial<Agent>);
       } else if (!res.ok) {

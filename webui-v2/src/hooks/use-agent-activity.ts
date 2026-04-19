@@ -24,18 +24,23 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
 }));
 
 /**
- * Connects to the SSE endpoint for agent activity events.
- * Call once at the app level (e.g., in App.tsx).
+ * Connects to the SSE endpoint for agent activity events for the given
+ * workspace. Closes and re-opens when `slug` changes so events from the
+ * previous workspace don't leak into the new one.
  */
-export function useAgentActivitySSE() {
+export function useAgentActivitySSE(slug: string | null) {
   const port = useConnectionStore((s) => s.port);
   const push = useAgentActivityStore((s) => s.push);
+  const clear = useAgentActivityStore((s) => s.clear);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    if (!port) return;
+    if (!port || !slug) return;
 
-    const url = `http://127.0.0.1:${port}/agents/events`;
+    // Drop activities from the previous workspace on switch.
+    clear();
+
+    const url = `http://127.0.0.1:${port}/workspaces/${encodeURIComponent(slug)}/agents/events`;
     const es = new EventSource(url);
     esRef.current = es;
 
@@ -56,5 +61,5 @@ export function useAgentActivitySSE() {
       es.close();
       esRef.current = null;
     };
-  }, [port, push]);
+  }, [port, slug, push, clear]);
 }

@@ -11,6 +11,7 @@ import { LabelChipInput } from "@/components/ui/label-chip-input";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { cn } from "@/lib/utils";
 
@@ -46,6 +47,7 @@ export function CardFilterBar({
   const showArchived = useCardStore((s) => s.showArchived);
   const toggleShowArchived = useCardStore((s) => s.toggleShowArchived);
   const setArchivedCards = useCardStore((s) => s.setArchivedCards);
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
 
   const channelOptions = useMemo(
     () => channels.filter((c) => c.kind === "channel").map((c) => c.name),
@@ -69,9 +71,10 @@ export function CardFilterBar({
   // code simple and avoids N calls per per-channel selection.
   const fetchArchived = useCallback(
     async (selectedChannels: string[]): Promise<boolean> => {
+      if (!activeSlug) return false;
       const ch = selectedChannels.length === 1 ? selectedChannels[0] : undefined;
       try {
-        const res = await client.listArchivedCards(ch);
+        const res = await client.listArchivedCards(activeSlug, ch);
         if (res.ok && res.data) {
           setArchivedCards(res.data.cards);
           return true;
@@ -85,7 +88,7 @@ export function CardFilterBar({
         return false;
       }
     },
-    [setArchivedCards],
+    [activeSlug, setArchivedCards],
   );
 
   async function handleToggleArchived() {

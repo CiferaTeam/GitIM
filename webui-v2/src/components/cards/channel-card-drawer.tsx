@@ -6,6 +6,7 @@ import {
   useCardStore,
   sortByUpdatedDesc,
 } from "@/hooks/use-card-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Card, CardStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,7 @@ export function ChannelCardDrawer({
   onOpenChange,
 }: ChannelCardDrawerProps) {
   const navigate = useNavigate();
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const cards = useCardStore((s) => s.cards);
   const setCards = useCardStore((s) => s.setCards);
 
@@ -41,12 +43,12 @@ export function ChannelCardDrawer({
 
   // Refetch listCards whenever drawer opens to ensure freshness
   useEffect(() => {
-    if (!open) return;
+    if (!open || !activeSlug) return;
     (async () => {
-      const res = await client.listCards();
+      const res = await client.listCards(activeSlug);
       if (res.ok && res.data) setCards(res.data.cards);
     })();
-  }, [open, setCards]);
+  }, [open, activeSlug, setCards]);
 
   // ESC to close
   useEffect(() => {

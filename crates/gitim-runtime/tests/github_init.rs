@@ -110,14 +110,31 @@ async fn post_raw(
     resp.text().await.unwrap()
 }
 
-async fn setup_workspace(addr: SocketAddr, ws: &Path) {
-    let resp = post_json(
+/// Create a github-mode workspace via the unified `/workspaces` endpoint.
+///
+/// Kept as a helper because most tests share the same shape: POST a
+/// `{ path, git: { provider: "github", remote_url, token } }` body and
+/// assert on `error_code`. Returns the parsed JSON so callers can inspect
+/// either the success or failure body.
+async fn post_workspaces_github(
+    addr: SocketAddr,
+    ws: &Path,
+    remote_url: Option<&str>,
+    token: Option<&str>,
+) -> serde_json::Value {
+    let mut git = serde_json::json!({ "provider": "github" });
+    if let Some(u) = remote_url {
+        git["remote_url"] = serde_json::Value::String(u.to_string());
+    }
+    if let Some(t) = token {
+        git["token"] = serde_json::Value::String(t.to_string());
+    }
+    post_json(
         addr,
-        "/workspace",
-        serde_json::json!({ "path": ws.to_string_lossy(), "confirm": true }),
+        "/workspaces",
+        serde_json::json!({ "path": ws.to_string_lossy(), "git": git }),
     )
-    .await;
-    assert_eq!(resp["ok"], true, "workspace setup failed: {resp:?}");
+    .await
 }
 
 /// Build a bare origin with one initial commit so `git clone file://` has
@@ -180,17 +197,9 @@ async fn github_init_rejects_missing_token() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/owner/repo"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), None).await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "missing_token");
@@ -204,17 +213,8 @@ async fn github_init_rejects_missing_remote_url() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp = post_workspaces_github(addr, &ws, None, Some("ghp_x")).await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "missing_remote_url");
@@ -228,18 +228,10 @@ async fn github_init_rejects_non_github_host() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://gitlab.com/owner/repo",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://gitlab.com/owner/repo"), Some("ghp_x"))
+            .await;
 
     assert_eq!(resp["ok"], false);
     // parse_github_url returns ParseError which maps to clone_failed.
@@ -263,18 +255,10 @@ async fn github_init_rejects_cloud_sync_workspace_path() {
 
     let api = Arc::new(MockGithubApi::all_ok());
     let (addr, server, _state) = spawn_server_with(api, None).await;
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/owner/repo",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
+            .await;
 
     if let Some(p) = prev_home {
         std::env::set_var("HOME", p);
@@ -296,18 +280,10 @@ async fn github_init_fails_on_invalid_token() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/owner/repo",
-            "token": "ghp_bad"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_bad"))
+            .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "invalid_token");
@@ -323,18 +299,10 @@ async fn github_init_fails_on_token_lacks_repo_access() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/owner/repo",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
+            .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "token_lacks_repo_access");
@@ -343,10 +311,6 @@ async fn github_init_fails_on_token_lacks_repo_access() {
 
 #[tokio::test]
 async fn github_init_fails_on_network_error() {
-    // Force verify_token to return a network error by spinning up a real HTTP
-    // client against a closed port. Simpler: synthesise the error via
-    // reqwest::Error through a bad request. Even simpler: use UnexpectedStatus
-    // which the handler also maps to "network_error".
     let api = Arc::new(MockGithubApi::with_verify(GithubError::UnexpectedStatus(
         500,
     )));
@@ -354,18 +318,10 @@ async fn github_init_fails_on_network_error() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/owner/repo",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
+            .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "network_error");
@@ -392,16 +348,12 @@ async fn github_init_full_flow_with_mock_api() {
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
+    let resp = post_workspaces_github(
         addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/fake/fake",
-            "token": "ghp_TESTSENTINEL_abc"
-        }),
+        &ws,
+        Some("https://github.com/fake/fake"),
+        Some("ghp_TESTSENTINEL_abc"),
     )
     .await;
 
@@ -431,18 +383,10 @@ async fn github_init_fails_on_clone_error_cleans_up() {
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
-    let resp = post_json(
-        addr,
-        "/git/init",
-        serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/fake/fake",
-            "token": "ghp_x"
-        }),
-    )
-    .await;
+    let resp =
+        post_workspaces_github(addr, &ws, Some("https://github.com/fake/fake"), Some("ghp_x"))
+            .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "clone_failed");
@@ -451,9 +395,8 @@ async fn github_init_fails_on_clone_error_cleans_up() {
         !ws.join(".gitim-runtime/human").exists(),
         "human dir should be cleaned up after clone failure"
     );
-    // set_workspace wrote a legacy-schema config.json; on clone failure we must
-    // not have overwritten it with a github-flavoured one that would pin a bad
-    // provider and (worse) retain the token.
+    // On clone failure we must not have written a github-flavoured config
+    // that would pin a bad provider and (worse) retain the token.
     let cfg_path = ws.join(".gitim-runtime/config.json");
     if cfg_path.exists() {
         let content = std::fs::read_to_string(&cfg_path).unwrap();
@@ -480,16 +423,18 @@ async fn github_init_response_body_never_contains_token() {
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
     const SENTINEL: &str = "ghp_TESTSENTINEL_xyz123abc";
     let raw = post_raw(
         addr,
-        "/git/init",
+        "/workspaces",
         serde_json::json!({
-            "provider": "github",
-            "remote_url": "https://github.com/fake/fake",
-            "token": SENTINEL
+            "path": ws.to_string_lossy(),
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/fake/fake",
+                "token": SENTINEL
+            }
         }),
     )
     .await;
@@ -510,12 +455,14 @@ async fn git_init_rejects_unknown_provider() {
     let tmp = short_tempdir();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    setup_workspace(addr, &ws).await;
 
     let resp = post_json(
         addr,
-        "/git/init",
-        serde_json::json!({ "provider": "gitea" }),
+        "/workspaces",
+        serde_json::json!({
+            "path": ws.to_string_lossy(),
+            "git": { "provider": "gitea" }
+        }),
     )
     .await;
     assert_eq!(resp["ok"], false);

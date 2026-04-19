@@ -7,8 +7,6 @@ interface Step {
 
 const STEPS: Step[] = [
   { number: 1, label: "Connect" },
-  { number: 2, label: "Workspace" },
-  { number: 3, label: "Git" },
 ];
 
 interface SetupShellProps {
@@ -51,7 +49,12 @@ export function SetupShell({
             {/* Active line */}
             <div
               className="absolute left-0 top-4 h-0.5 bg-primary rounded-full transition-all duration-500"
-              style={{ width: `${((step - 1) / (STEPS.length - 1)) * 100}%` }}
+              style={{
+                width:
+                  STEPS.length > 1
+                    ? `${((step - 1) / (STEPS.length - 1)) * 100}%`
+                    : "0%",
+              }}
             />
             {STEPS.map((s) => {
               const isActive = s.number === step;

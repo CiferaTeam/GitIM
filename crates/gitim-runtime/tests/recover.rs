@@ -1,4 +1,4 @@
-//! Tests for `recover_agents_from_workspace` — the per-workspace scan that
+//! Tests for `recover_agents_for_workspace` — the per-workspace scan that
 //! `recover_from_config` delegates to on startup.
 //!
 //! Only error branches are covered here. The happy path (valid provider →
@@ -9,7 +9,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use gitim_runtime::http::{recover_agents_from_workspace, RuntimeState, SharedRuntimeState};
+use gitim_runtime::http::{recover_agents_for_workspace, RuntimeState, SharedRuntimeState};
+use gitim_runtime::workspace::WorkspaceContext;
 use tempfile::TempDir;
 
 /// Write a minimal me.json into `<workspace>/<handler>/.gitim/me.json`.
@@ -23,14 +24,25 @@ fn write_agent(workspace: &Path, handler: &str, me: serde_json::Value) {
     .unwrap();
 }
 
-fn fresh_state() -> SharedRuntimeState {
-    Arc::new(Mutex::new(RuntimeState::default()))
+fn fresh_state_with_ws(slug: &str, path: &Path) -> SharedRuntimeState {
+    let state = Arc::new(Mutex::new(RuntimeState::default()));
+    {
+        let mut s = state.lock().unwrap();
+        s.workspaces.insert(
+            slug.to_string(),
+            WorkspaceContext::new(
+                slug.to_string(),
+                slug.to_string(),
+                path.to_path_buf(),
+            ),
+        );
+    }
+    state
 }
 
 #[tokio::test]
 async fn test_recover_missing_provider_marks_error() {
     let tmp = TempDir::new().unwrap();
-    // No "provider" key at all.
     write_agent(
         tmp.path(),
         "no-prov",
@@ -40,11 +52,12 @@ async fn test_recover_missing_provider_marks_error() {
         }),
     );
 
-    let state = fresh_state();
-    recover_agents_from_workspace(state.clone(), tmp.path()).await;
+    let state = fresh_state_with_ws("test-ws", tmp.path());
+    recover_agents_for_workspace(state.clone(), "test-ws", tmp.path()).await;
 
     let s = state.lock().unwrap();
-    let info = s
+    let ctx = s.workspaces.get("test-ws").expect("ws present");
+    let info = ctx
         .agents
         .get("no-prov")
         .expect("agent should be registered even when provider is missing");
@@ -68,11 +81,12 @@ async fn test_recover_unknown_provider_marks_error() {
         }),
     );
 
-    let state = fresh_state();
-    recover_agents_from_workspace(state.clone(), tmp.path()).await;
+    let state = fresh_state_with_ws("test-ws", tmp.path());
+    recover_agents_for_workspace(state.clone(), "test-ws", tmp.path()).await;
 
     let s = state.lock().unwrap();
-    let info = s
+    let ctx = s.workspaces.get("test-ws").expect("ws present");
+    let info = ctx
         .agents
         .get("gem-prov")
         .expect("agent should be registered even with unknown provider");
@@ -86,7 +100,6 @@ async fn test_recover_unknown_provider_marks_error() {
         msg.contains("gemini"),
         "error_message should echo the bad provider value: {msg}"
     );
-    // provider field is preserved so the UI can show what was actually in the file
     assert_eq!(info.provider.as_deref(), Some("gemini"));
     assert!(info.loop_handle.is_none());
 }
@@ -103,17 +116,14 @@ async fn test_recover_missing_provider_broadcasts_error_event() {
         }),
     );
 
-    let state = fresh_state();
-    // Subscribe BEFORE triggering recover so the broadcast isn't lost — a
-    // broadcast channel drops sends made when the subscriber count is 0.
+    let state = fresh_state_with_ws("test-ws", tmp.path());
     let mut rx = {
         let s = state.lock().unwrap();
-        s.activity_tx.subscribe()
+        s.workspaces.get("test-ws").expect("ws present").activity_tx.subscribe()
     };
 
-    recover_agents_from_workspace(state.clone(), tmp.path()).await;
+    recover_agents_for_workspace(state.clone(), "test-ws", tmp.path()).await;
 
-    // Timeout guards against the broadcast never firing.
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
         .expect("activity event should arrive within 1s")
@@ -121,6 +131,7 @@ async fn test_recover_missing_provider_broadcasts_error_event() {
 
     assert_eq!(event.event_type, "error", "event_type should be error");
     assert_eq!(event.agent_id, "no-prov", "agent_id should match handler");
+    assert_eq!(event.workspace_id, "test-ws", "workspace_id should be set");
     assert!(
         event.detail.contains("Missing"),
         "detail should mention Missing: {}",

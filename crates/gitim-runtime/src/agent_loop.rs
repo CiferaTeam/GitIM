@@ -32,6 +32,7 @@ pub struct AgentLoop {
     custom_system_prompt: Option<String>,
     handler: String,
     activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
+    workspace_id: String,
 }
 
 impl AgentLoop {
@@ -76,6 +77,7 @@ impl AgentLoop {
             custom_system_prompt: None,
             handler: handler.to_string(),
             activity_tx: None,
+            workspace_id: String::new(),
         })
     }
 
@@ -115,18 +117,25 @@ impl AgentLoop {
             custom_system_prompt: config.system_prompt.clone(),
             handler: config.handler.clone(),
             activity_tx: None,
+            workspace_id: String::new(),
         })
     }
 
-    /// Attach a broadcast sender for agent activity events.
-    pub fn set_activity_tx(&mut self, tx: broadcast::Sender<AgentActivityEvent>) {
+    /// Attach a broadcast sender and tag emitted events with a workspace slug.
+    pub fn set_activity_tx_with_workspace(
+        &mut self,
+        tx: broadcast::Sender<AgentActivityEvent>,
+        workspace_id: String,
+    ) {
         self.activity_tx = Some(tx);
+        self.workspace_id = workspace_id;
     }
 
     fn emit_activity(&self, event_type: &str, detail: &str) {
         if let Some(tx) = &self.activity_tx {
             let _ = tx.send(AgentActivityEvent {
                 agent_id: self.handler.clone(),
+                workspace_id: self.workspace_id.clone(),
                 event_type: event_type.to_string(),
                 detail: detail.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -511,4 +520,22 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
                 "missing handler field in .gitim/me.json",
             ))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_activity_event_includes_workspace_id() {
+        let e = AgentActivityEvent {
+            agent_id: "a".to_string(),
+            workspace_id: "ws1".to_string(),
+            event_type: "tool_use".to_string(),
+            detail: "d".to_string(),
+            timestamp: "t".to_string(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"workspace_id\":\"ws1\""));
+    }
 }

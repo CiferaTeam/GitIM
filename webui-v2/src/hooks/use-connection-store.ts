@@ -3,10 +3,7 @@ import { create } from "zustand";
 export type ConnectionStatus =
   | "checking"       // trying stored port
   | "disconnected"   // no runtime found, show port form
-  | "connected"      // health OK, need workspace
-  | "workspace_set"  // workspace configured, need git provider
-  | "github_setup"   // github provider selected, collecting remote URL + PAT
-  | "ready";         // git initialized, app can proceed
+  | "ready";         // runtime reachable, app can proceed
 
 const STORAGE_KEY = "gitim-runtime-port";
 
@@ -14,13 +11,11 @@ interface ConnectionState {
   status: ConnectionStatus;
   port: number | null;
   runtimeVersion: string | null;
-  workspacePath: string | null;
   error: string | null;
 
   setStatus: (s: ConnectionStatus) => void;
   setPort: (p: number) => void;
-  setRuntimeVersion: (v: string) => void;
-  setWorkspacePath: (p: string) => void;
+  setRuntimeVersion: (v: string | null) => void;
   setError: (e: string | null) => void;
   baseUrl: () => string;
 }
@@ -36,7 +31,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   status: "checking",
   port: loadStoredPort(),
   runtimeVersion: null,
-  workspacePath: null,
   error: null,
 
   setStatus: (s) => set({ status: s, error: null }),
@@ -45,7 +39,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ port: p });
   },
   setRuntimeVersion: (v) => set({ runtimeVersion: v }),
-  setWorkspacePath: (p) => set({ workspacePath: p }),
   setError: (e) => set({ error: e }),
   baseUrl: () => `http://127.0.0.1:${get().port}`,
 }));

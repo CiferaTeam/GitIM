@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import {
   Dialog,
@@ -27,6 +28,7 @@ export function InviteDialog({
   excludeHandlers,
   onInvited,
 }: InviteDialogProps) {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const [selected, setSelected] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,10 +43,14 @@ export function InviteDialog({
   }, [open]);
 
   async function handleInvite() {
+    if (!activeSlug) {
+      setError("No workspace selected");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const res = await client.joinChannel(channel, selected);
+      const res = await client.joinChannel(activeSlug, channel, selected);
       if (!res.ok) {
         setError(res.error ?? "Failed to invite");
         setSubmitting(false);

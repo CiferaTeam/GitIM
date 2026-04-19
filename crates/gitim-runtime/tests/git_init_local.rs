@@ -40,21 +40,16 @@ async fn git_init_local_creates_bare_and_human_and_config() {
     let workspace_path = tmp.path().join("ws");
     std::fs::create_dir_all(&workspace_path).unwrap();
 
-    let ws_resp = post_json(
-        addr,
-        "/workspace",
-        serde_json::json!({ "path": workspace_path.to_string_lossy(), "confirm": true }),
-    )
-    .await;
-    assert_eq!(ws_resp["ok"], true, "workspace setup failed: {ws_resp:?}");
-
     let init_resp = post_json(
         addr,
-        "/git/init",
-        serde_json::json!({ "provider": "local" }),
+        "/workspaces",
+        serde_json::json!({
+            "path": workspace_path.to_string_lossy(),
+            "git": { "provider": "local" },
+        }),
     )
     .await;
-    assert_eq!(init_resp["ok"], true, "git_init failed: {init_resp:?}");
+    assert_eq!(init_resp["ok"], true, "workspace create failed: {init_resp:?}");
 
     assert!(
         workspace_path.join("repo.git").exists(),

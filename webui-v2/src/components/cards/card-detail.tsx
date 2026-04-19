@@ -13,6 +13,7 @@ import {
   selectCardById,
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
@@ -26,6 +27,7 @@ export function CardDetail() {
   const channel = params.channel ?? "";
   const cardId = params.card_id ?? "";
 
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentUser = useChatStore((s) => s.currentUser);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
@@ -82,6 +84,7 @@ export function CardDetail() {
   }, [users, agents]);
 
   useEffect(() => {
+    if (!activeSlug) return;
     let aborted = false;
     // Intentional: set loading state synchronously when (channel, cardId) change
     // so the fetch-then-update cycle has a correct UI story.
@@ -93,7 +96,7 @@ export function CardDetail() {
     setLoadError(null);
     setArchived(false);
     (async () => {
-      const res = await client.readCard(channel, cardId, { limit: 100 });
+      const res = await client.readCard(activeSlug, channel, cardId, { limit: 100 });
       if (aborted) return;
       if (!res.ok) {
         const err = res.error ?? "failed to load";
@@ -126,7 +129,7 @@ export function CardDetail() {
     return () => {
       aborted = true;
     };
-  }, [channel, cardId, pathKey, upsertCard, upsertArchivedCard, setCardMessages]);
+  }, [activeSlug, channel, cardId, pathKey, upsertCard, upsertArchivedCard, setCardMessages]);
 
   const handleUpdate = useCallback(
     async (patch: {
@@ -134,7 +137,7 @@ export function CardDetail() {
       labels?: string[];
       assignee?: string | null;
     }) => {
-      if (!card) return;
+      if (!card || !activeSlug) return;
       const prev = card;
       const next: Card = {
         ...card,
@@ -150,18 +153,21 @@ export function CardDetail() {
       upsertCard(next);
       // Use channel/cardId from route params — `card.*` could be stale after
       // the optimistic upsertCard above if any poll tick landed between reads.
-      const res = await client.updateCard(channel, cardId, patch);
+      const res = await client.updateCard(activeSlug, channel, cardId, patch);
       unmarkCardInFlight(channel, cardId);
       if (!res.ok) {
         upsertCard(prev);
         toast.error(`Update failed: ${res.error ?? "unknown"}`);
       }
     },
-    [card, upsertCard, channel, cardId, markCardInFlight, unmarkCardInFlight],
+    [activeSlug, card, upsertCard, channel, cardId, markCardInFlight, unmarkCardInFlight],
   );
 
   const handleSend = useCallback(
     async (body: string, pointTo: number): Promise<ApiResponse> => {
+      if (!activeSlug) {
+        return { ok: false, error: "No workspace selected" };
+      }
       const pendingId = `pending-${Date.now()}`;
       const pending: Message = {
         line_number: -1,
@@ -174,6 +180,7 @@ export function CardDetail() {
       };
       addPendingCardMessage(pathKey, pending);
       const res = await client.sendCardMessage(
+        activeSlug,
         channel,
         cardId,
         body,
@@ -187,6 +194,7 @@ export function CardDetail() {
       return res;
     },
     [
+      activeSlug,
       channel,
       cardId,
       pathKey,
@@ -198,9 +206,9 @@ export function CardDetail() {
   );
 
   const handleArchive = useCallback(async () => {
-    if (archiveInFlight) return;
+    if (archiveInFlight || !activeSlug) return;
     setArchiveInFlight(true);
-    const res = await client.archiveCard(channel, cardId);
+    const res = await client.archiveCard(activeSlug, channel, cardId);
     // Gate all post-await effects — user may have navigated away mid-flight.
     if (!isMountedRef.current) return;
     setArchiveInFlight(false);
@@ -218,12 +226,12 @@ export function CardDetail() {
     } else {
       navigate("/cards");
     }
-  }, [archiveInFlight, channel, cardId, markArchived, navigate]);
+  }, [activeSlug, archiveInFlight, channel, cardId, markArchived, navigate]);
 
   const handleUnarchive = useCallback(async () => {
-    if (archiveInFlight) return;
+    if (archiveInFlight || !activeSlug) return;
     setArchiveInFlight(true);
-    const res = await client.unarchiveCard(channel, cardId);
+    const res = await client.unarchiveCard(activeSlug, channel, cardId);
     // Gate all post-await effects — user may have navigated away mid-flight.
     if (!isMountedRef.current) return;
     setArchiveInFlight(false);
@@ -234,7 +242,7 @@ export function CardDetail() {
     markUnarchived(channel, cardId);
     setArchived(false);
     toast.success("Card restored");
-  }, [archiveInFlight, channel, cardId, markUnarchived]);
+  }, [activeSlug, archiveInFlight, channel, cardId, markUnarchived]);
 
   function handleBack() {
     if (window.history.length > 1) {

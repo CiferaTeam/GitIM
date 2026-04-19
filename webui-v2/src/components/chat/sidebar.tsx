@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Hash, AtSign, ArchiveRestore, ChevronRight, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
 import { AgentStatusPanel } from "./agent-status-panel";
@@ -41,6 +42,7 @@ function isSelfDm(channel: Channel, currentUser: string): boolean {
 }
 
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
@@ -76,6 +78,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   async function handleCreateChannel() {
+    if (!activeSlug) {
+      setCreateError("No workspace selected");
+      return;
+    }
     const name = createName.trim().toLowerCase();
     const validation = client.validateChannelName(name);
     if (validation) {
@@ -86,6 +92,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     setCreateError("");
     try {
       const res = await client.createChannel(
+        activeSlug,
         name,
         createDisplayName.trim() || undefined,
         createIntro.trim() || undefined,
@@ -102,7 +109,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       return;
     }
     try {
-      const chRes = await client.channels();
+      const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
         setChannels(chRes.data.channels as Channel[]);
       }
@@ -156,7 +163,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Session cache: subsequent opens skip the fetch; unarchive updates the
     // local list directly.
     if (next && !archivedLoaded) {
-      const res = await client.listArchivedChannels();
+      if (!activeSlug) return;
+      const res = await client.listArchivedChannels(activeSlug);
       if (res.ok && res.data) {
         setArchivedChannels(res.data.channels);
         setArchivedLoaded(true);
@@ -169,7 +177,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   async function handleUnarchiveChannel(name: string) {
-    const res = await client.unarchiveChannel(name);
+    if (!activeSlug) return;
+    const res = await client.unarchiveChannel(activeSlug, name);
     if (!res.ok) {
       toast.error(`Failed to unarchive #${name}: ${res.error ?? "unknown"}`);
       return;
@@ -179,7 +188,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Refresh channel list so the restored channel picks up full metadata
     // (kind, members) in the active `channels` store.
     try {
-      const chRes = await client.channels();
+      const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
         setChannels(chRes.data.channels as Channel[]);
       }

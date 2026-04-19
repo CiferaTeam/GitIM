@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Navigate, Route, Routes } from "react-router";
+import { Loader2 } from "lucide-react";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
@@ -12,10 +13,12 @@ import { useAgentStore } from "./hooks/use-agent-store";
 import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
+import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { SetupGate } from "./components/setup/setup-gate";
+import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
 import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
@@ -36,6 +39,50 @@ function ChatPage() {
   return <ChatLayout />;
 }
 
+function FirstRunScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-6">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold tracking-tight">
+            GitIM<span className="text-primary">·</span>Cell
+          </h1>
+          <p className="text-sm text-text-muted mt-1">
+            Create your first workspace to get started.
+          </p>
+        </div>
+        <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-black/20 p-6">
+          <CreateWorkspaceForm fullWidth />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceLoading() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background text-sm text-text-muted gap-2">
+      <Loader2 className="size-4 animate-spin" />
+      Loading workspaces...
+    </div>
+  );
+}
+
+function WorkspaceIncomplete({ slug }: { slug: string }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-6">
+      <div className="max-w-md text-center space-y-3">
+        <p className="text-base font-semibold">Workspace incomplete</p>
+        <p className="text-sm text-text-muted">
+          Workspace <code className="font-mono">{slug}</code> is registered but
+          not fully initialized. Try creating it again, or delete it from the
+          switcher and start over.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const setCurrentUser = useChatStore((s) => s.setCurrentUser);
   const setChannels = useChatStore((s) => s.setChannels);
@@ -49,17 +96,23 @@ export default function App() {
   const addCardMessages = useCardStore((s) => s.addCardMessages);
   const port = useConnectionStore((s) => s.port);
 
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspacesLoading = useWorkspaceStore((s) => s.loading);
+  const fetchWorkspaces = useWorkspaceStore((s) => s.fetchAll);
+
   // Mutable refs for poll loop — avoids stale closures
   const sinceRef = useRef<string | undefined>(undefined);
   const workspaceRef = useRef<string | undefined>(undefined);
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
+  const activeSlugRef = useRef<string | null>(null);
 
   useVersionCheck();
-  // Connect to agent activity SSE stream
-  useAgentActivitySSE();
+  // Agent activity SSE is scoped to the active workspace
+  useAgentActivitySSE(activeSlug);
 
-  // Keep refs in sync with store
+  // Keep refs in sync with stores
   useEffect(() => {
     return useChatStore.subscribe((state) => {
       currentChannelRef.current = state.currentChannel;
@@ -67,9 +120,21 @@ export default function App() {
     });
   }, []);
 
+  useEffect(() => {
+    activeSlugRef.current = activeSlug;
+  }, [activeSlug]);
+
+  // Fetch workspaces once the runtime is reachable.
+  useEffect(() => {
+    if (!port) return;
+    fetchWorkspaces();
+  }, [port, fetchWorkspaces]);
+
   const runPoll = useCallback(async () => {
+    const slug = activeSlugRef.current;
+    if (!slug) return;
     try {
-      const pollRes = await client.poll(sinceRef.current);
+      const pollRes = await client.poll(slug, sinceRef.current);
 
       if (!pollRes.ok || !pollRes.data) {
         // Stale cursor recovery: discard and re-init
@@ -132,14 +197,14 @@ export default function App() {
       }
 
       if (needChannelRefresh) {
-        const chRes = await client.channels();
+        const chRes = await client.channels(slug);
         if (chRes.ok && chRes.data) {
           setChannels(chRes.data.channels as Channel[]);
         }
       }
 
       if (needCardRefresh) {
-        const cardRes = await client.listCards();
+        const cardRes = await client.listCards(slug);
         if (cardRes.ok && cardRes.data) {
           // Merge, not replace — preserves in-flight optimistic patches so
           // the 3s poll cadence can't flicker the UI back before PATCH resolves.
@@ -148,7 +213,7 @@ export default function App() {
       }
 
       // Periodically refresh agents (real backend)
-      const agentsRes = await client.listAgents();
+      const agentsRes = await client.listAgents(slug);
       if (agentsRes.ok && agentsRes.data) {
         setAgents(agentsRes.data.agents as Agent[]);
       }
@@ -164,26 +229,35 @@ export default function App() {
     addCardMessages,
   ]);
 
-  // Init + poll loop — only run when port is available
+  // Init + poll loop — runs whenever port + activeSlug are both set, and
+  // re-runs whenever activeSlug changes so state is refreshed on switch.
   useEffect(() => {
-    if (!port) return;
+    if (!port || !activeSlug) return;
 
-    async function init() {
-      const [healthRes, meRes, channelsRes, usersRes, agentsRes, cardsRes] =
+    // Reset per-workspace store slices on switch so stale data from the
+    // previous workspace doesn't flash into the new one.
+    setChannels([]);
+    setUsers([]);
+    setAgents([]);
+    setCards([]);
+    setCurrentUser("");
+    setConnected(false);
+    sinceRef.current = undefined;
+    workspaceRef.current = undefined;
+
+    async function init(slug: string) {
+      const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
-          client.health(),
-          client.me(),
-          client.channels(),
-          client.users(),
-          client.listAgents(),
-          client.listCards(),
+          client.me(slug),
+          client.channels(slug),
+          client.users(slug),
+          client.listAgents(slug),
+          client.listCards(slug),
         ]);
 
-      // Restore cursor from localStorage keyed by workspace
-      if (healthRes.ok && healthRes.data?.workspace) {
-        workspaceRef.current = healthRes.data.workspace as string;
-        sinceRef.current = loadCursor(workspaceRef.current);
-      }
+      // Restore cursor from localStorage keyed by slug (stable identifier).
+      workspaceRef.current = slug;
+      sinceRef.current = loadCursor(slug);
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data)
@@ -199,28 +273,57 @@ export default function App() {
     }
 
     let pollHandle: ReturnType<typeof setInterval>;
-    init().then(() => {
+    init(activeSlug).then(() => {
       pollHandle = setInterval(runPoll, POLL_INTERVAL_MS);
     });
 
     return () => {
       clearInterval(pollHandle);
     };
-  }, [port, setCurrentUser, setChannels, setUsers, setAgents, setCards, setConnected, runPoll]);
+  }, [
+    port,
+    activeSlug,
+    setCurrentUser,
+    setChannels,
+    setUsers,
+    setAgents,
+    setCards,
+    setConnected,
+    runPoll,
+  ]);
+
+  // Render-time gate: until we have a workspace selected, bypass the chat UI.
+  let gated: React.ReactNode;
+  if (workspacesLoading && workspaces.length === 0) {
+    gated = <WorkspaceLoading />;
+  } else if (workspaces.length === 0) {
+    gated = <FirstRunScreen />;
+  } else {
+    const active = activeSlug
+      ? workspaces.find((w) => w.slug === activeSlug)
+      : null;
+    if (active && !active.initialized) {
+      gated = <WorkspaceIncomplete slug={active.slug} />;
+    } else {
+      gated = (
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<Navigate to="/management" replace />} />
+            <Route path="/management" element={<ManagementPage />} />
+            <Route path="/management/:agentId" element={<AgentDetail />} />
+            <Route path="/chat" element={<ChatPage />} />
+            <Route path="/cards" element={<CardKanban />} />
+            <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
+          </Route>
+        </Routes>
+      );
+    }
+  }
 
   return (
     <SetupGate>
       <Toaster position="top-right" richColors />
-      <Routes>
-        <Route element={<AppShell />}>
-          <Route index element={<Navigate to="/management" replace />} />
-          <Route path="/management" element={<ManagementPage />} />
-          <Route path="/management/:agentId" element={<AgentDetail />} />
-          <Route path="/chat" element={<ChatPage />} />
-          <Route path="/cards" element={<CardKanban />} />
-          <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
-        </Route>
-      </Routes>
+      {gated}
     </SetupGate>
   );
 }

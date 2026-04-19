@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, LogIn } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
 import { Button } from "../ui/button";
@@ -23,6 +24,7 @@ function toApiChannel(displayName: string): string {
 }
 
 export function ChatLayout() {
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const currentUser = useChatStore((s) => s.currentUser);
@@ -78,17 +80,18 @@ export function ChatLayout() {
 
   const handleChannelSelect = useCallback(
     async (name: string) => {
+      if (!activeSlug) return;
       selectChannel(name);
       clearUnread(name);
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(apiChannel, 50);
+      const res = await client.read(activeSlug, apiChannel, 50);
       if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
         setMessages(res.data.entries as Message[]);
       }
     },
-    [selectChannel, clearUnread, setMessages, setThreadRoot]
+    [activeSlug, selectChannel, clearUnread, setMessages, setThreadRoot]
   );
 
   useEffect(() => {
@@ -100,19 +103,19 @@ export function ChatLayout() {
   }, [channels, currentChannel, handleChannelSelect]);
 
   const handleJoin = useCallback(async () => {
-    if (!currentChannel) return;
-    const res = await client.joinChannel(currentChannel);
+    if (!currentChannel || !activeSlug) return;
+    const res = await client.joinChannel(activeSlug, currentChannel);
     if (!res.ok) return;
-    const chRes = await client.channels();
+    const chRes = await client.channels(activeSlug);
     if (chRes.ok && chRes.data) {
       setChannels(chRes.data.channels as Channel[]);
     }
     const apiChannel = toApiChannel(currentChannel);
-    const readRes = await client.read(apiChannel, 50);
+    const readRes = await client.read(activeSlug, apiChannel, 50);
     if (readRes.ok && readRes.data) {
       setMessages(readRes.data.entries as Message[]);
     }
-  }, [currentChannel, setChannels, setMessages]);
+  }, [activeSlug, currentChannel, setChannels, setMessages]);
 
   const handleStartDm = useCallback(
     async (targetUser: string) => {
@@ -131,6 +134,7 @@ export function ChatLayout() {
   const handleSend = useCallback(
     async (body: string, pointTo: number = 0) => {
       if (!currentChannel) return { ok: false, error: "No channel selected" };
+      if (!activeSlug) return { ok: false, error: "No workspace selected" };
       const pendingId = `pending-${Date.now()}`;
       const pending: Message = {
         line_number: -1,
@@ -148,6 +152,7 @@ export function ChatLayout() {
 
       const apiChannel = toApiChannel(currentChannel);
       const res = await client.send(
+        activeSlug,
         apiChannel,
         body,
         currentUser,
@@ -160,7 +165,7 @@ export function ChatLayout() {
       }
       return res;
     },
-    [currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
+    [activeSlug, currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
   );
 
   const handleReply = useCallback(
@@ -172,9 +177,9 @@ export function ChatLayout() {
 
   const handleShowThread = useCallback(
     async (msg: Message) => {
-      if (!currentChannel) return;
+      if (!currentChannel || !activeSlug) return;
       const apiChannel = toApiChannel(currentChannel);
-      const res = await client.thread(apiChannel, msg.line_number);
+      const res = await client.thread(activeSlug, apiChannel, msg.line_number);
       if (res.ok && res.data) {
         const entries = res.data.entries as Message[];
         const root = entries[0] ?? msg;
@@ -182,7 +187,7 @@ export function ChatLayout() {
         setThreadMessages(entries);
       }
     },
-    [currentChannel, setThreadRoot, setThreadMessages]
+    [activeSlug, currentChannel, setThreadRoot, setThreadMessages]
   );
 
   const handleMentionClick = useCallback(
@@ -229,13 +234,13 @@ export function ChatLayout() {
 
   const handleNavBack = useCallback(async () => {
     const entry = useChatStore.getState().popNav();
-    if (!entry) return;
+    if (!entry || !activeSlug) return;
     selectChannel(entry.channel);
     clearUnread(entry.channel);
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(apiChannel, 50);
+    const res = await client.read(activeSlug, apiChannel, 50);
     if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
       setMessages(res.data.entries as Message[]);
     }
@@ -243,7 +248,7 @@ export function ChatLayout() {
       const el = document.querySelector("[data-message-scroll]");
       if (el) el.scrollTop = entry.scrollTop;
     });
-  }, [selectChannel, clearUnread, setMessages, setThreadRoot]);
+  }, [activeSlug, selectChannel, clearUnread, setMessages, setThreadRoot]);
 
   const handleCloseUserCard = useCallback(() => {
     setUserCardHandler(null);

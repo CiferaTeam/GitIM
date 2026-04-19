@@ -148,16 +148,31 @@ async fn test_preflight_codex_returns_result_shape() {
 
 fn agents_add_request(body: serde_json::Value) -> Request<Body> {
     Request::builder()
-        .uri("/agents/add")
+        .uri("/workspaces/test-ws/agents/add")
         .method("POST")
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
 
+/// Inject a placeholder workspace so the /workspaces/{slug}/agents/add route
+/// resolves. Provider validation runs before workspace state is read, so these
+/// tests exercise the validation branch alone.
+fn inject_ws(state: &gitim_runtime::http::SharedRuntimeState) {
+    use std::path::PathBuf;
+    let mut s = state.lock().unwrap();
+    let ctx = gitim_runtime::workspace::WorkspaceContext::new(
+        "test-ws".to_string(),
+        "test-ws".to_string(),
+        PathBuf::from("/tmp/test-ws"),
+    );
+    s.workspaces.insert("test-ws".to_string(), ctx);
+}
+
 #[tokio::test]
 async fn test_agents_add_missing_provider_returns_400() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
 
     // Body deliberately omits `provider`. serde's "missing field" error surfaces
     // as a 4xx from axum's Json extractor — we accept any 4xx to stay resilient
@@ -179,7 +194,8 @@ async fn test_agents_add_missing_provider_returns_400() {
 
 #[tokio::test]
 async fn test_agents_add_unsupported_provider_returns_400() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
 
     let response = router
         .oneshot(agents_add_request(serde_json::json!({
@@ -229,9 +245,10 @@ async fn assert_route_reachable(router: axum::Router, req: Request<Body>) {
 
 #[tokio::test]
 async fn test_card_archive_route_reachable() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/cards/general/abc123/archive")
+        .uri("/workspaces/test-ws/im/cards/general/abc123/archive")
         .method("POST")
         .body(Body::empty())
         .unwrap();
@@ -240,9 +257,10 @@ async fn test_card_archive_route_reachable() {
 
 #[tokio::test]
 async fn test_card_unarchive_route_reachable() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/cards/general/abc123/unarchive")
+        .uri("/workspaces/test-ws/im/cards/general/abc123/unarchive")
         .method("POST")
         .body(Body::empty())
         .unwrap();
@@ -252,9 +270,10 @@ async fn test_card_unarchive_route_reachable() {
 #[tokio::test]
 async fn test_list_archived_cards_route_reachable() {
     // No query param.
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/cards/archived")
+        .uri("/workspaces/test-ws/im/cards/archived")
         .body(Body::empty())
         .unwrap();
     assert_route_reachable(router, req).await;
@@ -265,9 +284,10 @@ async fn test_list_archived_cards_with_channel_query_route_reachable() {
     // With `?channel=foo` — verifies the Query extractor accepts the optional
     // filter and the route matches `archived` rather than trying to fall
     // through to `/im/cards/{channel}/{card_id}`.
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/cards/archived?channel=general")
+        .uri("/workspaces/test-ws/im/cards/archived?channel=general")
         .body(Body::empty())
         .unwrap();
     assert_route_reachable(router, req).await;
@@ -275,9 +295,10 @@ async fn test_list_archived_cards_with_channel_query_route_reachable() {
 
 #[tokio::test]
 async fn test_channel_archive_route_reachable() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/channels/general/archive")
+        .uri("/workspaces/test-ws/im/channels/general/archive")
         .method("POST")
         .body(Body::empty())
         .unwrap();
@@ -286,9 +307,10 @@ async fn test_channel_archive_route_reachable() {
 
 #[tokio::test]
 async fn test_channel_unarchive_route_reachable() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/channels/general/unarchive")
+        .uri("/workspaces/test-ws/im/channels/general/unarchive")
         .method("POST")
         .body(Body::empty())
         .unwrap();
@@ -297,9 +319,10 @@ async fn test_channel_unarchive_route_reachable() {
 
 #[tokio::test]
 async fn test_list_archived_channels_route_reachable() {
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_ws(&state);
     let req = Request::builder()
-        .uri("/im/channels/archived")
+        .uri("/workspaces/test-ws/im/channels/archived")
         .body(Body::empty())
         .unwrap();
     assert_route_reachable(router, req).await;
