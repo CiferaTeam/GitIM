@@ -22,6 +22,35 @@ interface VersionCheckResult {
   triggerUpdate: () => Promise<void>;
 }
 
+// Parse "X.Y.Z" (with optional leading `v`) into a triple. Returns null on
+// any malformed input — callers should fail closed, matching the backend's
+// `gitim-updater::is_newer` semantics.
+function parseVersion(s: string | null): [number, number, number] | null {
+  if (!s) return null;
+  const cleaned = s.replace(/^v/, "").trim();
+  const parts = cleaned.split(".");
+  if (parts.length !== 3) return null;
+  const nums = parts.map((p) => {
+    const n = parseInt(p, 10);
+    return Number.isFinite(n) && n >= 0 ? n : NaN;
+  });
+  if (nums.some(Number.isNaN)) return null;
+  return nums as [number, number, number];
+}
+
+// Strict "latest is newer than current" — returns false for equal, older,
+// or malformed inputs. Fail-closed behavior mirrors the runtime updater.
+function isNewer(current: string | null, latest: string | null): boolean {
+  const c = parseVersion(current);
+  const l = parseVersion(latest);
+  if (!c || !l) return false;
+  for (let i = 0; i < 3; i++) {
+    if (l[i] > c[i]) return true;
+    if (l[i] < c[i]) return false;
+  }
+  return false;
+}
+
 /**
  * Combines runtime `/health` with the Cell API `check-version` endpoint to
  * drive the self-update state machine (Task 8).
@@ -56,31 +85,34 @@ export function useVersionCheck(): VersionCheckResult {
 
   // Guard against overlapping restart polls and StrictMode double-fire.
   const restartingRef = useRef(false);
+  // Tracks the active restart-window interval so unmount can tear it down.
+  const pollHandleRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // --- Refresh primitives ----------------------------------------------------
+
+  const refreshCurrent = useCallback(async () => {
+    const res = await health();
+    if (res.ok && res.data) {
+      const version = (res.data as { version?: string }).version ?? null;
+      if (version) setRuntimeVersion(version);
+    }
+  }, [setRuntimeVersion]);
+
+  const refreshLatest = useCallback(async () => {
+    const uuid = getUUID();
+    const res = await checkVersion(uuid);
+    if (res.ok && res.latest_version) {
+      setLatest(res.latest_version);
+    }
+  }, []);
 
   // --- Periodic version check ------------------------------------------------
 
   useEffect(() => {
     let cancelled = false;
 
-    async function refreshCurrent() {
-      const res = await health();
-      if (cancelled) return;
-      if (res.ok && res.data) {
-        const version = (res.data as { version?: string }).version ?? null;
-        if (version) setRuntimeVersion(version);
-      }
-    }
-
-    async function refreshLatest() {
-      const uuid = getUUID();
-      const res = await checkVersion(uuid);
-      if (cancelled) return;
-      if (res.ok && res.latest_version) {
-        setLatest(res.latest_version);
-      }
-    }
-
     async function tick() {
+      if (cancelled) return;
       await Promise.all([refreshCurrent(), refreshLatest()]);
     }
 
@@ -90,7 +122,19 @@ export function useVersionCheck(): VersionCheckResult {
       cancelled = true;
       clearInterval(handle);
     };
-  }, [setRuntimeVersion]);
+  }, [refreshCurrent, refreshLatest]);
+
+  // --- Unmount cleanup for restart-window poll -------------------------------
+
+  useEffect(
+    () => () => {
+      if (pollHandleRef.current !== null) {
+        clearInterval(pollHandleRef.current);
+        pollHandleRef.current = null;
+      }
+    },
+    [],
+  );
 
   // --- Update trigger --------------------------------------------------------
 
@@ -102,6 +146,13 @@ export function useVersionCheck(): VersionCheckResult {
     const accept = await updateAndRestart();
     if (!accept.ok || !accept.data) {
       restartingRef.current = false;
+      // `already_latest` is an info signal, not a failure: our "latest"
+      // state was stale. Refresh silently so hasUpdate corrects itself.
+      if (accept.error_code === "already_latest") {
+        toast.info("Already up to date");
+        await Promise.all([refreshCurrent(), refreshLatest()]);
+        return;
+      }
       const msg = accept.error ?? "Failed to start update";
       setUpdateError(msg);
       toast.error(msg);
@@ -115,10 +166,13 @@ export function useVersionCheck(): VersionCheckResult {
     let sawDisconnect = false;
 
     await new Promise<void>((resolve) => {
-      const poll = setInterval(async () => {
+      pollHandleRef.current = setInterval(async () => {
         // Timeout — couldn't confirm the new version came up.
         if (Date.now() - startedAt > RESTART_TIMEOUT_MS) {
-          clearInterval(poll);
+          if (pollHandleRef.current !== null) {
+            clearInterval(pollHandleRef.current);
+            pollHandleRef.current = null;
+          }
           setIsUpdating(false);
           setIsRestarting(false);
           setUpdateError("Update may have failed, please restart manually");
@@ -140,7 +194,10 @@ export function useVersionCheck(): VersionCheckResult {
 
         const version = (res.data as { version?: string } | undefined)?.version ?? null;
         if (version && version === targetVersion) {
-          clearInterval(poll);
+          if (pollHandleRef.current !== null) {
+            clearInterval(pollHandleRef.current);
+            pollHandleRef.current = null;
+          }
           setIsUpdating(false);
           setIsRestarting(false);
           setUpdateError(null);
@@ -156,10 +213,16 @@ export function useVersionCheck(): VersionCheckResult {
         // old process still answering). Keep polling.
       }, RESTART_POLL_MS);
     });
-  }, [setIsRestarting, setIsUpdating, setRuntimeVersion, setUpdateError]);
+  }, [
+    refreshCurrent,
+    refreshLatest,
+    setIsRestarting,
+    setIsUpdating,
+    setRuntimeVersion,
+    setUpdateError,
+  ]);
 
-  const hasUpdate =
-    current != null && latest != null && current !== latest;
+  const hasUpdate = isNewer(current, latest);
 
   return {
     current,
