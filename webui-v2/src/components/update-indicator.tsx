@@ -34,7 +34,7 @@ export function UpdateIndicator() {
 
   // Icon color follows severity: red on error, amber otherwise. A spinner
   // replaces the triangle while the restart window is in flight.
-  const iconColor = error ? "text-red-500" : "text-amber-500";
+  const iconColor = error ? "text-error" : "text-warning";
   const Icon = busy ? Loader2 : AlertTriangle;
   const iconClasses = busy ? "size-4 animate-spin" : "size-4";
 
@@ -75,7 +75,7 @@ export function UpdateIndicator() {
             You're on v{current ?? "unknown"}
           </div>
           {error ? (
-            <div className="text-xs text-red-500 break-words">{error}</div>
+            <div className="text-xs text-error break-words">{error}</div>
           ) : (
             <Button
               size="sm"
