@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   ArrowLeft,
   CircleHelp,
@@ -7,6 +7,7 @@ import {
   MessageSquare,
   LayoutDashboard,
   ChevronRight,
+  KeyRound,
 } from "lucide-react";
 
 interface DocSection {
@@ -42,9 +43,45 @@ function Tip({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Screenshot slot. Swap `src="pending:..."` for a real path once the image
+ * is dropped into `webui-v2/public/docs-images/...`.
+ */
+function Screenshot({ src, caption }: { src: string; caption: string }) {
+  const pending = src.startsWith("pending:");
+  const target = pending ? src.slice("pending:".length) : src;
+  return (
+    <figure className="rounded-md border border-border bg-surface/40 overflow-hidden">
+      {pending ? (
+        <div className="aspect-video flex flex-col items-center justify-center gap-1.5 bg-surface/60 text-center p-6">
+          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
+            Screenshot pending
+          </span>
+          <code className="font-mono text-[11px] text-text-secondary break-all max-w-full">
+            {target}
+          </code>
+        </div>
+      ) : (
+        <img src={target} alt={caption} className="w-full block" loading="lazy" />
+      )}
+      <figcaption className="text-[11px] text-text-muted px-3 py-2 border-t border-border/60">
+        {caption}
+      </figcaption>
+    </figure>
+  );
+}
+
 export function DocsPage() {
   const navigate = useNavigate();
-  const [activeId, setActiveId] = useState("quickstart");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = searchParams.get("tab") ?? "quickstart";
+  const [activeId, setActiveId] = useState(initialTab);
+
+  function selectTab(id: string) {
+    setActiveId(id);
+    // Keep URL in sync so refresh / bookmark lands on the same section.
+    setSearchParams({ tab: id }, { replace: true });
+  }
 
   const sections: DocSection[] = [
     {
@@ -86,6 +123,152 @@ export function DocsPage() {
               The green dot next to the logo indicates an active connection.
             </p>
           </Step>
+        </div>
+      ),
+    },
+    {
+      id: "github-token",
+      title: "GitHub Token",
+      icon: <KeyRound className="size-4" />,
+      content: (
+        <div className="space-y-5">
+          <p className="text-text-secondary text-sm leading-relaxed">
+            When you pick <strong>GitHub</strong> as a workspace provider, the runtime uses
+            a Personal Access Token (PAT) to clone, fetch, and push to your repository.
+            This page walks through what scopes the token needs and how to generate one.
+          </p>
+
+          <div className="rounded-lg border border-border bg-surface/40 px-4 py-3 text-sm text-text-secondary">
+            <p className="font-semibold text-foreground mb-1">TL;DR</p>
+            <p className="leading-relaxed">
+              Fine-grained PAT → <strong>Contents: Read and write</strong> + Metadata: Read (auto),
+              scoped to the single workspace repo.
+              Classic PAT → <code className="font-mono text-xs">repo</code> scope.
+              Always use a <strong>private</strong> repo — it stores all channels, DMs, and user metadata.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Option A — Fine-grained PAT (recommended)</h3>
+            <p className="text-sm text-text-secondary leading-relaxed">
+              Fine-grained tokens limit access to a single repo and a minimum permission set,
+              which is what you want for a workspace credential.
+              Create one at{" "}
+              <a
+                href="https://github.com/settings/personal-access-tokens/new?name=GitIM%20runtime"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                github.com/settings/personal-access-tokens/new
+              </a>
+              .
+            </p>
+
+            <Step number={1} title="Name, expiration, resource owner">
+              <p>
+                Give the token a name you will recognize later (for example <code className="font-mono text-xs">GitIM runtime</code>).
+                Pick an expiration date — <strong>90 days or longer</strong> is recommended, because
+                <code className="font-mono text-xs"> sync_loop</code> will circuit-break after 3 consecutive auth failures and
+                v1 has no in-app rotation flow.
+              </p>
+              <p>
+                Resource owner must be the account (or org) that owns the workspace repo.
+              </p>
+              <Screenshot
+                src="pending:/docs-images/github-token/01-token-basics.png"
+                caption="Name · Expiration · Resource owner"
+              />
+            </Step>
+
+            <Step number={2} title="Repository access — Only select repositories">
+              <p>
+                Choose <strong>Only select repositories</strong> and pick the single repo you plan to use as a workspace.
+                Do not grant <em>All repositories</em> access — the token is written to
+                <code className="font-mono text-xs"> $workspace/.gitim-runtime/config.json</code>, so minimise its blast radius.
+              </p>
+              <Screenshot
+                src="pending:/docs-images/github-token/02-repo-access.png"
+                caption="Only select repositories → workspace repo"
+              />
+            </Step>
+
+            <Step number={3} title="Repository permissions">
+              <p>
+                Under <strong>Repository permissions</strong>, set:
+              </p>
+              <ul className="list-disc list-inside space-y-0.5 text-sm">
+                <li><strong>Contents</strong>: <strong>Read and write</strong> — required for <code className="font-mono text-xs">git clone</code>, fetch, and push commits back to the remote.</li>
+                <li><strong>Metadata</strong>: Read — auto-granted, leave it on.</li>
+              </ul>
+              <p>
+                Do not grant anything else. Specifically, you do not need Issues, Pull requests, Actions, or any account-level permissions.
+              </p>
+              <Screenshot
+                src="pending:/docs-images/github-token/03-permissions.png"
+                caption="Contents: Read and write (Metadata: Read is auto)"
+              />
+            </Step>
+
+            <Step number={4} title="Generate and paste">
+              <p>
+                Click <strong>Generate token</strong>, copy the value (starts with <code className="font-mono text-xs">github_pat_</code>),
+                and paste it into the <em>Personal Access Token</em> field in the workspace setup form.
+                GitHub only shows the token once — if you lose it, generate a new one.
+              </p>
+              <Screenshot
+                src="pending:/docs-images/github-token/04-generated.png"
+                caption="Copy the github_pat_... value once; it is not shown again"
+              />
+            </Step>
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Option B — Classic PAT</h3>
+            <p className="text-sm text-text-secondary leading-relaxed">
+              Classic tokens grant broader access but are accepted if you prefer the older flow.
+              Create one at{" "}
+              <a
+                href="https://github.com/settings/tokens/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                github.com/settings/tokens/new
+              </a>
+              .
+            </p>
+            <ul className="list-disc list-inside space-y-0.5 text-sm text-text-secondary">
+              <li>Private repo (recommended): tick <code className="font-mono text-xs">repo</code> — the whole group.</li>
+              <li>Do not tick <code className="font-mono text-xs">admin:*</code>, <code className="font-mono text-xs">delete_repo</code>, or anything else.</li>
+            </ul>
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Security notes</h3>
+            <ul className="list-disc list-inside space-y-1 text-sm text-text-secondary">
+              <li>
+                Keep the workspace repo <strong>private</strong>. It contains every channel message, DM, and user metadata file.
+              </li>
+              <li>
+                All agent commits share this single token. Commit author is the agent handler; GitHub attributes the push to the token owner.
+              </li>
+              <li>
+                Multi-machine workspaces use <strong>the same PAT</strong> for every clone —
+                GitIM propagates it into each clone's <code className="font-mono text-xs">.git/config</code> automatically.
+              </li>
+              <li>
+                If the token expires or is revoked, sync halts after 3 failed auth attempts.
+                Restart the runtime after updating the token in <code className="font-mono text-xs">config.json</code> (v1 has no rotate UI).
+              </li>
+            </ul>
+          </div>
+
+          <Tip>
+            The workspace setup form validates the token before cloning — if you see
+            <code className="font-mono text-xs"> insufficient_scope</code> or
+            <code className="font-mono text-xs"> token_lacks_repo_access</code>, re-check the Repository access and Contents permission boxes above.
+          </Tip>
         </div>
       ),
     },
@@ -247,7 +430,7 @@ export function DocsPage() {
             <button
               key={section.id}
               type="button"
-              onClick={() => setActiveId(section.id)}
+              onClick={() => selectTab(section.id)}
               className={[
                 "w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors",
                 activeId === section.id

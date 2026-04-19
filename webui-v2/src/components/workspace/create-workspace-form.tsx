@@ -227,14 +227,25 @@ export function CreateWorkspaceForm({
               autoComplete="off"
               disabled={submitting}
             />
-            <a
-              href={PAT_GENERATE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block text-[11px] text-primary hover:underline"
-            >
-              Generate PAT on GitHub
-            </a>
+            <div className="flex items-center gap-2 text-[11px]">
+              <a
+                href={PAT_GENERATE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                Generate PAT on GitHub
+              </a>
+              <span className="text-text-muted" aria-hidden="true">·</span>
+              <a
+                href="/docs?tab=github-token"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                Required scopes
+              </a>
+            </div>
           </div>
 
           <label className="flex items-start gap-2 text-[11px] text-text-secondary leading-relaxed cursor-pointer">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 import { Loader2 } from "lucide-react";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
@@ -319,9 +319,17 @@ export default function App() {
     runPoll,
   ]);
 
+  // /docs is a standalone reference — let it render regardless of workspace
+  // state so setup-screen hints ("What scopes does the PAT need?") can deep-link
+  // into it without getting bounced back by the gate.
+  const location = useLocation();
+  const isDocsRoute = location.pathname.startsWith("/docs");
+
   // Render-time gate: until we have a workspace selected, bypass the chat UI.
   let gated: React.ReactNode;
-  if (workspacesLoading && workspaces.length === 0) {
+  if (isDocsRoute) {
+    gated = <DocsPage />;
+  } else if (workspacesLoading && workspaces.length === 0) {
     gated = <WorkspaceLoading />;
   } else if (workspaces.length === 0) {
     gated = <FirstRunScreen />;
