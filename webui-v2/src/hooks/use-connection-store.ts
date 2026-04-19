@@ -13,10 +13,21 @@ interface ConnectionState {
   runtimeVersion: string | null;
   error: string | null;
 
+  // Self-update state machine (Task 8). Set by `useVersionCheck.triggerUpdate`.
+  // - isUpdating: update-and-restart accepted, polling /health
+  // - isRestarting: /health unreachable (parent exiting / child rebinding)
+  // - updateError: surfaced error string for the UI
+  isUpdating: boolean;
+  isRestarting: boolean;
+  updateError: string | null;
+
   setStatus: (s: ConnectionStatus) => void;
   setPort: (p: number) => void;
   setRuntimeVersion: (v: string | null) => void;
   setError: (e: string | null) => void;
+  setIsUpdating: (v: boolean) => void;
+  setIsRestarting: (v: boolean) => void;
+  setUpdateError: (e: string | null) => void;
   baseUrl: () => string;
 }
 
@@ -33,6 +44,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   runtimeVersion: null,
   error: null,
 
+  isUpdating: false,
+  isRestarting: false,
+  updateError: null,
+
   setStatus: (s) => set({ status: s, error: null }),
   setPort: (p) => {
     localStorage.setItem(STORAGE_KEY, String(p));
@@ -40,5 +55,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
   setRuntimeVersion: (v) => set({ runtimeVersion: v }),
   setError: (e) => set({ error: e }),
+  setIsUpdating: (v) => set({ isUpdating: v }),
+  setIsRestarting: (v) => set({ isRestarting: v }),
+  setUpdateError: (e) => set({ updateError: e }),
   baseUrl: () => `http://127.0.0.1:${get().port}`,
 }));

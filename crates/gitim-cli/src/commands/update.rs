@@ -1,50 +1,17 @@
 #![deny(warnings)]
 
-const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
+//! `gitim update` CLI orchestrator.
+//!
+//! All download / extract / replace logic lives in `gitim-updater`. This file
+//! owns only the user-facing interaction: progress messages on stderr, the
+//! confirm prompt when a daemon is running, and exit-code semantics.
+
+use gitim_updater::{
+    detect_platform, download_and_extract, download_url, fetch_latest_tag, is_newer,
+    replace_binaries,
+};
+
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
-
-fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
-    let s = s.strip_prefix('v').unwrap_or(s);
-    let mut parts = s.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some((major, minor, patch))
-}
-
-fn is_newer(current: &str, remote: &str) -> bool {
-    match (parse_version(current), parse_version(remote)) {
-        (Some(c), Some(r)) => r > c,
-        _ => false,
-    }
-}
-
-fn detect_platform() -> Result<String, String> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    let arch_name = match arch {
-        "aarch64" => "arm64",
-        "x86_64" => "x86_64",
-        other => return Err(format!("unsupported architecture: {other}")),
-    };
-    let os_name = match os {
-        "macos" => "darwin",
-        "linux" => "linux",
-        other => return Err(format!("unsupported OS: {other}")),
-    };
-    Ok(format!("{os_name}-{arch_name}"))
-}
-
-fn download_url(tag: &str, platform: &str) -> String {
-    format!(
-        "https://github.com/{RELEASES_REPO}/releases/download/{tag}/gitim-{tag}-{platform}.tar.gz"
-    )
-}
-
-fn latest_release_api_url() -> String {
-    format!("https://api.github.com/repos/{RELEASES_REPO}/releases/latest")
-}
 
 fn confirm(prompt: &str) -> bool {
     use std::io::{self, Write};
@@ -55,100 +22,6 @@ fn confirm(prompt: &str) -> bool {
         return false;
     }
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
-}
-
-async fn fetch_latest_tag() -> Result<String, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .user_agent("gitim-updater")
-        .build()?;
-    let resp: serde_json::Value = client
-        .get(latest_release_api_url())
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    resp["tag_name"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "no tag_name in release response".into())
-}
-
-async fn download_and_extract(
-    url: &str,
-    dest: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .user_agent("gitim-updater")
-        .build()?;
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(dest)?;
-    Ok(())
-}
-
-fn replace_binaries(
-    extracted_dir: &std::path::Path,
-    install_dir: &std::path::Path,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut installed = Vec::new();
-    for bin_name in BINARIES {
-        let src = find_binary(extracted_dir, bin_name);
-        let Some(src) = src else {
-            eprintln!("Warning: {bin_name} not found in archive, skipping");
-            continue;
-        };
-        let dest = install_dir.join(bin_name);
-        // Rename-then-copy: if copy fails, the backup is still usable
-        let backup = dest.with_extension("old");
-        if dest.exists() {
-            std::fs::rename(&dest, &backup)?;
-        }
-        std::fs::copy(&src, &dest)?;
-        let _ = std::fs::remove_file(&backup);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        }
-        installed.push(bin_name.to_string());
-    }
-    Ok(installed)
-}
-
-fn find_binary(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    for entry in walkdir(dir) {
-        let matches = entry
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == name);
-        if matches && entry.is_file() {
-            return Some(entry);
-        }
-    }
-    None
-}
-
-fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut results = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                results.extend(walkdir(&path));
-            } else {
-                results.push(path);
-            }
-        }
-    }
-    results
 }
 
 pub async fn cmd_update(version: Option<&str>, yes: bool) {
@@ -226,9 +99,10 @@ pub async fn cmd_update(version: Option<&str>, yes: bool) {
         std::process::exit(1);
     }
 
-    // 7. Replace binaries
+    // 7. Replace binaries (CLI doesn't retain backups — they're a debug aid
+    // only the runtime's update flow needs).
     eprintln!("Installing to {}...", install_dir.display());
-    match replace_binaries(tmp.path(), install_dir) {
+    match replace_binaries(tmp.path(), install_dir, false) {
         Ok(installed) => {
             for name in &installed {
                 eprintln!("  {name} -> {}", install_dir.join(name).display());
@@ -239,55 +113,5 @@ pub async fn cmd_update(version: Option<&str>, yes: bool) {
             eprintln!("Error: failed to install binaries: {e}");
             std::process::exit(1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_version() {
-        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1)));
-        assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
-        assert_eq!(parse_version("v0.10.0"), Some((0, 10, 0)));
-        assert_eq!(parse_version("bad"), None);
-        assert_eq!(parse_version("1.2"), None);
-    }
-
-    #[test]
-    fn test_is_newer() {
-        assert!(is_newer("0.3.1", "0.4.0"));
-        assert!(is_newer("0.3.1", "0.3.2"));
-        assert!(is_newer("0.3.1", "1.0.0"));
-        assert!(!is_newer("0.3.1", "0.3.1"));
-        assert!(!is_newer("0.3.1", "0.3.0"));
-        assert!(!is_newer("0.3.1", "0.2.9"));
-        assert!(is_newer("0.3.1", "v0.4.0"));
-    }
-
-    #[test]
-    fn test_detect_platform() {
-        let platform = detect_platform();
-        assert!(platform.is_ok());
-        let p = platform.unwrap();
-        assert!(p.contains('-'));
-    }
-
-    #[test]
-    fn test_download_url() {
-        let url = download_url("v0.3.1", "darwin-arm64");
-        assert_eq!(
-            url,
-            "https://github.com/CiferaTeam/gitim-releases/releases/download/v0.3.1/gitim-v0.3.1-darwin-arm64.tar.gz"
-        );
-    }
-
-    #[test]
-    fn test_latest_release_api_url() {
-        assert_eq!(
-            latest_release_api_url(),
-            "https://api.github.com/repos/CiferaTeam/gitim-releases/releases/latest"
-        );
     }
 }

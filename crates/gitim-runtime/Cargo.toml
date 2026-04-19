@@ -8,6 +8,8 @@ license.workspace = true
 gitim-client = { path = "../gitim-client" }
 gitim-agent-provider = { path = "../gitim-agent-provider" }
 gitim-sync = { path = "../gitim-sync" }
+gitim-updater = { path = "../gitim-updater" }
+uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,9 +30,38 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1"
 
+[features]
+# Gates the `fake-gitim-runtime` test-support binary and the `update_e2e`
+# integration test. Without this feature, plain `cargo build --release` (or
+# `cargo install --path`) does NOT produce the fake binary — keeps test
+# helpers out of production artifacts. Enable via
+# `cargo test -p gitim-runtime --features test-support --test update_e2e`.
+test-support = []
+
 [[bin]]
 name = "gitim-runtime"
 path = "src/bin/runtime.rs"
+
+# Test-only stand-in for `gitim-runtime`. The update E2E tarball is built
+# around copies of this binary; the `CARGO_BIN_EXE_fake-gitim-runtime` env var
+# lets the test locate the compiled artifact without hard-coding a target path.
+#
+# Gated behind the `test-support` feature so plain `cargo build --release`
+# (or `cargo install --path`) does NOT drop this helper into the production
+# artifact set. The `update_e2e` integration test declares the same feature
+# via `required-features`, so the two travel together.
+[[bin]]
+name = "fake-gitim-runtime"
+path = "tests/support/fake_runtime.rs"
+test = false
+doc = false
+bench = false
+required-features = ["test-support"]
+
+[[test]]
+name = "update_e2e"
+path = "tests/update_e2e.rs"
+required-features = ["test-support"]
 
 [dev-dependencies]
 serial_test = "3"

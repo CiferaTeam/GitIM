@@ -5,6 +5,7 @@ import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
+import { UpdateIndicator } from "../update-indicator";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -42,7 +43,7 @@ export function AppShell({ children }: AppShellProps) {
         {/* Center: nav tabs */}
         <NavTabs />
 
-        {/* Right: theme toggle + twitter + help + current user */}
+        {/* Right: theme toggle + twitter + update indicator + help + current user */}
         <div className="flex items-center justify-end gap-2 min-w-[140px]">
           <ThemeToggle />
           <a
@@ -54,6 +55,7 @@ export function AppShell({ children }: AppShellProps) {
           >
             <TwitterXIcon className="size-4" />
           </a>
+          <UpdateIndicator />
           <button
             type="button"
             onClick={() => navigate("/docs")}

@@ -64,6 +64,40 @@ pub fn kill_daemons_blocking(ctx: &WorkspaceContext) {
     }
 }
 
+/// Kill every managed daemon across every workspace. Shared by the binary's
+/// shutdown path and by the async self-update phase — both want the same
+/// SIGTERM + 500ms grace + SIGKILL sequence applied to every agent and the
+/// human clone. Blocking to keep the call site sync-friendly; with ~O(10)
+/// agents and a 500ms grace the total cost is bounded.
+///
+/// Acquires the state mutex, snapshots the workspaces, then releases before
+/// the blocking kill — so long-running signal dispatch does not hold the
+/// mutex against other HTTP handlers.
+pub fn kill_managed_daemons(state: &crate::http::SharedRuntimeState) {
+    let snapshot: Vec<(Option<PathBuf>, Vec<PathBuf>)> = {
+        let s = state.lock().unwrap();
+        s.workspaces
+            .values()
+            .map(|w| {
+                let agents = w
+                    .agents
+                    .values()
+                    .map(|a| PathBuf::from(&a.repo_path))
+                    .collect();
+                (w.human_repo.clone(), agents)
+            })
+            .collect()
+    };
+    for (human, agents) in snapshot {
+        if let Some(h) = human {
+            kill_pid_at_blocking(&h);
+        }
+        for agent in agents {
+            kill_pid_at_blocking(&agent);
+        }
+    }
+}
+
 async fn kill_pid_at(repo: &Path) {
     let pid_file = repo.join(".gitim/run/gitim.pid");
     let Ok(content) = std::fs::read_to_string(&pid_file) else { return; };

@@ -1,9 +1,14 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use gitim_runtime::http::DEFAULT_PORT;
 use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
-const DEFAULT_PORT: u16 = 16868;
+fn cleanup_pid_file() {
+    if let Some(home) = dirs::home_dir() {
+        let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,10 +86,6 @@ fn parse_port(args: &[String]) -> Option<u16> {
 
 fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
-    let gitim_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gitim");
-    std::fs::create_dir_all(&gitim_dir)?;
 
     // Runtime + per-daemon logs both live in ~/.gitim/logs/ so a single
     // tail over the directory surfaces all agent activity.
@@ -92,9 +93,12 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let pid_path = gitim_dir.join("runtime.pid");
     let log_file = std::fs::File::create(&log_path)?;
 
+    // PID file ownership lives with the process actually serving HTTP —
+    // `run_shell()` writes it at startup. That way a future self-replace
+    // path (fork-exec a fresh runtime with new binary) doesn't need to
+    // also remember to rewrite the PID file from the exiting parent.
     let child = std::process::Command::new(exe)
         .args(["--port", &port.to_string()])
         .stdin(std::process::Stdio::null())
@@ -102,7 +106,6 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .stderr(log_file)
         .spawn()?;
 
-    std::fs::write(&pid_path, child.id().to_string())?;
     eprintln!("runtime started in background (pid: {}, port: {port})", child.id());
     eprintln!("log: {}", log_path.display());
 
@@ -110,7 +113,29 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let (router, state) = gitim_runtime::http::create_router();
+    // Capture canonical exe BEFORE any self-replace could run. After
+    // replace_binaries swaps the on-disk file, Linux `current_exe()` returns
+    // "<path> (deleted)" for this inode — too late then. Stored in
+    // RuntimeState so the Task 6/7 update endpoint can strict-mode-check the
+    // install dir and pick the fork-exec target.
+    let canonical_exe = std::env::current_exe()?.canonicalize()?;
+
+    // Whoever is actually serving HTTP owns the PID file. On normal boot
+    // this is just us writing our own pid; on self-replace restart the
+    // freshly spawned runtime overwrites whatever the dying parent left.
+    let pid_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gitim/runtime.pid");
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+
+    let (router, state) = gitim_runtime::http::create_router_with_exe(canonical_exe);
+    // Record the port we're about to bind so the self-update async phase can
+    // pass the same `--port` to the replacement runtime. `run_shell` is the
+    // single writer; nothing else in the crate needs to mutate this.
+    state.lock().unwrap().listen_port = port;
 
     gitim_runtime::http::recover_from_config(state.clone()).await;
 
@@ -151,11 +176,8 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 eprintln!("no activity for 24h — shutting down");
-                // Clean up pid file
-                if let Some(home) = dirs::home_dir() {
-                    let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
-                }
-                kill_managed_daemons(&idle_state);
+                cleanup_pid_file();
+                gitim_runtime::workspace::kill_managed_daemons(&idle_state);
                 std::process::exit(0);
             }
         }
@@ -164,7 +186,26 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     eprintln!("runtime shell listening on http://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Self-update path fork-execs a fresh runtime and then `exit(0)`s the
+    // parent. The child can briefly race the parent for the listening port:
+    // parent hasn't released it yet when child first calls bind. Retry a few
+    // times on AddrInUse so the child survives that ~100ms window instead of
+    // dying and leaving the frontend polling a dead `/health`.
+    // 10 x 100ms = 1s max wait, well over the observed race window.
+    let listener = {
+        let mut attempts = 0;
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) if attempts < 10 && e.kind() == std::io::ErrorKind::AddrInUse => {
+                    attempts += 1;
+                    tracing::warn!(?e, attempts, "port in use (likely restart race), retrying in 100ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
     let mut server = tokio::spawn(async move {
         axum::serve(listener, router).await
     });
@@ -184,7 +225,8 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     server.abort();
 
     // Kill all managed daemons on shutdown
-    kill_managed_daemons(&state);
+    cleanup_pid_file();
+    gitim_runtime::workspace::kill_managed_daemons(&state);
     eprintln!("all daemons stopped");
     Ok(())
 }
@@ -202,9 +244,3 @@ async fn shutdown_signal() {
     eprintln!("\nshutting down...");
 }
 
-fn kill_managed_daemons(state: &gitim_runtime::http::SharedRuntimeState) {
-    let s = state.lock().unwrap();
-    for ws in s.workspaces.values() {
-        gitim_runtime::workspace::kill_daemons_blocking(ws);
-    }
-}

@@ -20,6 +20,12 @@ use crate::github::{check_repo_access, parse_github_url, verify_token, GithubErr
 use gitim_client::GitimClient;
 use gitim_sync::url_redact::redacted_url;
 
+/// Default TCP port for the runtime HTTP server. Shared between
+/// `RuntimeState::default()` and `bin/runtime.rs`'s argv parser so the two
+/// can't drift. Chosen to sit well above the IANA registered range and out
+/// of the ephemeral-port band on macOS / Linux.
+pub const DEFAULT_PORT: u16 = 16868;
+
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care
 /// which backing impl is wired up — they just ask the injected client.
@@ -107,6 +113,31 @@ pub struct RuntimeState {
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+    /// Canonicalized path to the runtime binary captured at startup. The
+    /// update endpoint (self-replace) uses this to (a) validate the install
+    /// dir in strict mode, and (b) fork-exec a new runtime after the binary
+    /// is swapped. We must capture this BEFORE the binary is replaced on
+    /// disk — on Linux `std::env::current_exe()` returns `<path> (deleted)`
+    /// for an inode whose dentry has been unlinked.
+    pub canonical_exe_path: PathBuf,
+    /// Guard against concurrent self-update runs. Set when the sync phase of
+    /// `POST /runtime/update-and-restart` begins; cleared when the async phase
+    /// finishes or any step fails. A second request arriving while this is
+    /// `true` gets a `409 concurrent_update`.
+    pub update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    /// Most recent async-phase failure from `/runtime/update-and-restart`.
+    /// Written by the async phase on error (replace / fork-exec) so a future
+    /// diagnostic endpoint or log export can surface what went wrong. v1 has
+    /// no UI that reads this — the WebUI just polls `/health` for the new
+    /// version and times out on failure — but we still capture the detail so
+    /// it isn't silently lost.
+    pub update_last_error: Option<String>,
+    /// TCP port the runtime's HTTP server is bound to. Set by `run_shell`
+    /// after argument parsing so the async self-update phase knows which
+    /// `--port` to pass when fork-exec'ing the replacement binary. Tests that
+    /// go through `create_router()` / `create_router_with_exe()` leave the
+    /// default; the E2E test overrides it before driving the async phase.
+    pub listen_port: u16,
 }
 
 impl RuntimeState {
@@ -128,6 +159,16 @@ impl Default for RuntimeState {
         let base_url = std::env::var("GITIM_TEST_GITHUB_API_BASE")
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
+        // Best-effort canonical exe for test constructors. Production boots
+        // via `run_shell()` which computes + passes the real path into
+        // `create_router_with_exe` — this fallback only matters in unit/IT
+        // tests that call `RuntimeState::default()` / `create_router()`
+        // directly. A placeholder at `/nonexistent/gitim-runtime` keeps
+        // Task 6/7 strict-mode checks safe: the update endpoint will refuse
+        // to self-replace a path that doesn't exist.
+        let canonical_exe_path = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .unwrap_or_else(|_| PathBuf::from("/nonexistent/gitim-runtime"));
         Self {
             last_activity: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
@@ -138,6 +179,10 @@ impl Default for RuntimeState {
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
             workspaces: HashMap::new(),
+            canonical_exe_path,
+            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_last_error: None,
+            listen_port: DEFAULT_PORT,
         }
     }
 }
@@ -2305,9 +2350,26 @@ async fn workspaces_create(
         .into_response()
 }
 
+/// Assemble the axum router with a fresh `RuntimeState`. The canonical exe
+/// path is resolved from `RuntimeState::default()` — fine for tests, but
+/// production must call `create_router_with_exe` so the pre-replacement
+/// binary path is captured before any self-update can happen.
 pub fn create_router() -> (Router, SharedRuntimeState) {
-    let state: SharedRuntimeState = Arc::new(Mutex::new(RuntimeState::default()));
+    build_router(Arc::new(Mutex::new(RuntimeState::default())))
+}
 
+/// Production entry point: caller supplies the canonical exe path captured
+/// at startup (before any binary self-replace). Task 6/7 self-update reads
+/// this from `state.canonical_exe_path`.
+pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRuntimeState) {
+    let inner = RuntimeState {
+        canonical_exe_path,
+        ..RuntimeState::default()
+    };
+    build_router(Arc::new(Mutex::new(inner)))
+}
+
+fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
     let ws_router = Router::new()
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))
@@ -2355,6 +2417,10 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         )
         .nest("/workspaces/{slug}", ws_router)
         .route("/preflight/{provider}", get(preflight_handler))
+        .route(
+            "/runtime/update-and-restart",
+            post(crate::update::update_and_restart),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             activity_middleware,
