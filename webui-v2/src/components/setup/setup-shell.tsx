@@ -6,7 +6,8 @@ interface Step {
 }
 
 const STEPS: Step[] = [
-  { number: 1, label: "Connect" },
+  { number: 1, label: "Install" },
+  { number: 2, label: "Connect" },
 ];
 
 interface SetupShellProps {

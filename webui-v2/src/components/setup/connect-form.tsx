@@ -2,7 +2,11 @@ import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { SetupShell } from "./setup-shell";
 
-export function ConnectForm() {
+interface ConnectFormProps {
+  onBack?: () => void;
+}
+
+export function ConnectForm({ onBack }: ConnectFormProps = {}) {
   const port = useConnectionStore((s) => s.port);
   const error = useConnectionStore((s) => s.error);
   const setPort = useConnectionStore((s) => s.setPort);
@@ -47,11 +51,12 @@ export function ConnectForm() {
 
   return (
     <SetupShell
-      step={1}
+      step={2}
       title="Connect Runtime"
       description="Link GitIM·Cell to your local runtime daemon"
       error={error}
       loading={checking}
+      onBack={onBack}
       footer={
         <>
           请先启动 Runtime：{" "}

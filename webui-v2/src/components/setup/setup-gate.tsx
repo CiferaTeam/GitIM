@@ -1,6 +1,7 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { ConnectForm } from "./connect-form";
+import { InstallStep } from "./install-step";
 import { SetupShell } from "./setup-shell";
 
 interface SetupGateProps {
@@ -20,6 +21,13 @@ export function SetupGate({ children }: SetupGateProps) {
   const port = useConnectionStore((s) => s.port);
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
+
+  // First-time users land on the Install step; returning users (saved port)
+  // skip straight to Connect. Once the user clicks "continue" we remember it
+  // within this session so going back to edit the port does not re-show Install.
+  const [installAcknowledged, setInstallAcknowledged] = useState(
+    () => port != null,
+  );
 
   // On mount: if we have a stored port, try to connect automatically.
   useEffect(() => {
@@ -57,7 +65,7 @@ export function SetupGate({ children }: SetupGateProps) {
   if (status === "checking") {
     return (
       <SetupShell
-        step={1}
+        step={2}
         title="Connect Runtime"
         description="Link GitIM·Cell to your local runtime daemon"
         loading
@@ -66,7 +74,10 @@ export function SetupGate({ children }: SetupGateProps) {
   }
 
   if (status === "disconnected") {
-    return <ConnectForm />;
+    if (!installAcknowledged) {
+      return <InstallStep onContinue={() => setInstallAcknowledged(true)} />;
+    }
+    return <ConnectForm onBack={() => setInstallAcknowledged(false)} />;
   }
 
   return <>{children}</>;
