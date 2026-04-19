@@ -2335,8 +2335,10 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
 /// at startup (before any binary self-replace). Task 6/7 self-update reads
 /// this from `state.canonical_exe_path`.
 pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRuntimeState) {
-    let mut inner = RuntimeState::default();
-    inner.canonical_exe_path = canonical_exe_path;
+    let inner = RuntimeState {
+        canonical_exe_path,
+        ..RuntimeState::default()
+    };
     build_router(Arc::new(Mutex::new(inner)))
 }
 

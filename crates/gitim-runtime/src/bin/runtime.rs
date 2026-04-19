@@ -5,6 +5,12 @@ use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
 const DEFAULT_PORT: u16 = 16868;
 
+fn cleanup_pid_file() {
+    if let Some(home) = dirs::home_dir() {
+        let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -167,10 +173,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 eprintln!("no activity for 24h — shutting down");
-                // Clean up pid file
-                if let Some(home) = dirs::home_dir() {
-                    let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
-                }
+                cleanup_pid_file();
                 kill_managed_daemons(&idle_state);
                 std::process::exit(0);
             }
@@ -200,6 +203,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     server.abort();
 
     // Kill all managed daemons on shutdown
+    cleanup_pid_file();
     kill_managed_daemons(&state);
     eprintln!("all daemons stopped");
     Ok(())
