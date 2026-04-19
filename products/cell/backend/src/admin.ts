@@ -4,8 +4,9 @@ import { kvKey } from "./types";
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-// Auth middleware — all /admin/* routes require X-Admin-Secret header
-app.use("*", async (c, next) => {
+// Auth middleware — scoped to /admin/* so it doesn't leak to sibling routes
+// when mounted via app.route("/", adminRoutes).
+app.use("/admin/*", async (c, next) => {
   if (c.req.header("x-admin-secret") !== c.env.ADMIN_SECRET) {
     return c.json({ error: "unauthorized" }, 401);
   }
