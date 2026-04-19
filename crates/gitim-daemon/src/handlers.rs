@@ -347,12 +347,13 @@ async fn handle_send(
         std::fs::create_dir_all(parent).ok();
     }
 
-    // Serialize the read-compute-append-commit sequence. Without this, two
-    // concurrent Send requests can both observe the same last_line and race
-    // into duplicate line numbers. The guard is released right before we
-    // start awaiting the (potentially slow) push result so pushes don't
-    // block other writers.
-    let write_guard = state.thread_write_lock.lock().await;
+    // Commit-tree lock: held for the whole read-parse-append-commit span so
+    // no other writer (and no sync_loop rebase) can mutate the commit tree
+    // in parallel. Dropped before push_rx.await so a slow remote push can't
+    // stall other writers. The critical section is entirely blocking I/O —
+    // std::sync::Mutex is the right primitive here and must not be held
+    // across any `.await`.
+    let write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // Read existing content and parse
     let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
@@ -1639,10 +1640,10 @@ async fn write_channel_event(
         _ => return Response::error(format!("unknown event type: {}", event_type)),
     }
 
-    // Serialize the read-compute-append-commit sequence. Concurrent joins
-    // (e.g. `join -t lewis` and `join -t claude01` fired back-to-back by an
-    // agent) must not both observe the same last_line and write duplicates.
-    let _write_guard = state.thread_write_lock.lock().await;
+    // Commit-tree lock: covers read → re-validate → append → commit so
+    // concurrent joins (and sync_loop's rebase) can't interleave. Critical
+    // section is all blocking I/O; no `.await` between here and the commit.
+    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // Read .thread for next line number
     let thread_path = state
@@ -1756,6 +1757,11 @@ async fn write_channel_event(
             "written"
         }
     };
+
+    // Commit tree is stable — drop the lock BEFORE any `.await` below.
+    // std::sync::MutexGuard must not cross await points, and everything
+    // from here on (event broadcast, cache invalidation) is non-mutating.
+    drop(_write_guard);
 
     // Broadcast MembershipChanged event
     let _ = state.event_tx.send(Event::MembershipChanged {

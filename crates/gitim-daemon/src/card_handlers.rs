@@ -731,10 +731,10 @@ pub async fn handle_send_card_message(
     let card_dir = state.repo_root.join(&located.rel_path);
     let thread_path = card_dir.join("discussion.thread");
 
-    // Hold the global write lock through the read-append-commit sequence so
-    // two concurrent `card comment` requests can't both assign the same line
-    // number to their new entries.
-    let write_guard = state.thread_write_lock.lock().await;
+    // Commit-tree lock: keeps the read-append-commit sequence serial across
+    // all writers (and blocks sync_loop's rebase from interleaving). No
+    // `.await` inside the locked region — std::sync::Mutex is intentional.
+    let write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     let (next_line, _new_content) =
         match thread_io::append_message_to_thread(&thread_path, &handler, &body, reply_to) {

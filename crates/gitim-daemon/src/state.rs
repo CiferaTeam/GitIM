@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use std::sync::Mutex as StdMutex;
+use tokio::sync::{broadcast, Notify, RwLock};
 
 pub type SharedState = Arc<AppState>;
 
@@ -43,14 +44,23 @@ pub struct AppState {
     /// Readers can check this to surface "PAT expired" to the UI; the flag stays
     /// set until daemon restart (v1).
     pub auth_failed: Arc<AtomicBool>,
-    /// Serializes the read-parse-compute-append-commit sequence that every
-    /// `.thread` writer goes through. Without it, two tokio tasks can each
-    /// observe `last_line = N`, both compute `N+1`, and both append the same
-    /// line number — producing duplicate L-numbers and corrupting the protocol
-    /// invariant that line numbers are strictly monotonic. Single global lock
-    /// is sufficient: git commits are already serialized by the index lock, so
-    /// fine-grained per-thread concurrency would only save the no-op case.
-    pub thread_write_lock: Mutex<()>,
+    /// **Commit-tree invariant**: any in-process operation that mutates the
+    /// local commit tree MUST hold this lock for the duration of that
+    /// mutation. That covers:
+    ///   - handler write paths (read thread → append → `git commit`)
+    ///   - sync_loop's `git rebase` onto origin
+    ///   - conflict resolution (write merged files + commit)
+    ///
+    /// It does NOT cover the network-only ops (`git fetch`, `git push`) —
+    /// those don't touch the commit tree, and holding the lock through a slow
+    /// network round-trip would let a single fetch stall every writer.
+    ///
+    /// Shared as `Arc` so the sync_loop spawn can cheaply clone-and-own a
+    /// handle. `std::sync::Mutex` is deliberate: every critical section is
+    /// blocking I/O (fs + `git` subprocess), so there is no await point for
+    /// the guard to cross, and a tokio Mutex would force sync_loop —
+    /// currently a plain `fn` — into async plumbing for no gain.
+    pub commit_lock: Arc<StdMutex<()>>,
 }
 
 impl AppState {
@@ -84,7 +94,7 @@ impl AppState {
                     .as_secs(),
             ),
             auth_failed: Arc::new(AtomicBool::new(false)),
-            thread_write_lock: Mutex::new(()),
+            commit_lock: Arc::new(StdMutex::new(())),
         }
     }
 
@@ -159,6 +169,7 @@ impl AppState {
         let sync_root = state.repo_root.clone();
         let push_notify = state.push_notify.clone();
         let auth_failed = state.auth_failed.clone();
+        let commit_lock = state.commit_lock.clone();
         let push_state = state.clone();
         let renum_state = state.clone();
         let synced_state = state.clone();
@@ -170,6 +181,7 @@ impl AppState {
                 sync_interval,
                 push_notify,
                 auth_failed,
+                commit_lock,
                 move || {
                     // on_pushed: get commit_id, send PushResult::Pushed to waiters,
                     // clear pending_push and broadcast MessagesPushed events

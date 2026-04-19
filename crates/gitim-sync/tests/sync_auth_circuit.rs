@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gitim_sync::git::{GitError, GitStorage};
 use gitim_sync::sync_loop::{
@@ -180,10 +180,12 @@ fn run_sync_cycle_does_not_trip_circuit_on_non_auth_errors() {
 
     // 10 cycles of real push failures (all CommandFailed, not auth).
     // The circuit MUST NOT trip — this is the guard against false positives.
+    let commit_lock = Mutex::new(());
     for _ in 0..10 {
         let _outcome = run_sync_cycle(
             &repo,
             &mut circuit,
+            &commit_lock,
             &|| {},
             &|_, _, _| {},
             &|_| {},
@@ -203,9 +205,11 @@ fn run_sync_cycle_short_circuits_when_circuit_open() {
     let flag = Arc::new(AtomicBool::new(true));
     let mut circuit = AuthCircuit::new(flag);
 
+    let commit_lock = Mutex::new(());
     let outcome = run_sync_cycle(
         &repo,
         &mut circuit,
+        &commit_lock,
         &|| {},
         &|_, _, _| {},
         &|_| {},
@@ -235,9 +239,11 @@ fn end_to_end_trip_then_skip_git() {
     let cycle_done = Arc::new(AtomicBool::new(false));
     let cycle_done_clone = cycle_done.clone();
 
+    let commit_lock = Mutex::new(());
     let outcome = run_sync_cycle(
         &repo,
         &mut circuit,
+        &commit_lock,
         &|| panic!("on_pushed must not fire when circuit is open"),
         &|_, _, _| panic!("on_renumbered must not fire when circuit is open"),
         &|_| panic!("on_synced must not fire when circuit is open"),

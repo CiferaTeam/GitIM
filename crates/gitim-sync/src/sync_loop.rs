@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use rand::Rng;
 use tokio::sync::Notify;
@@ -72,6 +72,11 @@ impl AuthCircuit {
 
 /// Start the sync loop with push-first strategy.
 ///
+/// - `commit_lock`: serializes every mutation of the local commit tree. Held
+///   only around `git rebase` and the conflict-resolution write+commit
+///   sequence — never around the network-only `fetch`/`push`. The daemon's
+///   write handlers hold the same lock around their own commits, so `rebase`
+///   is guaranteed never to run while a handler is mid-append.
 /// - `on_pushed`: called after a successful push (all pending messages are now remote)
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
@@ -85,6 +90,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     interval_secs: u32,
     push_notify: Arc<Notify>,
     auth_failed: Arc<AtomicBool>,
+    commit_lock: Arc<Mutex<()>>,
     on_pushed: F1,
     on_renumbered: F2,
     on_synced: F3,
@@ -132,6 +138,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
         let outcome = run_sync_cycle(
             &repo,
             &mut circuit,
+            &commit_lock,
             &on_pushed,
             &on_renumbered,
             &on_synced,
@@ -176,6 +183,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
 pub fn run_sync_cycle<F1, F2, F3, F4>(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
+    commit_lock: &Mutex<()>,
     on_pushed: &F1,
     on_renumbered: &F2,
     on_synced: &F3,
@@ -202,9 +210,9 @@ where
     };
 
     let outcome = if has_unpushed {
-        sync_with_push(repo, circuit, on_pushed, on_renumbered)
+        sync_with_push(repo, circuit, commit_lock, on_pushed, on_renumbered)
     } else {
-        sync_pull_only(repo, circuit)
+        sync_pull_only(repo, circuit, commit_lock)
     };
 
     match repo.rev_parse("HEAD") {
@@ -236,6 +244,7 @@ fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
 fn sync_with_push<F1, F2>(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
+    commit_lock: &Mutex<()>,
     on_pushed: &F1,
     on_renumbered: &F2,
 ) -> SyncOutcome
@@ -314,9 +323,16 @@ where
             }
         }
 
+        // Rebase + optional conflict resolution mutates the local commit
+        // tree; hold commit_lock across the whole block so handler writes
+        // never interleave with it. Push happens *after* the guard drops so
+        // a slow remote can't stall handler writers.
+        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
+                drop(rebase_guard);
                 let push_after_rebase = repo.push();
                 observe_auth(circuit, &push_after_rebase);
                 match push_after_rebase {
@@ -450,6 +466,11 @@ where
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
 
+                // Resolve committed — commit tree is stable again, release
+                // before the network round-trip so a slow push doesn't hold
+                // back handler writers waiting on commit_lock.
+                drop(rebase_guard);
+
                 let push_after_resolve = repo.push();
                 observe_auth(circuit, &push_after_resolve);
                 match push_after_resolve {
@@ -486,7 +507,11 @@ where
 
 /// Pull-only path: fetch remote changes, then fast-forward via rebase.
 /// On failure, abort the rebase but preserve local state — next cycle retries.
-fn sync_pull_only(repo: &GitStorage, circuit: &mut AuthCircuit) -> SyncOutcome {
+fn sync_pull_only(
+    repo: &GitStorage,
+    circuit: &mut AuthCircuit,
+    commit_lock: &Mutex<()>,
+) -> SyncOutcome {
     let fetch_result = repo.fetch();
     observe_auth(circuit, &fetch_result);
     match fetch_result {
@@ -508,6 +533,9 @@ fn sync_pull_only(repo: &GitStorage, circuit: &mut AuthCircuit) -> SyncOutcome {
         Ok(()) => {}
     }
 
+    // Rebase mutates the local commit tree; hold commit_lock so it can't
+    // interleave with a handler's read-append-commit window.
+    let _rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
     if let Err(e) = repo.rebase_onto_origin() {
         warn!("sync: rebase failed after fetch: {}", e);
         let _ = repo.abort_rebase();
