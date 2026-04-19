@@ -12,6 +12,8 @@ interface ChatState {
   isGuest: boolean;
   users: string[];
   channels: Channel[];
+  /** Archived channels — populated by explicit fetch, not by /im/channels poll. */
+  archivedChannels: Channel[];
   currentChannel: string | null;
   messages: Message[];
   replyTo: Message | null;
@@ -26,6 +28,11 @@ interface ChatState {
   setIsGuest: (v: boolean) => void;
   setUsers: (u: string[]) => void;
   setChannels: (c: Channel[]) => void;
+  setArchivedChannels: (c: Channel[]) => void;
+  /** Optimistic: move a channel from `channels` → `archivedChannels`. */
+  markChannelArchived: (name: string) => void;
+  /** Optimistic: move a channel from `archivedChannels` → `channels`. */
+  markChannelUnarchived: (name: string) => void;
   selectChannel: (name: string) => void;
   incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
@@ -50,6 +57,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isGuest: false,
   users: [],
   channels: [],
+  archivedChannels: [],
   currentChannel: null,
   messages: [],
   replyTo: null,
@@ -78,6 +86,45 @@ export const useChatStore = create<ChatState>((set) => ({
           };
         }),
       };
+    }),
+
+  setArchivedChannels: (newChannels) =>
+    set({
+      // Daemon omits unreadCount / hasMention for archived channels, so
+      // synthesize defaults here — the existing Channel type requires them.
+      archivedChannels: newChannels.map((c) => ({
+        ...c,
+        unreadCount: c.unreadCount ?? 0,
+        hasMention: c.hasMention ?? false,
+      })),
+    }),
+
+  markChannelArchived: (name) =>
+    set((state) => {
+      const channel = state.channels.find((c) => c.name === name);
+      const nextChannels = state.channels.filter((c) => c.name !== name);
+      const alreadyArchived = state.archivedChannels.some((c) => c.name === name);
+      const nextArchived =
+        channel && !alreadyArchived
+          ? [...state.archivedChannels, channel]
+          : state.archivedChannels;
+      return { channels: nextChannels, archivedChannels: nextArchived };
+    }),
+
+  markChannelUnarchived: (name) =>
+    set((state) => {
+      const channel = state.archivedChannels.find((c) => c.name === name);
+      const nextArchived = state.archivedChannels.filter((c) => c.name !== name);
+      const alreadyActive = state.channels.some((c) => c.name === name);
+      // Normalize kind → "channel". Daemon tags archived items with
+      // kind: "archived_channel" (runtime value outside the TS union), so
+      // without this rewrite the sidebar's `kind === "channel"` filter would
+      // skip the restored channel until a client.channels() refresh lands.
+      const nextChannels =
+        channel && !alreadyActive
+          ? [...state.channels, { ...channel, kind: "channel" as const }]
+          : state.channels;
+      return { channels: nextChannels, archivedChannels: nextArchived };
     }),
 
   selectChannel: (name) =>

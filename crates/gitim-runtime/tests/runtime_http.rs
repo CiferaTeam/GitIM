@@ -203,3 +203,104 @@ async fn test_agents_add_unsupported_provider_returns_400() {
         "error should echo the rejected provider name, got: {error}"
     );
 }
+
+// -- Archive / unarchive route dispatch --
+//
+// These tests don't spin up a daemon — the router hits `human_client()` /
+// `human_handler()` with an empty state and short-circuits with a structured
+// "human daemon not initialized" JSON error. The value is proving the route
+// is wired and reachable: a 404 would show a missing or misordered route,
+// and a 5xx would show a panic / handler signature mismatch. Deeper behaviour
+// (success path, permission checks) belongs in E2E where a workspace exists.
+
+async fn assert_route_reachable(router: axum::Router, req: Request<Body>) {
+    let response = router.oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "archive routes return 200 with JSON body even on uninitialised state"
+    );
+    let body = body_to_json(response).await;
+    assert!(
+        body.get("ok").is_some(),
+        "response should be a well-formed gitim envelope, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_card_archive_route_reachable() {
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/cards/general/abc123/archive")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_card_unarchive_route_reachable() {
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/cards/general/abc123/unarchive")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_list_archived_cards_route_reachable() {
+    // No query param.
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/cards/archived")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_list_archived_cards_with_channel_query_route_reachable() {
+    // With `?channel=foo` — verifies the Query extractor accepts the optional
+    // filter and the route matches `archived` rather than trying to fall
+    // through to `/im/cards/{channel}/{card_id}`.
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/cards/archived?channel=general")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_channel_archive_route_reachable() {
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/channels/general/archive")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_channel_unarchive_route_reachable() {
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/channels/general/unarchive")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}
+
+#[tokio::test]
+async fn test_list_archived_channels_route_reachable() {
+    let (router, _state) = create_router();
+    let req = Request::builder()
+        .uri("/im/channels/archived")
+        .body(Body::empty())
+        .unwrap();
+    assert_route_reachable(router, req).await;
+}

@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Archive, Check, ChevronDown } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -8,7 +9,9 @@ import {
 } from "@/components/ui/popover";
 import { LabelChipInput } from "@/components/ui/label-chip-input";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import * as client from "@/lib/client";
 import { cn } from "@/lib/utils";
 
 export interface CardFilterState {
@@ -40,6 +43,9 @@ export function CardFilterBar({
   const channels = useChatStore((s) => s.channels);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
+  const showArchived = useCardStore((s) => s.showArchived);
+  const toggleShowArchived = useCardStore((s) => s.toggleShowArchived);
+  const setArchivedCards = useCardStore((s) => s.setArchivedCards);
 
   const channelOptions = useMemo(
     () => channels.filter((c) => c.kind === "channel").map((c) => c.name),
@@ -56,6 +62,66 @@ export function CardFilterBar({
     value.labels.length > 0 ||
     !!value.assignee ||
     value.mineOnly;
+
+  // Fetch archived cards for the current channel filter. When zero or many
+  // channels are selected we drop the scope and fetch all archived — the
+  // kanban's own channel filter narrows the list client-side. Keeps fetch
+  // code simple and avoids N calls per per-channel selection.
+  const fetchArchived = useCallback(
+    async (selectedChannels: string[]): Promise<boolean> => {
+      const ch = selectedChannels.length === 1 ? selectedChannels[0] : undefined;
+      try {
+        const res = await client.listArchivedCards(ch);
+        if (res.ok && res.data) {
+          setArchivedCards(res.data.cards);
+          return true;
+        }
+        toast.error(`Failed to load archived cards: ${res.error ?? "unknown"}`);
+        return false;
+      } catch (err) {
+        toast.error(
+          `Failed to load archived cards: ${err instanceof Error ? err.message : "unknown"}`,
+        );
+        return false;
+      }
+    },
+    [setArchivedCards],
+  );
+
+  async function handleToggleArchived() {
+    const nextShow = !showArchived;
+    toggleShowArchived();
+    // Refetch whenever we turn on — stale archived lists are worse than one
+    // extra request, and the UX cost of stale is high (user sees wrong cards).
+    if (nextShow) {
+      const ok = await fetchArchived(value.channels);
+      if (!ok) {
+        // Revert — "show archived = ON + empty list" is indistinguishable
+        // from "no archived cards" and misleads the user.
+        toggleShowArchived();
+      }
+    }
+  }
+
+  // When archived view is already ON, refetch if the channel filter changes
+  // so the user sees archived cards for the current scope rather than
+  // whatever was scoped at toggle time. Fetch-only: no auto-turn-off on
+  // failure here — that would cause surprise UI flips mid-interaction.
+  //
+  // Skips the tick where showArchived flipped OFF→ON; the toggle handler
+  // owns that fetch (so it can revert on failure). Only channel-change
+  // fetches flow through this effect.
+  const prevShowArchivedRef = useRef(showArchived);
+  const channelsKey = value.channels.join("|");
+  useEffect(() => {
+    const wasOn = prevShowArchivedRef.current;
+    prevShowArchivedRef.current = showArchived;
+    if (!showArchived) return;
+    // Toggle OFF → ON: owned by handleToggleArchived; skip here.
+    if (!wasOn) return;
+    void fetchArchived(value.channels);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived, channelsKey, fetchArchived]);
 
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-[#232326] flex-wrap">
@@ -89,6 +155,22 @@ export function CardFilterBar({
         />
         <span>My cards</span>
       </label>
+      <Button
+        variant={showArchived ? "default" : "ghost"}
+        size="sm"
+        onClick={handleToggleArchived}
+        className={cn(
+          "gap-1.5 text-xs",
+          showArchived
+            ? "bg-accent-muted text-[#60a5fa] hover:bg-accent-muted hover:text-[#60a5fa]"
+            : "text-muted-foreground",
+        )}
+        aria-pressed={showArchived}
+        title={showArchived ? "Hide archived cards" : "Show archived cards"}
+      >
+        <Archive className="h-3 w-3" />
+        <span>Archived</span>
+      </Button>
       {hasAny && (
         <Button
           variant="ghost"

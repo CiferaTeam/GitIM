@@ -971,6 +971,132 @@ async fn im_update_card(
     )
 }
 
+// -- /im/cards archive/unarchive + /im/channels archive/unarchive --
+//
+// Cards carry an explicit `author` in the daemon API (creator/assignee check +
+// commit attribution), so these handlers read the workspace's `.gitim/me.json`
+// the same way the CLI does. Channel archive doesn't need an author.
+
+/// Read the human's handler from `$human_repo/.gitim/me.json`. Mirrors the
+/// CLI's `read_my_handler` — returns a structured JSON error the route can
+/// short-circuit on when the workspace isn't provisioned or the file is
+/// unreadable.
+fn human_handler(state: &SharedRuntimeState) -> Result<String, Json<serde_json::Value>> {
+    let human_repo = {
+        let s = state.lock().unwrap();
+        match &s.human_repo {
+            Some(p) => p.clone(),
+            None => {
+                return Err(Json(serde_json::json!({
+                    "ok": false,
+                    "error": "human daemon not initialized"
+                })));
+            }
+        }
+    };
+    let me_path = human_repo.join(".gitim/me.json");
+    let content = std::fs::read_to_string(&me_path).map_err(|e| {
+        Json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to read me.json: {e}")
+        }))
+    })?;
+    let me: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        Json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to parse me.json: {e}")
+        }))
+    })?;
+    me.get("handler")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "me.json missing handler field"
+            }))
+        })
+}
+
+async fn im_card_archive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let author = match human_handler(&state) {
+        Ok(h) => h,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.archive_card(&channel, &card_id, &author).await)
+}
+
+async fn im_card_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((channel, card_id)): axum::extract::Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let author = match human_handler(&state) {
+        Ok(h) => h,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_card(&channel, &card_id, &author).await)
+}
+
+#[derive(Deserialize)]
+struct ListArchivedCardsQuery {
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+async fn im_list_archived_cards(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Query(q): axum::extract::Query<ListArchivedCardsQuery>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_cards(q.channel.as_deref()).await)
+}
+
+async fn im_channel_archive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.archive_channel(&name).await)
+}
+
+async fn im_channel_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_channel(&name).await)
+}
+
+async fn im_list_archived_channels(
+    State(state): State<SharedRuntimeState>,
+) -> Json<serde_json::Value> {
+    let client = match human_client(&state) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_channels().await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -1788,9 +1914,20 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
         .route("/im/thread", post(im_thread))
         .route("/im/cards", post(im_create_card))
         .route("/im/cards", get(im_list_cards))
+        // `/im/cards/archived` must come before `/im/cards/{channel}/{card_id}`
+        // so axum doesn't try to match "archived" as a channel segment.
+        .route("/im/cards/archived", get(im_list_archived_cards))
         .route("/im/cards/{channel}/{card_id}", get(im_read_card))
         .route("/im/cards/{channel}/{card_id}/messages", post(im_send_card_message))
         .route("/im/cards/{channel}/{card_id}", axum::routing::patch(im_update_card))
+        .route("/im/cards/{channel}/{card_id}/archive", post(im_card_archive))
+        .route("/im/cards/{channel}/{card_id}/unarchive", post(im_card_unarchive))
+        // Channel archive: no `/im/channels/{name}` route exists today, but keep
+        // `/im/channels/archived` registered before the parametric routes anyway
+        // in case one is added later.
+        .route("/im/channels/archived", get(im_list_archived_channels))
+        .route("/im/channels/{name}/archive", post(im_channel_archive))
+        .route("/im/channels/{name}/unarchive", post(im_channel_unarchive))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))

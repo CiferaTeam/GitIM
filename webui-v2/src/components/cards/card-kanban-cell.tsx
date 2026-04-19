@@ -42,10 +42,16 @@ function formatRelative(iso: string): string {
 
 export interface CardKanbanCellProps {
   card: Card;
+  /** Render the card in a muted "archived" style and hide the status dropdown. */
+  archived?: boolean;
   onStatusChange: (card: Card, newStatus: CardStatus) => void;
 }
 
-export function CardKanbanCell({ card, onStatusChange }: CardKanbanCellProps) {
+export function CardKanbanCell({
+  card,
+  archived = false,
+  onStatusChange,
+}: CardKanbanCellProps) {
   const navigate = useNavigate();
 
   const visibleLabels = card.labels.slice(0, 3);
@@ -54,42 +60,55 @@ export function CardKanbanCell({ card, onStatusChange }: CardKanbanCellProps) {
   return (
     <div
       onClick={() => navigate(`/cards/${card.channel}/${card.card_id}`)}
-      className="group rounded-md border border-border bg-[#232326] hover:bg-[#2a2a2e] p-3 cursor-pointer transition-colors flex flex-col gap-2"
+      className={cn(
+        "group rounded-md border border-border bg-[#232326] hover:bg-[#2a2a2e] p-3 cursor-pointer transition-colors flex flex-col gap-2",
+        archived && "opacity-55 hover:opacity-75",
+      )}
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-sm font-medium leading-snug line-clamp-2 flex-1">
           {card.title}
         </h3>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              onClick={(e) => e.stopPropagation()}
-              className={cn(
-                "shrink-0 rounded px-2 py-0.5 text-xs font-medium capitalize",
-                STATUS_CLASS[card.status],
-              )}
-            >
-              {card.status}
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-            {STATUSES.map((s) => (
-              <DropdownMenuItem
-                key={s}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (s !== card.status) onStatusChange(card, s);
-                }}
+        {archived ? (
+          // Small "Archived" pill replaces the status dropdown — quiet,
+          // non-interactive. Click still falls through to the card detail.
+          <span
+            className="shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider bg-muted text-muted-foreground"
+          >
+            Archived
+          </span>
+        ) : (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "capitalize",
-                  s === card.status && "font-semibold",
+                  "shrink-0 rounded px-2 py-0.5 text-xs font-medium capitalize",
+                  STATUS_CLASS[card.status],
                 )}
               >
-                {s}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                {card.status}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+              {STATUSES.map((s) => (
+                <DropdownMenuItem
+                  key={s}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (s !== card.status) onStatusChange(card, s);
+                  }}
+                  className={cn(
+                    "capitalize",
+                    s === card.status && "font-semibold",
+                  )}
+                >
+                  {s}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
         <span className="truncate">#{card.channel}</span>

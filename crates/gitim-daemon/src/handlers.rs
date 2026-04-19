@@ -56,6 +56,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
                 | Request::ArchiveChannel { .. }
+                | Request::UnarchiveChannel { .. }
                 | Request::CreateCard { .. }
                 | Request::SendCardMessage { .. }
                 | Request::UpdateCard { .. }
@@ -165,6 +166,13 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             handle_archive_channel(state, channel, resolved_author).await
+        }
+        Request::UnarchiveChannel { channel, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_unarchive_channel(state, channel, resolved_author).await
         }
         Request::ListArchivedChannels => handle_list_archived_channels(state).await,
         Request::CreateCard {
@@ -1379,6 +1387,162 @@ async fn handle_archive_channel(
     Response::success(serde_json::json!({
         "channel": channel,
         "archived_by": author,
+    }))
+}
+
+async fn handle_unarchive_channel(
+    state: SharedState,
+    channel: String,
+    author: String,
+) -> Response {
+    // 1. Validate channel name
+    let channel_name = match ChannelName::new(&channel) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {}", e)),
+    };
+
+    // 2. Validate author is registered
+    {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {}", author));
+        }
+    }
+
+    // 3. Read archive meta; fail if source not present
+    let archive_meta_path = state
+        .repo_root
+        .join(format!("archive/channels/{}.meta.yaml", channel_name));
+    let meta_str = match std::fs::read_to_string(&archive_meta_path) {
+        Ok(s) => s,
+        Err(_) => {
+            return Response::error(format!(
+                "archive source does not exist for channel '{}'",
+                channel
+            ));
+        }
+    };
+    let meta: ChannelMeta = match serde_yaml::from_str(&meta_str) {
+        Ok(m) => m,
+        Err(e) => return Response::error(format!("failed to parse archive channel meta: {}", e)),
+    };
+
+    // 4. Permission: only creator can unarchive
+    if meta.created_by != author {
+        return Response::error("only channel creator can unarchive");
+    }
+
+    // 5. Name conflict: active meta must not already exist
+    let active_meta_path = state
+        .repo_root
+        .join(format!("channels/{}.meta.yaml", channel_name));
+    if active_meta_path.exists() {
+        return Response::error(format!(
+            "channel '{}' already exists in active location; unarchive aborted",
+            channel
+        ));
+    }
+
+    // 6. Ensure channels/ parent dir exists
+    let channels_dir = state.repo_root.join("channels");
+    if let Err(e) = std::fs::create_dir_all(&channels_dir) {
+        return Response::error(format!("failed to create channels dir: {}", e));
+    }
+
+    // 7. git mv archive → active for both thread and meta.
+    //    Move thread first; on meta-mv failure, reverse the thread mv.
+    let thread_from = format!("archive/channels/{}.thread", channel_name);
+    let thread_to = format!("channels/{}.thread", channel_name);
+    let meta_from = format!("archive/channels/{}.meta.yaml", channel_name);
+    let meta_to = format!("channels/{}.meta.yaml", channel_name);
+
+    if let Err(e) = state.git_storage.mv(&thread_from, &thread_to) {
+        return Response::error(format!("git mv thread failed: {}", e));
+    }
+    if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
+        // Reverse thread mv to leave tree clean.
+        if let Err(rb) = state.git_storage.mv(&thread_to, &thread_from) {
+            warn!("unarchive_channel: rollback thread mv also failed: {}", rb);
+        }
+        return Response::error(format!("git mv meta failed: {}", e));
+    }
+
+    // 8. add + commit as author. On failure, reverse BOTH mvs so archive is intact.
+    let commit_msg = format!("unarchive: #{} by @{}", channel, author);
+    if let Err(e) = state
+        .git_storage
+        .add_and_commit_as(&[&thread_to, &meta_to], &commit_msg, Some(&author))
+    {
+        // Reverse meta mv first, then thread mv — mirror archive direction.
+        if let Err(rb) = state.git_storage.mv(&meta_to, &meta_from) {
+            warn!("unarchive_channel: rollback meta mv also failed: {}", rb);
+        }
+        if let Err(rb) = state.git_storage.mv(&thread_to, &thread_from) {
+            warn!("unarchive_channel: rollback thread mv also failed: {}", rb);
+        }
+        return Response::error(format!(
+            "unarchive_channel commit failed: {}; rolled back git mv",
+            e
+        ));
+    }
+
+    // 9. Push with retry (mirror archive_channel)
+    if state.git_storage.has_remote() {
+        let mut pushed = false;
+        for attempt in 1..=MAX_PUSH_RETRIES {
+            match state.git_storage.push() {
+                Ok(()) => {
+                    pushed = true;
+                    break;
+                }
+                Err(GitError::PushConflict) => {
+                    warn!(
+                        "unarchive_channel: push conflict (attempt {}/{}), rebasing",
+                        attempt, MAX_PUSH_RETRIES
+                    );
+                    if let Err(e) = state.git_storage.fetch() {
+                        return Response::error(format!(
+                            "unarchive_channel fetch failed: {}",
+                            e
+                        ));
+                    }
+                    if let Err(e) = state.git_storage.rebase_onto_origin() {
+                        return Response::error(format!(
+                            "unarchive_channel rebase failed: {}",
+                            e
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Response::error(format!("unarchive_channel push failed: {}", e));
+                }
+            }
+        }
+        if !pushed {
+            return Response::error(format!(
+                "unarchive_channel: push still conflicting after {} retries",
+                MAX_PUSH_RETRIES
+            ));
+        }
+    }
+
+    // 10. Remove channel from thread_cache (symmetry with archive_channel)
+    state.thread_cache.write().await.remove(&channel);
+
+    // 11. Emit SSE event
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let _ = state.event_tx.send(Event::ChannelUnarchived {
+        channel: channel_name.to_string(),
+        author: author.clone(),
+        timestamp,
+    });
+
+    info!("channel '{}' unarchived by @{}", channel, author);
+
+    // 12. Return success
+    Response::success(serde_json::json!({
+        "channel": channel,
+        "unarchived_by": author,
     }))
 }
 

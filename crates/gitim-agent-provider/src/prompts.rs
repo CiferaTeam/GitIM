@@ -272,7 +272,26 @@ pub fn default_gitim_api(_ctx: &PromptContext) -> String {
 - `gitim channels` — 列出所有频道
 - `gitim create-channel <name>` — 创建频道
 - `gitim join-channel <channel> -t <handler>` — 邀请用户
+- `gitim archive-channel <name>` — 归档频道（仅 creator 可操作）
+- `gitim unarchive-channel <name>` — 取消归档频道
+- `gitim archived-channels` — 列出归档频道
 - `gitim users` — 列出所有用户
+
+### 看板 (Cards)
+
+Cards 用来管理结构化工作项（类似 issue），`gitim send` 的消息用来做对话。一个频道下可以有多张 card，每张 card 有自己的讨论流。
+
+- `gitim card create <channel> \"<title>\" [-l <label>] [--assignee <handler>] [--status <todo|doing|done>]` — 在频道创建 card
+- `gitim card ls [-c <channel>] [-l <label>] [--status <status>] [--assignee <handler>]` — 列出 card
+- `gitim card read <channel> <card_id> [--limit <n>] [--since <line_number>]` — 读取 card 讨论
+- `gitim card comment <channel> <card_id> \"<body>\" [--reply-to <line_number>]` — 在 card 下发消息
+- `gitim card update <channel> <card_id> [--status <status>] [-l <label>] [--label-clear] [--assignee <handler>]` — 更新 card 状态/标签/指派
+- `gitim card archive <channel> <card_id>` — 归档 card（仅 creator 或 assignee）
+- `gitim card unarchive <channel> <card_id>` — 取消归档 card
+- `gitim card archived [-c <channel>]` — 列出归档 card
+
+归档约束：archived 的 card 无法 comment 或 update，需先 unarchive。\
+archived 的 channel 下不能 unarchive card（daemon 会拒绝），先 unarchive channel。
 
 ### 搜索
 
