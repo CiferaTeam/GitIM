@@ -250,16 +250,35 @@ fn set_exec_perms(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A rollback entry recorded during [`replace_binaries`]. Two shapes because
+/// the two install scenarios call for different recovery actions:
+///
+/// - `Restore`: the destination existed, so we renamed it to `.old` before
+///   copying. Rollback renames `.old` back to the destination.
+/// - `Remove`: the destination did not previously exist, so the new copy is
+///   the only file on disk. Rollback removes the stranded copy.
+///
+/// The previous implementation only tracked the `Restore` case, which meant a
+/// partial-install failure on a fresh destination left the new binary
+/// stranded after rollback — inconsistent with the "atomic or not at all"
+/// contract.
+enum RollbackAction {
+    Restore { dest: PathBuf, backup: PathBuf },
+    Remove { dest: PathBuf },
+}
+
 /// Atomically replace every binary in [`BINARIES`] that exists under `src_dir`.
 ///
 /// For each binary:
 /// 1. Locate it under `src_dir` via `find_binary`; missing -> warn + skip.
-/// 2. If the destination exists, rename it to `<dest>.old` (tracked for rollback).
+/// 2. If the destination exists, rename it to `<dest>.old` (tracked as
+///    `Restore` for rollback). If it doesn't exist, record `Remove` so
+///    rollback can delete the freshly-created copy.
 /// 3. Copy the new file into place and chmod 0o755.
 ///
-/// If any step fails, every rename performed so far is reversed (in reverse
+/// If any step fails, every action performed so far is reversed (in reverse
 /// order) and the original error is returned. On full success, `.old` backups
-/// are deleted unless `keep_backup` is true.
+/// from `Restore` entries are deleted unless `keep_backup` is true.
 ///
 /// Returns the list of binary names that were successfully replaced.
 pub fn replace_binaries(
@@ -267,9 +286,7 @@ pub fn replace_binaries(
     install_dir: &Path,
     keep_backup: bool,
 ) -> Result<Vec<String>, UpdateError> {
-    // (dest, backup) pairs for rollback. Each entry means "we renamed `dest`
-    // away to `backup`" — rollback restores by renaming `backup` back to `dest`.
-    let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut actions: Vec<RollbackAction> = Vec::new();
     let mut installed: Vec<String> = Vec::new();
 
     for bin_name in BINARIES {
@@ -279,65 +296,95 @@ pub fn replace_binaries(
         };
         let dest = install_dir.join(bin_name);
         let backup = backup_path(&dest);
+        let had_existing = dest.exists();
 
         // Step 1: move any existing binary out of the way.
-        if dest.exists() {
+        if had_existing {
             if let Err(e) = std::fs::rename(&dest, &backup) {
-                rollback(&renames);
+                rollback(&actions);
                 return Err(UpdateError::Io(e));
             }
-            renames.push((dest.clone(), backup.clone()));
+            actions.push(RollbackAction::Restore {
+                dest: dest.clone(),
+                backup: backup.clone(),
+            });
+        } else {
+            // Pre-register the remove action BEFORE the copy: if the copy
+            // partially wrote to disk and then failed, the next iteration's
+            // rollback still needs to clean it up.
+            actions.push(RollbackAction::Remove {
+                dest: dest.clone(),
+            });
         }
 
         // Step 2: copy the new binary into place.
         if let Err(e) = std::fs::copy(&src, &dest) {
             // Best-effort: remove any partial dest the failed copy may have left.
             let _ = std::fs::remove_file(&dest);
-            rollback(&renames);
+            rollback(&actions);
             return Err(UpdateError::Io(e));
         }
 
         // Step 3: set executable perms.
         if let Err(e) = set_exec_perms(&dest) {
             let _ = std::fs::remove_file(&dest);
-            rollback(&renames);
+            rollback(&actions);
             return Err(UpdateError::Io(e));
         }
 
         installed.push(bin_name.to_string());
     }
 
-    // Success: optionally drop backups.
+    // Success: optionally drop backups. `Remove` actions have no backup.
     if !keep_backup {
-        for (_, backup) in &renames {
-            let _ = std::fs::remove_file(backup);
+        for action in &actions {
+            if let RollbackAction::Restore { backup, .. } = action {
+                let _ = std::fs::remove_file(backup);
+            }
         }
     }
 
     Ok(installed)
 }
 
-/// Undo renames in reverse order. Best-effort — rollback failures are logged
+/// Undo actions in reverse order. Best-effort — rollback failures are logged
 /// but not propagated; the caller already has a primary error to report.
-fn rollback(renames: &[(PathBuf, PathBuf)]) {
-    for (dest, backup) in renames.iter().rev() {
-        // Clear any partial file sitting at `dest` so the rename can land.
-        if dest.exists() {
-            if let Err(e) = std::fs::remove_file(dest) {
-                tracing::warn!(
-                    path = %dest.display(),
-                    error = %e,
-                    "rollback: failed to remove partial copy"
-                );
+fn rollback(actions: &[RollbackAction]) {
+    for action in actions.iter().rev() {
+        match action {
+            RollbackAction::Restore { dest, backup } => {
+                // Clear any partial file sitting at `dest` so the rename can land.
+                if dest.exists() {
+                    if let Err(e) = std::fs::remove_file(dest) {
+                        tracing::warn!(
+                            path = %dest.display(),
+                            error = %e,
+                            "rollback: failed to remove partial copy"
+                        );
+                    }
+                }
+                if let Err(e) = std::fs::rename(backup, dest) {
+                    tracing::warn!(
+                        from = %backup.display(),
+                        to = %dest.display(),
+                        error = %e,
+                        "rollback: failed to restore backup"
+                    );
+                }
             }
-        }
-        if let Err(e) = std::fs::rename(backup, dest) {
-            tracing::warn!(
-                from = %backup.display(),
-                to = %dest.display(),
-                error = %e,
-                "rollback: failed to restore backup"
-            );
+            RollbackAction::Remove { dest } => {
+                // Only remove if it exists; a failed copy may never have
+                // produced a file in the first place.
+                if dest.exists() {
+                    if let Err(e) = std::fs::remove_file(dest) {
+                        tracing::warn!(
+                            path = %dest.display(),
+                            error = %e,
+                            "rollback: failed to remove newly-created binary"
+                        );
+                    }
+                }
+            }
         }
     }
 }

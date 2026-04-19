@@ -219,6 +219,37 @@ impl Drop for FakeVersionGuard {
     }
 }
 
+/// RAII guard to point `HOME` at an isolated tempdir. The failure-branch
+/// respawn helper calls `recover_from_config`, which reads
+/// `$HOME/.gitim/runtime.json`. Without this guard the test reads the dev
+/// machine's real workspace config and tries to provision it — which either
+/// succeeds (polluting the dev environment) or fails noisily.
+struct HomeGuard {
+    _tmp: TempDir,
+    original: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn install() -> Self {
+        let tmp = TempDir::new().expect("home tempdir");
+        let original = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+        Self {
+            _tmp: tmp,
+            original,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 // -- tests ------------------------------------------------------------------
 
 /// Happy path: replace binaries, fork-exec a new runtime, new runtime answers
@@ -350,6 +381,9 @@ async fn async_phase_replace_failure_leaves_old_runtime_alive() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let _version_guard = FakeVersionGuard::install("9.9.9");
+    // Isolate `$HOME` so the respawn helper's `recover_from_config` reads an
+    // empty `runtime.json` and does not touch the dev machine's workspaces.
+    let _home_guard = HomeGuard::install();
 
     let outcome =
         run_async_install_and_spawn(state.clone(), "test-fail".to_string(), src_dir).await;
@@ -389,6 +423,16 @@ async fn async_phase_replace_failure_leaves_old_runtime_alive() {
     assert!(!install_dir.path().join("gitim.old").exists());
     // No listener ever started.
     assert!(fetch_health_once(port).is_err());
+
+    // Respawn contract: the helper cleared state.workspaces and called
+    // recover_from_config. With an empty $HOME the map stays empty — what we
+    // care about is that the clear ran (proving respawn was invoked) rather
+    // than that recovery re-populated anything.
+    let workspaces_len = state.lock().unwrap().workspaces.len();
+    assert_eq!(
+        workspaces_len, 0,
+        "respawn helper should have cleared workspaces before recover_from_config"
+    );
 }
 
 /// Fork-exec failure: point `canonical_exe_path` at a missing file so `spawn`
@@ -432,6 +476,8 @@ async fn async_phase_fork_exec_failure_records_error() {
         install_dir.path().join("definitely-nonexistent");
 
     let _version_guard = FakeVersionGuard::install("9.9.9");
+    // Same rationale as the replace-failure test: respawn path reads $HOME.
+    let _home_guard = HomeGuard::install();
 
     let outcome = run_async_install_and_spawn(
         state.clone(),

@@ -480,11 +480,17 @@ pub async fn run_async_install_and_spawn(
         Ok(Err(e)) => {
             let detail = format!("replace_binaries failed: {e}");
             record_async_error(&state, &guard, &job_id, detail.clone());
+            // Daemons were killed in step 1. If replace fails, the old binary
+            // is still on disk (rollback restored it) so the *current* runtime
+            // can re-provision them. Without this, the user's agents stay dead
+            // until they restart the runtime manually.
+            respawn_daemons_after_failure(&state, &job_id).await;
             return AsyncPhaseOutcome::Failed { detail };
         }
         Err(join_err) => {
             let detail = format!("replace_binaries task panicked: {join_err}");
             record_async_error(&state, &guard, &job_id, detail.clone());
+            respawn_daemons_after_failure(&state, &job_id).await;
             return AsyncPhaseOutcome::Failed { detail };
         }
     };
@@ -506,6 +512,11 @@ pub async fn run_async_install_and_spawn(
         Err(e) => {
             let detail = format!("fork-exec new runtime failed: {e}");
             record_async_error(&state, &guard, &job_id, detail.clone());
+            // Binaries are already swapped in place; the current (still-old)
+            // runtime stays alive and can drive the freshly-installed daemon
+            // binary just fine. Restore the daemons so the user's agents come
+            // back online instead of staying stranded.
+            respawn_daemons_after_failure(&state, &job_id).await;
             return AsyncPhaseOutcome::Failed { detail };
         }
     };
@@ -558,6 +569,25 @@ fn record_async_error(
         s.update_last_error = Some(detail);
     }
     guard.store(false, Ordering::SeqCst);
+}
+
+/// Best-effort: after the async phase has killed daemons and then failed
+/// before a successful handoff to the new runtime, re-provision the daemons
+/// through the same path startup uses. Without this, the user sees a failed
+/// update AND every agent offline — which is much worse than either alone.
+///
+/// `kill_managed_daemons` only SIGKILLs PIDs — it does not clear the state's
+/// workspaces map. `recover_from_config` on the other hand skips any slug it
+/// already sees in state. So we clear the workspaces map first, then let
+/// `recover_from_config` rebuild it by reading `~/.gitim/runtime.json` and
+/// re-provisioning human + agent daemons for each workspace.
+async fn respawn_daemons_after_failure(state: &SharedRuntimeState, job_id: &str) {
+    tracing::warn!(%job_id, "update_and_restart: respawning daemons after async-phase failure");
+    {
+        let mut s = state.lock().unwrap();
+        s.workspaces.clear();
+    }
+    crate::http::recover_from_config(state.clone()).await;
 }
 
 #[cfg(test)]

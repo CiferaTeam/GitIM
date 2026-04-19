@@ -189,7 +189,18 @@ export function useVersionCheck(): VersionCheckResult {
           return;
         }
 
-        const res = await health();
+        // `health()` propagates fetch rejections (network down, connection
+        // refused) as thrown errors — the exact shape of the restart window
+        // when the old process has exited and the new one hasn't yet bound.
+        // Catch here so the interval callback doesn't leak unhandled
+        // rejections and so we still flip into the Restarting state.
+        let res: Awaited<ReturnType<typeof health>>;
+        try {
+          res = await health();
+        } catch {
+          res = { ok: false, error: "fetch failed" };
+        }
+
         if (!res.ok) {
           // Connection down = parent process exiting. Child will rebind shortly.
           if (!sawDisconnect) {

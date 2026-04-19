@@ -242,3 +242,63 @@ fn replace_binaries_rolls_back_on_failure() {
     assert!(!install_dir.path().join("gitim.old").exists());
     assert!(install_dir.path().join("gitim-daemon.old").is_dir());
 }
+
+/// Test E: rollback when some destinations did NOT previously exist.
+///
+/// Scenario: fresh install where only `gitim-runtime` is on disk in the
+/// install dir. The first two binaries (`gitim`, `gitim-daemon`) are brand
+/// new copies with no backup to restore. If the third copy fails, rollback
+/// must REMOVE the new files (not leave them stranded) and RESTORE the
+/// third from its `.old` backup. The previous implementation only tracked
+/// renames, so newly-created copies survived a rollback — a partial install.
+#[test]
+#[cfg(unix)]
+fn replace_binaries_rolls_back_newly_created_on_failure() {
+    let src_dir = tempfile::tempdir().expect("src tempdir");
+    let install_dir = tempfile::tempdir().expect("install tempdir");
+
+    // src_dir has all three new binaries.
+    for name in BINARIES {
+        write_file(src_dir.path(), name, format!("new {name}\n").as_bytes());
+    }
+
+    // install_dir initially only has the third binary (`gitim-runtime`).
+    write_file(
+        install_dir.path(),
+        "gitim-runtime",
+        b"old gitim-runtime\n",
+    );
+
+    // Inject a blocker for the third iteration's rename: `gitim-runtime.old`
+    // pre-exists as a directory so `fs::rename(gitim-runtime, gitim-runtime.old)`
+    // fails (EISDIR / ENOTDIR on Unix).
+    fs::create_dir(install_dir.path().join("gitim-runtime.old"))
+        .expect("pre-create blocker");
+
+    let result = replace_binaries(src_dir.path(), install_dir.path(), false);
+    assert!(
+        matches!(result, Err(UpdateError::Io(_))),
+        "expected Io error from rename failure, got {result:?}"
+    );
+
+    // Key assertion: the newly-copied `gitim` and `gitim-daemon` must NOT
+    // survive — rollback must have removed them.
+    assert!(
+        !install_dir.path().join("gitim").exists(),
+        "gitim (newly created) should have been removed by rollback"
+    );
+    assert!(
+        !install_dir.path().join("gitim-daemon").exists(),
+        "gitim-daemon (newly created) should have been removed by rollback"
+    );
+
+    // Original `gitim-runtime` is still in place (rename never succeeded).
+    let runtime = fs::read(install_dir.path().join("gitim-runtime")).expect("read runtime");
+    assert_eq!(&runtime[..], b"old gitim-runtime\n");
+
+    // No stray `.old` files for the Remove-rollback cases.
+    assert!(!install_dir.path().join("gitim.old").exists());
+    assert!(!install_dir.path().join("gitim-daemon.old").exists());
+    // The blocking directory stays — we never touched it.
+    assert!(install_dir.path().join("gitim-runtime.old").is_dir());
+}
