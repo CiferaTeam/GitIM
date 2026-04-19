@@ -257,12 +257,20 @@ export const useCardStore = create<CardState>((set) => ({
 
 // ─── Derived selectors (call as regular functions with state) ───────────────
 
+// Memoized by `state.cards` identity so zustand's Object.is check over the
+// selector result stays stable — otherwise useSyncExternalStore's getSnapshot
+// would return a fresh array every render and loop forever.
+let _labelsCardsRef: Card[] | null = null;
+let _labelsCache: string[] = [];
 export function selectAllLabels(state: CardState): string[] {
+  if (state.cards === _labelsCardsRef) return _labelsCache;
   const set = new Set<string>();
   for (const card of state.cards) {
     for (const l of card.labels) set.add(l);
   }
-  return [...set].sort();
+  _labelsCardsRef = state.cards;
+  _labelsCache = [...set].sort();
+  return _labelsCache;
 }
 
 export function selectFilteredCards(
