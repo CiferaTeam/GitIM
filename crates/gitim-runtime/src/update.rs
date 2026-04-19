@@ -403,8 +403,12 @@ async fn run_async_phase(
     match outcome {
         AsyncPhaseOutcome::Done { child_pid } => {
             tracing::info!(%job_id, %child_pid, "update_and_restart: exiting parent process");
-            // No return from here. The spawned child is responsible for
-            // serving HTTP from this point forward.
+            // std::process::exit(0) here is intentional: the new runtime has just been
+            // spawned and is binding its port (with retry). This process's cleanup —
+            // dropping SharedRuntimeState, joining server tasks, running SIGTERM handlers —
+            // is skipped on purpose; any delay risks the child failing to bind if our
+            // listener is still held. kill_managed_daemons + replace_binaries + clean_old
+            // all completed before this line, so no resources leak.
             std::process::exit(0);
         }
         AsyncPhaseOutcome::Failed { detail } => {

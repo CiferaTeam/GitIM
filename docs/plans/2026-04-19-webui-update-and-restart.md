@@ -386,9 +386,10 @@
 3. **前端错误态无 dismiss / retry**:error 状态下 UpdateIndicator 显示红色叹号 + 错误文字,但没有"重试"或"关闭"按钮。用户要么等 1 小时自动 re-check,要么刷新页面。v1 接受。
 4. **端口重绑定 race**:老 runtime `exit(0)` 和新 runtime bind 同端口之间有小窗口。已在 `run_shell` 里加 10×100ms retry(AddrInUse → 等 100ms 重试),实践上足够。如果仍有问题,后续可以考虑 `SO_REUSEPORT`。
 5. **`update_last_error` 字段无 reader**:Task 7 在 RuntimeState 加了 `update_last_error: Option<String>` 记录异步阶段错误,但 v1 前端不查询它(只等 30s 超时)。Future work:加 `GET /runtime/update-status` endpoint 让前端能拿到"为啥失败",减少"Update may have failed" 这种模糊提示。
-6. **Windows 支持**:与 `install.sh` 一致,v1 not scoped。
-7. **自动后台升级 / 静默升级**:明确不做。每次升级需用户在 UI 主动确认。
-8. **版本比较使用 semver triple**:`parseVersion` 在前后端(gitim-updater 和 webui-v2 hook)都要求严格 `X.Y.Z` 格式,拒绝 `X.Y.Z.W` 和 pre-release 后缀。对当前 release 约定安全,但如果未来发 `v0.5.0-rc1` 之类 tag,前端不会提示升级。
+6. **升级期间其他 API 调用可能仍弹错误 toast**:`useConnectionStore.isUpdating` 标志已就位,但 `client.ts` 里的各 fetch wrapper 没有检查这个标志来 swallow 错误。其他组件(比如 message poller)在 restart 窗口可能弹 "连接失败" toast。用户体验小瑕疵但不影响功能。Future work:在 `client.ts` 的 base fetch 层做统一 swallow。
+7. **Windows 支持**:与 `install.sh` 一致,v1 not scoped。
+8. **自动后台升级 / 静默升级**:明确不做。每次升级需用户在 UI 主动确认。
+9. **版本比较使用 semver triple**:`parseVersion` 在前后端(gitim-updater 和 webui-v2 hook)都要求严格 `X.Y.Z` 格式,拒绝 `X.Y.Z.W` 和 pre-release 后缀。对当前 release 约定安全,但如果未来发 `v0.5.0-rc1` 之类 tag,前端不会提示升级。
 
 ---
 

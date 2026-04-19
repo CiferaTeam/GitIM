@@ -1,9 +1,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use gitim_runtime::http::DEFAULT_PORT;
 use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
-
-const DEFAULT_PORT: u16 = 16868;
 
 fn cleanup_pid_file() {
     if let Some(home) = dirs::home_dir() {

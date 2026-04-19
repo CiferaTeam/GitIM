@@ -20,6 +20,12 @@ use crate::github::{check_repo_access, parse_github_url, verify_token, GithubErr
 use gitim_client::GitimClient;
 use gitim_sync::url_redact::redacted_url;
 
+/// Default TCP port for the runtime HTTP server. Shared between
+/// `RuntimeState::default()` and `bin/runtime.rs`'s argv parser so the two
+/// can't drift. Chosen to sit well above the IANA registered range and out
+/// of the ephemeral-port band on macOS / Linux.
+pub const DEFAULT_PORT: u16 = 16868;
+
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care
 /// which backing impl is wired up — they just ask the injected client.
@@ -176,11 +182,7 @@ impl Default for RuntimeState {
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
-            // Default matches `DEFAULT_PORT` in `bin/runtime.rs`. Kept in sync
-            // by convention, not by a shared constant — the bin crate can't
-            // depend on the lib's private defaults and vice versa without
-            // adding a public const.
-            listen_port: 16868,
+            listen_port: DEFAULT_PORT,
         }
     }
 }

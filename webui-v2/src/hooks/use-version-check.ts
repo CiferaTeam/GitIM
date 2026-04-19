@@ -12,6 +12,13 @@ const RESTART_POLL_MS = 500;
 // Hard ceiling on the restart window before we give up and surface an error.
 const RESTART_TIMEOUT_MS = 30_000;
 
+// `/health` returns the bare CARGO_PKG_VERSION ("0.4.2") while the update
+// endpoint's `target_version` comes from the GitHub tag ("v0.4.2"). Strict
+// string equality across these two representations would never match — and
+// the restart-success detection loop would silently time out. Normalize both
+// sides before comparing.
+const stripV = (s: string): string => s.replace(/^v/, "");
+
 interface VersionCheckResult {
   current: string | null;
   latest: string | null;
@@ -193,7 +200,7 @@ export function useVersionCheck(): VersionCheckResult {
         }
 
         const version = (res.data as { version?: string } | undefined)?.version ?? null;
-        if (version && version === targetVersion) {
+        if (version && stripV(version) === stripV(targetVersion)) {
           if (pollHandleRef.current !== null) {
             clearInterval(pollHandleRef.current);
             pollHandleRef.current = null;
@@ -202,7 +209,7 @@ export function useVersionCheck(): VersionCheckResult {
           setIsRestarting(false);
           setUpdateError(null);
           setRuntimeVersion(version);
-          toast.success(`Updated to v${version}`);
+          toast.success(`Updated to v${stripV(version)}`);
           restartingRef.current = false;
           // Hard reload: reset every store and re-subscribe all live channels.
           // See hook docstring for rationale.
