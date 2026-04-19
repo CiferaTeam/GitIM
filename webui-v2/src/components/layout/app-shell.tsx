@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Outlet, useNavigate } from "react-router";
-import { HelpCircle } from "lucide-react";
+import { HelpCircle, X } from "lucide-react";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
@@ -41,9 +41,18 @@ export function AppShell({ children }: AppShellProps) {
         {/* Center: nav tabs */}
         <NavTabs />
 
-        {/* Right: theme toggle + help + current user */}
+        {/* Right: theme toggle + twitter + help + current user */}
         <div className="flex items-center justify-end gap-2 min-w-[140px]">
           <ThemeToggle />
+          <a
+            href="https://x.com/arknights60"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Twitter / X"
+            className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
+          >
+            <X className="size-4" />
+          </a>
           <button
             type="button"
             onClick={() => navigate("/docs")}
