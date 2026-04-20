@@ -419,6 +419,11 @@ impl AgentLoop {
                 "context reset complete, clearing session_token"
             );
             self.session_token = None;
+            let mut state = AgentState::load(&self.repo_root)?;
+            let sid_for_log = state.session_usage.as_ref().map(|s| s.session_id.clone());
+            state.clear_session();
+            state.save(&self.repo_root)?;
+            tracing::info!(session_id = ?sid_for_log, reason = "agent_emitted_reset", "session_reset");
             self.save_state()?;
             return Ok(true);
         }
@@ -435,6 +440,9 @@ impl AgentLoop {
                 self.emit_activity("error", "execution failed");
                 // Clear session_token to avoid resuming a broken session
                 self.session_token = None;
+                let mut state = AgentState::load(&self.repo_root)?;
+                state.clear_session();
+                state.save(&self.repo_root)?;
             }
             ExecStatus::Aborted => {
                 info!(
