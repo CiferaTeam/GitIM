@@ -569,6 +569,159 @@ pub async fn preflight_codex() -> PreflightResult {
     preflight_codex_with("codex", Duration::from_secs(60)).await
 }
 
+/// Run a real-hello ping against the opencode CLI at `bin`.
+///
+/// Unlike claude/codex where we force a cheap model, opencode uses whatever
+/// model the user authenticated with via `opencode auth login`. We cannot
+/// predict that at preflight time, so we accept the variance. System prompt
+/// is injected via OPENCODE_CONFIG_CONTENT as a minimal echo agent to keep
+/// the request cheap and deterministic.
+pub async fn preflight_opencode_with(bin: &str, timeout: Duration) -> PreflightResult {
+    let started = Instant::now();
+
+    let tmpdir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            return PreflightResult::failure(
+                "opencode",
+                ErrorKind::Other,
+                format!("failed to create tempdir: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let config_content = serde_json::json!({
+        "agent": {
+            "gitim_preflight": {
+                "prompt": "Reply with exactly what the user asks, nothing more.",
+                "mode": "primary",
+            }
+        }
+    })
+    .to_string();
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.current_dir(tmpdir.path())
+        .args([
+            "run",
+            "--format",
+            "json",
+            "--dangerously-skip-permissions",
+            "--agent",
+            "gitim_preflight",
+            "--",
+            "Reply with exactly: GITIM_OK",
+        ])
+        .env("OPENCODE_CONFIG_CONTENT", &config_content)
+        .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("opencode CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn opencode: {e}")
+            };
+            return PreflightResult::failure(
+                "opencode",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return PreflightResult::failure(
+                "opencode",
+                ErrorKind::Other,
+                format!("opencode IO error: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+        Err(_) => {
+            return PreflightResult::failure(
+                "opencode",
+                ErrorKind::Timeout,
+                format!("opencode preflight exceeded {}ms", timeout.as_millis()),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = truncate(stderr.trim(), STDERR_TRUNCATE);
+        let msg = if trimmed.is_empty() {
+            format!("opencode exited with status {}", output.status)
+        } else {
+            format!("opencode exited with status {}: {}", output.status, trimmed)
+        };
+        return PreflightResult::failure("opencode", ErrorKind::Other, msg, duration_ms);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = extract_opencode_text(&stdout);
+
+    if text.contains("GITIM_OK") {
+        PreflightResult::success(
+            "opencode",
+            None,
+            None, // model_used = whatever user auth'd; unknown at CLI level
+            duration_ms,
+            Some(truncate(&text, PREVIEW_TRUNCATE)),
+        )
+    } else {
+        PreflightResult::failure(
+            "opencode",
+            ErrorKind::Other,
+            "response did not contain GITIM_OK",
+            duration_ms,
+        )
+    }
+}
+
+/// Run a real-hello preflight against the default `opencode` binary.
+pub async fn preflight_opencode() -> PreflightResult {
+    preflight_opencode_with("opencode", Duration::from_secs(60)).await
+}
+
+/// Concatenate all `text` part payloads from opencode's NDJSON stream.
+fn extract_opencode_text(stdout: &str) -> String {
+    let mut out = String::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val): Result<serde_json::Value, _> = serde_json::from_str(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|t| t.as_str()) != Some("text") {
+            continue;
+        }
+        if let Some(text) = val
+            .get("part")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+        {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +860,26 @@ mod tests {
     fn parse_claude_result_invalid_json() {
         let err = parse_claude_result("not json").unwrap_err();
         assert!(err.contains("failed to parse"));
+    }
+
+    #[test]
+    fn extract_opencode_text_concatenates_text_parts() {
+        let stdout = r#"
+{"type":"step_start","sessionID":"s1","part":{}}
+{"type":"text","sessionID":"s1","part":{"text":"GITIM_"}}
+{"type":"text","sessionID":"s1","part":{"text":"OK"}}
+{"type":"step_finish","sessionID":"s1","part":{}}
+"#;
+        assert_eq!(extract_opencode_text(stdout), "GITIM_OK");
+    }
+
+    #[test]
+    fn extract_opencode_text_ignores_non_text_lines() {
+        let stdout = r#"
+not json
+{"type":"tool_use","part":{}}
+{"type":"text","part":{"text":"hello"}}
+"#;
+        assert_eq!(extract_opencode_text(stdout), "hello");
     }
 }
