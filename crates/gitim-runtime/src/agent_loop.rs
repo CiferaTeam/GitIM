@@ -147,6 +147,7 @@ impl AgentLoop {
         let state = AgentState {
             cursor: self.poller.cursor().map(|s| s.to_string()),
             session_token: self.session_token.clone(),
+            ..Default::default()
         };
         state.save(&self.repo_root)
     }
