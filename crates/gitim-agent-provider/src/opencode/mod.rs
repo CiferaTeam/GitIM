@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
@@ -39,37 +40,36 @@ impl Provider for OpencodeProvider {
         })?;
 
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
-
-        let mut args = vec!["run".to_string(), "--format".to_string(), "json".to_string()];
-        if let Some(model) = &opts.model {
-            args.extend(["--model".to_string(), model.clone()]);
-        }
-        if let Some(system_prompt) = &opts.system_prompt {
-            args.extend(["--prompt".to_string(), system_prompt.clone()]);
-        }
-        if let Some(resume_token) = &opts.resume_token {
-            args.extend(["--session".to_string(), resume_token.clone()]);
-        }
-        args.push(prompt.to_string());
+        let inv = build_invocation(prompt, &opts);
 
         let mut cmd = Command::new(&exec_path);
-        cmd.args(&args)
+        cmd.args(&inv.args)
             .stdout(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#);
+            .kill_on_drop(true);
+
+        // Apply provider-level env first so invocation env can override.
+        for (k, v) in &self.config.env {
+            cmd.env(k, v);
+        }
+        for (k, v) in &inv.env {
+            cmd.env(k, v);
+        }
 
         if let Some(cwd) = &opts.cwd {
             cmd.current_dir(cwd);
         }
-        for (k, v) in &self.config.env {
-            cmd.env(k, v);
-        }
 
         let mut child = cmd.spawn()?;
         let pid = child.id().unwrap_or(0);
-        info!(pid, cwd = ?opts.cwd, model = ?opts.model, "opencode started");
+        info!(
+            pid,
+            cwd = ?opts.cwd,
+            model = ?opts.model,
+            has_sys = opts.system_prompt.is_some(),
+            "opencode started"
+        );
 
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -249,6 +249,66 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("event channel full, dropping event");
     }
+}
+
+/// Plan of record for invoking `opencode run`. Separated from execute() so
+/// command construction is testable without spawning a real process.
+#[derive(Debug)]
+pub struct Invocation {
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+/// Build the argv + env for `opencode run` given a user prompt and options.
+///
+/// System prompt is injected via OPENCODE_CONFIG_CONTENT as a custom `gitim`
+/// agent, selected on the CLI with `--agent gitim`. There is NO CLI flag for
+/// system prompt — `opencode run --help` confirms this.
+pub fn build_invocation(prompt: &str, opts: &ExecOptions) -> Invocation {
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+    ];
+
+    if let Some(model) = &opts.model {
+        args.push("--model".to_string());
+        args.push(model.clone());
+    }
+    if let Some(resume_token) = &opts.resume_token {
+        args.push("--session".to_string());
+        args.push(resume_token.clone());
+    }
+
+    let mut env: HashMap<String, String> = HashMap::new();
+    // OPENCODE_PERMISSION merges into final permission config; "*":"allow"
+    // flattens external_directory ask, .env ask, etc. so the agent can touch
+    // the workspace without per-path approval.
+    env.insert(
+        "OPENCODE_PERMISSION".to_string(),
+        r#"{"*":"allow"}"#.to_string(),
+    );
+
+    if let Some(system_prompt) = opts.system_prompt.as_ref().filter(|s| !s.is_empty()) {
+        let config = json!({
+            "agent": {
+                "gitim": {
+                    "prompt": system_prompt,
+                    "mode": "primary",
+                }
+            }
+        });
+        env.insert("OPENCODE_CONFIG_CONTENT".to_string(), config.to_string());
+        args.push("--agent".to_string());
+        args.push("gitim".to_string());
+    }
+
+    // `--` terminator so messages starting with `-` don't get parsed as flags.
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+
+    Invocation { args, env }
 }
 
 /// Parsed result from a single line of OpenCode JSON output.
