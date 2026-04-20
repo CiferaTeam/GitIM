@@ -29,13 +29,14 @@ This collectively enables a "feels infinite" context experience: the agent is gu
 - Inject a one-shot "please finalize and emit `[[RESET]]`" notice when `used_percent` crosses 80%.
 - Expose snapshot via `GET /agents/:id` (field `session_usage`) and SSE `AgentActivityEvent` (event_type `"usage"`).
 - Log a comparison line at `info` level whenever the 80% threshold is crossed; log per-turn usage at `debug`.
+- **Surface session_id + used_percent in the WebUI `AgentStatusPanel` expansion popover** (top-right of the "Recent Activity" header). Folded view stays unchanged.
 
 ### Non-Goals (explicitly deferred)
 - `me.json`-level user-configurable thresholds or `max_tokens` override. v1 ships hardcoded per-provider/model defaults; the override story ships with the future "edit agent config" UX (not this feature).
 - Historical session log (`.gitim/session-history.jsonl` or similar). Only current session is tracked; `[[RESET]]` clears state.
 - Forced auto-reset at any threshold. The agent is the one who emits `[[RESET]]`; runtime only sends the notice.
 - Multi-tier thresholds (70% warn / 90% critical). Single 80% cliff only.
-- CLI surface (`gitim status` showing usage). HTTP + SSE only.
+- CLI surface (`gitim status` showing usage). HTTP + SSE + WebUI popover only.
 - Changing the `[[RESET]]` detection protocol.
 - Estimator-driven threshold decisions. Even with tiktoken data flowing, threshold is always driven by `provider_reported` when present. Estimator is observation-only in v1.
 
@@ -308,7 +309,32 @@ A new `event_type = "usage"` with `detail` carrying a JSON-serialized `SessionUs
 }
 ```
 
-WebUI v2: not part of this feature's scope. A follow-up card will add the usage badge component consuming these signals.
+**WebUI v2 integration** (part of this feature's scope):
+
+- `webui-v2/src/lib/types.ts`: extend `Agent` with
+  ```ts
+  sessionUsage?: {
+    sessionId: string;
+    usedPercent: number;
+    source: "provider_reported" | "runtime_estimated";
+    updatedAt: string;
+  };
+  ```
+- `webui-v2/src/lib/client.ts`: parse `session_usage` from `GET /agents/:id` responses and camelCase it into the store.
+- `webui-v2/src/hooks/use-agent-activity.ts` (or wherever SSE is consumed): on receiving an event with `event_type === "usage"`, JSON-parse `detail` and patch the corresponding agent's `sessionUsage` in the agent store — do not append to the activity log.
+- `webui-v2/src/components/chat/agent-status-panel.tsx` — modify only the expanded popover header row (current single `<p>Recent Activity</p>` line at ~line 88-90). After the change:
+  ```
+  ┌ name — Recent Activity ·············  sid:abc123 · 47% ┐
+  ├─── activity line 1 ──────────────────────────────────────┤
+  ├─── activity line 2 ──────────────────────────────────────┤
+  ```
+  - Left: existing `{name} — Recent Activity`
+  - Right: `sid:{sessionId.slice(0, 8)} · {usedPercent.toFixed(0)}%`
+  - Show the percent in a soft-warning color (yellow/orange token) when `usedPercent >= 80`; default muted color otherwise.
+  - If `sessionUsage` is absent (no usage data yet / first turn not complete), render nothing on the right — no placeholder, no dash.
+- **Folded row stays identical.** No percent, no session_id in the folded view.
+
+No new component file. The change is confined to the header row of the existing popover plus a small type + data-flow tail.
 
 ### 4.7 Logging
 
@@ -360,9 +386,18 @@ session_reset session_id=<sid> reason=agent_emitted_reset
 - `threshold_injection_e2e`: mock provider returns 82% on turn 2; assert turn 3's prompt contains the system notice prefix.
 - `estimator_logs_match_provider_reported`: capture `tracing` output, verify `delta_pp` stays within ±20pp band for a scripted scenario.
 
+**WebUI**:
+
+- Unit test `AgentStatusPanel` with a mocked agent store:
+  - `sessionUsage` absent → popover header right side empty
+  - `sessionUsage.usedPercent = 47` → header right renders `sid:xxxxxxxx · 47%` in muted color
+  - `sessionUsage.usedPercent = 85` → same text, warning color token applied
+  - Folded row renders identically regardless of `sessionUsage` state
+
 **Manual validation**:
 
 - Point a real Claude agent at an artificial pressure scenario (long input → watch log). Collect ~10 samples over a few days; compare distribution of `delta_pp` values. Target: median |delta_pp| ≤ 10.
+- Visual verification in the running WebUI: expand an agent row, confirm the header-right badge updates live as turns progress (SSE path), survives a full page reload (HTTP path), and disappears cleanly after the agent emits `[[RESET]]`.
 
 ## 7. File Touch List
 
@@ -381,10 +416,15 @@ session_reset session_id=<sid> reason=agent_emitted_reset
 - `crates/gitim-runtime/src/http.rs` — `AgentInfo.session_usage` field; ensure recovery populates from state
 - `crates/gitim-runtime/Cargo.toml` — add `tiktoken-rs`
 
-### Untouched (but worth noting)
+### Added / Modified (WebUI)
+- `webui-v2/src/lib/types.ts` — extend `Agent` with optional `sessionUsage`
+- `webui-v2/src/lib/client.ts` — map `session_usage` from HTTP response
+- `webui-v2/src/hooks/use-agent-activity.ts` (or store equivalent) — handle SSE `"usage"` event
+- `webui-v2/src/components/chat/agent-status-panel.tsx` — header row of the expansion popover shows `sid:xxxxxxxx · NN%`
+
+### Untouched
 - `gitim-daemon`: no change. Daemon doesn't speak to providers.
 - `gitim-core`, `gitim-sync`, `gitim-index`, `gitim-cli`: no change.
-- WebUI: no change in this feature. Consumes added surface in a follow-up card.
 
 ## 8. Rollout
 
