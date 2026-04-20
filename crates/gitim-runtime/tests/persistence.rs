@@ -29,6 +29,7 @@ async fn test_state_save_and_load() {
     let state = AgentState {
         cursor: Some(cursor.clone()),
         session_token: Some("test-session-123".into()),
+        ..Default::default()
     };
     state.save(&handle.repo_root).unwrap();
 
@@ -74,6 +75,7 @@ async fn test_cursor_restore_skips_old_messages() {
     let state = AgentState {
         cursor: Some(saved_cursor.clone()),
         session_token: None,
+        ..Default::default()
     };
     state.save(&handle.repo_root).unwrap();
 
