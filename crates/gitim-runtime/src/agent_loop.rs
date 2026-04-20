@@ -286,25 +286,37 @@ impl AgentLoop {
 
         let opts = self.build_exec_options();
 
+        // Consume usage_notice_pending (Task 14) and accumulate tiktoken estimate
+        // (Task 12) in a single load/save cycle. If the notice flag was set by
+        // a previous turn's threshold crossing, prepend the system preamble here
+        // and clear the flag before execute — this way a mid-turn crash won't
+        // cause the notice to re-fire.
+        let mut state = AgentState::load(&self.repo_root)?;
+        let prompt = if state.usage_notice_pending {
+            let pct = state.session_usage.as_ref().map(|s| s.used_percent).unwrap_or(80.0);
+            let preamble = build_usage_notice_preamble(pct);
+            state.usage_notice_pending = false;
+            format!("{preamble}\n\n---\n\n{prompt}")
+        } else {
+            prompt
+        };
+
         // Pre-execute tiktoken accumulation (Task 12).
         // Cold start (no resume token) → reset estimator and seed with the system prompt.
         // Every turn adds the user prompt before execute; assistant text is added after.
-        {
-            let cold_start = self.session_token.is_none();
-            let mut state = AgentState::load(&self.repo_root)?;
-            if cold_start {
-                state.estimated_tokens = 0;
-            }
-            state.estimated_tokens +=
-                crate::context_window::tokenize_for_provider(&self.provider_type, &prompt);
-            if cold_start {
-                if let Some(sp) = opts.system_prompt.as_deref() {
-                    state.estimated_tokens +=
-                        crate::context_window::tokenize_for_provider(&self.provider_type, sp);
-                }
-            }
-            state.save(&self.repo_root)?;
+        let cold_start = self.session_token.is_none();
+        if cold_start {
+            state.estimated_tokens = 0;
         }
+        state.estimated_tokens +=
+            crate::context_window::tokenize_for_provider(&self.provider_type, &prompt);
+        if cold_start {
+            if let Some(sp) = opts.system_prompt.as_deref() {
+                state.estimated_tokens +=
+                    crate::context_window::tokenize_for_provider(&self.provider_type, sp);
+            }
+        }
+        state.save(&self.repo_root)?;
 
         let mut session = self
             .provider
