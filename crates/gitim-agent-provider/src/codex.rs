@@ -223,6 +223,7 @@ async fn drive_session(
         error: final_error,
         duration_ms: duration.as_millis() as u64,
         session_token: thread_id,
+        usage: None,
     });
 }
 

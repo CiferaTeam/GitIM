@@ -104,6 +104,7 @@ impl Provider for MockProvider {
                 error: None,
                 duration_ms,
                 session_token: None,
+                usage: None,
             });
         });
 

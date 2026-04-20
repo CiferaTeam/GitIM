@@ -285,6 +285,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage: None,
     });
 }
 

@@ -109,6 +109,8 @@ pub struct ExecResult {
     pub duration_ms: u64,
     /// Session token for resuming (provider-specific).
     pub session_token: Option<String>,
+    /// Per-turn usage data, when the provider reported any.
+    pub usage: Option<ProviderUsage>,
 }
 
 /// Execution outcome status.
@@ -118,6 +120,19 @@ pub enum ExecStatus {
     Failed,
     Aborted,
     Timeout,
+}
+
+/// Per-turn usage as reported by a provider.
+///
+/// Providers fill different subsets:
+/// - Claude populates `input_tokens` / `output_tokens`; `used_percent` is `None`.
+/// - Codex populates `used_percent`; token counts are `None`.
+/// - Mock fills whatever the test configures.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProviderUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub used_percent: Option<f64>,
 }
 
 /// Context passed to prompt generation methods.
