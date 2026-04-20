@@ -10,7 +10,10 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsage, Session,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -116,6 +119,7 @@ async fn drive_session(
     let mut final_error: Option<String> = None;
     let mut saw_result = false;
     let mut num_turns: u32 = 0;
+    let mut captured_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
@@ -181,9 +185,11 @@ async fn drive_session(
                                     session_id: sid,
                                     output: result_text,
                                     is_error,
+                                    usage: result_usage,
                                 } => {
                                     saw_result = true;
                                     session_id = sid;
+                                    captured_usage = result_usage;
                                     info!(
                                         pid,
                                         is_error,
@@ -285,7 +291,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: None,
+        usage: captured_usage,
     });
 }
 
@@ -328,6 +334,7 @@ pub enum ParsedMessage {
         session_id: String,
         output: String,
         is_error: bool,
+        usage: Option<ProviderUsage>,
     },
     /// Permission control request requiring a response on stdin.
     ControlRequest { request_id: String, input: Value },
@@ -369,6 +376,11 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             session_id: raw.session_id.unwrap_or_default(),
             output: raw.result.unwrap_or_default(),
             is_error: raw.is_error.unwrap_or(false),
+            usage: raw.usage.map(|u| ProviderUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                used_percent: None,
+            }),
         }),
         "log" => {
             let log = raw.log?;
@@ -456,11 +468,29 @@ struct RawMessage {
     #[serde(default)]
     is_error: Option<bool>,
     #[serde(default)]
+    usage: Option<ClaudeUsage>,
+    #[serde(default)]
     log: Option<LogEntry>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
     request: Option<Value>,
+}
+
+/// Usage block from Claude stream-json's final "result" message.
+/// cache_* fields are parsed but currently unused — preserved for future aggregation.
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default, rename = "cache_read_input_tokens")]
+    #[allow(dead_code)]
+    cache_read_tokens: Option<u64>,
+    #[serde(default, rename = "cache_creation_input_tokens")]
+    #[allow(dead_code)]
+    cache_creation_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -498,4 +528,49 @@ struct ContentBlock {
 struct ControlRequestPayload {
     #[serde(default)]
     input: Option<Value>,
+}
+
+#[cfg(test)]
+mod usage_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_result_with_usage_block() {
+        let line = r#"{
+            "type": "result",
+            "session_id": "sess-abc",
+            "result": "hello",
+            "is_error": false,
+            "usage": {
+                "input_tokens": 164000,
+                "output_tokens": 520,
+                "cache_read_input_tokens": 120000,
+                "cache_creation_input_tokens": 800
+            }
+        }"#;
+
+        let parsed = parse_line(line).expect("should parse");
+        let ParsedMessage::Result { usage, .. } = parsed else {
+            panic!("expected Result variant");
+        };
+        let usage = usage.expect("usage field present");
+        assert_eq!(usage.input_tokens, Some(164_000));
+        assert_eq!(usage.output_tokens, Some(520));
+    }
+
+    #[test]
+    fn parse_result_without_usage_block_ok() {
+        let line = r#"{
+            "type": "result",
+            "session_id": "sess-abc",
+            "result": "hello",
+            "is_error": false
+        }"#;
+
+        let parsed = parse_line(line).expect("should parse");
+        let ParsedMessage::Result { usage, .. } = parsed else {
+            panic!("expected Result variant");
+        };
+        assert!(usage.is_none());
+    }
 }

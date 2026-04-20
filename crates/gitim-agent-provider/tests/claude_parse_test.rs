@@ -126,6 +126,7 @@ fn parse_result_completed() {
             session_id,
             output,
             is_error,
+            ..
         } if session_id == "sess-123" && output == "Done!" && !is_error
     ));
 }
