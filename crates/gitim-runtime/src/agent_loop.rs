@@ -202,7 +202,12 @@ impl AgentLoop {
 
     /// After `provider.execute()` returns, update state.session_usage based on
     /// whatever the provider reported plus the current estimator. Persists state.
-    fn update_session_usage(
+    ///
+    /// Public to allow E2E integration tests (`tests/session_usage_e2e.rs`,
+    /// `tests/threshold_injection_e2e.rs`) to drive the computation + persist
+    /// path directly without wiring up a real provider + daemon. Production
+    /// callers should continue to go through `run_once`.
+    pub fn update_session_usage(
         &self,
         state: &mut AgentState,
         provider_reported: Option<&ProviderUsage>,
