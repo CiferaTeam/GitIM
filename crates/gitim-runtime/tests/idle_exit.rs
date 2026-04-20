@@ -47,6 +47,7 @@ fn has_active_agents_with_running() {
                 system_prompt: None,
                 env: std::collections::HashMap::new(),
                 error_message: None,
+                session_usage: None,
                 loop_handle: None,
             },
         );

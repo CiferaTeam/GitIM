@@ -99,6 +99,12 @@ pub struct AgentInfo {
     pub env: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Last-known usage snapshot for the agent's current provider session.
+    /// Populated at recovery from `.gitim/agent-state.json` and patched in
+    /// place by `AgentLoop::update_session_usage` after every turn — so
+    /// `GET /agents/:id` returns fresh data without re-reading disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_usage: Option<crate::state::SessionUsageSnapshot>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -1177,6 +1183,7 @@ async fn agents_add(
                 system_prompt: req.system_prompt.clone(),
                 env: req.env.clone(),
                 error_message: None,
+                session_usage: None,
                 loop_handle: None,
             };
             {
@@ -1293,6 +1300,7 @@ fn start_agent_loop(
         .map_err(|e| format!("failed to create agent loop: {e}"))?;
 
     agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
+    agent_loop.set_runtime_state(state.clone());
 
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
@@ -1684,6 +1692,9 @@ pub async fn recover_agents_for_workspace(
                 system_prompt: custom_system_prompt,
                 env,
                 error_message: Some(msg),
+                session_usage: crate::state::AgentState::load(&dir)
+                    .ok()
+                    .and_then(|s| s.session_usage),
                 loop_handle: None,
             });
             continue;
@@ -1722,6 +1733,9 @@ pub async fn recover_agents_for_workspace(
                 system_prompt: custom_system_prompt,
                 env,
                 error_message: None,
+                session_usage: crate::state::AgentState::load(&dir)
+                    .ok()
+                    .and_then(|s| s.session_usage),
                 loop_handle: None,
             });
         }

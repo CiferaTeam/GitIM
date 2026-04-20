@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::context_window::WARN_AT_PERCENT;
 use crate::error::RuntimeError;
-use crate::http::AgentActivityEvent;
+use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
 use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
 
@@ -37,6 +37,12 @@ pub struct AgentLoop {
     handler: String,
     activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
     workspace_id: String,
+    /// Optional reference to the runtime's shared state, used by
+    /// `update_session_usage` to patch `AgentInfo.session_usage` in place after
+    /// every turn — so `GET /agents/:id` returns fresh data without
+    /// re-reading `.gitim/agent-state.json` on each request. None in tests
+    /// and standalone CLI use where no HTTP state exists.
+    runtime_state: Option<SharedRuntimeState>,
 }
 
 impl AgentLoop {
@@ -83,6 +89,7 @@ impl AgentLoop {
             handler: handler.to_string(),
             activity_tx: None,
             workspace_id: String::new(),
+            runtime_state: None,
         })
     }
 
@@ -124,7 +131,16 @@ impl AgentLoop {
             handler: config.handler.clone(),
             activity_tx: None,
             workspace_id: String::new(),
+            runtime_state: None,
         })
+    }
+
+    /// Attach a reference to the runtime's shared state so per-turn usage
+    /// snapshots can be patched into `AgentInfo.session_usage` in place.
+    /// Must be called after construction and before the loop spawns; tests
+    /// that don't drive HTTP handlers can skip this entirely.
+    pub fn set_runtime_state(&mut self, state: SharedRuntimeState) {
+        self.runtime_state = Some(state);
     }
 
     /// Attach a broadcast sender and tag emitted events with a workspace slug.
@@ -246,8 +262,24 @@ impl AgentLoop {
             );
         }
 
-        state.session_usage = new_snapshot;
+        state.session_usage = new_snapshot.clone();
         state.save(&self.repo_root)?;
+
+        // Patch the in-memory AgentInfo so polling clients (GET /agents/:id)
+        // see fresh data without re-reading disk on every request. A missing
+        // runtime_state is fine — standalone CLI / tests skip silently.
+        if let Some(snap) = &new_snapshot {
+            if let Some(rs) = &self.runtime_state {
+                if let Ok(mut s) = rs.lock() {
+                    if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
+                        if let Some(info) = ctx.agents.get_mut(&self.handler) {
+                            info.session_usage = Some(snap.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
