@@ -386,13 +386,11 @@ session_reset session_id=<sid> reason=agent_emitted_reset
 - `threshold_injection_e2e`: mock provider returns 82% on turn 2; assert turn 3's prompt contains the system notice prefix.
 - `estimator_logs_match_provider_reported`: capture `tracing` output, verify `delta_pp` stays within ±20pp band for a scripted scenario.
 
-**WebUI**:
+**WebUI** (no test framework installed in `webui-v2` today — rely on TypeScript + manual verification, matching current project convention):
 
-- Unit test `AgentStatusPanel` with a mocked agent store:
-  - `sessionUsage` absent → popover header right side empty
-  - `sessionUsage.usedPercent = 47` → header right renders `sid:xxxxxxxx · 47%` in muted color
-  - `sessionUsage.usedPercent = 85` → same text, warning color token applied
-  - Folded row renders identically regardless of `sessionUsage` state
+- `tsc -b` in `webui-v2` passes with no new errors after type extensions.
+- `eslint` clean.
+- The four visual states (no usage / 47% muted / 85% warning / reset → empty) are exercised as part of the manual validation checklist below.
 
 **Manual validation**:
 
