@@ -225,6 +225,21 @@ pub async fn download_bytes(url: &str) -> Result<Vec<u8>, UpdateError> {
     Ok(bytes.to_vec())
 }
 
+/// Extract a gzipped-tar byte slice into `dest` on disk.
+///
+/// Pure sync; no network. The `tar` 0.4 default `Archive::unpack` rejects
+/// absolute paths and `..` traversal — we rely on that for defense in depth.
+/// Do not call `archive.set_preserve_permissions(true)` or relax the path
+/// checks without re-evaluating the trust model.
+pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), UpdateError> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    archive
+        .unpack(dest)
+        .map_err(|e| UpdateError::Extract(format!("tar unpack failed: {e}")))?;
+    Ok(())
+}
+
 /// Download a tarball from `url` and unpack it into `dest`.
 ///
 /// Small (5-20MB) tarballs are read fully into memory — streaming to disk adds

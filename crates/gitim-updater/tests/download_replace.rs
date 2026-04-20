@@ -347,6 +347,54 @@ fn verify_sha256_rejects_malformed_hex() {
     assert!(verify_sha256(bytes, malformed).is_err());
 }
 
+// ---------- extract_tarball ----------
+
+fn build_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::{Builder, Header};
+
+    let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+    {
+        let mut tar = Builder::new(&mut gz);
+        for (path, content) in files {
+            let mut h = Header::new_gnu();
+            h.set_path(path).unwrap();
+            h.set_size(content.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append(&h, *content).unwrap();
+        }
+        tar.finish().unwrap();
+    }
+    gz.finish().unwrap()
+}
+
+#[test]
+fn extract_tarball_happy_path() {
+    use gitim_updater::extract_tarball;
+    let bytes = build_tar_gz(&[
+        ("gitim-v9.9.9-darwin-arm64/gitim", b"fake-bin-1"),
+        ("gitim-v9.9.9-darwin-arm64/gitim-daemon", b"fake-bin-2"),
+    ]);
+    let dest = tempfile::tempdir().unwrap();
+    extract_tarball(&bytes, dest.path()).expect("extract must succeed");
+    let entry = dest.path().join("gitim-v9.9.9-darwin-arm64/gitim");
+    assert!(entry.exists(), "extracted file must exist");
+    assert_eq!(std::fs::read(&entry).unwrap(), b"fake-bin-1");
+}
+
+#[test]
+fn extract_tarball_rejects_corrupt_bytes() {
+    use gitim_updater::{UpdateError, extract_tarball};
+    let garbage = vec![0xFFu8; 1024];
+    let dest = tempfile::tempdir().unwrap();
+    match extract_tarball(&garbage, dest.path()).expect_err("garbage must fail") {
+        UpdateError::Extract(_) => (),
+        other => panic!("expected Extract, got {:?}", other),
+    }
+}
+
 // ---------- download_bytes ----------
 
 #[tokio::test]
