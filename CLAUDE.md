@@ -150,12 +150,24 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 ## 测试
 
 ```bash
-cargo test                                    # 全量（~270 tests）
+cargo test                                    # 全量（700+ tests，数分钟级别，贵）
 cargo test -p gitim-core                      # 核心类型/解析
 cargo test -p gitim-daemon                    # daemon handler 集成测试
 cargo test -p gitim-sync                      # git 同步逻辑
 cargo test -p gitim-runtime --test poller     # poller 集成测试（需编译 daemon）
 ```
+
+### 跑测试的节奏（重要）
+
+**全量 `cargo test` 是一个昂贵操作**（700+ 测试、含启动真实 daemon 的集成测试，耗时以分钟计）。在多 agent / subagent / 长任务流程里频繁触发会把总时长拖得非常夸张，不要无脑跑。
+
+节奏约定：
+- **任务开头**：跑一次全量，建立 baseline（确认当前 main 是绿的，排除祖传红测试干扰判断）
+- **任务末尾 / 交付前**：跑一次全量，确认没有 regression
+- **开发中间**：**只跑相关 crate / 相关 `--test` 目标 / 相关 `#[test]` 过滤**（`cargo test -p <crate>`、`cargo test <name_substring>`、`cargo test --test <file>`），不要每改一次就全量
+- Subagent / 并行任务里：同样原则，subagent 自己干活时只跑相关测试，汇总到主线再考虑全量
+
+如果某次改动跨 crate、涉及共享类型 / 协议、或改了 workspace 级依赖，才需要中途加跑一次全量。否则相信 scoped 测试。
 
 注意事项：
 - `gitim-runtime` 的 poller 测试启动真实 daemon 进程，用 `serial_test` 串行执行
