@@ -13,7 +13,7 @@ case "$ARCH" in
 esac
 PLATFORM="${OS}-${ARCH}"
 
-SUPPORTED_PLATFORMS="darwin-arm64"
+SUPPORTED_PLATFORMS="darwin-arm64 darwin-x86_64 linux-arm64 linux-x86_64"
 
 if ! echo "$SUPPORTED_PLATFORMS" | grep -qw "$PLATFORM"; then
   echo "Error: unsupported platform: $PLATFORM"
@@ -54,6 +54,37 @@ if [ "$HTTP_CODE" != "200" ]; then
   echo "Error: download failed (HTTP $HTTP_CODE)"
   echo "URL: $DOWNLOAD_URL"
   exit 1
+fi
+
+# ---------- Verify SHA256 ----------
+SHA_URL="https://github.com/${RELEASES_REPO}/releases/download/${TAG}/SHA256SUMS"
+echo "==> Verifying SHA256..."
+SHA_FILE="$TMPDIR/SHA256SUMS"
+if ! curl -sSfL -o "$SHA_FILE" "$SHA_URL"; then
+  echo "Error: SHA256SUMS not found at $SHA_URL"
+  echo "This release may be pre-v0.6.0. Upgrade path:"
+  echo "  1. Install v0.5.x manually (or skip SHA check: SKIP_SHA=1 sh install.sh)"
+  echo "  2. Run \`gitim update\` after install to jump to the current version."
+  # Allow explicit bypass for one-shot recovery; never default to off.
+  if [ "${SKIP_SHA:-0}" != "1" ]; then
+    exit 1
+  fi
+  echo "==> SKIP_SHA=1 — skipping SHA verification (unsafe)"
+else
+  EXPECTED_SHA=$(grep " $ARCHIVE_NAME$" "$SHA_FILE" | awk '{print $1}' | head -1)
+  if [ -z "$EXPECTED_SHA" ]; then
+    echo "Error: SHA256SUMS has no line for $ARCHIVE_NAME"
+    exit 1
+  fi
+  ACTUAL_SHA=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
+  if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+    echo "Error: SHA256 mismatch"
+    echo "  expected: $EXPECTED_SHA"
+    echo "  actual:   $ACTUAL_SHA"
+    rm -f "$TMPDIR/$ARCHIVE_NAME"
+    exit 1
+  fi
+  echo "==> SHA256 verified."
 fi
 
 # ---------- Extract ----------
