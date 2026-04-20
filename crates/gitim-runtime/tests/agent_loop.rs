@@ -259,3 +259,19 @@ fn preamble_says_only_once() {
     let p = build_usage_notice_preamble(85.0);
     assert!(p.contains("仅发送一次"));
 }
+
+#[test]
+fn preamble_frames_as_handoff_not_completion() {
+    // Lock the "stop now, write orientation, hand off" framing — the whole
+    // point of the revised preamble. If a future edit drifts back toward
+    // "finish your tasks first", these assertions fail.
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("立即"), "must convey stop-now urgency: {p}");
+    assert!(p.contains("交接"), "must frame as handoff: {p}");
+    assert!(p.contains("记忆文件"), "must name the persistence target: {p}");
+    assert!(p.contains("orientation"), "must name the handoff shape (not inventory): {p}");
+    assert!(
+        !p.contains("请在本轮完成手头任务后"),
+        "must NOT tell the agent to finish its work first: {p}"
+    );
+}

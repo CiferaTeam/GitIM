@@ -247,10 +247,22 @@ Note: crossing is detected **once per session**. After the notice is dispatched 
 let mut prompt = base_prompt;
 if state.usage_notice_pending {
     prompt = format!(
-        "[系统通知] 你的对话窗口使用率已达 {pct:.0}%。\
-         请在本轮完成手头任务后立即结束本次对话：\n\
-         1. 把所有需要长期记忆的内容（重要决定、用户偏好、未完成事项、进度交接）写入你的记忆文件\n\
-         2. 在输出末尾附加标记 [[RESET]]，runtime 会在下一轮为你开启全新窗口\n\
+        "[系统通知] 对话窗口已用 {pct:.0}%，容量接近上限。\n\
+         \n\
+         你手里大概同时压着好几件事。继续在这个窗口里推进的边际收益已经很低 —— \
+         注意力被稀释，新细节越来越难稳定保持。此刻最有价值的动作不是把手头的事收尾，\
+         而是给下一个窗口的你做一次干净的交接。\n\
+         \n\
+         请立即：\n\
+         1. 停下所有新的工具调用和任务步骤\n\
+         2. 在你的记忆文件里留一段 orientation（方向感，不是流水账）：\n\
+            - 当前任务位置 / 下一步该做什么\n\
+            - 已经形成但还没落笔的判断、用户偏好、关键未决 tension\n\
+            - 让冷启动的你能快速接回当前位置的最小定向信息\n\
+         3. 输出末尾附加 [[RESET]]，runtime 会给你开一个干净的新窗口\n\
+         \n\
+         新窗口的你会读这些记忆文件冷启动。你此刻留下什么，它就从什么开始。\n\
+         \n\
          本提醒仅发送一次。\n\n---\n\n{prompt}",
         pct = state.session_usage.unwrap().used_percent
     );
@@ -260,6 +272,8 @@ if state.usage_notice_pending {
 ```
 
 Save **before** calling `provider.execute()` so a crash mid-turn doesn't cause the notice to re-fire.
+
+**Framing note.** The preamble is deliberately written as agent-to-agent, not a procedural checklist. It acknowledges what context pressure *feels like* from inside the model (attention diluting, new details becoming unstable), reframes the goal as **handoff, not completion**, and privileges orientation over inventory in the memory handoff. This is locked by a `preamble_frames_as_handoff_not_completion` test that asserts the absence of "finish your work first" wording.
 
 **Authoritative value policy**:
 
