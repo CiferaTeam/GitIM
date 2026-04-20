@@ -232,6 +232,20 @@ impl AgentLoop {
             }
         }
 
+        if let Some(snap) = &new_snapshot {
+            let est_pct = max
+                .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
+                .unwrap_or(0.0);
+            tracing::debug!(
+                session_id = %session_id,
+                provider_pct = snap.used_percent,
+                estimated_pct = est_pct,
+                delta_pp = snap.used_percent - est_pct,
+                source = ?snap.source,
+                "turn_usage"
+            );
+        }
+
         state.session_usage = new_snapshot;
         state.save(&self.repo_root)?;
         Ok(())
