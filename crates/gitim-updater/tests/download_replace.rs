@@ -346,3 +346,63 @@ fn verify_sha256_rejects_malformed_hex() {
     let malformed = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982";
     assert!(verify_sha256(bytes, malformed).is_err());
 }
+
+// ---------- download_bytes ----------
+
+#[tokio::test]
+async fn download_bytes_happy_path() {
+    use gitim_updater::download_bytes;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/blob.bin"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"payload-bytes".as_slice()))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/blob.bin", server.uri());
+    let bytes = download_bytes(&url).await.expect("download must succeed");
+    assert_eq!(bytes.as_slice(), b"payload-bytes");
+}
+
+#[tokio::test]
+async fn download_bytes_http_404() {
+    use gitim_updater::{UpdateError, download_bytes};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/missing", server.uri());
+    match download_bytes(&url).await.expect_err("must fail") {
+        UpdateError::HttpStatus(404) => (),
+        other => panic!("expected HttpStatus(404), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn download_bytes_http_500() {
+    use gitim_updater::{UpdateError, download_bytes};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/boom"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/boom", server.uri());
+    match download_bytes(&url).await.expect_err("must fail") {
+        UpdateError::HttpStatus(500) => (),
+        other => panic!("expected HttpStatus(500), got {:?}", other),
+    }
+}

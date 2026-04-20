@@ -209,6 +209,22 @@ pub async fn fetch_latest_tag() -> Result<String, UpdateError> {
         .ok_or_else(|| UpdateError::Extract("no tag_name in release response".to_string()))
 }
 
+/// Fetch the full body of `url` into memory. Used for both small SHA256SUMS
+/// text files and the release tarball (10-20 MB at current binary sizes —
+/// well within RAM, streaming to disk not worth the complexity).
+///
+/// Non-2xx -> `UpdateError::HttpStatus(code)`.
+pub async fn download_bytes(url: &str) -> Result<Vec<u8>, UpdateError> {
+    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(UpdateError::HttpStatus(status.as_u16()));
+    }
+    let bytes = resp.bytes().await?;
+    Ok(bytes.to_vec())
+}
+
 /// Download a tarball from `url` and unpack it into `dest`.
 ///
 /// Small (5-20MB) tarballs are read fully into memory — streaming to disk adds
