@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import type { AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
+import { useAgentStore } from "./use-agent-store";
 
 const MAX_EVENTS_PER_AGENT = 20;
 
@@ -47,6 +48,25 @@ export function useAgentActivitySSE(slug: string | null) {
     es.onmessage = (e) => {
       try {
         const event: AgentActivityEvent = JSON.parse(e.data);
+        if (event.event_type === "usage") {
+          try {
+            const snap = JSON.parse(event.detail);
+            useAgentStore.getState().updateAgent(event.agent_id, {
+              sessionUsage: {
+                sessionId: snap.session_id ?? "",
+                inputTokens: snap.input_tokens,
+                outputTokens: snap.output_tokens,
+                maxTokens: snap.max_tokens,
+                usedPercent: snap.used_percent ?? 0,
+                source: snap.source ?? "provider_reported",
+                updatedAt: snap.updated_at ?? "",
+              },
+            });
+          } catch {
+            // malformed usage payload — ignore
+          }
+          return; // do NOT push usage events to the activity log
+        }
         push(event);
       } catch {
         // ignore malformed events
