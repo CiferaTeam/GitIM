@@ -6,6 +6,7 @@ import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
+import { UsageIndicator } from "../usage-indicator";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -55,6 +56,7 @@ export function AppShell({ children }: AppShellProps) {
           >
             <TwitterXIcon className="size-4" />
           </a>
+          <UsageIndicator />
           <UpdateIndicator />
           <button
             type="button"

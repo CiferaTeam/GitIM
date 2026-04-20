@@ -45,3 +45,19 @@ export async function checkVersion(uuid: string): Promise<VersionResult> {
     return { ok: false, error: "unable to reach version service" };
   }
 }
+
+export interface StatsDay {
+  date: string;
+  dau: number;
+}
+
+export async function fetchStats(): Promise<StatsDay[] | null> {
+  try {
+    const res = await fetch(`${API_URL}/api/stats`);
+    if (!res.ok) return null;
+    const body = (await res.json()) as { days?: StatsDay[] };
+    return body.days ?? null;
+  } catch {
+    return null;
+  }
+}

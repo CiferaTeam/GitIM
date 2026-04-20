@@ -5,6 +5,7 @@ import { inviteRoutes } from "./invite";
 import { heartbeatRoutes } from "./heartbeat";
 import { adminRoutes } from "./admin";
 import { versionRoutes } from "./version";
+import { statsRoutes } from "./stats";
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -28,6 +29,7 @@ app.route("/", inviteRoutes);
 app.route("/", heartbeatRoutes);
 app.route("/", adminRoutes);
 app.route("/", versionRoutes);
+app.route("/", statsRoutes);
 
 app.get("/", (c) => c.json({ service: "cell-api", status: "ok" }));
 
