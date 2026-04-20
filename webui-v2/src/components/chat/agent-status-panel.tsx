@@ -43,6 +43,23 @@ function ActivityLine({ event }: { event: AgentActivityEvent }) {
   );
 }
 
+function UsageBadge({ agentId }: { agentId: string }) {
+  const usage = useAgentStore(
+    (s) => s.agents.find((a) => a.id === agentId)?.sessionUsage,
+  );
+  if (!usage) return null;
+
+  const warning = usage.usedPercent >= 80;
+  const colorClass = warning ? "text-warning" : "text-text-faint";
+  const sidShort = usage.sessionId.slice(0, 8);
+
+  return (
+    <span className={`text-[10px] font-mono ${colorClass} shrink-0`}>
+      sid:{sidShort} · {usage.usedPercent.toFixed(0)}%
+    </span>
+  );
+}
+
 function AgentRow({ agentId, name }: { agentId: string; name: string }) {
   const [expanded, setExpanded] = useState(false);
   const activities = useAgentActivityStore(
@@ -85,9 +102,12 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
 
       {expanded && activities.length > 0 && (
         <div className="absolute left-0 top-full z-50 w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-xl p-2 mt-1">
-          <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider mb-1">
-            {name} — Recent Activity
-          </p>
+          <div className="flex items-baseline justify-between gap-2 mb-1">
+            <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
+              {name} — Recent Activity
+            </p>
+            <UsageBadge agentId={agentId} />
+          </div>
           {activities.map((evt, i) => (
             <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} />
           ))}
