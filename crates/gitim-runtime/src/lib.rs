@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod context_window;
 pub mod daemon_log;
 pub mod error;
 pub mod git_config;
