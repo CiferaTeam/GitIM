@@ -278,9 +278,10 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
         let path_refs: Vec<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
         state
             .git_storage
-            .add_and_commit(
+            .add_and_commit_as(
                 &path_refs,
                 "init: repo structure (.gitignore + general channel)",
+                Some(handler),
             )
             .map_err(|e| Response::error(format!("ensure_repo commit failed: {}", e)))?;
 
