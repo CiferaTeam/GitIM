@@ -235,6 +235,7 @@ async fn drive_session(
             input_tokens: None,
             output_tokens: None,
             used_percent: Some(p),
+            ..Default::default()
         }),
     });
 }

@@ -4,6 +4,12 @@ export type AgentStatus = "running" | "idle" | "error" | "offline";
 
 export interface SessionUsageSnapshot {
   sessionId: string;
+  /**
+   * For Claude, Anthropic's `input_tokens` excludes cached content. The
+   * backend aggregates input + cache_read + cache_creation before computing
+   * `usedPercent`, so the percentage here already reflects the true window
+   * occupancy even when this field looks tiny.
+   */
   inputTokens?: number;
   outputTokens?: number;
   maxTokens?: number;

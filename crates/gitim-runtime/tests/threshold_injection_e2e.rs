@@ -53,6 +53,7 @@ async fn threshold_crossing_sets_notice_pending() {
         input_tokens: Some(5_500),
         output_tokens: Some(200),
         used_percent: None,
+        ..Default::default()
     };
     let mut state = AgentState::load(repo_root).expect("load");
     loop_
@@ -78,6 +79,7 @@ async fn threshold_crossing_sets_notice_pending() {
         input_tokens: Some(8_200),
         output_tokens: Some(300),
         used_percent: None,
+        ..Default::default()
     };
     let mut state = AgentState::load(repo_root).expect("load");
     loop_

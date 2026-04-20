@@ -380,6 +380,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 used_percent: None,
+                cache_read_tokens: u.cache_read_tokens,
+                cache_creation_tokens: u.cache_creation_tokens,
             }),
         }),
         "log" => {
@@ -478,7 +480,11 @@ struct RawMessage {
 }
 
 /// Usage block from Claude stream-json's final "result" message.
-/// cache_* fields are parsed but currently unused — preserved for future aggregation.
+///
+/// Anthropic reports `input_tokens` **excluding** cache hits. Real context
+/// window occupancy is the sum `input + cache_read + cache_creation`, so
+/// these three fields are propagated into `ProviderUsage` and aggregated at
+/// the runtime layer when computing percentages.
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeUsage {
     #[serde(default)]
@@ -486,10 +492,8 @@ struct ClaudeUsage {
     #[serde(default)]
     output_tokens: Option<u64>,
     #[serde(default, rename = "cache_read_input_tokens")]
-    #[allow(dead_code)]
     cache_read_tokens: Option<u64>,
     #[serde(default, rename = "cache_creation_input_tokens")]
-    #[allow(dead_code)]
     cache_creation_tokens: Option<u64>,
 }
 
@@ -556,6 +560,36 @@ mod usage_parse_tests {
         let usage = usage.expect("usage field present");
         assert_eq!(usage.input_tokens, Some(164_000));
         assert_eq!(usage.output_tokens, Some(520));
+        assert_eq!(usage.cache_read_tokens, Some(120_000));
+        assert_eq!(usage.cache_creation_tokens, Some(800));
+    }
+
+    #[test]
+    fn parse_result_with_cache_only_has_tiny_input() {
+        // Real-world turn 2+: prompt caching active. input_tokens is just the
+        // delta; the bulk of context comes through cache_read_input_tokens.
+        // This is the scenario that produced the "0%" display bug.
+        let line = r#"{
+            "type": "result",
+            "session_id": "sess-xyz",
+            "result": "ok",
+            "is_error": false,
+            "usage": {
+                "input_tokens": 312,
+                "output_tokens": 180,
+                "cache_read_input_tokens": 159500,
+                "cache_creation_input_tokens": 220
+            }
+        }"#;
+
+        let parsed = parse_line(line).expect("should parse");
+        let ParsedMessage::Result { usage, .. } = parsed else {
+            panic!("expected Result variant");
+        };
+        let usage = usage.expect("usage field present");
+        assert_eq!(usage.input_tokens, Some(312));
+        assert_eq!(usage.cache_read_tokens, Some(159_500));
+        assert_eq!(usage.cache_creation_tokens, Some(220));
     }
 
     #[test]

@@ -707,9 +707,15 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
 ///
 /// Authoritative-value policy (matches 01-design.md §4.5):
 /// 1. provider_reported.used_percent (Codex)
-/// 2. provider_reported.input_tokens / max_tokens (Claude)
+/// 2. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude)
 /// 3. estimated_tokens / max_tokens (fallback)
 /// 4. None (no data available)
+///
+/// For Claude, Anthropic's `input_tokens` excludes tokens served from the
+/// prompt cache. With caching active, `input_tokens` drops to a few hundred
+/// per turn while `cache_read_input_tokens` carries 100k+ of context. The
+/// true occupancy is the sum — using `input_tokens` alone collapses the
+/// percentage to ~0% (see `parse_result_with_cache_only_has_tiny_input`).
 ///
 /// `used_percent` is clamped to `[0, 100]`. Callers are responsible for
 /// logging unusual values (e.g. >110 as a protocol-drift signal).
@@ -724,8 +730,17 @@ pub fn compute_snapshot(
         if let Some(pu) = provider_reported {
             if let Some(pct) = pu.used_percent {
                 (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
-            } else if let (Some(input), Some(max)) = (pu.input_tokens, max_tokens) {
-                let pct = (input as f64) / (max as f64) * 100.0;
+            } else if let Some(max) = max_tokens {
+                let effective = effective_input_tokens(pu);
+                if effective == 0 {
+                    return compute_from_estimate(
+                        session_id,
+                        estimated_tokens,
+                        max_tokens,
+                        updated_at,
+                    );
+                }
+                let pct = (effective as f64) / (max as f64) * 100.0;
                 (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
             } else {
                 return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
@@ -744,6 +759,15 @@ pub fn compute_snapshot(
         source,
         updated_at: updated_at.to_string(),
     })
+}
+
+/// Sum of `input_tokens + cache_read_tokens + cache_creation_tokens` — the
+/// real context-window occupancy for Claude turns. Missing fields count as 0.
+fn effective_input_tokens(pu: &ProviderUsage) -> u64 {
+    pu.input_tokens
+        .unwrap_or(0)
+        .saturating_add(pu.cache_read_tokens.unwrap_or(0))
+        .saturating_add(pu.cache_creation_tokens.unwrap_or(0))
 }
 
 fn compute_from_estimate(

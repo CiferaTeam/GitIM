@@ -132,6 +132,7 @@ mod usage_tests {
                 input_tokens: Some(42_000),
                 output_tokens: Some(800),
                 used_percent: None,
+                ..Default::default()
             });
 
         let session = provider
@@ -150,6 +151,7 @@ mod usage_tests {
                 input_tokens: Some(42_000),
                 output_tokens: Some(800),
                 used_percent: None,
+                ..Default::default()
             })
         );
     }
