@@ -31,6 +31,15 @@ pub struct AppState {
     pub users: RwLock<Vec<String>>,
     pub event_tx: broadcast::Sender<Event>,
     pub current_user: RwLock<Option<String>>,
+    /// Optional verified email read from `.gitim/me.json` → `github_email`.
+    /// When present, daemon-created commits use this as `author.email` so
+    /// they attribute to the GitHub account on the contribution graph.
+    /// Absent → fallback to `<handler>@gitim` (legacy behavior).
+    ///
+    /// Wrapped in `std::sync::RwLock` so onboard can set it after daemon
+    /// startup (me.json is written *during* onboard, not before) and
+    /// handler paths can read without needing async context.
+    pub github_email: std::sync::RwLock<Option<String>>,
     pub pending_push: std::sync::RwLock<Vec<PendingMessage>>,
     pub push_notify: Arc<Notify>,
     pub has_remote: bool,
@@ -70,6 +79,16 @@ impl AppState {
         event_tx: broadcast::Sender<Event>,
         current_user: Option<String>,
     ) -> Self {
+        Self::new_with_email(repo_root, config, event_tx, current_user, None)
+    }
+
+    pub fn new_with_email(
+        repo_root: PathBuf,
+        config: Config,
+        event_tx: broadcast::Sender<Event>,
+        current_user: Option<String>,
+        github_email: Option<String>,
+    ) -> Self {
         let git_storage = GitStorage::new(&repo_root);
         let has_remote = git_storage.has_remote();
         Self {
@@ -80,6 +99,7 @@ impl AppState {
             users: RwLock::new(Vec::new()),
             event_tx,
             current_user: RwLock::new(current_user),
+            github_email: std::sync::RwLock::new(github_email),
             pending_push: std::sync::RwLock::new(Vec::new()),
             push_notify: Arc::new(Notify::new()),
             has_remote,
@@ -96,6 +116,23 @@ impl AppState {
             auth_failed: Arc::new(AtomicBool::new(false)),
             commit_lock: Arc::new(StdMutex::new(())),
         }
+    }
+
+    /// Build the `(name, email)` pair used as commit `author` when this
+    /// daemon writes on behalf of `handler`. Email comes from
+    /// `github_email` when set, otherwise the legacy `<handler>@gitim`
+    /// fallback so existing workspaces keep working unchanged.
+    ///
+    /// Read is a single `Option<String>` clone; never held across
+    /// await, safe from any handler context.
+    pub fn author_for(&self, handler: &str) -> (String, String) {
+        let email = self
+            .github_email
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| format!("{}@gitim", handler));
+        (handler.to_string(), email)
     }
 
     /// Open (or rebuild) the search index at `.gitim/index.db`.
@@ -337,4 +374,49 @@ fn is_ancestor(ancestor: &str, descendant: &str, repo_root: &PathBuf) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitim_core::types::Config;
+
+    fn make_state(github_email: Option<String>) -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _) = broadcast::channel(16);
+        AppState::new_with_email(
+            tmp.path().to_path_buf(),
+            Config::default(),
+            tx,
+            None,
+            github_email,
+        )
+    }
+
+    #[test]
+    fn author_for_uses_github_email_when_configured() {
+        let state = make_state(Some("flame0743@gmail.com".to_string()));
+        let (name, email) = state.author_for("framer-gpt");
+        assert_eq!(name, "framer-gpt");
+        assert_eq!(email, "flame0743@gmail.com");
+    }
+
+    #[test]
+    fn author_for_falls_back_to_gitim_domain_when_no_email() {
+        let state = make_state(None);
+        let (name, email) = state.author_for("framer-gpt");
+        assert_eq!(name, "framer-gpt");
+        assert_eq!(email, "framer-gpt@gitim");
+    }
+
+    #[test]
+    fn author_for_reflects_runtime_update() {
+        // Simulates the onboard flow: daemon starts with no email, then
+        // handle_onboard writes github_email into AppState.
+        let state = make_state(None);
+        assert_eq!(state.author_for("alice").1, "alice@gitim");
+
+        *state.github_email.write().unwrap() = Some("alice@example.com".to_string());
+        assert_eq!(state.author_for("alice").1, "alice@example.com");
+    }
 }

@@ -442,9 +442,10 @@ async fn handle_send(
         Ok(rel) => {
             let rel_str = rel.to_string_lossy().to_string();
             let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
+            let (author_name, author_email) = state.author_for(&author);
             match state
                 .git_storage
-                .add_and_commit_as(&[&rel_str], &commit_msg, Some(&author))
+                .add_and_commit_as(&[&rel_str], &commit_msg, Some((&author_name, &author_email)))
             {
                 Ok(()) => "committed",
                 Err(e) => {
@@ -676,10 +677,11 @@ async fn handle_register_user(
     }
 
     // Git add + commit (best effort)
+    let (author_name, author_email) = state.author_for(&handler);
     let _ = state.git_storage.add_and_commit_as(
         &[&format!("users/{}.meta.yaml", handler)],
         &format!("user: register @{}", handler),
-        Some(&handler),
+        Some((&author_name, &author_email)),
     );
 
     Response::success(serde_json::json!({
@@ -1267,10 +1269,12 @@ async fn handle_create_channel(
     let meta_rel = format!("channels/{}.meta.yaml", channel_name);
     let thread_rel = format!("channels/{}.thread", channel_name);
     let commit_msg = format!("channel: create #{} by @{}", name, author);
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&meta_rel, &thread_rel], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_rel, &thread_rel],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         return Response::error(format!("create_channel commit failed: {}", e));
     }
 
@@ -1378,10 +1382,12 @@ async fn handle_archive_channel(
 
     // 7. git add + commit
     let commit_msg = format!("archive: #{} by @{}", channel, author);
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&thread_to, &meta_to], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&thread_to, &meta_to],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         return Response::error(format!("archive commit failed: {}", e));
     }
 
@@ -1510,10 +1516,12 @@ async fn handle_unarchive_channel(
 
     // 8. add + commit as author. On failure, reverse BOTH mvs so archive is intact.
     let commit_msg = format!("unarchive: #{} by @{}", channel, author);
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&thread_to, &meta_to], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&thread_to, &meta_to],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         // Reverse meta mv first, then thread mv — mirror archive direction.
         if let Err(rb) = state.git_storage.mv(&meta_to, &meta_from) {
             warn!("unarchive_channel: rollback meta mv also failed: {}", rb);
@@ -1772,10 +1780,11 @@ async fn write_channel_event(
     let thread_rel = format!("channels/{}.thread", channel);
     let meta_rel = format!("channels/{}.meta.yaml", channel);
     let commit_msg = format!("event: @{} {} {}", author, event_type, channel);
+    let (author_name, author_email) = state.author_for(&author);
     let commit_status = match state.git_storage.add_and_commit_as(
         &[&thread_rel, &meta_rel],
         &commit_msg,
-        Some(&author),
+        Some((&author_name, &author_email)),
     ) {
         Ok(()) => "committed",
         Err(e) => {

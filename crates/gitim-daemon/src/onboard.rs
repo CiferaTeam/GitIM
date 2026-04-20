@@ -57,16 +57,31 @@ pub async fn handle_onboard(
     };
     let handler = identity.handler.as_str().to_string();
     let display_name = identity.display_name.clone();
+    let github_email = identity.email.clone();
 
     info!("onboard: identity inferred — @{}", handler);
 
     // --- Step B: Write me.json ---
-    if let Err(resp) = write_me_json(&state, &handler, &display_name, &git_server) {
+    if let Err(resp) = write_me_json(
+        &state,
+        &handler,
+        &display_name,
+        &git_server,
+        github_email.as_deref(),
+    ) {
         return resp;
     }
     {
         let mut current = state.current_user.write().await;
         *current = Some(handler.clone());
+    }
+    // Propagate to AppState so subsequent commits pick it up. Without
+    // this step the first onboarded workspace would only see the email
+    // after a daemon restart.
+    if github_email.is_some() {
+        if let Ok(mut slot) = state.github_email.write() {
+            *slot = github_email.clone();
+        }
     }
 
     info!("onboard: me.json written for @{}", handler);
@@ -175,18 +190,24 @@ fn write_me_json(
     handler: &str,
     display_name: &str,
     git_server: &str,
+    github_email: Option<&str>,
 ) -> Result<(), Response> {
     let gitim_dir = state.repo_root.join(".gitim");
     std::fs::create_dir_all(&gitim_dir)
         .map_err(|e| Response::error(format!("failed to create .gitim dir: {}", e)))?;
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let me = serde_json::json!({
+    let mut me = serde_json::json!({
         "handler": handler,
         "git_server": git_server,
         "display_name": display_name,
         "onboarded_at": now,
     });
+    if let Some(email) = github_email {
+        me.as_object_mut()
+            .unwrap()
+            .insert("github_email".to_string(), serde_json::Value::String(email.to_string()));
+    }
 
     let me_path = gitim_dir.join("me.json");
     let content = serde_json::to_string_pretty(&me).unwrap();
@@ -329,9 +350,10 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
     let rel_path = format!("users/{}.meta.yaml", handler);
     let commit_msg = format!("user: register @{}", handler);
 
+    let (name, email) = state.author_for(handler);
     state
         .git_storage
-        .add_and_commit_as(&[&rel_path], &commit_msg, Some(handler))
+        .add_and_commit_as(&[&rel_path], &commit_msg, Some((&name, &email)))
         .map_err(|e| Response::error(format!("register_user commit failed: {}", e)))?;
 
     // Push with retry on conflict (skip if no remote, e.g. local git mode)
@@ -411,10 +433,11 @@ fn auto_join_general(state: &SharedState, handler: &str) -> Result<(), Response>
         .map_err(|e| Response::error(format!("write meta: {}", e)))?;
 
     // Git commit
+    let (name, email) = state.author_for(handler);
     let _ = state.git_storage.add_and_commit_as(
         &["channels/general.thread", "channels/general.meta.yaml"],
         &format!("event: @{} join general", handler),
-        Some(handler),
+        Some((&name, &email)),
     );
 
     Ok(())
@@ -524,7 +547,7 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
 
-        write_me_json(&state, "alice", "Alice W", "github").unwrap();
+        write_me_json(&state, "alice", "Alice W", "github", Some("alice@example.com")).unwrap();
 
         let me_path = repo.join(".gitim").join("me.json");
         assert!(me_path.exists());
@@ -533,7 +556,25 @@ mod tests {
         assert_eq!(content["handler"], "alice");
         assert_eq!(content["git_server"], "github");
         assert_eq!(content["display_name"], "Alice W");
+        assert_eq!(content["github_email"], "alice@example.com");
         assert!(content["onboarded_at"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn write_me_json_omits_email_when_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
+
+        write_me_json(&state, "alice", "Alice W", "git", None).unwrap();
+
+        let me_path = repo.join(".gitim").join("me.json");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+        assert!(content.get("github_email").is_none(),
+            "github_email should be absent when no email inferred");
     }
 
     #[tokio::test]

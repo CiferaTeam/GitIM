@@ -44,6 +44,10 @@ pub enum AuthData {
 pub struct InferredIdentity {
     pub handler: Handler,
     pub display_name: String,
+    /// GitHub-mode only for now — persisted into `.gitim/me.json` as
+    /// `github_email` so daemon commits can attribute to the user's
+    /// GitHub account. None for git / gitea / gitlab modes.
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -95,6 +99,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler: validated,
                 display_name,
+                email: None,
             })
         }
 
@@ -123,10 +128,19 @@ pub fn infer_identity(
                 .unwrap_or(&login)
                 .to_string();
 
+            // Public email from /user; null when the user has chosen to
+            // keep their address private. Filter out empty strings too.
+            let email = v
+                .get("email")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
             let handler = Handler::new(&login)?;
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email,
             })
         }
 
@@ -155,6 +169,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
 
@@ -182,6 +197,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
     }

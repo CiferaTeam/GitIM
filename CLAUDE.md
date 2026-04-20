@@ -135,7 +135,7 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - **换 remote URL**：需 rm -rf 重建
 - **Token rotate UI**：v1 无，手工改 config.json + 重启 runtime
 - **Windows 支持**：`chmod 0600` + xattr + `dirs::home_dir` 的 OneDrive 检测不适配
-- **Agent 独立 GitHub 身份**：共用 workspace PAT。commit author = agent handler；GitHub committer = PAT owner（audit 归因见 `author` 字段）
+- **Agent 独立 GitHub 身份**：共用 workspace PAT。commit author name = agent handler；author email = `.gitim/me.json` 里的 `github_email`(github mode onboard 自动从 `/user` API 拉取),没配置则 fallback `<handler>@gitim`。GitHub committer = PAT owner。审计归因通过 author **name** 字段(handler),email 统一到 workspace owner 后所有 daemon commit 都能算进该账户的 contribution graph
 - **OAuth Device Flow**：不做。PAT 手动粘贴
 
 ## 约定

@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read identity from .gitim/me.json (written by CLI onboard)
     // Absence is normal on first startup before onboard — not an error
     let me_path = repo_root.join(".gitim").join("me.json");
-    let (current_user, is_guest_from_me) = if me_path.exists() {
+    let (current_user, is_guest_from_me, github_email) = if me_path.exists() {
         let me_content = std::fs::read_to_string(&me_path)?;
         let me_json: serde_json::Value = serde_json::from_str(&me_content)?;
         let handler = me_json
@@ -74,24 +74,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get("guest")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        (handler, guest)
+        let email = me_json
+            .get("github_email")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        (handler, guest, email)
     } else {
-        (None, false)
+        (None, false, None)
     };
 
     if let Some(ref user) = current_user {
         tracing::info!("daemon identity: @{}", user);
+    }
+    if github_email.is_some() {
+        tracing::info!("daemon commit author email: configured (from me.json)");
     }
 
     let debug_http = config.daemon.debug_http;
     let debug_port = config.daemon.debug_port;
 
     let (event_tx, _) = broadcast::channel::<api::Event>(256);
-    let app_state = Arc::new(state::AppState::new(
+    let app_state = Arc::new(state::AppState::new_with_email(
         repo_root.clone(),
         config,
         event_tx,
         current_user,
+        github_email,
     ));
     {
         let mut u = app_state.users.write().await;
