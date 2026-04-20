@@ -31,6 +31,7 @@ pub struct AgentLoop {
     session_token: Option<String>,
     pub poll_interval: Duration,
     repo_root: PathBuf,
+    provider_type: String,
     model: Option<String>,
     custom_system_prompt: Option<String>,
     handler: String,
@@ -76,6 +77,7 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
+            provider_type: provider_type.to_string(),
             model: None,
             custom_system_prompt: None,
             handler: handler.to_string(),
@@ -116,6 +118,7 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
+            provider_type: config.provider_type.clone(),
             model: config.model.clone(),
             custom_system_prompt: config.system_prompt.clone(),
             handler: config.handler.clone(),
@@ -179,6 +182,59 @@ impl AgentLoop {
             resume_token: self.session_token.clone(),
             ..Default::default()
         }
+    }
+
+    /// After `provider.execute()` returns, update state.session_usage based on
+    /// whatever the provider reported plus the current estimator. Persists state.
+    fn update_session_usage(
+        &self,
+        state: &mut AgentState,
+        provider_reported: Option<&ProviderUsage>,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let model = self.model.as_deref().unwrap_or("");
+        let max = crate::context_window::default_max_tokens(&self.provider_type, model);
+        let now = chrono::Utc::now().to_rfc3339();
+        let new_snapshot = compute_snapshot(
+            session_id,
+            provider_reported,
+            state.estimated_tokens,
+            max,
+            &now,
+        );
+
+        let prev_pct = state.session_usage.as_ref().map(|s| s.used_percent);
+        if let Some(snap) = &new_snapshot {
+            if just_crossed_threshold(prev_pct, snap.used_percent) {
+                state.usage_notice_pending = true;
+                let est_pct = max
+                    .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
+                    .unwrap_or(0.0);
+                tracing::info!(
+                    session_id = %session_id,
+                    provider_input_tokens = ?provider_reported.and_then(|p| p.input_tokens),
+                    provider_used_pct = snap.used_percent,
+                    estimated_tokens = state.estimated_tokens,
+                    estimated_used_pct = est_pct,
+                    delta_pp = snap.used_percent - est_pct,
+                    max_tokens = ?max,
+                    provider = %self.provider_type,
+                    model = %model,
+                    "threshold_crossed_80pct"
+                );
+            }
+            if snap.used_percent > 110.0 {
+                tracing::warn!(
+                    session_id = %session_id,
+                    used_percent = snap.used_percent,
+                    "provider reported >110% — protocol drift signal"
+                );
+            }
+        }
+
+        state.session_usage = new_snapshot;
+        state.save(&self.repo_root)?;
+        Ok(())
     }
 
     /// Initialize the poller cursor if not already set.
@@ -335,6 +391,13 @@ impl AgentLoop {
                     "provider aborted by steering"
                 );
                 self.emit_activity("steered", &format!("interrupted ({duration_s:.1}s)"));
+                // Extract session_id from the just-completed turn. For Claude the
+                // session_token and session_id are the same opaque string; for Codex
+                // it's the thread_id. In either case it's exec_result.session_token.
+                if let Some(sid) = exec_result.session_token.as_deref() {
+                    let mut state = AgentState::load(&self.repo_root)?;
+                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                }
                 // Keep session_token for resume in next cycle
                 if let Some(token) = exec_result.session_token {
                     self.session_token = Some(token);
@@ -347,6 +410,13 @@ impl AgentLoop {
                     "provider ok"
                 );
                 self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
+                // Extract session_id from the just-completed turn. For Claude the
+                // session_token and session_id are the same opaque string; for Codex
+                // it's the thread_id. In either case it's exec_result.session_token.
+                if let Some(sid) = exec_result.session_token.as_deref() {
+                    let mut state = AgentState::load(&self.repo_root)?;
+                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                }
                 if let Some(token) = exec_result.session_token {
                     self.session_token = Some(token);
                 }
