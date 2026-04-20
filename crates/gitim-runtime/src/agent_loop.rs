@@ -266,8 +266,11 @@ impl AgentLoop {
         state.save(&self.repo_root)?;
 
         // Patch the in-memory AgentInfo so polling clients (GET /agents/:id)
-        // see fresh data without re-reading disk on every request. A missing
-        // runtime_state is fine — standalone CLI / tests skip silently.
+        // see fresh data without re-reading disk on every request, and
+        // broadcast the snapshot as a "usage" SSE event on the existing
+        // activity channel so reactive clients (/agents/events subscribers)
+        // can patch their local store. A missing runtime_state or
+        // activity_tx is fine — standalone CLI / tests skip silently.
         if let Some(snap) = &new_snapshot {
             if let Some(rs) = &self.runtime_state {
                 if let Ok(mut s) = rs.lock() {
@@ -278,6 +281,8 @@ impl AgentLoop {
                     }
                 }
             }
+            let detail = serde_json::to_string(snap).unwrap_or_default();
+            self.emit_activity("usage", &detail);
         }
 
         Ok(())

@@ -115,6 +115,24 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_serializes_without_detail_fields_when_absent() {
+        let snap = SessionUsageSnapshot {
+            session_id: "sid".into(),
+            input_tokens: None,
+            output_tokens: None,
+            max_tokens: None,
+            used_percent: 47.5,
+            source: UsageSource::ProviderReported,
+            updated_at: "2026-04-20T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(json.contains("\"session_id\":\"sid\""));
+        assert!(json.contains("\"used_percent\":47.5"));
+        assert!(json.contains("\"source\":\"provider_reported\""));
+        assert!(!json.contains("input_tokens")); // skipped when None
+    }
+
+    #[test]
     fn legacy_state_without_new_fields_loads() {
         let dir = TempDir::new().expect("tempdir");
         let gitim_dir = dir.path().join(".gitim");
