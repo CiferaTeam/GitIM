@@ -1,6 +1,6 @@
 // Detect pings a fixed cheap model in the runtime (claude-haiku-4-5 / gpt-5.4-mini),
 // not the user's selected model — so a green check verifies CLI availability, not model availability.
-export type ProviderId = "claude" | "codex";
+export type ProviderId = "claude" | "codex" | "opencode";
 
 export type PreflightErrorKind = "not_installed" | "timeout" | "other";
 
@@ -27,6 +27,12 @@ export interface ProviderModel {
 export interface ProviderInfo {
   label: string;
   models: ProviderModel[];
+  /**
+   * If true, Model selection is optional — the provider picks its own default
+   * (e.g. opencode uses the user's `opencode auth login` default). Empty model
+   * id is sent as undefined to the runtime.
+   */
+  modelOptional?: boolean;
 }
 
 export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
@@ -45,6 +51,11 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
       { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
     ],
   },
+  opencode: {
+    label: "OpenCode",
+    models: [],
+    modelOptional: true,
+  },
 };
 
-export const PROVIDER_IDS: ProviderId[] = ["claude", "codex"];
+export const PROVIDER_IDS: ProviderId[] = ["claude", "codex", "opencode"];

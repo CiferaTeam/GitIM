@@ -97,6 +97,9 @@ export function AddAgentDialog() {
     if (!next) resetForm();
   }
 
+  const providerInfo = provider ? PROVIDERS[provider as ProviderId] : null;
+  const modelRequired = providerInfo ? !providerInfo.modelOptional : true;
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (
@@ -104,7 +107,7 @@ export function AddAgentDialog() {
       validationError ||
       submitting ||
       !provider ||
-      !model ||
+      (modelRequired && !model) ||
       !detectResult?.available
     )
       return;
@@ -236,25 +239,35 @@ export function AddAgentDialog() {
               )}
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="agent-model">
-                Model
-              </label>
-              <select
-                id="agent-model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                disabled={!provider}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <option value="">— Select model —</option>
-                {availableModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {providerInfo?.modelOptional ? (
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Model</label>
+                <p className="text-xs text-muted-foreground">
+                  {providerInfo.label} uses the default model from{" "}
+                  <code>opencode auth login</code>. No selection needed.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="agent-model">
+                  Model
+                </label>
+                <select
+                  id="agent-model"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={!provider}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">— Select model —</option>
+                  {availableModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-prompt">
@@ -337,7 +350,7 @@ export function AddAgentDialog() {
                   !!validationError ||
                   submitting ||
                   !provider ||
-                  !model ||
+                  (modelRequired && !model) ||
                   !detectResult?.available
                 }
               >
