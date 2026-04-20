@@ -146,6 +146,21 @@ async fn atomic_swap_supports_guard_contract() {
     assert!(prev, "second swap must observe true");
 }
 
+// -- SHA error codes: contract lock -----------------------------------------
+//
+// The sha_mismatch / sha_line_missing error codes are produced inside
+// `run_sync_phase` (past the strict install-dir gate), so we cannot reach them
+// via a real HTTP call in this test file without mocking `$HOME`. Instead we
+// assert the string values directly — these are part of the HTTP contract and
+// must stay stable so WebUI can pattern-match on them.
+
+#[test]
+fn sha_error_codes_have_correct_string_values() {
+    use gitim_runtime::update::error_codes;
+    assert_eq!(error_codes::SHA_MISMATCH, "sha_mismatch");
+    assert_eq!(error_codes::SHA_LINE_MISSING, "sha_line_missing");
+}
+
 // -- response body shape ----------------------------------------------------
 
 #[tokio::test]

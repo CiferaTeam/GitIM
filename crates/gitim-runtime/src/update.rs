@@ -77,6 +77,10 @@ pub mod error_codes {
     pub const ARCHIVE_MISSING_BINARIES: &str = "archive_missing_binaries";
     pub const SANITY_CHECK_FAILED: &str = "sanity_check_failed";
     pub const CONCURRENT_UPDATE: &str = "concurrent_update";
+    /// SHA-256 digest of the downloaded tarball did not match SHA256SUMS.
+    pub const SHA_MISMATCH: &str = "sha_mismatch";
+    /// SHA256SUMS file did not contain an entry for the requested archive.
+    pub const SHA_LINE_MISSING: &str = "sha_line_missing";
 }
 
 /// Map an error code to its HTTP status. Centralized so response helpers and
@@ -87,7 +91,7 @@ fn status_for(code: &str) -> StatusCode {
         error_codes::UNSUPPORTED_PLATFORM => StatusCode::BAD_REQUEST,
         error_codes::ALREADY_LATEST => StatusCode::BAD_REQUEST,
         error_codes::CONCURRENT_UPDATE => StatusCode::CONFLICT,
-        // network / download / extract / archive / sanity -> 500
+        // network / download / extract / archive / sanity / sha -> 500
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -211,6 +215,40 @@ async fn sanity_check_new_runtime(
     Ok(())
 }
 
+/// Map a `gitim_updater::UpdateError` to the runtime's HTTP `UpdateError`.
+///
+/// Extracted from the inline closure so it can be unit-tested independently
+/// and so the SHA-specific codes are easy to find by future maintainers.
+pub(crate) fn map_updater_error(e: gitim_updater::UpdateError) -> UpdateError {
+    match e {
+        // Reached the server but got a non-2xx → treat as download failure
+        // (bad URL / missing asset), not a generic network outage.
+        gitim_updater::UpdateError::HttpStatus(_) | gitim_updater::UpdateError::Network(_) => {
+            UpdateError {
+                error_code: error_codes::DOWNLOAD_FAILED.into(),
+                detail: format!("download failed: {e}"),
+            }
+        }
+        // SHA mismatch: digest of the downloaded tarball didn't match
+        // the expected value from SHA256SUMS.
+        gitim_updater::UpdateError::Sha256Mismatch { expected, actual } => UpdateError {
+            error_code: error_codes::SHA_MISMATCH.into(),
+            detail: format!("expected sha256 {expected}, got {actual}"),
+        },
+        // SHA256SUMS file existed but had no entry for this archive name.
+        gitim_updater::UpdateError::Sha256LineMissing(name) => UpdateError {
+            error_code: error_codes::SHA_LINE_MISSING.into(),
+            detail: format!("SHA256SUMS has no entry for {name}"),
+        },
+        // Everything else (Extract, Io, UnsupportedPlatform from this context)
+        // is an extraction or unpack failure.
+        _ => UpdateError {
+            error_code: error_codes::EXTRACT_FAILED.into(),
+            detail: format!("extract failed: {e}"),
+        },
+    }
+}
+
 /// Post-install-dir, post-concurrency-guard body of the handler. Returns the
 /// job description on success or an [`UpdateError`] on any failure. The caller
 /// is responsible for releasing the `update_in_progress` flag on error.
@@ -260,20 +298,7 @@ async fn run_sync_phase() -> Result<(UpdateJob, tempfile::TempDir, PathBuf), Upd
     );
     gitim_updater::install_update(&base, &latest_tag, &platform, tmp.path())
         .await
-        .map_err(|e| match e {
-            // `HttpStatus` means "reached GitHub, got a non-2xx" — treat as a
-            // download failure (bad URL / missing asset), not a generic
-            // network outage.
-            gitim_updater::UpdateError::HttpStatus(_)
-            | gitim_updater::UpdateError::Network(_) => UpdateError {
-                error_code: error_codes::DOWNLOAD_FAILED.into(),
-                detail: format!("download failed: {e}"),
-            },
-            _ => UpdateError {
-                error_code: error_codes::EXTRACT_FAILED.into(),
-                detail: format!("extract failed: {e}"),
-            },
-        })?;
+        .map_err(|e| map_updater_error(e))?;
 
     // 6. Verify the archive carries all three binaries. Missing any one means
     //    the tarball was packed wrong and we refuse to touch disk.
@@ -688,5 +713,61 @@ mod tests {
             }
         }
         panic!("echo binary not found on this platform");
+    }
+
+    // -- map_updater_error: SHA-specific error codes --------------------------
+
+    #[test]
+    fn map_updater_error_sha_mismatch_gives_sha_mismatch_code() {
+        let updater_err = gitim_updater::UpdateError::Sha256Mismatch {
+            expected: "aabbcc".to_string(),
+            actual: "112233".to_string(),
+        };
+        let err = map_updater_error(updater_err);
+        assert_eq!(err.error_code, error_codes::SHA_MISMATCH);
+        assert!(
+            err.detail.contains("aabbcc") && err.detail.contains("112233"),
+            "detail should include both hashes: {}", err.detail
+        );
+    }
+
+    #[test]
+    fn map_updater_error_sha_line_missing_gives_sha_line_missing_code() {
+        let updater_err =
+            gitim_updater::UpdateError::Sha256LineMissing("gitim-v1.2.3-x86_64-apple.tar.gz".to_string());
+        let err = map_updater_error(updater_err);
+        assert_eq!(err.error_code, error_codes::SHA_LINE_MISSING);
+        assert!(
+            err.detail.contains("gitim-v1.2.3-x86_64-apple.tar.gz"),
+            "detail should name the archive: {}", err.detail
+        );
+    }
+
+    #[test]
+    fn map_updater_error_http_status_gives_download_failed_code() {
+        let updater_err = gitim_updater::UpdateError::HttpStatus(404);
+        let err = map_updater_error(updater_err);
+        assert_eq!(err.error_code, error_codes::DOWNLOAD_FAILED);
+    }
+
+    #[test]
+    fn map_updater_error_extract_gives_extract_failed_code() {
+        let updater_err = gitim_updater::UpdateError::Extract("bad tar".to_string());
+        let err = map_updater_error(updater_err);
+        assert_eq!(err.error_code, error_codes::EXTRACT_FAILED);
+    }
+
+    // Ensure status_for covers the new codes (500, same bucket as other
+    // download/extract errors).
+    #[test]
+    fn status_for_sha_codes_are_500() {
+        assert_eq!(
+            status_for(error_codes::SHA_MISMATCH),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert_eq!(
+            status_for(error_codes::SHA_LINE_MISSING),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
     }
 }
