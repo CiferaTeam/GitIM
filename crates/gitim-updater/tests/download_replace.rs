@@ -302,3 +302,47 @@ fn replace_binaries_rolls_back_newly_created_on_failure() {
     // The blocking directory stays — we never touched it.
     assert!(install_dir.path().join("gitim-runtime.old").is_dir());
 }
+
+// ---------- SHA256 verify ----------
+
+#[test]
+fn verify_sha256_matches_expected() {
+    use gitim_updater::verify_sha256;
+    // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    let bytes = b"hello";
+    let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    verify_sha256(bytes, expected).expect("matching SHA must pass");
+}
+
+#[test]
+fn verify_sha256_rejects_mismatch() {
+    use gitim_updater::{UpdateError, verify_sha256};
+    let bytes = b"hello";
+    let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    let err = verify_sha256(bytes, wrong).expect_err("wrong SHA must fail");
+    match err {
+        UpdateError::Sha256Mismatch { expected, actual } => {
+            assert_eq!(expected, wrong);
+            assert_eq!(actual.len(), 64);
+            assert_ne!(actual, wrong);
+        }
+        other => panic!("expected Sha256Mismatch, got {:?}", other),
+    }
+}
+
+#[test]
+fn verify_sha256_case_insensitive() {
+    use gitim_updater::verify_sha256;
+    let bytes = b"hello";
+    let upper = "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824";
+    verify_sha256(bytes, upper).expect("uppercase hex must pass");
+}
+
+#[test]
+fn verify_sha256_rejects_malformed_hex() {
+    use gitim_updater::verify_sha256;
+    let bytes = b"hello";
+    // 63 chars (奇数 / 短)
+    let malformed = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982";
+    assert!(verify_sha256(bytes, malformed).is_err());
+}

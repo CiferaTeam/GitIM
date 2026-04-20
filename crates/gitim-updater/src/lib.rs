@@ -40,6 +40,12 @@ pub enum UpdateError {
     #[error("missing binary in archive: {0}")]
     MissingBinary(String),
 
+    #[error("sha256 mismatch: expected {expected}, actual {actual}")]
+    Sha256Mismatch { expected: String, actual: String },
+
+    #[error("sha256 line not found in SHA256SUMS for {0}")]
+    Sha256LineMissing(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -64,6 +70,44 @@ pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
         return None;
     }
     Some((major, minor, patch))
+}
+
+/// Verify that `bytes` hash to `expected_hex` under SHA-256.
+///
+/// `expected_hex` is a 64-char lowercase hex string (uppercase tolerated) —
+/// the canonical SHA-256 output format from `shasum -a 256` / `sha256sum`.
+/// Anything shorter, longer, or non-hex is rejected as
+/// `UpdateError::Sha256Mismatch` (fail closed — we never silently accept a
+/// malformed expectation).
+pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), UpdateError> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual_bytes = hasher.finalize();
+    let actual_hex = hex::encode(actual_bytes);
+
+    // Case-insensitive compare — sha256sum on BSD/mac emits lowercase, GNU
+    // coreutils also lowercase, but older shasum(1) on macOS emits uppercase
+    // for some flags. Normalize both.
+    let expected_norm = expected_hex.trim().to_lowercase();
+
+    // Length guard: SHA-256 is always 32 bytes = 64 hex chars. Anything else
+    // is malformed upstream data — treat as mismatch rather than a separate
+    // error variant (callers only care "verify failed").
+    if expected_norm.len() != 64 || !expected_norm.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(UpdateError::Sha256Mismatch {
+            expected: expected_hex.to_string(),
+            actual: actual_hex,
+        });
+    }
+
+    if expected_norm != actual_hex {
+        return Err(UpdateError::Sha256Mismatch {
+            expected: expected_norm,
+            actual: actual_hex,
+        });
+    }
+    Ok(())
 }
 
 /// True iff `remote` is strictly newer than `current`. Malformed inputs -> false
