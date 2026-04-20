@@ -465,6 +465,19 @@ export async function preflightProvider(
 }
 
 function mapBackendAgent(raw: Record<string, unknown>): Agent {
+  const rawUsage = raw.session_usage as Record<string, unknown> | undefined;
+  const sessionUsage: Agent["sessionUsage"] = rawUsage
+    ? {
+        sessionId: (rawUsage.session_id as string) ?? "",
+        inputTokens: rawUsage.input_tokens as number | undefined,
+        outputTokens: rawUsage.output_tokens as number | undefined,
+        maxTokens: rawUsage.max_tokens as number | undefined,
+        usedPercent: (rawUsage.used_percent as number) ?? 0,
+        source: (rawUsage.source as "provider_reported" | "runtime_estimated") ?? "provider_reported",
+        updatedAt: (rawUsage.updated_at as string) ?? "",
+      }
+    : undefined;
+
   return {
     id: (raw.id ?? raw.handler) as string,
     name: (raw.display_name ?? raw.handler) as string,
@@ -477,6 +490,7 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     messagesProcessed: (raw.messages_processed as number) ?? 0,
     lastActivity: raw.last_activity as string | undefined,
     errorMessage: (raw.error_message as string) ?? undefined,
+    sessionUsage,
   };
 }
 
