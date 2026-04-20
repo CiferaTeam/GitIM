@@ -1,34 +1,13 @@
 //! Integration tests for gitim-updater IO helpers:
-//! `download_and_extract` and `replace_binaries`.
+//! `install_update` and `replace_binaries`.
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use gitim_updater::{BINARIES, UpdateError, download_and_extract, replace_binaries};
+use gitim_updater::{BINARIES, UpdateError, replace_binaries};
 
 // -- helpers ----------------------------------------------------------------
-
-/// Build an in-memory `.tar.gz` whose top-level directory contains the given
-/// files. Each file's contents is the supplied byte slice.
-fn build_tarball(top_dir: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
-    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let mut builder = tar::Builder::new(encoder);
-
-    for (name, contents) in files {
-        let path = format!("{top_dir}/{name}");
-        let mut header = tar::Header::new_gnu();
-        header.set_size(contents.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, &path, *contents)
-            .expect("append_data");
-    }
-
-    let encoder = builder.into_inner().expect("builder.into_inner");
-    encoder.finish().expect("gz finish")
-}
 
 /// Write an arbitrary file under `dir` with the given content.
 fn write_file(dir: &Path, name: &str, contents: &[u8]) {
@@ -52,51 +31,6 @@ fn is_executable(_path: &Path) -> bool {
 }
 
 // -- tests ------------------------------------------------------------------
-
-/// Test A: `download_and_extract` fetches a tarball over HTTP and unpacks it.
-#[tokio::test]
-async fn download_and_extract_happy_path() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let top = "gitim-v0.5.0-darwin-arm64";
-    let files: &[(&str, &[u8])] = &[
-        ("gitim", b"#!/bin/sh\necho gitim\n"),
-        ("gitim-daemon", b"#!/bin/sh\necho daemon\n"),
-        ("gitim-runtime", b"#!/bin/sh\necho runtime\n"),
-    ];
-    let tarball = build_tarball(top, files);
-
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/archive.tar.gz"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_bytes(tarball.clone())
-                .insert_header("content-type", "application/gzip"),
-        )
-        .mount(&server)
-        .await;
-
-    let dest = tempfile::tempdir().expect("tempdir");
-    let url = format!("{}/archive.tar.gz", server.uri());
-
-    download_and_extract(&url, dest.path())
-        .await
-        .expect("download_and_extract should succeed");
-
-    // Each file should exist at `<dest>/<top>/<name>` with the bytes we wrote.
-    for (name, contents) in files {
-        let extracted = dest.path().join(top).join(name);
-        assert!(
-            extracted.exists(),
-            "missing extracted file: {}",
-            extracted.display()
-        );
-        let got = fs::read(&extracted).expect("read extracted");
-        assert_eq!(&got[..], *contents, "content mismatch for {name}");
-    }
-}
 
 /// Test B: `replace_binaries` swaps all three binaries atomically and drops
 /// `.old` backups when `keep_backup` is false.

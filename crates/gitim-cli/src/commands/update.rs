@@ -7,8 +7,7 @@
 //! confirm prompt when a daemon is running, and exit-code semantics.
 
 use gitim_updater::{
-    detect_platform, download_and_extract, download_url, fetch_latest_tag, is_newer,
-    replace_binaries,
+    detect_platform, fetch_latest_tag, install_update, is_newer, replace_binaries, RELEASES_REPO,
 };
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -88,13 +87,13 @@ pub async fn cmd_update(version: Option<&str>, yes: bool) {
     }
 
     // 6. Download
-    let url = download_url(&tag, &platform);
     eprintln!("Downloading {tag} ({platform})...");
     let tmp = tempfile::tempdir().unwrap_or_else(|e| {
         eprintln!("Error: cannot create temp directory: {e}");
         std::process::exit(1);
     });
-    if let Err(e) = download_and_extract(&url, tmp.path()).await {
+    let base = format!("https://github.com/{RELEASES_REPO}/releases/download");
+    if let Err(e) = install_update(&base, &tag, &platform, tmp.path()).await {
         eprintln!("Error: download failed: {e}");
         std::process::exit(1);
     }

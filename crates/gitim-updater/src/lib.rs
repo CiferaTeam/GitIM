@@ -3,7 +3,7 @@
 //! gitim-updater: shared core for GitIM self-update.
 //!
 //! Pure helpers (version parsing, platform detection, URL formatting) sit
-//! alongside async IO helpers (`fetch_latest_tag`, `download_and_extract`) and
+//! alongside async IO helpers (`fetch_latest_tag`, `install_update`) and
 //! a sync atomic-replace helper (`replace_binaries`). The CLI and runtime both
 //! drive the flow through these — no direct reqwest / tar calls at callsites.
 
@@ -290,34 +290,6 @@ pub async fn install_update(
     let tarball_bytes = download_bytes(&tarball_url).await?;
     verify_sha256(&tarball_bytes, &expected_hex)?;
     extract_tarball(&tarball_bytes, dest)?;
-    Ok(())
-}
-
-/// Download a tarball from `url` and unpack it into `dest`.
-///
-/// Small (5-20MB) tarballs are read fully into memory — streaming to disk adds
-/// complexity the current sizes don't warrant.
-pub async fn download_and_extract(url: &str, dest: &Path) -> Result<(), UpdateError> {
-    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
-    let resp = client.get(url).send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(UpdateError::HttpStatus(status.as_u16()));
-    }
-    let bytes = resp.bytes().await?;
-    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut archive = tar::Archive::new(decoder);
-    // Archive corruption / malformed tar entries -> Extract (semantic mismatch
-    // with the archive contract), not raw Io.
-    //
-    // `tar` 0.4's default `Archive::unpack` rejects absolute paths and `..`
-    // traversal — we rely on that for defense in depth. Do not call
-    // `archive.set_preserve_permissions(true)` or relax the path checks
-    // without re-evaluating the trust model (release tarballs from the
-    // official repo are trusted, but multiple consumers now call this).
-    archive
-        .unpack(dest)
-        .map_err(|e| UpdateError::Extract(format!("tar unpack failed: {e}")))?;
     Ok(())
 }
 

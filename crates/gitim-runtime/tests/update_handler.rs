@@ -25,7 +25,7 @@
 //! branches are already covered one level down:
 //!
 //! - `gitim-updater` has wiremock coverage of `fetch_latest_tag`,
-//!   `download_and_extract`, and `HttpStatus` vs `Network` error shapes.
+//!   `install_update`, and `HttpStatus` vs `Network` error shapes.
 //! - `update::tests` (lib) covers `strict_install_dir_check`,
 //!   `status_for`, and `sanity_check_new_runtime` with fake
 //!   `sleep`/`echo` processes.

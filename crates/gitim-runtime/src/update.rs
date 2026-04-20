@@ -254,8 +254,11 @@ async fn run_sync_phase() -> Result<(UpdateJob, tempfile::TempDir, PathBuf), Upd
             error_code: error_codes::EXTRACT_FAILED.into(),
             detail: format!("create tempdir failed: {e}"),
         })?;
-    let url = gitim_updater::download_url(&latest_tag, &platform);
-    gitim_updater::download_and_extract(&url, tmp.path())
+    let base = format!(
+        "https://github.com/{}/releases/download",
+        gitim_updater::RELEASES_REPO
+    );
+    gitim_updater::install_update(&base, &latest_tag, &platform, tmp.path())
         .await
         .map_err(|e| match e {
             // `HttpStatus` means "reached GitHub, got a non-2xx" — treat as a
