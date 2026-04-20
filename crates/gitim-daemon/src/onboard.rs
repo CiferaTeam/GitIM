@@ -196,25 +196,51 @@ fn write_me_json(
     std::fs::create_dir_all(&gitim_dir)
         .map_err(|e| Response::error(format!("failed to create .gitim dir: {}", e)))?;
 
-    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let mut me = serde_json::json!({
-        "handler": handler,
-        "git_server": git_server,
-        "display_name": display_name,
-        "onboarded_at": now,
-    });
-    if let Some(email) = github_email {
-        me.as_object_mut()
-            .unwrap()
-            .insert("github_email".to_string(), serde_json::Value::String(email.to_string()));
-    }
-
     let me_path = gitim_dir.join("me.json");
+
+    // Merge semantics: start from the existing file (if any) so fields this
+    // code path doesn't set — github_email, model, provider, etc. — aren't
+    // silently erased on re-onboard. Caller-provided fields below still take
+    // precedence.
+    let mut me = read_me_json_object(&me_path);
+
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let obj = me.as_object_mut().unwrap();
+    obj.insert("handler".to_string(), serde_json::Value::String(handler.to_string()));
+    obj.insert("git_server".to_string(), serde_json::Value::String(git_server.to_string()));
+    obj.insert("display_name".to_string(), serde_json::Value::String(display_name.to_string()));
+    obj.insert("onboarded_at".to_string(), serde_json::Value::String(now));
+    // Caller-provided email overrides; absent → preserve whatever was there.
+    if let Some(email) = github_email {
+        obj.insert("github_email".to_string(), serde_json::Value::String(email.to_string()));
+    }
+    // Guest flag is mutually exclusive with a real handler — clear stale value.
+    obj.remove("guest");
+
     let content = serde_json::to_string_pretty(&me).unwrap();
     std::fs::write(&me_path, &content)
         .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
 
     Ok(())
+}
+
+/// Read existing me.json as a JSON object. On missing / invalid / non-object
+/// content, return an empty object — callers rely on `as_object_mut()` always
+/// succeeding.
+fn read_me_json_object(me_path: &std::path::Path) -> serde_json::Value {
+    let content = match std::fs::read_to_string(me_path) {
+        Ok(s) => s,
+        Err(_) => return serde_json::json!({}),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return serde_json::json!({}),
+    };
+    if parsed.is_object() {
+        parsed
+    } else {
+        serde_json::json!({})
+    }
 }
 
 fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {

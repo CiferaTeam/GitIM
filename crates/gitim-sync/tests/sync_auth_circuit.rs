@@ -190,6 +190,7 @@ fn run_sync_cycle_does_not_trip_circuit_on_non_auth_errors() {
             &|_, _, _| {},
             &|_| {},
             &|| {},
+            None,
         );
     }
 
@@ -214,6 +215,7 @@ fn run_sync_cycle_short_circuits_when_circuit_open() {
         &|_, _, _| {},
         &|_| {},
         &|| {},
+        None,
     );
 
     assert!(matches!(outcome, SyncOutcome::AuthCircuitOpen));
@@ -250,6 +252,7 @@ fn end_to_end_trip_then_skip_git() {
         &move || {
             cycle_done_clone.store(true, Ordering::SeqCst);
         },
+        None,
     );
 
     assert!(matches!(outcome, SyncOutcome::AuthCircuitOpen));

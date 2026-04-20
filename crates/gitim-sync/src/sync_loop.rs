@@ -84,6 +84,11 @@ impl AuthCircuit {
 ///   The index layer uses this to decide whether incremental updates are needed.
 /// - `on_cycle_done`: called at the very end of every cycle, regardless of success or failure.
 ///   Used to notify remaining waiters that the push did not succeed.
+/// - `rebase_author`: snapshot of `(name, email)` to stamp on the rebase-resolution
+///   commit. `None` falls back to git config (legacy behaviour). Daemon passes the
+///   `current_user` handler + workspace github email so that rebased commits
+///   attribute to the daemon owner instead of whoever the OS-level git
+///   config happens to name.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_sync_loop<F1, F2, F3, F4>(
     repo_root: &Path,
@@ -95,6 +100,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     on_renumbered: F2,
     on_synced: F3,
     on_cycle_done: F4,
+    rebase_author: Option<(String, String)>,
 ) where
     F1: Fn() + Send + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + 'static,
@@ -143,6 +149,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
             &on_renumbered,
             &on_synced,
             &on_cycle_done,
+            rebase_author.as_ref(),
         );
 
         next_delay = match outcome {
@@ -180,6 +187,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
 /// Made `pub` so integration tests can drive cycles deterministically without
 /// spawning the async loop.
+#[allow(clippy::too_many_arguments)]
 pub fn run_sync_cycle<F1, F2, F3, F4>(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
@@ -188,6 +196,7 @@ pub fn run_sync_cycle<F1, F2, F3, F4>(
     on_renumbered: &F2,
     on_synced: &F3,
     on_cycle_done: &F4,
+    rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome
 where
     F1: Fn(),
@@ -210,7 +219,7 @@ where
     };
 
     let outcome = if has_unpushed {
-        sync_with_push(repo, circuit, commit_lock, on_pushed, on_renumbered)
+        sync_with_push(repo, circuit, commit_lock, on_pushed, on_renumbered, rebase_author)
     } else {
         sync_pull_only(repo, circuit, commit_lock)
     };
@@ -247,6 +256,7 @@ fn sync_with_push<F1, F2>(
     commit_lock: &Mutex<()>,
     on_pushed: &F1,
     on_renumbered: &F2,
+    rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome
 where
     F1: Fn(),
@@ -456,7 +466,19 @@ where
                     } else {
                         "meta: sync after rebase".to_string()
                     };
-                    if let Err(e) = repo.add_and_commit(&path_refs, &commit_msg) {
+                    // Under normal operation every local commit on this clone
+                    // belongs to one handler (the daemon owner), so stamping
+                    // the rebase-resolution commit with that handler matches
+                    // reality. Committer still comes from git config — only
+                    // author is rewritten. `None` preserves the legacy
+                    // behaviour (git config picks author too).
+                    let commit_result = match rebase_author {
+                        Some((name, email)) => {
+                            repo.add_and_commit_as(&path_refs, &commit_msg, Some((name, email)))
+                        }
+                        None => repo.add_and_commit(&path_refs, &commit_msg),
+                    };
+                    if let Err(e) = commit_result {
                         warn!("sync: commit after conflict resolution failed: {}", e);
                         return SyncOutcome::Normal;
                     }

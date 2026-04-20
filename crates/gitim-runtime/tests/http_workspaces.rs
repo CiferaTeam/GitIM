@@ -137,6 +137,7 @@ fn inject_workspace(
             provider,
             remote_url: None,
             token: None,
+            github_email: None,
         },
     });
     // `human_repo: None` keeps `initialized` false, matching a placeholder

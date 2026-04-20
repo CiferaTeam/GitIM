@@ -53,6 +53,40 @@ pub async fn verify_token(token: &str, api_base: &str) -> Result<(), GithubError
     }
 }
 
+/// Fetch the authenticated user's public email from /user.
+///
+/// Returns `Ok(None)` when the account is valid but `email` is null / empty
+/// (user has "Keep my email addresses private" set). Returns an error for
+/// auth / network failures — callers typically best-effort this and fall
+/// back to the `<handler>@gitim` sentinel when no email is available.
+pub async fn fetch_user_email(token: &str, api_base: &str) -> Result<Option<String>, GithubError> {
+    let url = format!("{}/user", api_base.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token)
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await?;
+
+    let status = response.status();
+    match status.as_u16() {
+        401 => return Err(GithubError::InvalidToken),
+        403 => return Err(GithubError::InsufficientScope),
+        429 => return Err(GithubError::RateLimited),
+        s if (200..300).contains(&s) => {}
+        s => return Err(GithubError::UnexpectedStatus(s)),
+    }
+
+    let body: serde_json::Value = response.json().await.map_err(GithubError::from)?;
+    let email = body
+        .get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Ok(email)
+}
+
 pub async fn check_repo_access(
     owner: &str,
     repo: &str,

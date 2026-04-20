@@ -13,6 +13,7 @@ fn local_mode_roundtrip() {
             provider: GitProvider::Local,
             remote_url: None,
             token: None,
+            github_email: None,
         },
     };
     let json = serde_json::to_string(&cfg).unwrap();
@@ -29,6 +30,7 @@ fn github_mode_roundtrip() {
             provider: GitProvider::Github,
             remote_url: Some("https://github.com/owner/repo.git".to_string()),
             token: Some("ghp_example".to_string()),
+            github_email: None,
         },
     };
     let json = serde_json::to_string(&cfg).unwrap();
@@ -60,6 +62,7 @@ fn write_config_sets_0600_perms() {
             provider: GitProvider::Github,
             remote_url: Some("https://github.com/owner/repo.git".to_string()),
             token: Some("ghp_example".to_string()),
+            github_email: None,
         },
     };
     cfg.write(dir.path()).expect("write");

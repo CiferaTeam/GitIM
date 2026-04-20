@@ -212,7 +212,17 @@ impl AppState {
         let synced_state = state.clone();
         let cycle_done_state = state.clone();
 
+        // Snapshot (handler, email) for rebase-resolution commits. Each
+        // daemon only ever writes commits on behalf of its owner, so the
+        // snapshot is stable for the lifetime of this sync loop. Guest /
+        // unauthenticated → None → legacy git-config fallback.
+        let rebase_author_state = state.clone();
+
         tokio::spawn(async move {
+            let rebase_author = {
+                let current = rebase_author_state.current_user.read().await.clone();
+                current.map(|u| rebase_author_state.author_for(&u))
+            };
             gitim_sync::sync_loop::start_sync_loop(
                 &sync_root,
                 sync_interval,
@@ -358,6 +368,7 @@ impl AppState {
                         }
                     });
                 },
+                rebase_author,
             )
             .await;
         });

@@ -16,7 +16,7 @@ use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
     WorkspaceConfig,
 };
-use crate::github::{check_repo_access, parse_github_url, verify_token, GithubError};
+use crate::github::{check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError};
 use gitim_client::GitimClient;
 use gitim_sync::url_redact::redacted_url;
 
@@ -38,6 +38,7 @@ pub trait GithubApiClient: Send + Sync {
         repo: &str,
         token: &str,
     ) -> Result<(), GithubError>;
+    async fn fetch_user_email(&self, token: &str) -> Result<Option<String>, GithubError>;
 }
 
 pub struct DefaultGithubApi {
@@ -56,6 +57,9 @@ impl GithubApiClient for DefaultGithubApi {
         token: &str,
     ) -> Result<(), GithubError> {
         check_repo_access(owner, repo, token, &self.base_url).await
+    }
+    async fn fetch_user_email(&self, token: &str) -> Result<Option<String>, GithubError> {
+        fetch_user_email(token, &self.base_url).await
     }
 }
 
@@ -1127,10 +1131,18 @@ async fn agents_add(
         "provisioning agent",
     );
 
+    // Pull the workspace-level GitHub email so it rides into the agent's
+    // git-mode onboard and lands in the agent me.json + AppState. None in
+    // local mode or when the owner's email is private.
+    let workspace_github_email = workspace_config
+        .as_ref()
+        .and_then(|c| c.git.github_email.clone());
+
     let config = AgentConfig {
         handler: req.handler.clone(),
         display_name: req.display_name.clone(),
         remote_url,
+        github_email: workspace_github_email,
     };
 
     match provision_agent(&agents_dir, &config).await {
@@ -1555,6 +1567,7 @@ async fn recover_single_workspace(
                 provider: GitProvider::Github,
                 remote_url: Some(url),
                 token: Some(token),
+                ..
             }) => {
                 let token_url = match parse_github_url(url) {
                     Ok((owner, repo)) => build_token_url(&owner, &repo, token),
@@ -2009,6 +2022,7 @@ async fn provision_local_workspace(
             provider: GitProvider::Local,
             remote_url: None,
             token: None,
+            github_email: None,
         },
     };
     config.write(workspace).map_err(|e| {
@@ -2121,6 +2135,20 @@ async fn provision_github_workspace(
                 )
             })?;
 
+        // Best-effort email fetch: a failure or null email (private account)
+        // falls back to the `<handler>@gitim` sentinel. Never blocks init —
+        // the workspace is already usable without it.
+        let github_email = match github_api.fetch_user_email(&token).await {
+            Ok(email) => email,
+            Err(e) => {
+                tracing::warn!(
+                    "fetch_user_email failed, agent commits will fallback: {}",
+                    redacted_url(&e.to_string())
+                );
+                None
+            }
+        };
+
         let config = WorkspaceConfig {
             workspace: workspace.to_string_lossy().into_owned(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -2128,6 +2156,7 @@ async fn provision_github_workspace(
                 provider: GitProvider::Github,
                 remote_url: Some(remote_url.clone()),
                 token: Some(token.clone()),
+                github_email,
             },
         };
         config.write(workspace).map_err(|e| {
@@ -2530,6 +2559,7 @@ mod tests {
                 provider: GitProvider::Github,
                 remote_url: Some("https://github.com/o/r".to_string()),
                 token: Some("tok".to_string()),
+                github_email: None,
             },
         });
         ctx.human_repo = Some(PathBuf::from("/ws/fe/.gitim-runtime/human"));

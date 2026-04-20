@@ -85,6 +85,7 @@ async fn test_agent_loop_end_to_end() {
         handler: "loop-agent".into(),
         display_name: "Loop Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);

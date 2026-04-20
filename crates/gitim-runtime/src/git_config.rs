@@ -17,6 +17,13 @@ pub struct GitConfig {
     pub remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// GitHub verified email of the workspace owner (fetched from /user at
+    /// init time for github provider). Propagated to every agent's daemon so
+    /// commits attribute to the owner's contribution graph instead of
+    /// `<handler>@gitim`. None for local provider or when /user omits email
+    /// (private-by-default accounts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

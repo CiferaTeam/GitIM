@@ -15,6 +15,7 @@ use gitim_runtime::workspace::WorkspaceContext;
 struct MockGithubApi {
     verify_result: Mutex<Option<Result<(), GithubError>>>,
     access_result: Mutex<Option<Result<(), GithubError>>>,
+    email_result: Mutex<Option<Result<Option<String>, GithubError>>>,
 }
 
 impl MockGithubApi {
@@ -22,6 +23,7 @@ impl MockGithubApi {
         Self {
             verify_result: Mutex::new(Some(Ok(()))),
             access_result: Mutex::new(Some(Ok(()))),
+            email_result: Mutex::new(Some(Ok(Some("octo@example.com".to_string())))),
         }
     }
 }
@@ -46,6 +48,13 @@ impl GithubApiClient for MockGithubApi {
             .unwrap()
             .take()
             .unwrap_or(Ok(()))
+    }
+    async fn fetch_user_email(&self, _token: &str) -> Result<Option<String>, GithubError> {
+        self.email_result
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(Ok(None))
     }
 }
 
@@ -170,6 +179,7 @@ fn write_workspace_config(workspace: &Path, provider: GitProvider, remote_url: O
             provider,
             remote_url,
             token,
+            github_email: None,
         },
     };
     config.write(workspace).unwrap();

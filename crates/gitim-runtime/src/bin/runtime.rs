@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler: handler.clone(),
         display_name: display_name.clone(),
         remote_url: remote_url.clone(),
+        github_email: None,
     };
     let handle = provision_agent(&agents_dir, &config).await?;
     eprintln!("agent ready at {}", handle.repo_root.display());

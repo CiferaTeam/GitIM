@@ -105,15 +105,19 @@ WebUI 走 Runtime 的 `/git/init` HTTP 端点。两种 provider：
   "git": {
     "provider": "local" | "github",
     "remote_url": "https://github.com/org/repo" | null,
-    "token": "ghp_..." | null
+    "token": "ghp_..." | null,
+    "github_email": "owner@example.com" | null
   }
 }
 ```
 
 **Token source of truth = 这份文件**。各 clone 的 `.git/config` URL 里嵌的 token 是派生值。
 
+**`github_email` source of truth** 也是这份文件(github 模式下 `/git/init` 时从 GitHub `/user` 自动拉取,best-effort)。`provision_agent` 读它,注入新 agent onboard 的 `git` 变体 auth payload (`github_email` 字段),走 daemon `InferredIdentity.email` → `write_me_json` → agent `.gitim/me.json` → `AppState.github_email` → commit author。所有 daemon commit 因此 author email 归 workspace owner,计入 contribution graph。
+
 - Runtime 启动（recover workspace 后）+ `add_agent` 成功后 → 调 `token_propagation::propagate_token` 扫所有 clone 并覆盖 `remote.origin.url`
 - 未来 "Update token" UI（v2）→ 改 config.json → propagate → 所有 clone 同步
+- Daemon `write_me_json` 采用 **merge 语义**:re-onboard 不传 `github_email` 时保留旧值,防抹掉已配置的字段
 
 ### Handler 冲突防护（github 模式）
 
@@ -135,7 +139,7 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - **换 remote URL**：需 rm -rf 重建
 - **Token rotate UI**：v1 无，手工改 config.json + 重启 runtime
 - **Windows 支持**：`chmod 0600` + xattr + `dirs::home_dir` 的 OneDrive 检测不适配
-- **Agent 独立 GitHub 身份**：共用 workspace PAT。commit author name = agent handler；author email = `.gitim/me.json` 里的 `github_email`(github mode onboard 自动从 `/user` API 拉取),没配置则 fallback `<handler>@gitim`。GitHub committer = PAT owner。审计归因通过 author **name** 字段(handler),email 统一到 workspace owner 后所有 daemon commit 都能算进该账户的 contribution graph
+- **Agent 独立 GitHub 身份**：共用 workspace PAT 和 workspace owner email。commit author name = agent handler；author email = `WorkspaceConfig.git.github_email`(github mode /git/init 时从 `/user` API 自动拉取),fallback `<handler>@gitim`。GitHub committer = PAT owner。审计归因通过 author **name** 字段(handler),email 统一到 workspace owner 后所有 daemon commit 都能算进该账户的 contribution graph。sync_loop 的 rebase-resolution commit 也 stamp daemon owner(而非本地 git config fallback),维持每个 clone 的"一人一 commit"归属
 - **OAuth Device Flow**：不做。PAT 手动粘贴
 
 ## 约定
