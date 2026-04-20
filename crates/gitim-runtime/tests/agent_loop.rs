@@ -135,3 +135,70 @@ async fn test_agent_loop_end_to_end() {
 
     stop_daemon(&handle.repo_root).await;
 }
+
+use gitim_agent_provider::ProviderUsage;
+use gitim_runtime::agent_loop::compute_snapshot;
+use gitim_runtime::state::UsageSource;
+
+#[test]
+fn snapshot_from_claude_provider_reported() {
+    let snap = compute_snapshot(
+        "sess-abc",
+        Some(&ProviderUsage { input_tokens: Some(160_000), output_tokens: Some(500), used_percent: None }),
+        42_000,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+
+    assert_eq!(snap.session_id, "sess-abc");
+    assert_eq!(snap.input_tokens, Some(160_000));
+    assert!((snap.used_percent - 80.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
+fn snapshot_from_codex_used_percent() {
+    let snap = compute_snapshot(
+        "sess-xyz",
+        Some(&ProviderUsage { input_tokens: None, output_tokens: None, used_percent: Some(47.5) }),
+        0,
+        None,
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+
+    assert!((snap.used_percent - 47.5).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+    assert!(snap.max_tokens.is_none());
+}
+
+#[test]
+fn snapshot_falls_back_to_estimator() {
+    let snap = compute_snapshot(
+        "sess-fut",
+        None,
+        80_000,
+        Some(100_000),
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+
+    assert!((snap.used_percent - 80.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::RuntimeEstimated));
+}
+
+#[test]
+fn snapshot_returns_none_when_no_data_available() {
+    let snap = compute_snapshot("sess", None, 0, None, "2026-04-20T10:00:00Z");
+    assert!(snap.is_none());
+}
+
+#[test]
+fn snapshot_clamps_above_100_with_warning_signal() {
+    let snap = compute_snapshot(
+        "sess",
+        Some(&ProviderUsage { input_tokens: None, output_tokens: None, used_percent: Some(115.0) }),
+        0,
+        None,
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+    assert!((snap.used_percent - 100.0).abs() < 0.01);
+}

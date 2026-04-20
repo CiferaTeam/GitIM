@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gitim_agent_provider::{ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, create};
+use gitim_agent_provider::{
+    ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage, create,
+};
 use gitim_client::GitimClient;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -10,7 +12,7 @@ use tracing::info;
 use crate::error::RuntimeError;
 use crate::http::AgentActivityEvent;
 use crate::poller::{ChannelChange, Poller};
-use crate::state::AgentState;
+use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
 
 
 #[derive(Debug, Clone, Default)]
@@ -519,6 +521,71 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
                 "missing handler field in .gitim/me.json",
             ))
         })
+}
+
+/// Compute a `SessionUsageSnapshot` from available usage signals.
+///
+/// Authoritative-value policy (matches 01-design.md §4.5):
+/// 1. provider_reported.used_percent (Codex)
+/// 2. provider_reported.input_tokens / max_tokens (Claude)
+/// 3. estimated_tokens / max_tokens (fallback)
+/// 4. None (no data available)
+///
+/// `used_percent` is clamped to `[0, 100]`. Callers are responsible for
+/// logging unusual values (e.g. >110 as a protocol-drift signal).
+pub fn compute_snapshot(
+    session_id: &str,
+    provider_reported: Option<&ProviderUsage>,
+    estimated_tokens: u64,
+    max_tokens: Option<u64>,
+    updated_at: &str,
+) -> Option<SessionUsageSnapshot> {
+    let (used_percent, source, input_tokens, output_tokens) =
+        if let Some(pu) = provider_reported {
+            if let Some(pct) = pu.used_percent {
+                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
+            } else if let (Some(input), Some(max)) = (pu.input_tokens, max_tokens) {
+                let pct = (input as f64) / (max as f64) * 100.0;
+                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
+            } else {
+                return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+            }
+        } else {
+            return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+        };
+
+    let used_percent = used_percent.clamp(0.0, 100.0);
+    Some(SessionUsageSnapshot {
+        session_id: session_id.to_string(),
+        input_tokens,
+        output_tokens,
+        max_tokens,
+        used_percent,
+        source,
+        updated_at: updated_at.to_string(),
+    })
+}
+
+fn compute_from_estimate(
+    session_id: &str,
+    estimated_tokens: u64,
+    max_tokens: Option<u64>,
+    updated_at: &str,
+) -> Option<SessionUsageSnapshot> {
+    let max = max_tokens?;
+    if estimated_tokens == 0 {
+        return None;
+    }
+    let pct = ((estimated_tokens as f64) / (max as f64) * 100.0).clamp(0.0, 100.0);
+    Some(SessionUsageSnapshot {
+        session_id: session_id.to_string(),
+        input_tokens: None,
+        output_tokens: None,
+        max_tokens: Some(max),
+        used_percent: pct,
+        source: UsageSource::RuntimeEstimated,
+        updated_at: updated_at.to_string(),
+    })
 }
 
 #[cfg(test)]
