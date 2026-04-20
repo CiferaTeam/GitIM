@@ -602,6 +602,19 @@ pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
     }
 }
 
+/// The one-shot preamble inserted before the next user prompt when
+/// `used_percent` first crosses `WARN_AT_PERCENT`. Content is deliberately
+/// firm — no tiered wording, no retry guidance — per 01-design.md §4.5.
+pub fn build_usage_notice_preamble(used_percent: f64) -> String {
+    format!(
+        "[系统通知] 你的对话窗口使用率已达 {pct:.0}%。请在本轮完成手头任务后立即结束本次对话：\n\
+         1. 把所有需要长期记忆的内容（重要决定、用户偏好、未完成事项、进度交接）写入你的记忆文件\n\
+         2. 在输出末尾附加标记 [[RESET]]，runtime 会在下一轮为你开启全新窗口\n\
+         本提醒仅发送一次。",
+        pct = used_percent,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

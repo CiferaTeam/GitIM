@@ -233,3 +233,29 @@ fn not_crossed_when_already_above() {
 fn not_crossed_when_dropping() {
     assert!(!just_crossed_threshold(Some(90.0), 40.0));
 }
+
+use gitim_runtime::agent_loop::build_usage_notice_preamble;
+
+#[test]
+fn preamble_contains_percentage() {
+    let p = build_usage_notice_preamble(82.4);
+    assert!(p.contains("82"), "preamble: {p}");
+}
+
+#[test]
+fn preamble_mentions_reset_marker() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("[[RESET]]"));
+}
+
+#[test]
+fn preamble_marks_as_system_notice() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.starts_with("[系统通知]"));
+}
+
+#[test]
+fn preamble_says_only_once() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("仅发送一次"));
+}
