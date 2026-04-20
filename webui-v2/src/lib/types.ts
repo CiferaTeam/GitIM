@@ -2,6 +2,16 @@ import type { ProviderId } from "./providers";
 
 export type AgentStatus = "running" | "idle" | "error" | "offline";
 
+export interface SessionUsageSnapshot {
+  sessionId: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  maxTokens?: number;
+  usedPercent: number;
+  source: "provider_reported" | "runtime_estimated";
+  updatedAt: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -14,6 +24,7 @@ export interface Agent {
   lastActivity?: string; // ISO8601
   messagesProcessed: number;
   errorMessage?: string;
+  sessionUsage?: SessionUsageSnapshot;
 }
 
 export type MessageStatus = "sending" | "sent" | "synced" | "failed";
@@ -48,7 +59,7 @@ export interface UserInfo {
 
 export interface AgentActivityEvent {
   agent_id: string;
-  event_type: "tool_use" | "thinking" | "done" | "error";
+  event_type: "tool_use" | "thinking" | "done" | "error" | "usage";
   detail: string;
   timestamp: string; // ISO8601
 }
