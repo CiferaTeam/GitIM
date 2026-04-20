@@ -9,6 +9,7 @@ use gitim_client::GitimClient;
 use tokio::sync::broadcast;
 use tracing::info;
 
+use crate::context_window::WARN_AT_PERCENT;
 use crate::error::RuntimeError;
 use crate::http::AgentActivityEvent;
 use crate::poller::{ChannelChange, Poller};
@@ -586,6 +587,19 @@ fn compute_from_estimate(
         source: UsageSource::RuntimeEstimated,
         updated_at: updated_at.to_string(),
     })
+}
+
+/// `true` iff this turn is the first to observe `new_pct >= WARN_AT_PERCENT`
+/// in the current session. Never returns `true` twice for the same session
+/// (subsequent turns see `prev_pct >= WARN_AT_PERCENT`).
+pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
+    if new_pct < WARN_AT_PERCENT {
+        return false;
+    }
+    match prev_pct {
+        None => true,
+        Some(p) => p < WARN_AT_PERCENT,
+    }
 }
 
 #[cfg(test)]

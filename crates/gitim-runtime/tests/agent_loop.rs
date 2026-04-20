@@ -202,3 +202,34 @@ fn snapshot_clamps_above_100_with_warning_signal() {
     ).expect("snapshot");
     assert!((snap.used_percent - 100.0).abs() < 0.01);
 }
+
+use gitim_runtime::agent_loop::just_crossed_threshold;
+use gitim_runtime::context_window::WARN_AT_PERCENT;
+
+#[test]
+fn crossed_on_first_observation_above_threshold() {
+    assert!(just_crossed_threshold(None, 85.0));
+}
+
+#[test]
+fn not_crossed_below_threshold() {
+    assert!(!just_crossed_threshold(Some(45.0), 62.0));
+    assert!(!just_crossed_threshold(None, 30.0));
+}
+
+#[test]
+fn crossed_when_previous_below_and_new_above() {
+    assert!(just_crossed_threshold(Some(78.0), 82.0));
+    assert!(just_crossed_threshold(Some(79.99), WARN_AT_PERCENT));
+}
+
+#[test]
+fn not_crossed_when_already_above() {
+    assert!(!just_crossed_threshold(Some(82.0), 90.0));
+    assert!(!just_crossed_threshold(Some(WARN_AT_PERCENT), 95.0));
+}
+
+#[test]
+fn not_crossed_when_dropping() {
+    assert!(!just_crossed_threshold(Some(90.0), 40.0));
+}
