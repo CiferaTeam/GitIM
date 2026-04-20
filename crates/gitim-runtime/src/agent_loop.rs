@@ -271,6 +271,27 @@ impl AgentLoop {
         self.emit_activity("thinking", "processing...");
 
         let opts = self.build_exec_options();
+
+        // Pre-execute tiktoken accumulation (Task 12).
+        // Cold start (no resume token) → reset estimator and seed with the system prompt.
+        // Every turn adds the user prompt before execute; assistant text is added after.
+        {
+            let cold_start = self.session_token.is_none();
+            let mut state = AgentState::load(&self.repo_root)?;
+            if cold_start {
+                state.estimated_tokens = 0;
+            }
+            state.estimated_tokens +=
+                crate::context_window::tokenize_for_provider(&self.provider_type, &prompt);
+            if cold_start {
+                if let Some(sp) = opts.system_prompt.as_deref() {
+                    state.estimated_tokens +=
+                        crate::context_window::tokenize_for_provider(&self.provider_type, sp);
+                }
+            }
+            state.save(&self.repo_root)?;
+        }
+
         let mut session = self
             .provider
             .execute(&prompt, opts)
@@ -285,6 +306,9 @@ impl AgentLoop {
         // The agent signals an intentional context reset by emitting "[[RESET]]" in its output.
         // This is a private runtime protocol — silent, not surfaced to IM or the WebUI.
         let mut text_tail = String::new();
+        // Task 12: accumulate full assistant text across the turn for tiktoken estimate.
+        // Intentionally uncapped (unlike text_tail) — we want total token count.
+        let mut assistant_text_buf = String::new();
         let mut reset_requested = false;
 
         loop {
@@ -296,6 +320,7 @@ impl AgentLoop {
                                 gitim_agent_provider::Event::Text { content } => {
                                     tracing::debug!(text_len = content.len(), "agent text");
                                     text_tail.push_str(content);
+                                    assistant_text_buf.push_str(content);
                                     if text_tail.contains("[[RESET]]") {
                                         info!(
                                             handler = %self.handler,
@@ -396,6 +421,10 @@ impl AgentLoop {
                 // it's the thread_id. In either case it's exec_result.session_token.
                 if let Some(sid) = exec_result.session_token.as_deref() {
                     let mut state = AgentState::load(&self.repo_root)?;
+                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                        &self.provider_type,
+                        &assistant_text_buf,
+                    );
                     self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
                 }
                 // Keep session_token for resume in next cycle
@@ -415,6 +444,10 @@ impl AgentLoop {
                 // it's the thread_id. In either case it's exec_result.session_token.
                 if let Some(sid) = exec_result.session_token.as_deref() {
                     let mut state = AgentState::load(&self.repo_root)?;
+                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                        &self.provider_type,
+                        &assistant_text_buf,
+                    );
                     self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
                 }
                 if let Some(token) = exec_result.session_token {
