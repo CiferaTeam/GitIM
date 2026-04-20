@@ -240,6 +240,59 @@ pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
+/// Parse one line out of a `SHA256SUMS` file, matching by exact trailing
+/// filename. Lines follow GNU/BSD format: `<64 hex>  <filename>\n` (two spaces
+/// for binary mode, one space + `*` for text mode — we accept both).
+///
+/// Returns `Sha256LineMissing(archive_name)` if `SHA256SUMS` has no matching
+/// line. Malformed lines are skipped silently — one bad line shouldn't poison
+/// the rest of the file, and we fail-close on "no match" anyway.
+pub fn parse_sha256sums_line(body: &str, archive_name: &str) -> Result<String, UpdateError> {
+    for line in body.lines() {
+        // Split on first whitespace run. First token = hex, rest = name.
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let Some(hex_tok) = parts.next() else { continue };
+        let Some(rest) = parts.next() else { continue };
+        // BSD/GNU text mode prefixes filename with `*`; strip.
+        let name = rest.trim_start().trim_start_matches('*').trim();
+        if name == archive_name {
+            return Ok(hex_tok.trim().to_string());
+        }
+    }
+    Err(UpdateError::Sha256LineMissing(archive_name.to_string()))
+}
+
+/// Orchestrate a self-update:
+///   1. Fetch SHA256SUMS
+///   2. Parse expected hash for `gitim-{tag}-{platform}.tar.gz`
+///   3. Download the tarball
+///   4. Verify SHA — on mismatch, fail-closed and do NOT extract
+///   5. Extract into `dest`
+///
+/// `base_download_url` is the URL prefix up to (not including) the tag-scoped
+/// path segment. In production: `https://github.com/<repo>/releases/download`.
+/// The function appends `/<tag>/SHA256SUMS` and `/<tag>/gitim-...tar.gz`.
+pub async fn install_update(
+    base_download_url: &str,
+    tag: &str,
+    platform: &str,
+    dest: &Path,
+) -> Result<(), UpdateError> {
+    let archive = format!("gitim-{tag}-{platform}.tar.gz");
+    let sha_url = format!("{base_download_url}/{tag}/SHA256SUMS");
+    let tarball_url = format!("{base_download_url}/{tag}/{archive}");
+
+    let sha_body_bytes = download_bytes(&sha_url).await?;
+    let sha_body = String::from_utf8(sha_body_bytes)
+        .map_err(|e| UpdateError::Extract(format!("SHA256SUMS not UTF-8: {e}")))?;
+    let expected_hex = parse_sha256sums_line(&sha_body, &archive)?;
+
+    let tarball_bytes = download_bytes(&tarball_url).await?;
+    verify_sha256(&tarball_bytes, &expected_hex)?;
+    extract_tarball(&tarball_bytes, dest)?;
+    Ok(())
+}
+
 /// Download a tarball from `url` and unpack it into `dest`.
 ///
 /// Small (5-20MB) tarballs are read fully into memory — streaming to disk adds

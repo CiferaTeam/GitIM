@@ -454,3 +454,184 @@ async fn download_bytes_http_500() {
         other => panic!("expected HttpStatus(500), got {:?}", other),
     }
 }
+
+// ---------- install_update (orchestration) ----------
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+fn archive_name(tag: &str, platform: &str) -> String {
+    format!("gitim-{tag}-{platform}.tar.gz")
+}
+
+fn sha256sums_body(entries: &[(&str, &str)]) -> String {
+    // `shasum -a 256` format: "<hex>  <filename>\n" (two spaces for binary mode)
+    let mut s = String::new();
+    for (hex_sum, name) in entries {
+        s.push_str(hex_sum);
+        s.push_str("  ");
+        s.push_str(name);
+        s.push('\n');
+    }
+    s
+}
+
+#[tokio::test]
+async fn install_update_happy_path() {
+    use gitim_updater::install_update;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tag = "v9.9.9";
+    let platform = "darwin-arm64";
+    let tarball = build_tar_gz(&[(
+        &format!("gitim-{tag}-{platform}/gitim"),
+        b"binary-contents",
+    )]);
+    let expected_hex = sha256_hex(&tarball);
+    let sha_body = sha256sums_body(&[(&expected_hex, &archive_name(tag, platform))]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/releases/download/{tag}/SHA256SUMS")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sha_body))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/releases/download/{tag}/{}",
+            archive_name(tag, platform)
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball))
+        .mount(&server)
+        .await;
+
+    let dest = tempfile::tempdir().unwrap();
+    let base = format!("{}/releases/download", server.uri());
+    install_update(&base, tag, platform, dest.path())
+        .await
+        .expect("happy path must succeed");
+    let entry = dest.path().join(format!("gitim-{tag}-{platform}/gitim"));
+    assert!(entry.exists(), "extracted binary must be on disk");
+}
+
+#[tokio::test]
+async fn install_update_sha_mismatch_does_not_extract() {
+    // REGRESSION GUARD: a poisoned tarball with a valid SHA file must NEVER
+    // be extracted. This is the core self-update attack surface.
+    use gitim_updater::{UpdateError, install_update};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tag = "v9.9.9";
+    let platform = "darwin-arm64";
+    let real_tarball = build_tar_gz(&[(
+        &format!("gitim-{tag}-{platform}/gitim"),
+        b"original-bytes",
+    )]);
+    let poisoned_tarball = build_tar_gz(&[(
+        &format!("gitim-{tag}-{platform}/gitim"),
+        b"MALICIOUS_PAYLOAD",
+    )]);
+    // SHA references the original; server serves the poisoned tarball.
+    let real_hex = sha256_hex(&real_tarball);
+    let sha_body = sha256sums_body(&[(&real_hex, &archive_name(tag, platform))]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/releases/download/{tag}/SHA256SUMS")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sha_body))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/releases/download/{tag}/{}",
+            archive_name(tag, platform)
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(poisoned_tarball))
+        .mount(&server)
+        .await;
+
+    let dest = tempfile::tempdir().unwrap();
+    let base = format!("{}/releases/download", server.uri());
+    let err = install_update(&base, tag, platform, dest.path())
+        .await
+        .expect_err("poisoned tarball must be rejected");
+    match err {
+        UpdateError::Sha256Mismatch { .. } => (),
+        other => panic!("expected Sha256Mismatch, got {:?}", other),
+    }
+    // fail-closed: destination must be empty (no extracted files).
+    let entries: Vec<_> = std::fs::read_dir(dest.path())
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "destination must stay empty on SHA mismatch, got {entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn install_update_sha_file_missing_fails_closed() {
+    use gitim_updater::{UpdateError, install_update};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tag = "v9.9.9";
+    let platform = "darwin-arm64";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/releases/download/{tag}/SHA256SUMS")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let dest = tempfile::tempdir().unwrap();
+    let base = format!("{}/releases/download", server.uri());
+    match install_update(&base, tag, platform, dest.path())
+        .await
+        .expect_err("missing SHA file must fail")
+    {
+        UpdateError::HttpStatus(404) => (),
+        other => panic!("expected HttpStatus(404), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn install_update_sha_line_missing_fails_closed() {
+    use gitim_updater::{UpdateError, install_update};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tag = "v9.9.9";
+    let platform = "darwin-arm64";
+    // SHA file exists but lists a DIFFERENT platform only.
+    let other_hex = sha256_hex(b"other");
+    let sha_body =
+        sha256sums_body(&[(&other_hex, &archive_name(tag, "linux-x86_64"))]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/releases/download/{tag}/SHA256SUMS")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sha_body))
+        .mount(&server)
+        .await;
+
+    let dest = tempfile::tempdir().unwrap();
+    let base = format!("{}/releases/download", server.uri());
+    match install_update(&base, tag, platform, dest.path())
+        .await
+        .expect_err("missing SHA line must fail")
+    {
+        UpdateError::Sha256LineMissing(name) => {
+            assert_eq!(name, archive_name(tag, platform));
+        }
+        other => panic!("expected Sha256LineMissing, got {:?}", other),
+    }
+}
