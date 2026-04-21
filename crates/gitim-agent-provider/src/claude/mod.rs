@@ -167,8 +167,15 @@ async fn drive_session(
                                         status: "running".to_string(),
                                     });
                                 }
-                                ParsedMessage::AssistantEvents(events) => {
+                                ParsedMessage::AssistantEvents { events, usage } => {
                                     num_turns += 1;
+                                    // Per-iteration usage reflects actual window occupancy
+                                    // at this step. Result.usage (when it arrives) sums
+                                    // across iterations — billing-correct but wrong as a
+                                    // window denominator.
+                                    if usage.is_some() {
+                                        captured_usage = usage;
+                                    }
                                     for event in events {
                                         if let Event::Text { ref content } = event {
                                             output.push_str(content);
@@ -189,7 +196,13 @@ async fn drive_session(
                                 } => {
                                     saw_result = true;
                                     session_id = sid;
-                                    captured_usage = result_usage;
+                                    // Only fall back to result.usage when no assistant
+                                    // message surfaced per-iteration usage. Older CLI
+                                    // versions may omit usage on assistant events; newer
+                                    // ones always provide it and this branch is a no-op.
+                                    if captured_usage.is_none() {
+                                        captured_usage = result_usage;
+                                    }
                                     info!(
                                         pid,
                                         is_error,
@@ -326,7 +339,13 @@ pub enum ParsedMessage {
     /// System init message with session ID.
     System { session_id: String },
     /// Events from an assistant message (text contributes to output).
-    AssistantEvents(Vec<Event>),
+    AssistantEvents {
+        events: Vec<Event>,
+        /// Per-iteration usage carried on this assistant message. See the
+        /// `MessageContent.usage` doc comment for why this beats
+        /// `Result.usage` as a window-occupancy signal.
+        usage: Option<ProviderUsage>,
+    },
     /// Events from a user message (tool results, not accumulated into output).
     UserEvents(Vec<Event>),
     /// Final result.
@@ -360,7 +379,14 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             if events.is_empty() {
                 None
             } else {
-                Some(ParsedMessage::AssistantEvents(events))
+                let usage = content.usage.map(|u| ProviderUsage {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    used_percent: None,
+                    cache_read_tokens: u.cache_read_tokens,
+                    cache_creation_tokens: u.cache_creation_tokens,
+                });
+                Some(ParsedMessage::AssistantEvents { events, usage })
             }
         }
         "user" => {
@@ -386,10 +412,13 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
         }),
         "log" => {
             let log = raw.log?;
-            Some(ParsedMessage::AssistantEvents(vec![Event::Log {
-                level: log.level,
-                content: log.message,
-            }]))
+            Some(ParsedMessage::AssistantEvents {
+                events: vec![Event::Log {
+                    level: log.level,
+                    content: log.message,
+                }],
+                usage: None,
+            })
         }
         "control_request" => {
             let request: ControlRequestPayload = serde_json::from_value(raw.request?).ok()?;
@@ -507,6 +536,16 @@ struct LogEntry {
 struct MessageContent {
     #[serde(default)]
     content: Vec<ContentBlock>,
+    /// Per-iteration usage from a `type:assistant` message.
+    ///
+    /// Claude Code CLI emits one `assistant` message per inference step inside
+    /// a single CLI invocation. The `usage` here is scoped to *that* request,
+    /// so the last iteration's value reflects the actual context-window
+    /// occupancy at turn end. The final `type:result` event carries an
+    /// aggregate across iterations that double-counts cached context; prefer
+    /// this field when available.
+    #[serde(default)]
+    usage: Option<ClaudeUsage>,
 }
 
 #[derive(Deserialize)]
@@ -590,6 +629,68 @@ mod usage_parse_tests {
         assert_eq!(usage.input_tokens, Some(312));
         assert_eq!(usage.cache_read_tokens, Some(159_500));
         assert_eq!(usage.cache_creation_tokens, Some(220));
+    }
+
+    #[test]
+    fn assistant_message_surfaces_per_iteration_usage() {
+        // T1 iteration 3 of sid f6cf86eb-a78d-4d61-87b8-2edc2d1985ae (framer-opus,
+        // 2026-04-21). The runtime previously read the aggregated result.usage
+        // (sum across 3 iterations = 177k tokens) as window occupancy, which
+        // inflated the denominator 3x and fired the 80% preamble at what was
+        // actually ~30% real window usage. Per-iteration usage carried on the
+        // assistant message is the authoritative window-occupancy signal.
+        let line = r#"{
+            "type": "assistant",
+            "session_id": "sess-abc",
+            "message": {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 34,
+                    "cache_read_input_tokens": 59560,
+                    "cache_creation_input_tokens": 325
+                }
+            }
+        }"#;
+
+        let parsed = parse_line(line).expect("should parse");
+        let ParsedMessage::AssistantEvents { usage, .. } = parsed else {
+            panic!("expected AssistantEvents variant");
+        };
+        let usage = usage.expect("per-iteration usage present");
+        assert_eq!(usage.input_tokens, Some(1));
+        assert_eq!(usage.cache_read_tokens, Some(59_560));
+        assert_eq!(usage.cache_creation_tokens, Some(325));
+        assert!(usage.used_percent.is_none(), "Claude never sets used_percent");
+
+        // Effective = 59,886 — the actual window-occupancy number the runtime
+        // should divide into max_tokens. The aggregated 177k across 3
+        // iterations must never be produced by the parser.
+        let effective = usage.input_tokens.unwrap_or(0)
+            + usage.cache_read_tokens.unwrap_or(0)
+            + usage.cache_creation_tokens.unwrap_or(0);
+        assert_eq!(effective, 59_886);
+    }
+
+    #[test]
+    fn assistant_message_without_usage_field_ok() {
+        // Older Claude CLI versions may omit usage on assistant messages; the
+        // runtime then falls back to result.usage. Make sure parse doesn't
+        // reject the line.
+        let line = r#"{
+            "type": "assistant",
+            "session_id": "sess-abc",
+            "message": {
+                "content": [{"type": "text", "text": "hi"}]
+            }
+        }"#;
+
+        let parsed = parse_line(line).expect("should parse");
+        let ParsedMessage::AssistantEvents { usage, events } = parsed else {
+            panic!("expected AssistantEvents variant");
+        };
+        assert!(usage.is_none());
+        assert_eq!(events.len(), 1);
     }
 
     #[test]
