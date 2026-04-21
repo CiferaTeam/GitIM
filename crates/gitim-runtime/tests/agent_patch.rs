@@ -58,6 +58,61 @@ fn inject_workspace(state: &SharedRuntimeState, slug_str: &str) {
         .insert(slug_str.to_string(), ctx);
 }
 
+// -- Seeding helper -----------------------------------------------------------
+
+/// Create a fake agent directory with a `.gitim/me.json` and inject an
+/// `AgentInfo` into the workspace's agents map.  Returns the `tempdir` so the
+/// caller holds it alive for the duration of the test.
+fn seed_agent_in_workspace(
+    state: &SharedRuntimeState,
+    slug_str: &str,
+    agent_id: &str,
+    me_json: serde_json::Value,
+) -> tempfile::TempDir {
+    use gitim_runtime::http::AgentInfo;
+    use std::collections::HashMap;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let gitim_dir = dir.path().join(".gitim");
+    std::fs::create_dir_all(&gitim_dir).unwrap();
+    std::fs::write(
+        gitim_dir.join("me.json"),
+        serde_json::to_string_pretty(&me_json).unwrap(),
+    )
+    .unwrap();
+
+    let info = AgentInfo {
+        id: agent_id.to_string(),
+        handler: agent_id.to_string(),
+        display_name: "Test Agent".to_string(),
+        status: "idle".to_string(),
+        last_activity: None,
+        messages_processed: 0,
+        repo_path: dir.path().display().to_string(),
+        provider: Some("claude".to_string()),
+        model: None,
+        system_prompt: me_json
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        env: HashMap::new(),
+        error_message: None,
+        session_usage: None,
+        loop_handle: None,
+    };
+
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get_mut(slug_str)
+        .expect("workspace must be injected first")
+        .agents
+        .insert(agent_id.to_string(), info);
+
+    dir
+}
+
 // -- 1. PATCH on nonexistent agent returns 404 --------------------------------
 
 #[tokio::test]
@@ -75,4 +130,147 @@ async fn patch_nonexistent_agent_returns_404() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["ok"], json!(false));
+}
+
+// -- 2. PATCH system_prompt writes me.json (merge semantics) ------------------
+
+#[tokio::test]
+async fn patch_system_prompt_writes_me_json() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws2");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws2",
+        "alice",
+        json!({ "provider": "claude", "system_prompt": "old prompt" }),
+    );
+    let agent_dir = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws2")
+        .unwrap()
+        .agents
+        .get("alice")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, body) = send(
+        router,
+        "PATCH",
+        "/workspaces/ws2/agents/alice",
+        Some(json!({ "system_prompt": "new prompt" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], json!(true));
+    assert_eq!(body["agent"]["system_prompt"], json!("new prompt"));
+
+    // On-disk me.json must be updated.
+    let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
+    let me: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert_eq!(me["system_prompt"], json!("new prompt"), "disk must reflect new value");
+    // Merge semantics: provider field must be preserved.
+    assert_eq!(me["provider"], json!("claude"), "provider must be preserved");
+}
+
+// -- 3. PATCH system_prompt null clears the field ------------------------------
+
+#[tokio::test]
+async fn patch_system_prompt_null_clears_field() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws3");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws3",
+        "bob",
+        json!({ "provider": "claude", "system_prompt": "some prompt" }),
+    );
+    let agent_dir = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws3")
+        .unwrap()
+        .agents
+        .get("bob")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, body) = send(
+        router,
+        "PATCH",
+        "/workspaces/ws3/agents/bob",
+        Some(json!({ "system_prompt": null })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], json!(true));
+    // system_prompt absent from serialized AgentInfo (skip_serializing_if = None)
+    assert!(
+        body["agent"]["system_prompt"].is_null(),
+        "system_prompt should be null/absent in response; got body: {body}"
+    );
+
+    // On-disk: field removed.
+    let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
+    let me: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert!(
+        me.get("system_prompt").is_none(),
+        "system_prompt must be removed from me.json; got: {me}"
+    );
+    // Merge: provider still there.
+    assert_eq!(me["provider"], json!("claude"));
+}
+
+// -- 4. PATCH empty body does not touch system_prompt -------------------------
+
+#[tokio::test]
+async fn patch_missing_field_does_not_touch_it() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws4");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws4",
+        "carol",
+        json!({ "provider": "claude", "system_prompt": "keep me" }),
+    );
+    let agent_dir = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws4")
+        .unwrap()
+        .agents
+        .get("carol")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, body) = send(
+        router,
+        "PATCH",
+        "/workspaces/ws4/agents/carol",
+        Some(json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], json!(true));
+
+    // system_prompt must be unchanged in me.json.
+    let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
+    let me: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert_eq!(
+        me["system_prompt"],
+        json!("keep me"),
+        "system_prompt must be untouched when field is absent from request"
+    );
 }

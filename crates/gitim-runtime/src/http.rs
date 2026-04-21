@@ -1425,14 +1425,35 @@ async fn agents_get(
 
 // -- /agents PATCH --
 
+/// Deserialize a JSON field that has three distinct states:
+///   - absent → `None`           (caller should treat as "no-op")
+///   - `null`  → `Some(None)`    (caller should clear the field)
+///   - `"s"`   → `Some(Some(s))` (caller should set the field to `s`)
+///
+/// Standard serde maps both absent and `null` to `None` for `Option<T>`,
+/// which loses the distinction we need.  This helper uses a raw `Value` round-
+/// trip on the existing serde infrastructure instead of pulling in `serde_with`.
+fn deser_triple_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    match v {
+        serde_json::Value::Null => Ok(Some(None)),
+        serde_json::Value::String(s) => Ok(Some(Some(s))),
+        _ => Err(serde::de::Error::custom("expected string or null")),
+    }
+}
+
 #[derive(Deserialize, Default)]
-#[allow(dead_code)] // fields consumed in Task 2 (agents_patch merge logic)
 struct AgentUpdateRequest {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser_triple_option")]
     system_prompt: Option<Option<String>>,
     #[serde(default)]
+    #[allow(dead_code)] // consumed in Task 3
     env: Option<HashMap<String, String>>,
     #[serde(default)]
+    #[allow(dead_code)] // consumed in Task 3
     dotenv: Option<String>,
 }
 
@@ -1443,14 +1464,103 @@ async fn agents_patch(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    let _ = (state, slug, agent_id, req); // stub — merge logic lands in Task 2
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({
-            "ok": false, "error": "agent not found"
-        })),
-    )
-        .into_response()
+
+    // 1. Look up agent; clone repo_path so we can release the lock before I/O.
+    let repo_root = {
+        let s = state.lock().unwrap();
+        let ctx = match s.workspaces.get(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get(&agent_id) {
+            Some(info) => PathBuf::from(&info.repo_path),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "ok": false, "error": format!("agent not found: {agent_id}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // 2. Read + merge me.json (preserves untouched fields like github_email).
+    let me_path = repo_root.join(".gitim/me.json");
+    let me_content = match std::fs::read_to_string(&me_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false, "error": format!("read me.json failed: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut me: serde_json::Value = match serde_json::from_str(&me_content) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false, "error": format!("parse me.json failed: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Three-state semantics for system_prompt:
+    //   absent (None)       → no-op
+    //   Some(None)          → remove field
+    //   Some(Some(""))      → remove field
+    //   Some(Some(s))       → set to s
+    if let Some(sp_opt) = &req.system_prompt {
+        match sp_opt {
+            Some(s) if !s.is_empty() => {
+                me["system_prompt"] = serde_json::Value::String(s.clone());
+            }
+            _ => {
+                if let Some(obj) = me.as_object_mut() {
+                    obj.remove("system_prompt");
+                }
+            }
+        }
+    }
+
+    if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("write me.json failed: {e}")
+            })),
+        )
+            .into_response();
+    }
+
+    // 3. Update in-memory AgentInfo.
+    {
+        let mut s = state.lock().unwrap();
+        if let Some(ctx) = s.workspaces.get_mut(&slug) {
+            if let Some(info) = ctx.agents.get_mut(&agent_id) {
+                if let Some(sp_opt) = &req.system_prompt {
+                    info.system_prompt = match sp_opt {
+                        Some(s) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+
+    // 4. Return fresh snapshot.
+    let s = state.lock().unwrap();
+    let ctx = s.workspaces.get(&slug).unwrap();
+    let info = ctx.agents.get(&agent_id).unwrap().clone();
+    Json(serde_json::json!({ "ok": true, "agent": info })).into_response()
 }
 
 // -- /agents/remove --
