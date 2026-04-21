@@ -51,6 +51,7 @@ async fn usage_snapshot_surfaces_via_agent_state() {
         input_tokens: Some(5_000),
         output_tokens: Some(200),
         used_percent: None,
+        ..Default::default()
     };
 
     // Real AgentLoop: goes through the `create("mock", ...)` factory,

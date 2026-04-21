@@ -50,12 +50,24 @@ function UsageBadge({ agentId }: { agentId: string }) {
   if (!usage) return null;
 
   const warning = usage.usedPercent >= 80;
-  const colorClass = warning ? "text-warning" : "text-text-faint";
+  const pctColor = warning ? "text-warning" : "text-text-faint";
+  // One decimal so sub-1% sessions don't flatten to "0%" in the UI, but keep
+  // it short enough to fit on its own line. ≥10% displays as integer for
+  // density.
+  const pctText =
+    usage.usedPercent >= 10
+      ? usage.usedPercent.toFixed(0)
+      : usage.usedPercent.toFixed(1);
 
   return (
-    <span className={`text-[10px] font-mono ${colorClass} shrink-0 whitespace-nowrap`}>
-      {usage.usedPercent.toFixed(0)}% · sid:{usage.sessionId}
-    </span>
+    <div className="text-[10px] font-mono flex items-baseline gap-1.5 min-w-0">
+      <span className={`${pctColor} shrink-0`}>{pctText}%</span>
+      {usage.sessionId && (
+        <span className="text-text-faint truncate" title={usage.sessionId}>
+          sid:{usage.sessionId}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -101,8 +113,8 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
 
       {expanded && activities.length > 0 && (
         <div className="absolute left-0 top-full z-50 w-max max-w-[32rem] min-w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-xl p-2 mt-1">
-          <div className="flex items-baseline gap-2 mb-1 whitespace-nowrap">
-            <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider shrink-0">
+          <div className="mb-1.5">
+            <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
               {name} — Recent Activity
             </p>
             <UsageBadge agentId={agentId} />

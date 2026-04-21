@@ -145,7 +145,12 @@ use gitim_runtime::state::UsageSource;
 fn snapshot_from_claude_provider_reported() {
     let snap = compute_snapshot(
         "sess-abc",
-        Some(&ProviderUsage { input_tokens: Some(160_000), output_tokens: Some(500), used_percent: None }),
+        Some(&ProviderUsage {
+            input_tokens: Some(160_000),
+            output_tokens: Some(500),
+            used_percent: None,
+            ..Default::default()
+        }),
         42_000,
         Some(200_000),
         "2026-04-20T10:00:00Z",
@@ -158,10 +163,63 @@ fn snapshot_from_claude_provider_reported() {
 }
 
 #[test]
+fn snapshot_from_claude_aggregates_cache_tokens() {
+    // Turn 2+ of a cached Claude session: input_tokens alone reports 312,
+    // but 159_500 tokens are coming in through cache_read. The percentage
+    // must reflect the aggregate (~80%), not the uncached fraction (~0%).
+    let snap = compute_snapshot(
+        "sess-cached",
+        Some(&ProviderUsage {
+            input_tokens: Some(312),
+            output_tokens: Some(180),
+            used_percent: None,
+            cache_read_tokens: Some(159_500),
+            cache_creation_tokens: Some(220),
+        }),
+        0,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+
+    // 312 + 159_500 + 220 = 160_032  →  160_032 / 200_000 = 80.016%
+    assert!(
+        (snap.used_percent - 80.016).abs() < 0.01,
+        "got {}, want ~80.016",
+        snap.used_percent
+    );
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
+fn snapshot_from_claude_without_cache_still_uses_input_tokens() {
+    // No cache activity — behavior unchanged from the pre-fix path.
+    let snap = compute_snapshot(
+        "sess-nocache",
+        Some(&ProviderUsage {
+            input_tokens: Some(100_000),
+            output_tokens: Some(400),
+            used_percent: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+        }),
+        0,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    ).expect("snapshot");
+
+    assert!((snap.used_percent - 50.0).abs() < 0.01);
+}
+
+#[test]
 fn snapshot_from_codex_used_percent() {
     let snap = compute_snapshot(
         "sess-xyz",
-        Some(&ProviderUsage { input_tokens: None, output_tokens: None, used_percent: Some(47.5) }),
+        Some(&ProviderUsage {
+            input_tokens: None,
+            output_tokens: None,
+            used_percent: Some(47.5),
+            ..Default::default()
+        }),
         0,
         None,
         "2026-04-20T10:00:00Z",
@@ -196,7 +254,12 @@ fn snapshot_returns_none_when_no_data_available() {
 fn snapshot_clamps_above_100_with_warning_signal() {
     let snap = compute_snapshot(
         "sess",
-        Some(&ProviderUsage { input_tokens: None, output_tokens: None, used_percent: Some(115.0) }),
+        Some(&ProviderUsage {
+            input_tokens: None,
+            output_tokens: None,
+            used_percent: Some(115.0),
+            ..Default::default()
+        }),
         0,
         None,
         "2026-04-20T10:00:00Z",
