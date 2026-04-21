@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
@@ -9,20 +10,42 @@ const MAX_EVENTS_PER_AGENT = 20;
 interface AgentActivityState {
   /** Per-agent activity buffer, newest first. */
   activities: Record<string, AgentActivityEvent[]>;
+  /** Slug the persisted activities belong to; used to invalidate on switch. */
+  lastSlug: string | null;
   push: (event: AgentActivityEvent) => void;
+  /** If slug differs from lastSlug, wipe activities; always records lastSlug. */
+  ensureSlug: (slug: string) => void;
   clear: () => void;
 }
 
-export const useAgentActivityStore = create<AgentActivityState>((set) => ({
-  activities: {},
-  push: (event) =>
-    set((state) => {
-      const prev = state.activities[event.agent_id] ?? [];
-      const next = [event, ...prev].slice(0, MAX_EVENTS_PER_AGENT);
-      return { activities: { ...state.activities, [event.agent_id]: next } };
+export const useAgentActivityStore = create<AgentActivityState>()(
+  persist(
+    (set) => ({
+      activities: {},
+      lastSlug: null,
+      push: (event) =>
+        set((state) => {
+          const prev = state.activities[event.agent_id] ?? [];
+          const next = [event, ...prev].slice(0, MAX_EVENTS_PER_AGENT);
+          return { activities: { ...state.activities, [event.agent_id]: next } };
+        }),
+      ensureSlug: (slug) =>
+        set((state) =>
+          state.lastSlug === slug
+            ? { lastSlug: slug }
+            : { activities: {}, lastSlug: slug },
+        ),
+      clear: () => set({ activities: {}, lastSlug: null }),
     }),
-  clear: () => set({ activities: {} }),
-}));
+    {
+      name: "gitim/agent-activity",
+      partialize: (state) => ({
+        activities: state.activities,
+        lastSlug: state.lastSlug,
+      }),
+    },
+  ),
+);
 
 /**
  * Connects to the SSE endpoint for agent activity events for the given
@@ -32,14 +55,15 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
 export function useAgentActivitySSE(slug: string | null) {
   const port = useConnectionStore((s) => s.port);
   const push = useAgentActivityStore((s) => s.push);
-  const clear = useAgentActivityStore((s) => s.clear);
+  const ensureSlug = useAgentActivityStore((s) => s.ensureSlug);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     if (!port || !slug) return;
 
-    // Drop activities from the previous workspace on switch.
-    clear();
+    // Keep persisted activities if we're reloading into the same workspace;
+    // wipe only on a real workspace switch.
+    ensureSlug(slug);
 
     const url = `http://127.0.0.1:${port}/workspaces/${encodeURIComponent(slug)}/agents/events`;
     const es = new EventSource(url);
@@ -81,5 +105,5 @@ export function useAgentActivitySSE(slug: string | null) {
       es.close();
       esRef.current = null;
     };
-  }, [port, slug, push, clear]);
+  }, [port, slug, push, ensureSlug]);
 }
