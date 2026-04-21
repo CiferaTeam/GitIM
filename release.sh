@@ -104,16 +104,26 @@ build_target() {
   echo ""
   echo "==> [$slug] building (tool=$tool, rust_target=$rust_target)"
 
+  # Force stable toolchain for all release builds. The maintainer may use nightly
+  # for daily dev, but release must be reproducible: nightly versions drift, and
+  # cross (running Linux containers) cannot install matching nightly toolchains
+  # across host archs — e.g. a nightly-aarch64-apple-darwin host cannot provision
+  # nightly-x86_64-unknown-linux-gnu inside the cross container.
   case "$tool" in
     cargo)
-      # Ensure rustup target installed for macOS cross (x86_64 from arm64 host)
-      rustup target add "$rust_target" >/dev/null 2>&1 || true
-      cargo build --release --target "$rust_target" \
+      # Idempotent target install under stable (let rustup errors surface — the
+      # old `|| true` silently swallowed add failures that cascaded into
+      # "can't find crate for core").
+      if ! rustup +stable target list --installed 2>/dev/null | grep -qx "$rust_target"; then
+        echo "==> [$slug] installing rustup target $rust_target for stable toolchain..."
+        rustup +stable target add "$rust_target"
+      fi
+      cargo +stable build --release --target "$rust_target" \
         -p gitim-cli -p gitim-daemon -p gitim-runtime
       ;;
     cross)
-      # Requires Docker running + `cargo install cross`
-      cross build --release --target "$rust_target" \
+      # Requires Docker running + `cargo install cross`.
+      cross +stable build --release --target "$rust_target" \
         -p gitim-cli -p gitim-daemon -p gitim-runtime
       ;;
     *) echo "Error: unknown build tool '$tool'"; exit 1 ;;
