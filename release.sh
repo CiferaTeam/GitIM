@@ -85,6 +85,25 @@ else
   echo "==> Full matrix: 4 targets"
 fi
 
+# ---------- Pre-flight: cross needs Linux-host toolchains pre-installed ----------
+#
+# cross 0.2.5 invokes `rustup toolchain add stable-<linux-host>` inside its
+# container, but rustup 1.28+ refuses to install non-host toolchains unless
+# `--force-non-host` is passed — cross doesn't pass it, so the whole matrix
+# fails on the first linux target. Pre-install with --force-non-host here;
+# cross sees them already present and skips its own add.
+#
+# Idempotent. First-run cost: ~1 GB disk total for the two toolchains.
+# Skip when only building macOS targets (no cross involved).
+if [ -z "$ONLY_TARGET" ] || [[ "$ONLY_TARGET" == linux-* ]]; then
+  for cross_toolchain in stable-x86_64-unknown-linux-gnu stable-aarch64-unknown-linux-gnu; do
+    if ! rustup toolchain list 2>/dev/null | grep -q "^$cross_toolchain"; then
+      echo "==> Installing cross-container toolchain $cross_toolchain (first-time, ~500MB)..."
+      rustup toolchain install "$cross_toolchain" --force-non-host --profile minimal
+    fi
+  done
+fi
+
 # ---------- Prepare staging ----------
 STAGING="$ROOT/target/release-dist"
 rm -rf "$STAGING"
