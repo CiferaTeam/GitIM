@@ -2,6 +2,8 @@ use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{Handler, ThreadEntry};
 
+use crate::handlers::serde::entry_to_json;
+
 /// 向 thread 文件追加一条消息，返回 (行号, 新内容)
 pub fn append_message_to_thread(
     thread_path: &std::path::Path,
@@ -52,58 +54,4 @@ pub fn read_thread_entries(
     }
 
     Ok(entries.iter().map(|entry| entry_to_json(entry)).collect())
-}
-
-fn entry_to_json(entry: &ThreadEntry) -> serde_json::Value {
-    match entry {
-        ThreadEntry::Message(m) => {
-            use gitim_core::link::extract_links;
-            use gitim_core::types::LinkKind;
-            let links: Vec<serde_json::Value> = extract_links(&m.body)
-                .iter()
-                .map(|link| match &link.kind {
-                    LinkKind::Channel { name } => serde_json::json!({
-                        "kind": "channel", "name": name, "raw": link.raw,
-                    }),
-                    LinkKind::Message {
-                        channel,
-                        line_number,
-                    } => serde_json::json!({
-                        "kind": "message", "channel": channel,
-                        "line_number": line_number, "raw": link.raw,
-                    }),
-                    LinkKind::UserProfile { handler } => serde_json::json!({
-                        "kind": "user_profile", "handler": handler.as_str(), "raw": link.raw,
-                    }),
-                    LinkKind::Softlink { url, title } => {
-                        let mut v = serde_json::json!({
-                            "kind": "softlink", "url": url, "raw": link.raw,
-                        });
-                        if let Some(t) = title {
-                            v["title"] = serde_json::json!(t);
-                        }
-                        v
-                    }
-                })
-                .collect();
-            serde_json::json!({
-                "type": "message",
-                "line_number": m.line_number,
-                "point_to": m.point_to,
-                "author": m.author.as_str(),
-                "timestamp": m.timestamp,
-                "body": m.body,
-                "mentions": m.mentions.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
-                "links": links,
-            })
-        }
-        ThreadEntry::Event(ev) => serde_json::json!({
-            "type": "event",
-            "event_type": ev.event_type,
-            "line_number": ev.line_number,
-            "author": ev.author.as_str(),
-            "timestamp": ev.timestamp,
-            "meta": ev.meta,
-        }),
-    }
 }
