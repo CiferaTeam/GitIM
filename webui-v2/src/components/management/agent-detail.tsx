@@ -59,6 +59,11 @@ export function AgentDetail() {
   const [draftDotenv, setDraftDotenv] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
 
+  const activities = useAgentActivityStore((s) => s.activities);
+
+  const agent: Agent | undefined = agents.find((a) => a.id === agentId);
+  const agentEvents = agent ? (activities[agent.id] ?? []) : [];
+
   function enterEditMode() {
     if (!agent) return;
     setDraftPrompt(agent.systemPrompt ?? "");
@@ -167,11 +172,6 @@ export function AgentDetail() {
       setMode("edit");
     }
   }
-
-  const activities = useAgentActivityStore((s) => s.activities);
-
-  const agent: Agent | undefined = agents.find((a) => a.id === agentId);
-  const agentEvents = agent ? (activities[agent.id] ?? []) : [];
 
   if (!agent) {
     return (
