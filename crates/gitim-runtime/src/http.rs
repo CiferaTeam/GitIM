@@ -1465,6 +1465,18 @@ async fn agents_patch(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    // Match the validation convention for multi-path-param handlers
+    // (`im_card_archive`, `im_channel_archive`, `agents_get`): combining the
+    // `WorkspaceSlug` extractor with a `Path<(String, String)>` tuple fails
+    // in axum because both consume from the same cached url-params extension.
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
+
     // 1. Look up agent; clone repo_path so we can release the lock before I/O.
     let repo_root = {
         let s = state.lock().unwrap();
@@ -1541,8 +1553,13 @@ async fn agents_patch(
             .into_response();
     }
 
-    // 3. Update in-memory AgentInfo.
-    {
+    // 3+4. Update in-memory AgentInfo + take fresh snapshot under one lock.
+    // Folding these into one acquisition prevents a TOCTOU panic when
+    // `agents_remove` lands between the update and the snapshot.  If the agent
+    // (or workspace) disappeared mid-flight, caller gets 404 — the on-disk
+    // me.json write is harmless residual since the agent dir gets cleaned up
+    // on remove anyway.
+    let response = {
         let mut s = state.lock().unwrap();
         if let Some(ctx) = s.workspaces.get_mut(&slug) {
             if let Some(info) = ctx.agents.get_mut(&agent_id) {
@@ -1552,15 +1569,25 @@ async fn agents_patch(
                         _ => None,
                     };
                 }
+                Some(info.clone())
+            } else {
+                None
             }
+        } else {
+            None
         }
-    }
+    };
 
-    // 4. Return fresh snapshot.
-    let s = state.lock().unwrap();
-    let ctx = s.workspaces.get(&slug).unwrap();
-    let info = ctx.agents.get(&agent_id).unwrap().clone();
-    Json(serde_json::json!({ "ok": true, "agent": info })).into_response()
+    match response {
+        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("agent not found: {agent_id}")
+            })),
+        )
+            .into_response(),
+    }
 }
 
 // -- /agents/remove --
