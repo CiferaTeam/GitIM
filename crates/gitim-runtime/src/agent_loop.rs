@@ -403,7 +403,7 @@ impl AgentLoop {
                                     const TAIL_MAX: usize = 128;
                                     if text_tail.len() > TAIL_MAX {
                                         let cut = text_tail.len() - TAIL_MAX;
-                                        let safe = text_tail.floor_char_boundary(cut);
+                                        let safe = floor_char_boundary(&text_tail, cut);
                                         text_tail.drain(..safe);
                                     }
                                 }
@@ -597,8 +597,20 @@ fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
     if raw.len() <= MAX {
         raw
     } else {
-        format!("{}…", &raw[..raw.floor_char_boundary(MAX)])
+        format!("{}…", &raw[..floor_char_boundary(&raw, MAX)])
     }
+}
+
+/// Stable replacement for `str::floor_char_boundary` (nightly-only under
+/// feature `round_char_boundary`, tracking issue #93743). Returns the largest
+/// `j <= i` such that `s.is_char_boundary(j)` — i.e. a safe slice endpoint
+/// that won't split a UTF-8 character. Bounded to `s.len()`.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut j = i.min(s.len());
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
 }
 
 /// Format channel changes into a prompt, filtering out self-authored messages.
