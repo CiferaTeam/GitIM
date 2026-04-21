@@ -1452,7 +1452,7 @@ struct AgentUpdateRequest {
     #[serde(default)]
     env: Option<HashMap<String, String>>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed in Task 3
+    #[allow(dead_code)] // consumed in Task 4
     dotenv: Option<String>,
 }
 
