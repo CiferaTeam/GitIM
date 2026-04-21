@@ -17,6 +17,7 @@ async fn test_state_save_and_load() {
         handler: "state-agent".into(),
         display_name: "State Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
 
@@ -29,6 +30,7 @@ async fn test_state_save_and_load() {
     let state = AgentState {
         cursor: Some(cursor.clone()),
         session_token: Some("test-session-123".into()),
+        ..Default::default()
     };
     state.save(&handle.repo_root).unwrap();
 
@@ -52,6 +54,7 @@ async fn test_cursor_restore_skips_old_messages() {
         handler: "restore-agent".into(),
         display_name: "Restore Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);
@@ -74,6 +77,7 @@ async fn test_cursor_restore_skips_old_messages() {
     let state = AgentState {
         cursor: Some(saved_cursor.clone()),
         session_token: None,
+        ..Default::default()
     };
     state.save(&handle.repo_root).unwrap();
 

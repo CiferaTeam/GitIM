@@ -9,7 +9,6 @@ import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
-import { useVersionCheck } from "./hooks/use-version-check";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
@@ -110,7 +109,6 @@ export default function App() {
   const channelsRef = useRef<Channel[]>([]);
   const activeSlugRef = useRef<string | null>(null);
 
-  useVersionCheck();
   // Agent activity SSE is scoped to the active workspace
   useAgentActivitySSE(activeSlug);
 

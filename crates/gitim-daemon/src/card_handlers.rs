@@ -222,10 +222,12 @@ pub async fn handle_create_card(
         "card: create {} in {} by @{}",
         card_id, channel, author
     );
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&meta_rel, &thread_rel], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_rel, &thread_rel],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         return Response::error(format!("create_card commit failed: {}", e));
     }
 
@@ -315,10 +317,12 @@ pub async fn handle_archive_card(
     let meta_to = format!("{}/card.meta.yaml", to_rel);
     let thread_to = format!("{}/discussion.thread", to_rel);
     let commit_msg = format!("card: archive {} in {} by @{}", card_id, channel, author);
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_to, &thread_to],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         // Rollback the git mv to leave the working tree clean.
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("archive_card: rollback mv also failed: {}", rb_err);
@@ -424,10 +428,12 @@ pub async fn handle_unarchive_card(
     let meta_to = format!("{}/card.meta.yaml", to_rel);
     let thread_to = format!("{}/discussion.thread", to_rel);
     let commit_msg = format!("card: unarchive {} in {} by @{}", card_id, channel, author);
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&meta_to, &thread_to], &commit_msg, Some(&author))
-    {
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_to, &thread_to],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
         // Rollback the git mv to leave the working tree clean.
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("unarchive_card: rollback mv also failed: {}", rb_err);
@@ -748,9 +754,12 @@ pub async fn handle_send_card_message(
         "card-msg: @{} -> {}/{} L{:06}",
         author, ch_name, card_id, next_line
     );
-    let commit_status = match state
-        .git_storage
-        .add_and_commit_as(&[&thread_rel], &commit_msg, Some(&author))
+    let (author_name, author_email) = state.author_for(&author);
+    let commit_status = match state.git_storage.add_and_commit_as(
+        &[&thread_rel],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    )
     {
         Ok(()) => "committed",
         Err(e) => {
@@ -922,9 +931,12 @@ pub async fn handle_update_card(
         "card: update {} in {} by @{}",
         card_id, channel, author
     );
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit_as(&[&meta_rel], &commit_msg, Some(&author))
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_rel],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    )
     {
         return Response::error(format!("update_card commit failed: {}", e));
     }

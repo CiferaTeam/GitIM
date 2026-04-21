@@ -47,11 +47,14 @@ impl GitStorage {
         self.add_and_commit_as(paths, message, None)
     }
 
+    /// `author` is `Option<(name, email)>`. `None` → git picks author from
+    /// local git config (committer == author); `Some` → `name <email>`
+    /// becomes the `author` line, committer still comes from git config.
     pub fn add_and_commit_as(
         &self,
         paths: &[&str],
         message: &str,
-        author: Option<&str>,
+        author: Option<(&str, &str)>,
     ) -> Result<(), GitError> {
         let mut args = vec!["add"];
         args.extend(paths);
@@ -67,8 +70,8 @@ impl GitStorage {
 
         let mut commit_args = vec!["commit", "-m", message];
         let author_str;
-        if let Some(handler) = author {
-            author_str = format!("{} <{}@gitim>", handler, handler);
+        if let Some((name, email)) = author {
+            author_str = format!("{} <{}>", name, email);
             commit_args.push("--author");
             commit_args.push(&author_str);
         }

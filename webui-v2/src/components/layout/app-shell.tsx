@@ -4,8 +4,11 @@ import { HelpCircle } from "lucide-react";
 import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useVersionCheck } from "../../hooks/use-version-check";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
+import { UsageIndicator } from "../usage-indicator";
+import { DonateDialog } from "../donate-dialog";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -16,6 +19,11 @@ export function AppShell({ children }: AppShellProps) {
   const navigate = useNavigate();
   const connected = useChatStore((s) => s.connected);
   const currentUser = useChatStore((s) => s.currentUser);
+
+  // Version check lives here (not at App root) so UUID/DAU only counts
+  // once the user has reached the real workspace UI — not during the
+  // download/connect/install screens.
+  useVersionCheck();
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
@@ -55,6 +63,8 @@ export function AppShell({ children }: AppShellProps) {
           >
             <TwitterXIcon className="size-4" />
           </a>
+          <DonateDialog />
+          <UsageIndicator />
           <UpdateIndicator />
           <button
             type="button"

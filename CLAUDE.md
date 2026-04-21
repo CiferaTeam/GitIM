@@ -105,15 +105,19 @@ WebUI 走 Runtime 的 `/git/init` HTTP 端点。两种 provider：
   "git": {
     "provider": "local" | "github",
     "remote_url": "https://github.com/org/repo" | null,
-    "token": "ghp_..." | null
+    "token": "ghp_..." | null,
+    "github_email": "owner@example.com" | null
   }
 }
 ```
 
 **Token source of truth = 这份文件**。各 clone 的 `.git/config` URL 里嵌的 token 是派生值。
 
+**`github_email` source of truth** 也是这份文件(github 模式下 `/git/init` 时从 GitHub `/user` 自动拉取,best-effort)。`provision_agent` 读它,注入新 agent onboard 的 `git` 变体 auth payload (`github_email` 字段),走 daemon `InferredIdentity.email` → `write_me_json` → agent `.gitim/me.json` → `AppState.github_email` → commit author。所有 daemon commit 因此 author email 归 workspace owner,计入 contribution graph。
+
 - Runtime 启动（recover workspace 后）+ `add_agent` 成功后 → 调 `token_propagation::propagate_token` 扫所有 clone 并覆盖 `remote.origin.url`
 - 未来 "Update token" UI（v2）→ 改 config.json → propagate → 所有 clone 同步
+- Daemon `write_me_json` 采用 **merge 语义**:re-onboard 不传 `github_email` 时保留旧值,防抹掉已配置的字段
 
 ### Handler 冲突防护（github 模式）
 
@@ -135,7 +139,7 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - **换 remote URL**：需 rm -rf 重建
 - **Token rotate UI**：v1 无，手工改 config.json + 重启 runtime
 - **Windows 支持**：`chmod 0600` + xattr + `dirs::home_dir` 的 OneDrive 检测不适配
-- **Agent 独立 GitHub 身份**：共用 workspace PAT。commit author = agent handler；GitHub committer = PAT owner（audit 归因见 `author` 字段）
+- **Agent 独立 GitHub 身份**：共用 workspace PAT 和 workspace owner email。commit author name = agent handler；author email = `WorkspaceConfig.git.github_email`(github mode /git/init 时从 `/user` API 自动拉取),fallback `<handler>@gitim`。GitHub committer = PAT owner。审计归因通过 author **name** 字段(handler),email 统一到 workspace owner 后所有 daemon commit 都能算进该账户的 contribution graph。sync_loop 的 rebase-resolution commit 也 stamp daemon owner(而非本地 git config fallback),维持每个 clone 的"一人一 commit"归属
 - **OAuth Device Flow**：不做。PAT 手动粘贴
 
 ## 约定
@@ -146,12 +150,24 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 ## 测试
 
 ```bash
-cargo test                                    # 全量（~270 tests）
+cargo test                                    # 全量（700+ tests，数分钟级别，贵）
 cargo test -p gitim-core                      # 核心类型/解析
 cargo test -p gitim-daemon                    # daemon handler 集成测试
 cargo test -p gitim-sync                      # git 同步逻辑
 cargo test -p gitim-runtime --test poller     # poller 集成测试（需编译 daemon）
 ```
+
+### 跑测试的节奏（重要）
+
+**全量 `cargo test` 是一个昂贵操作**（700+ 测试、含启动真实 daemon 的集成测试，耗时以分钟计）。在多 agent / subagent / 长任务流程里频繁触发会把总时长拖得非常夸张，不要无脑跑。
+
+节奏约定：
+- **任务开头**：跑一次全量，建立 baseline（确认当前 main 是绿的，排除祖传红测试干扰判断）
+- **任务末尾 / 交付前**：跑一次全量，确认没有 regression
+- **开发中间**：**只跑相关 crate / 相关 `--test` 目标 / 相关 `#[test]` 过滤**（`cargo test -p <crate>`、`cargo test <name_substring>`、`cargo test --test <file>`），不要每改一次就全量
+- Subagent / 并行任务里：同样原则，subagent 自己干活时只跑相关测试，汇总到主线再考虑全量
+
+如果某次改动跨 crate、涉及共享类型 / 协议、或改了 workspace 级依赖，才需要中途加跑一次全量。否则相信 scoped 测试。
 
 注意事项：
 - `gitim-runtime` 的 poller 测试启动真实 daemon 进程，用 `serial_test` 串行执行
@@ -165,7 +181,7 @@ Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
 ## Current Orientation
-**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。
-**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制
-**Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。
-**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk
+**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。**Agent 配置可编辑**已落地：detail 页 Edit 模式可改 `system_prompt` / `env` / `.env` 文件（via `PATCH /workspaces/{slug}/agents/{id}`）；`.env` 文件落 `<agent-clone>/.env`（chmod 0600、64KB 上限），workspace `/git/init` 自动把 `.env` 加到仓库 `.gitignore`（幂等，用 `system@gitim` 作者 commit）；provider/model 仍 immutable。
+**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制、provider/model 修改（需 session 迁移方案）
+**Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。Serde 的 `Option<Option<T>>` + `#[serde(default)]` 不能天然区分"字段缺省"和"字段 = null"—— 两者都解析成 `None`，三态语义需要自定义 deserializer 用 `Value` 中转（见 http.rs `deser_triple_option`）。
+**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk；PATCH agent 的 me.json 写 + `.env` 写是**顺序而非事务**（无 WAL），`.env` 写失败时 me.json 已更新，客户端收到 500，靠幂等重试恢复。

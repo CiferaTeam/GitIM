@@ -2,15 +2,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gitim_agent_provider::{ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, create};
+use gitim_agent_provider::{
+    ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage, create,
+};
 use gitim_client::GitimClient;
 use tokio::sync::broadcast;
 use tracing::info;
 
+use crate::context_window::WARN_AT_PERCENT;
 use crate::error::RuntimeError;
-use crate::http::AgentActivityEvent;
+use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
-use crate::state::AgentState;
+use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
 
 
 #[derive(Debug, Clone, Default)]
@@ -28,11 +31,18 @@ pub struct AgentLoop {
     session_token: Option<String>,
     pub poll_interval: Duration,
     repo_root: PathBuf,
+    provider_type: String,
     model: Option<String>,
     custom_system_prompt: Option<String>,
     handler: String,
     activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
     workspace_id: String,
+    /// Optional reference to the runtime's shared state, used by
+    /// `update_session_usage` to patch `AgentInfo.session_usage` in place after
+    /// every turn — so `GET /agents/:id` returns fresh data without
+    /// re-reading `.gitim/agent-state.json` on each request. None in tests
+    /// and standalone CLI use where no HTTP state exists.
+    runtime_state: Option<SharedRuntimeState>,
 }
 
 impl AgentLoop {
@@ -73,11 +83,13 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
+            provider_type: provider_type.to_string(),
             model: None,
             custom_system_prompt: None,
             handler: handler.to_string(),
             activity_tx: None,
             workspace_id: String::new(),
+            runtime_state: None,
         })
     }
 
@@ -113,12 +125,22 @@ impl AgentLoop {
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
+            provider_type: config.provider_type.clone(),
             model: config.model.clone(),
             custom_system_prompt: config.system_prompt.clone(),
             handler: config.handler.clone(),
             activity_tx: None,
             workspace_id: String::new(),
+            runtime_state: None,
         })
+    }
+
+    /// Attach a reference to the runtime's shared state so per-turn usage
+    /// snapshots can be patched into `AgentInfo.session_usage` in place.
+    /// Must be called after construction and before the loop spawns; tests
+    /// that don't drive HTTP handlers can skip this entirely.
+    pub fn set_runtime_state(&mut self, state: SharedRuntimeState) {
+        self.runtime_state = Some(state);
     }
 
     /// Attach a broadcast sender and tag emitted events with a workspace slug.
@@ -144,10 +166,9 @@ impl AgentLoop {
     }
 
     fn save_state(&self) -> Result<(), RuntimeError> {
-        let state = AgentState {
-            cursor: self.poller.cursor().map(|s| s.to_string()),
-            session_token: self.session_token.clone(),
-        };
+        let mut state = AgentState::load(&self.repo_root)?;
+        state.cursor = self.poller.cursor().map(|s| s.to_string());
+        state.session_token = self.session_token.clone();
         state.save(&self.repo_root)
     }
 
@@ -177,6 +198,99 @@ impl AgentLoop {
             resume_token: self.session_token.clone(),
             ..Default::default()
         }
+    }
+
+    /// After `provider.execute()` returns, update state.session_usage based on
+    /// whatever the provider reported plus the current estimator. Persists state.
+    ///
+    /// Public to allow E2E integration tests (`tests/session_usage_e2e.rs`,
+    /// `tests/threshold_injection_e2e.rs`) to drive the computation + persist
+    /// path directly without wiring up a real provider + daemon. Production
+    /// callers should continue to go through `run_once`.
+    pub fn update_session_usage(
+        &self,
+        state: &mut AgentState,
+        provider_reported: Option<&ProviderUsage>,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let model = self.model.as_deref().unwrap_or("");
+        let max = crate::context_window::default_max_tokens(&self.provider_type, model);
+        let now = chrono::Utc::now().to_rfc3339();
+        let new_snapshot = compute_snapshot(
+            session_id,
+            provider_reported,
+            state.estimated_tokens,
+            max,
+            &now,
+        );
+
+        let prev_pct = state.session_usage.as_ref().map(|s| s.used_percent);
+        if let Some(snap) = &new_snapshot {
+            if just_crossed_threshold(prev_pct, snap.used_percent) {
+                state.usage_notice_pending = true;
+                let est_pct = max
+                    .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
+                    .unwrap_or(0.0);
+                tracing::info!(
+                    session_id = %session_id,
+                    provider_input_tokens = ?provider_reported.and_then(|p| p.input_tokens),
+                    provider_used_pct = snap.used_percent,
+                    estimated_tokens = state.estimated_tokens,
+                    estimated_used_pct = est_pct,
+                    delta_pp = snap.used_percent - est_pct,
+                    max_tokens = ?max,
+                    provider = %self.provider_type,
+                    model = %model,
+                    "threshold_crossed_80pct"
+                );
+            }
+            if snap.used_percent > 110.0 {
+                tracing::warn!(
+                    session_id = %session_id,
+                    used_percent = snap.used_percent,
+                    "provider reported >110% — protocol drift signal"
+                );
+            }
+        }
+
+        if let Some(snap) = &new_snapshot {
+            let est_pct = max
+                .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
+                .unwrap_or(0.0);
+            tracing::debug!(
+                session_id = %session_id,
+                provider_pct = snap.used_percent,
+                estimated_pct = est_pct,
+                delta_pp = snap.used_percent - est_pct,
+                source = ?snap.source,
+                "turn_usage"
+            );
+        }
+
+        state.session_usage = new_snapshot.clone();
+        state.save(&self.repo_root)?;
+
+        // Patch the in-memory AgentInfo so polling clients (GET /agents/:id)
+        // see fresh data without re-reading disk on every request, and
+        // broadcast the snapshot as a "usage" SSE event on the existing
+        // activity channel so reactive clients (/agents/events subscribers)
+        // can patch their local store. A missing runtime_state or
+        // activity_tx is fine — standalone CLI / tests skip silently.
+        if let Some(snap) = &new_snapshot {
+            if let Some(rs) = &self.runtime_state {
+                if let Ok(mut s) = rs.lock() {
+                    if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
+                        if let Some(info) = ctx.agents.get_mut(&self.handler) {
+                            info.session_usage = Some(snap.clone());
+                        }
+                    }
+                }
+            }
+            let detail = serde_json::to_string(snap).unwrap_or_default();
+            self.emit_activity("usage", &detail);
+        }
+
+        Ok(())
     }
 
     /// Initialize the poller cursor if not already set.
@@ -213,6 +327,39 @@ impl AgentLoop {
         self.emit_activity("thinking", "processing...");
 
         let opts = self.build_exec_options();
+
+        // Consume usage_notice_pending (Task 14) and accumulate tiktoken estimate
+        // (Task 12) in a single load/save cycle. If the notice flag was set by
+        // a previous turn's threshold crossing, prepend the system preamble here
+        // and clear the flag before execute — this way a mid-turn crash won't
+        // cause the notice to re-fire.
+        let mut state = AgentState::load(&self.repo_root)?;
+        let prompt = if state.usage_notice_pending {
+            let pct = state.session_usage.as_ref().map(|s| s.used_percent).unwrap_or(80.0);
+            let preamble = build_usage_notice_preamble(pct);
+            state.usage_notice_pending = false;
+            format!("{preamble}\n\n---\n\n{prompt}")
+        } else {
+            prompt
+        };
+
+        // Pre-execute tiktoken accumulation (Task 12).
+        // Cold start (no resume token) → reset estimator and seed with the system prompt.
+        // Every turn adds the user prompt before execute; assistant text is added after.
+        let cold_start = self.session_token.is_none();
+        if cold_start {
+            state.estimated_tokens = 0;
+        }
+        state.estimated_tokens +=
+            crate::context_window::tokenize_for_provider(&self.provider_type, &prompt);
+        if cold_start {
+            if let Some(sp) = opts.system_prompt.as_deref() {
+                state.estimated_tokens +=
+                    crate::context_window::tokenize_for_provider(&self.provider_type, sp);
+            }
+        }
+        state.save(&self.repo_root)?;
+
         let mut session = self
             .provider
             .execute(&prompt, opts)
@@ -227,6 +374,9 @@ impl AgentLoop {
         // The agent signals an intentional context reset by emitting "[[RESET]]" in its output.
         // This is a private runtime protocol — silent, not surfaced to IM or the WebUI.
         let mut text_tail = String::new();
+        // Task 12: accumulate full assistant text across the turn for tiktoken estimate.
+        // Intentionally uncapped (unlike text_tail) — we want total token count.
+        let mut assistant_text_buf = String::new();
         let mut reset_requested = false;
 
         loop {
@@ -238,6 +388,7 @@ impl AgentLoop {
                                 gitim_agent_provider::Event::Text { content } => {
                                     tracing::debug!(text_len = content.len(), "agent text");
                                     text_tail.push_str(content);
+                                    assistant_text_buf.push_str(content);
                                     if text_tail.contains("[[RESET]]") {
                                         info!(
                                             handler = %self.handler,
@@ -310,6 +461,11 @@ impl AgentLoop {
                 "context reset complete, clearing session_token"
             );
             self.session_token = None;
+            let mut state = AgentState::load(&self.repo_root)?;
+            let sid_for_log = state.session_usage.as_ref().map(|s| s.session_id.clone());
+            state.clear_session();
+            state.save(&self.repo_root)?;
+            tracing::info!(session_id = ?sid_for_log, reason = "agent_emitted_reset", "session_reset");
             self.save_state()?;
             return Ok(true);
         }
@@ -326,6 +482,9 @@ impl AgentLoop {
                 self.emit_activity("error", "execution failed");
                 // Clear session_token to avoid resuming a broken session
                 self.session_token = None;
+                let mut state = AgentState::load(&self.repo_root)?;
+                state.clear_session();
+                state.save(&self.repo_root)?;
             }
             ExecStatus::Aborted => {
                 info!(
@@ -333,6 +492,17 @@ impl AgentLoop {
                     "provider aborted by steering"
                 );
                 self.emit_activity("steered", &format!("interrupted ({duration_s:.1}s)"));
+                // Extract session_id from the just-completed turn. For Claude the
+                // session_token and session_id are the same opaque string; for Codex
+                // it's the thread_id. In either case it's exec_result.session_token.
+                if let Some(sid) = exec_result.session_token.as_deref() {
+                    let mut state = AgentState::load(&self.repo_root)?;
+                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                        &self.provider_type,
+                        &assistant_text_buf,
+                    );
+                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                }
                 // Keep session_token for resume in next cycle
                 if let Some(token) = exec_result.session_token {
                     self.session_token = Some(token);
@@ -345,6 +515,17 @@ impl AgentLoop {
                     "provider ok"
                 );
                 self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
+                // Extract session_id from the just-completed turn. For Claude the
+                // session_token and session_id are the same opaque string; for Codex
+                // it's the thread_id. In either case it's exec_result.session_token.
+                if let Some(sid) = exec_result.session_token.as_deref() {
+                    let mut state = AgentState::load(&self.repo_root)?;
+                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                        &self.provider_type,
+                        &assistant_text_buf,
+                    );
+                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                }
                 if let Some(token) = exec_result.session_token {
                     self.session_token = Some(token);
                 }
@@ -520,6 +701,135 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
                 "missing handler field in .gitim/me.json",
             ))
         })
+}
+
+/// Compute a `SessionUsageSnapshot` from available usage signals.
+///
+/// Authoritative-value policy (matches 01-design.md §4.5):
+/// 1. provider_reported.used_percent (Codex)
+/// 2. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude)
+/// 3. estimated_tokens / max_tokens (fallback)
+/// 4. None (no data available)
+///
+/// For Claude, Anthropic's `input_tokens` excludes tokens served from the
+/// prompt cache. With caching active, `input_tokens` drops to a few hundred
+/// per turn while `cache_read_input_tokens` carries 100k+ of context. The
+/// true occupancy is the sum — using `input_tokens` alone collapses the
+/// percentage to ~0% (see `parse_result_with_cache_only_has_tiny_input`).
+///
+/// `used_percent` is clamped to `[0, 100]`. Callers are responsible for
+/// logging unusual values (e.g. >110 as a protocol-drift signal).
+pub fn compute_snapshot(
+    session_id: &str,
+    provider_reported: Option<&ProviderUsage>,
+    estimated_tokens: u64,
+    max_tokens: Option<u64>,
+    updated_at: &str,
+) -> Option<SessionUsageSnapshot> {
+    let (used_percent, source, input_tokens, output_tokens) =
+        if let Some(pu) = provider_reported {
+            if let Some(pct) = pu.used_percent {
+                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
+            } else if let Some(max) = max_tokens {
+                let effective = effective_input_tokens(pu);
+                if effective == 0 {
+                    return compute_from_estimate(
+                        session_id,
+                        estimated_tokens,
+                        max_tokens,
+                        updated_at,
+                    );
+                }
+                let pct = (effective as f64) / (max as f64) * 100.0;
+                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
+            } else {
+                return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+            }
+        } else {
+            return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+        };
+
+    let used_percent = used_percent.clamp(0.0, 100.0);
+    Some(SessionUsageSnapshot {
+        session_id: session_id.to_string(),
+        input_tokens,
+        output_tokens,
+        max_tokens,
+        used_percent,
+        source,
+        updated_at: updated_at.to_string(),
+    })
+}
+
+/// Sum of `input_tokens + cache_read_tokens + cache_creation_tokens` — the
+/// real context-window occupancy for Claude turns. Missing fields count as 0.
+fn effective_input_tokens(pu: &ProviderUsage) -> u64 {
+    pu.input_tokens
+        .unwrap_or(0)
+        .saturating_add(pu.cache_read_tokens.unwrap_or(0))
+        .saturating_add(pu.cache_creation_tokens.unwrap_or(0))
+}
+
+fn compute_from_estimate(
+    session_id: &str,
+    estimated_tokens: u64,
+    max_tokens: Option<u64>,
+    updated_at: &str,
+) -> Option<SessionUsageSnapshot> {
+    let max = max_tokens?;
+    if estimated_tokens == 0 {
+        return None;
+    }
+    let pct = ((estimated_tokens as f64) / (max as f64) * 100.0).clamp(0.0, 100.0);
+    Some(SessionUsageSnapshot {
+        session_id: session_id.to_string(),
+        input_tokens: None,
+        output_tokens: None,
+        max_tokens: Some(max),
+        used_percent: pct,
+        source: UsageSource::RuntimeEstimated,
+        updated_at: updated_at.to_string(),
+    })
+}
+
+/// `true` iff this turn is the first to observe `new_pct >= WARN_AT_PERCENT`
+/// in the current session. Never returns `true` twice for the same session
+/// (subsequent turns see `prev_pct >= WARN_AT_PERCENT`).
+pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
+    if new_pct < WARN_AT_PERCENT {
+        return false;
+    }
+    match prev_pct {
+        None => true,
+        Some(p) => p < WARN_AT_PERCENT,
+    }
+}
+
+/// The one-shot preamble inserted before the next user prompt when
+/// `used_percent` first crosses `WARN_AT_PERCENT`. Written to speak to the
+/// agent as a model would experience context pressure — "handoff, not
+/// completion" framing. Per 01-design.md §4.5.
+pub fn build_usage_notice_preamble(used_percent: f64) -> String {
+    format!(
+        "[系统通知] 对话窗口已用 {pct:.0}%，容量接近上限。\n\
+         \n\
+         你手里大概同时压着好几件事。继续在这个窗口里推进的边际收益已经很低 —— \
+         注意力被稀释，新细节越来越难稳定保持。此刻最有价值的动作不是把手头的事收尾，\
+         而是给下一个窗口的你做一次干净的交接。\n\
+         \n\
+         请立即：\n\
+         1. 停下所有新的工具调用和任务步骤\n\
+         2. 在你的记忆文件里留一段 orientation（方向感，不是流水账）：\n\
+            - 当前任务位置 / 下一步该做什么\n\
+            - 已经形成但还没落笔的判断、用户偏好、关键未决 tension\n\
+            - 让冷启动的你能快速接回当前位置的最小定向信息\n\
+         3. 输出末尾附加 [[RESET]]，runtime 会给你开一个干净的新窗口\n\
+         \n\
+         新窗口的你会读这些记忆文件冷启动。你此刻留下什么，它就从什么开始。\n\
+         \n\
+         本提醒仅发送一次。",
+        pct = used_percent,
+    )
 }
 
 #[cfg(test)]

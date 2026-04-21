@@ -58,6 +58,14 @@ async function recordVisitor(
     )
     .bind(uuid, now)
     .run();
+
+  // D1: log one row per (uuid, UTC day) so we can compute real historical DAU
+  // later. visitors.last_seen overwrites itself, so it can only answer
+  // "active today" — not "active on day N".
+  await db
+    .prepare(`INSERT OR IGNORE INTO visits (uuid, day) VALUES (?1, DATE(?2))`)
+    .bind(uuid, now)
+    .run();
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

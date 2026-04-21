@@ -22,6 +22,7 @@ import type { Agent } from "@/lib/types";
 import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { EnvVarsEditor } from "./env-vars-editor";
 
 export function AddAgentDialog() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -286,53 +287,7 @@ export function AddAgentDialog() {
               <label className="text-sm font-medium">
                 Environment Variables
               </label>
-              <div className="space-y-2">
-                {envVars.map((pair, i) => (
-                  <div key={i} className="flex gap-2">
-                    <Input
-                      placeholder="KEY"
-                      value={pair.key}
-                      onChange={(e) => {
-                        const updated = [...envVars];
-                        updated[i] = { ...updated[i], key: e.target.value };
-                        setEnvVars(updated);
-                      }}
-                      className="flex-1 font-mono text-xs"
-                    />
-                    <Input
-                      placeholder="value"
-                      value={pair.value}
-                      onChange={(e) => {
-                        const updated = [...envVars];
-                        updated[i] = { ...updated[i], value: e.target.value };
-                        setEnvVars(updated);
-                      }}
-                      className="flex-1 font-mono text-xs"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() =>
-                        setEnvVars(envVars.filter((_, j) => j !== i))
-                      }
-                      className="px-2 text-muted-foreground hover:text-destructive"
-                    >
-                      ×
-                    </Button>
-                  </div>
-                ))}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    setEnvVars([...envVars, { key: "", value: "" }])
-                  }
-                >
-                  + Add Variable
-                </Button>
-              </div>
+              <EnvVarsEditor value={envVars} onChange={setEnvVars} />
             </div>
 
             <DialogFooter>

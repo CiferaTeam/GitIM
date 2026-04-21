@@ -51,6 +51,7 @@ fn github_config(token: &str) -> WorkspaceConfig {
             provider: GitProvider::Github,
             remote_url: Some("https://github.com/owner/repo".to_string()),
             token: Some(token.to_string()),
+            github_email: None,
         },
     }
 }
@@ -91,6 +92,7 @@ fn propagate_token_skips_local_mode() {
             provider: GitProvider::Local,
             remote_url: None,
             token: None,
+            github_email: None,
         },
     };
     write_config(workspace, cfg);

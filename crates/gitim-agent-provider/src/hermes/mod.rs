@@ -249,6 +249,7 @@ async fn drive_session(
             error,
             duration_ms: start.elapsed().as_millis() as u64,
             session_token: if session_id.is_empty() { None } else { Some(session_id.to_string()) },
+            usage: None,
         });
     }
 
@@ -440,6 +441,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage: None,
     });
 }
 

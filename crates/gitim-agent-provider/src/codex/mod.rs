@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
-    ProviderError, Session,
+    ProviderError, ProviderUsage, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -117,6 +117,7 @@ async fn drive_session(
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
     let mut saw_turn_completed = false;
+    let mut latest_used_percent: Option<f64> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -132,6 +133,13 @@ async fn drive_session(
             let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
+            }
+
+            // Codex streams token_count events mid-session; capture the
+            // latest used_percent seen. Runs alongside parse_line since
+            // token_count is an event_msg type parse_line doesn't handle.
+            if let Some(pct) = parse_used_percent(&line) {
+                latest_used_percent = Some(pct);
             }
 
             let parsed = match parse_line(&line) {
@@ -223,6 +231,12 @@ async fn drive_session(
         error: final_error,
         duration_ms: duration.as_millis() as u64,
         session_token: thread_id,
+        usage: latest_used_percent.map(|p| ProviderUsage {
+            input_tokens: None,
+            output_tokens: None,
+            used_percent: Some(p),
+            ..Default::default()
+        }),
     });
 }
 
@@ -388,6 +402,17 @@ fn parse_rollout_line(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract `rate_limits.primary.used_percent` from an `event_msg` of type `token_count`.
+/// Returns `None` for other event types or malformed lines.
+fn parse_used_percent(line: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let payload_type = v.pointer("/payload/type")?.as_str()?;
+    if payload_type != "token_count" {
+        return None;
+    }
+    v.pointer("/payload/rate_limits/primary/used_percent")?.as_f64()
 }
 
 /// Weaker fallback: a `token_count` event reporting `credits.balance == "0"`
@@ -584,5 +609,28 @@ mod rollout_tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+}
+
+#[cfg(test)]
+mod usage_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_token_count_used_percent() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47.5},"credits":null,"plan_type":"plus"}}}"#;
+        assert_eq!(parse_used_percent(line), Some(47.5));
+    }
+
+    #[test]
+    fn parse_token_count_without_primary_returns_none() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"credits":{"has_credits":true}}}}"#;
+        assert_eq!(parse_used_percent(line), None);
+    }
+
+    #[test]
+    fn parse_non_token_count_returns_none() {
+        let line = r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#;
+        assert_eq!(parse_used_percent(line), None);
     }
 }

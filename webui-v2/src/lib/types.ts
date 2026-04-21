@@ -2,6 +2,22 @@ import type { ProviderId } from "./providers";
 
 export type AgentStatus = "running" | "idle" | "error" | "offline";
 
+export interface SessionUsageSnapshot {
+  sessionId: string;
+  /**
+   * For Claude, Anthropic's `input_tokens` excludes cached content. The
+   * backend aggregates input + cache_read + cache_creation before computing
+   * `usedPercent`, so the percentage here already reflects the true window
+   * occupancy even when this field looks tiny.
+   */
+  inputTokens?: number;
+  outputTokens?: number;
+  maxTokens?: number;
+  usedPercent: number;
+  source: "provider_reported" | "runtime_estimated";
+  updatedAt: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -14,6 +30,7 @@ export interface Agent {
   lastActivity?: string; // ISO8601
   messagesProcessed: number;
   errorMessage?: string;
+  sessionUsage?: SessionUsageSnapshot;
 }
 
 export type MessageStatus = "sending" | "sent" | "synced" | "failed";
@@ -48,7 +65,7 @@ export interface UserInfo {
 
 export interface AgentActivityEvent {
   agent_id: string;
-  event_type: "tool_use" | "thinking" | "done" | "error";
+  event_type: "tool_use" | "thinking" | "done" | "error" | "usage";
   detail: string;
   timestamp: string; // ISO8601
 }

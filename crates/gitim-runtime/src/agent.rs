@@ -107,6 +107,11 @@ pub struct AgentConfig {
     pub handler: String,
     pub display_name: String,
     pub remote_url: String,
+    /// Workspace-level GitHub email propagated into the agent's me.json so
+    /// its commits attribute to the owner's contribution graph. `None` for
+    /// local-mode workspaces or github-mode workspaces where the owner's
+    /// email is private.
+    pub github_email: Option<String>,
 }
 
 #[derive(Debug)]
@@ -153,19 +158,26 @@ pub async fn provision_agent(
         ))??;
     info!(handler = %config.handler, "daemon running");
 
-    // Onboard (idempotent — daemon handles repeat calls)
+    // Onboard (idempotent — daemon handles repeat calls).
+    //
+    // `github_email`, if present, rides alongside handler + display_name in
+    // the git-mode auth payload. Daemon identity inference surfaces it into
+    // `InferredIdentity.email`, which write_me_json persists to the agent's
+    // me.json, which the daemon's commit path reads via `author_for`. The
+    // chain is how workspace-owner email reaches agent commits even though
+    // the agent onboards via `git` rather than `github`.
+    let mut auth = json!({
+        "type": "git",
+        "handler": config.handler,
+        "display_name": config.display_name,
+    });
+    if let Some(email) = &config.github_email {
+        auth["github_email"] = json!(email);
+    }
+
     let client = GitimClient::new(&repo_root);
     let onboard_resp = client
-        .onboard(
-            "git",
-            json!({
-                "type": "git",
-                "handler": config.handler,
-                "display_name": config.display_name,
-            }),
-            false,
-            false,
-        )
+        .onboard("git", auth, false, false)
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 

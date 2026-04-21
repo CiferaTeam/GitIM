@@ -26,6 +26,7 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
+tiktoken-rs = "0.11.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1"

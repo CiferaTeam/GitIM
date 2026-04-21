@@ -23,6 +23,12 @@ pub enum AuthData {
     Git {
         handler: String,
         display_name: String,
+        /// Optional — runtime injects this when provisioning an agent inside
+        /// a github-backed workspace, so the agent's commits attribute to
+        /// the workspace owner's GitHub account even though the agent
+        /// itself onboards via the `git` variant.
+        #[serde(default)]
+        github_email: Option<String>,
     },
     #[serde(rename = "github")]
     GitHub {
@@ -44,6 +50,10 @@ pub enum AuthData {
 pub struct InferredIdentity {
     pub handler: Handler,
     pub display_name: String,
+    /// GitHub-mode only for now — persisted into `.gitim/me.json` as
+    /// `github_email` so daemon commits can attribute to the user's
+    /// GitHub account. None for git / gitea / gitlab modes.
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -90,11 +100,13 @@ pub fn infer_identity(
         AuthData::Git {
             handler,
             display_name,
+            github_email,
         } => {
             let validated = Handler::new(&handler)?;
             Ok(InferredIdentity {
                 handler: validated,
                 display_name,
+                email: github_email.filter(|s| !s.is_empty()),
             })
         }
 
@@ -123,10 +135,19 @@ pub fn infer_identity(
                 .unwrap_or(&login)
                 .to_string();
 
+            // Public email from /user; null when the user has chosen to
+            // keep their address private. Filter out empty strings too.
+            let email = v
+                .get("email")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
             let handler = Handler::new(&login)?;
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email,
             })
         }
 
@@ -155,6 +176,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
 
@@ -182,6 +204,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
     }
@@ -198,11 +221,42 @@ mod tests {
             AuthData::Git {
                 handler: "alice".to_string(),
                 display_name: "Alice Wonderland".to_string(),
+                github_email: None,
             },
         )
         .unwrap();
         assert_eq!(result.handler.as_str(), "alice");
         assert_eq!(result.display_name, "Alice Wonderland");
+        assert!(result.email.is_none());
+    }
+
+    #[test]
+    fn git_mode_propagates_github_email() {
+        let result = infer_identity(
+            GitServer::Git,
+            AuthData::Git {
+                handler: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                github_email: Some("alice@example.com".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.email.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn git_mode_empty_github_email_treated_as_none() {
+        let result = infer_identity(
+            GitServer::Git,
+            AuthData::Git {
+                handler: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                github_email: Some("".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(result.email.is_none(),
+            "empty string should not produce a fake git author email");
     }
 
     #[test]
@@ -212,6 +266,7 @@ mod tests {
             AuthData::Git {
                 handler: "INVALID_UPPER".to_string(),
                 display_name: "Bad".to_string(),
+                github_email: None,
             },
         );
         assert!(matches!(result, Err(IdentityError::InvalidHandler(_))));
@@ -224,6 +279,7 @@ mod tests {
             AuthData::Git {
                 handler: "system".to_string(),
                 display_name: "System".to_string(),
+                github_email: None,
             },
         );
         assert!(matches!(result, Err(IdentityError::InvalidHandler(_))));

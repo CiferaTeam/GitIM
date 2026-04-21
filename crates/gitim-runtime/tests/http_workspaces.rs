@@ -137,6 +137,7 @@ fn inject_workspace(
             provider,
             remote_url: None,
             token: None,
+            github_email: None,
         },
     });
     // `human_repo: None` keeps `initialized` false, matching a placeholder
@@ -653,6 +654,7 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             system_prompt: None,
             env: Default::default(),
             error_message: None,
+            session_usage: None,
             loop_handle: None,
         };
         agent_info.loop_handle = Some(abort_handle);

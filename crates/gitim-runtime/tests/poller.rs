@@ -18,6 +18,7 @@ async fn setup_agent(
         handler: "poll-agent".into(),
         display_name: "Poll Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
 
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
