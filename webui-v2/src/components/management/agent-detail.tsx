@@ -8,6 +8,7 @@ import type { Agent } from "@/lib/types";
 import { ArrowLeft, Play, Pause, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-card";
+import { ProviderBadge } from "./provider-badge";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -126,10 +127,22 @@ export function AgentDetail() {
           </code>
         </Field>
 
+        <Field label="Provider">
+          <ProviderBadge provider={agent.provider} />
+        </Field>
+
         <Field label="Model">
-          <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
-            {agent.model ?? "claude-sonnet-4-6"}
-          </span>
+          {agent.model ? (
+            <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
+              {agent.model}
+            </span>
+          ) : agent.provider === "opencode" ? (
+            <span className="text-text-muted italic text-sm">
+              Default (from opencode auth login)
+            </span>
+          ) : (
+            <span className="text-text-muted">—</span>
+          )}
         </Field>
 
         <Field label="Messages Processed">
