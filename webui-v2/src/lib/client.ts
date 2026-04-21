@@ -566,6 +566,29 @@ export async function addAgent(
   }
 }
 
+export async function updateAgent(
+  slug: string,
+  agentId: string,
+  patch: {
+    system_prompt?: string | null;
+    env?: Record<string, string>;
+    dotenv?: string;
+  },
+): Promise<ApiResponse<{ agent: Agent }>> {
+  try {
+    const res = await fetch(`${wsBase(slug)}/agents/${agentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json();
+    if (!data.ok) return data;
+    return { ok: true, data: { agent: mapBackendAgent(data.agent) } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function removeAgent(slug: string, id: string): Promise<ApiResponse> {
   try {
     const res = await fetch(`${wsBase(slug)}/agents/remove`, {
