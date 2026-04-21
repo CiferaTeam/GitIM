@@ -416,3 +416,101 @@ async fn patch_env_rejects_illegal_key() {
         "error should mention 'invalid env var'; got: {body}"
     );
 }
+
+// -- 8. PATCH dotenv writes .env file with mode 0600 --------------------------
+
+#[tokio::test]
+async fn patch_dotenv_writes_file_with_mode_600() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws8");
+    let _dir = seed_agent_in_workspace(&state, "ws8", "alice", json!({ "provider": "claude" }));
+    let repo_root = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws8")
+        .unwrap()
+        .agents
+        .get("alice")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, _body) = send_patch(
+        &router,
+        "ws8",
+        "alice",
+        json!({ "dotenv": "OPENAI_KEY=sk-xxx\nDB=postgres://..." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {_body}");
+
+    let env_path = std::path::PathBuf::from(&repo_root).join(".env");
+    let contents = std::fs::read_to_string(&env_path).unwrap();
+    assert!(contents.contains("OPENAI_KEY=sk-xxx"), "file must contain written value");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&env_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+    }
+}
+
+// -- 9. PATCH dotenv empty string deletes the .env file -----------------------
+
+#[tokio::test]
+async fn patch_dotenv_empty_deletes_file() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws9");
+    let _dir = seed_agent_in_workspace(&state, "ws9", "alice", json!({ "provider": "claude" }));
+    let repo_root = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws9")
+        .unwrap()
+        .agents
+        .get("alice")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    // First: write a non-empty dotenv.
+    let (status, body) = send_patch(
+        &router,
+        "ws9",
+        "alice",
+        json!({ "dotenv": "SECRET=abc" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "setup write failed: {body}");
+    let env_path = std::path::PathBuf::from(&repo_root).join(".env");
+    assert!(env_path.exists(), ".env should exist after initial write");
+
+    // Then: send empty string → file must be deleted.
+    let (status, body) = send_patch(&router, "ws9", "alice", json!({ "dotenv": "" })).await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {body}");
+    assert!(!env_path.exists(), ".env should be deleted after empty-string patch");
+
+    // Also verify: empty-string patch when .env was never created is a no-op 200.
+    let (status, body) = send_patch(&router, "ws9", "alice", json!({ "dotenv": "" })).await;
+    assert_eq!(status, StatusCode::OK, "second empty patch (no-op) failed: {body}");
+}
+
+// -- 10. PATCH dotenv > 64KB is rejected with 400 -----------------------------
+
+#[tokio::test]
+async fn patch_dotenv_rejects_oversize() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws10");
+    let _dir = seed_agent_in_workspace(&state, "ws10", "alice", json!({ "provider": "claude" }));
+
+    let big = "A".repeat(65 * 1024); // 65 KB > 64 KB cap
+    let (status, body) = send_patch(&router, "ws10", "alice", json!({ "dotenv": big })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("64 KB"),
+        "error should mention '64 KB'; got: {body}"
+    );
+}

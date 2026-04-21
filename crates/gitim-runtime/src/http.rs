@@ -1452,7 +1452,6 @@ struct AgentUpdateRequest {
     #[serde(default)]
     env: Option<HashMap<String, String>>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed in Task 4
     dotenv: Option<String>,
 }
 
@@ -1568,6 +1567,20 @@ async fn agents_patch(
         }
     }
 
+    // dotenv size cap (64 KB) — validated before any disk write for fail-fast.
+    if let Some(contents) = &req.dotenv {
+        if contents.len() > 64 * 1024 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "dotenv exceeds 64 KB limit"
+                })),
+            )
+                .into_response();
+        }
+    }
+
     if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1576,6 +1589,43 @@ async fn agents_patch(
             })),
         )
             .into_response();
+    }
+
+    // Write or delete <repo_root>/.env based on dotenv field.
+    // File-only: dotenv is kept out of in-memory AgentInfo to avoid secrets
+    // leaking into API responses or process memory beyond what's needed.
+    if let Some(contents) = &req.dotenv {
+        let env_path = repo_root.join(".env");
+        if contents.is_empty() {
+            if env_path.exists() {
+                if let Err(e) = std::fs::remove_file(&env_path) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "ok": false, "error": format!("delete .env failed: {e}")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            if let Err(e) = std::fs::write(&env_path, contents) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false, "error": format!("write .env failed: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = std::fs::metadata(&env_path).unwrap().permissions();
+                perm.set_mode(0o600);
+                let _ = std::fs::set_permissions(&env_path, perm);
+            }
+        }
     }
 
     // 3+4. Update in-memory AgentInfo + take fresh snapshot under one lock.
