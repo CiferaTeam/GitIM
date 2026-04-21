@@ -11,6 +11,7 @@ use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::agent::{detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig};
+use crate::gitignore::ensure_env_gitignored;
 use crate::agent_loop::AgentLoop;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
@@ -2290,6 +2291,8 @@ async fn provision_local_workspace(
             )
         })?;
 
+    apply_dotenv_gitignore(&human_dir);
+
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -2409,6 +2412,8 @@ async fn provision_github_workspace(
                     redacted_url(&format!("provision_human failed: {e}")),
                 )
             })?;
+
+        apply_dotenv_gitignore(&final_human);
 
         // Best-effort email fetch: a failure or null email (private account)
         // falls back to the `<handler>@gitim` sentinel. Never blocks init —
@@ -2758,6 +2763,58 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
 /// Rejects empty strings, keys starting with a digit or non-ASCII character,
 /// and keys containing anything other than ASCII alphanumerics or underscores.
 /// (POSIX convention: `[A-Za-z_][A-Za-z0-9_]*`.)
+/// Ensure the human clone's .gitignore excludes .env and commit if we added it.
+/// Best-effort — failures are logged, not propagated; a missing rule is cosmetic,
+/// the secret file is per-clone anyway.
+fn apply_dotenv_gitignore(human_clone: &Path) {
+    match ensure_env_gitignored(human_clone) {
+        Ok(false) => {}
+        Ok(true) => {
+            let add = std::process::Command::new("git")
+                .args(["add", ".gitignore"])
+                .current_dir(human_clone)
+                .output();
+            match &add {
+                Ok(o) if !o.status.success() => {
+                    tracing::warn!(
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "git add .gitignore failed"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "git add .gitignore spawn failed");
+                    return;
+                }
+                _ => {}
+            }
+            let commit = std::process::Command::new("git")
+                .args([
+                    "-c", "user.email=runtime@gitim",
+                    "-c", "user.name=gitim",
+                    "commit", "-m", "chore: gitignore .env (runtime init)",
+                ])
+                .current_dir(human_clone)
+                .output();
+            match &commit {
+                Ok(o) if !o.status.success() => {
+                    tracing::warn!(
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "git commit .gitignore failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "git commit .gitignore spawn failed");
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "ensure_env_gitignored failed");
+        }
+    }
+}
+
 fn is_valid_env_key(k: &str) -> bool {
     if k.is_empty() {
         return false;
