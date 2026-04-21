@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
-use gitim_runtime::http::{create_router, SharedRuntimeState};
+use gitim_runtime::http::{create_router, SharedRuntimeState, DOTENV_MAX_BYTES};
 use gitim_runtime::workspace::WorkspaceContext;
 
 async fn send(
@@ -506,7 +506,7 @@ async fn patch_dotenv_rejects_oversize() {
     inject_workspace(&state, "ws10");
     let _dir = seed_agent_in_workspace(&state, "ws10", "alice", json!({ "provider": "claude" }));
 
-    let big = "A".repeat(65 * 1024); // 65 KB > 64 KB cap
+    let big = "A".repeat(DOTENV_MAX_BYTES + 1); // one byte over the cap
     let (status, body) = send_patch(&router, "ws10", "alice", json!({ "dotenv": big })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     assert!(

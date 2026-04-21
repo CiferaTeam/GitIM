@@ -26,6 +26,10 @@ use gitim_sync::url_redact::redacted_url;
 /// of the ephemeral-port band on macOS / Linux.
 pub const DEFAULT_PORT: u16 = 16868;
 
+/// Max bytes accepted for the `dotenv` field on `PATCH /agents/{id}`.
+/// Typical `.env` is < 1 KB; cap is generous headroom without enabling abuse.
+pub const DOTENV_MAX_BYTES: usize = 64 * 1024;
+
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care
 /// which backing impl is wired up — they just ask the injected client.
@@ -1567,9 +1571,9 @@ async fn agents_patch(
         }
     }
 
-    // dotenv size cap (64 KB) — validated before any disk write for fail-fast.
+    // dotenv size cap — validated before any disk write for fail-fast.
     if let Some(contents) = &req.dotenv {
-        if contents.len() > 64 * 1024 {
+        if contents.len() > DOTENV_MAX_BYTES {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -1594,6 +1598,12 @@ async fn agents_patch(
     // Write or delete <repo_root>/.env based on dotenv field.
     // File-only: dotenv is kept out of in-memory AgentInfo to avoid secrets
     // leaking into API responses or process memory beyond what's needed.
+    //
+    // Partial-failure contract: me.json has already been written by this point.
+    // If the .env write/delete below fails, the caller sees 500 but me.json is
+    // already updated on disk. Accepted trade-off: system_prompt/env updates are
+    // idempotent and the client can retry the full PATCH. True atomicity across
+    // two files would require a WAL and is out of scope for v1.
     if let Some(contents) = &req.dotenv {
         let env_path = repo_root.join(".env");
         if contents.is_empty() {
@@ -1621,9 +1631,29 @@ async fn agents_patch(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut perm = std::fs::metadata(&env_path).unwrap().permissions();
-                perm.set_mode(0o600);
-                let _ = std::fs::set_permissions(&env_path, perm);
+                // File now contains live secrets. chmod failure must be observable:
+                // silent fallthrough leaves 0o644 (world-readable on typical umask)
+                // while caller sees 200 OK, defeating the security guarantee.
+                match std::fs::metadata(&env_path) {
+                    Ok(meta) => {
+                        let mut perm = meta.permissions();
+                        perm.set_mode(0o600);
+                        if let Err(e) = std::fs::set_permissions(&env_path, perm) {
+                            tracing::warn!(
+                                path = %env_path.display(),
+                                error = %e,
+                                "failed to set 0600 on .env — file may be world-readable"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %env_path.display(),
+                            error = %e,
+                            "stat .env after write failed — mode not set"
+                        );
+                    }
+                }
             }
         }
     }
