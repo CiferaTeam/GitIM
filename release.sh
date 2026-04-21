@@ -13,6 +13,16 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # are not affected by this default.)
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
 
+# Enable sccache when present — caches rustc output across targets, so the
+# second release cycle only rebuilds changed code (most deps identical across
+# the 4-target matrix). No-op when not installed; `cargo install sccache` or
+# `brew install sccache` to activate. Only benefits the two cargo-host
+# (macOS) targets; cross-container rustc isn't wrapped.
+if command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+  echo "==> sccache enabled (host targets only)"
+fi
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 RELEASES_REPO="CiferaTeam/gitim-releases"
 
@@ -173,6 +183,12 @@ build_target() {
         linux-arm64)  arch_tag="linux/arm64" ;;
       esac
       echo "==> [$slug] smoke test (docker alpine, $arch_tag)"
+      # Pre-pull the correct-arch alpine. Without this, a previous Linux
+      # target's smoke test may leave the wrong arch cached locally, and
+      # `docker run --platform linux/amd64` warns "image ... does not match
+      # the specified platform: wanted linux/amd64, actual: linux/arm64/v8"
+      # then silently runs the wrong arch under Rosetta — false-positive smoke.
+      docker pull --platform "$arch_tag" alpine:3 >/dev/null
       # Smoke-test all three shipped binaries — a musl link error in
       # gitim-daemon or gitim-runtime would otherwise ship silently.
       docker run --rm --platform "$arch_tag" \
