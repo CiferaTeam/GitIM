@@ -62,9 +62,9 @@ echo "==> Verifying SHA256..."
 SHA_FILE="$TMPDIR/SHA256SUMS"
 if ! curl -sSfL -o "$SHA_FILE" "$SHA_URL"; then
   echo "Error: SHA256SUMS not found at $SHA_URL"
-  echo "This release may be pre-v0.6.0. Upgrade path:"
-  echo "  1. Install v0.5.x manually (or skip SHA check: SKIP_SHA=1 bash install.sh)"
-  echo "  2. Run \`gitim update\` after install to jump to the current version."
+  echo "This release predates SHA256 verification. Recovery:"
+  echo "  - Install the latest release (which ships with SHA256SUMS), or"
+  echo "  - Bypass verification for this install: SKIP_SHA=1 bash install.sh"
   # Allow explicit bypass for one-shot recovery; never default to off.
   if [ "${SKIP_SHA:-0}" != "1" ]; then
     exit 1
