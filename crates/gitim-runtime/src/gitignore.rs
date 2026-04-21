@@ -19,12 +19,18 @@ pub fn ensure_env_gitignored(clone_root: &Path) -> std::io::Result<bool> {
 
     // Match any of: ".env", "/.env", ".env*", "/.env*" as standalone lines.
     // Comments and blank lines don't count. We deliberately don't parse
-    // negation (`!...`) or more complex glob forms — if a user has something
-    // fancier in their .gitignore, they already know what they're doing.
+    // more complex glob forms — if a user has something fancier in their
+    // .gitignore, they already know what they're doing.
     for line in current.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.is_empty() {
             continue;
+        }
+        // Any negation involving .env means the user deliberately wants
+        // it tracked — bail rather than silently corrupt their intent by
+        // appending a later `.env` rule that git would take precedence on.
+        if trimmed.starts_with('!') && trimmed.contains(".env") {
+            return Ok(false);
         }
         if matches!(trimmed, ".env" | "/.env" | ".env*" | "/.env*") {
             return Ok(false);
@@ -55,7 +61,7 @@ mod tests {
         let changed = ensure_env_gitignored(dir.path()).unwrap();
         assert!(changed);
         let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-        assert!(content.contains(".env"));
+        assert_eq!(content, ".env\n");
     }
 
     #[test]
@@ -80,6 +86,16 @@ mod tests {
         fs::write(dir.path().join(".gitignore"), ".env*\n").unwrap();
         let changed = ensure_env_gitignored(dir.path()).unwrap();
         assert!(!changed);
+    }
+
+    #[test]
+    fn does_not_clobber_env_negation() {
+        let dir = tmpdir();
+        fs::write(dir.path().join(".gitignore"), "*\n!.env\n").unwrap();
+        let changed = ensure_env_gitignored(dir.path()).unwrap();
+        assert!(!changed, "must not append .env when !.env is present");
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert_eq!(content, "*\n!.env\n", "file must be untouched");
     }
 
     #[test]
