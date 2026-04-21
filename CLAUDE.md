@@ -147,6 +147,34 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - DM 文件名：两个 handler 按字典序排列，`--` 连接
 - Plan / 需求 / 设计文档统一放 `docs/plans/<feature-slug>/`，不要散落在仓库根或新建 `plans/`
 
+## Rust toolchain policy
+
+仓库根 `rust-toolchain.toml` 把 channel 锁到 **stable**。这是硬线,因为:
+
+1. **Release reproducibility**: release.sh 跑 4 target 交叉编译,nightly 每日飘,rustc commit 不稳 → 用户装的 binary 行为不可复现
+2. **Cross-compile 兼容性**: `cross-rs/cross` + rustup 1.28 在 nightly-host 下无法 provision matching nightly Linux-host toolchain 到容器里
+3. **Library 代码可移植**: 未来走 WASM / 新贡献者进来,stable 能编是基本假设
+
+### 规则
+
+- **禁止 library code 依赖 nightly-only feature**。典型坑:
+  - `str::floor_char_boundary` (unstable `round_char_boundary`)
+  - `build-std` / `panic_immediate_abort`
+  - async closures / async fn in trait 的 nightly 语义
+  - 任何需要 `#![feature(...)]` 的东西
+
+  想用类似功能 → 写 stable 等价实现(如 `floor_char_boundary` 其实 4 行 loop + `is_char_boundary()` 就能做)。
+
+- **Maintainer dev 自由用 nightly**:`cargo +nightly <cmd>` 显式 override。`rust-toolchain.toml` 只 pin repo 默认,不绑死 CLI override
+
+- **`release.sh` 保留 `+stable` 作为第二道锁**,即使 `rust-toolchain.toml` 被误改,release pipeline 仍然 pinned
+
+- **WASM 路线不受影响**: `wasm32-unknown-unknown` / `wasm32-wasip{1,2}` 全部 stable 支持,`wasm-bindgen` / `wasm-pack` / `Leptos` / `gix` 等生态都 stable。切 WASM 的工作在 IPC / storage / git 层,不在 toolchain
+
+### 为什么记这条(历史背景)
+
+2026-04 首次跑 4-target cross-compile dry-run 时,发现 `agent_loop.rs` 用了 `floor_char_boundary` (nightly-only),maintainer 的 nightly dev 环境下编得过,切 stable 秒挂。这类"无意 leak"只有在项目强制 stable 时才能早发现。
+
 ## 测试
 
 ```bash
