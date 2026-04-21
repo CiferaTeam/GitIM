@@ -11,6 +11,7 @@ use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::agent::{detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig};
+use crate::gitignore::ensure_env_gitignored;
 use crate::agent_loop::AgentLoop;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
@@ -25,6 +26,10 @@ use gitim_sync::url_redact::redacted_url;
 /// can't drift. Chosen to sit well above the IANA registered range and out
 /// of the ephemeral-port band on macOS / Linux.
 pub const DEFAULT_PORT: u16 = 16868;
+
+/// Max bytes accepted for the `dotenv` field on `PATCH /agents/{id}`.
+/// Typical `.env` is < 1 KB; cap is generous headroom without enabling abuse.
+pub const DOTENV_MAX_BYTES: usize = 64 * 1024;
 
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care
@@ -1423,6 +1428,277 @@ async fn agents_get(
     }
 }
 
+// -- /agents PATCH --
+
+/// Deserialize a JSON field that has three distinct states:
+///   - absent → `None`           (caller should treat as "no-op")
+///   - `null`  → `Some(None)`    (caller should clear the field)
+///   - `"s"`   → `Some(Some(s))` (caller should set the field to `s`)
+///
+/// Standard serde maps both absent and `null` to `None` for `Option<T>`,
+/// which loses the distinction we need.  This helper uses a raw `Value` round-
+/// trip on the existing serde infrastructure instead of pulling in `serde_with`.
+fn deser_triple_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    match v {
+        serde_json::Value::Null => Ok(Some(None)),
+        serde_json::Value::String(s) => Ok(Some(Some(s))),
+        _ => Err(serde::de::Error::custom("expected string or null")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct AgentUpdateRequest {
+    #[serde(default, deserialize_with = "deser_triple_option")]
+    system_prompt: Option<Option<String>>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    dotenv: Option<String>,
+}
+
+async fn agents_patch(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, agent_id)): axum::extract::Path<(String, String)>,
+    Json(req): Json<AgentUpdateRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Match the validation convention for multi-path-param handlers
+    // (`im_card_archive`, `im_channel_archive`, `agents_get`): combining the
+    // `WorkspaceSlug` extractor with a `Path<(String, String)>` tuple fails
+    // in axum because both consume from the same cached url-params extension.
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+        )
+            .into_response();
+    }
+
+    // 1. Look up agent; clone repo_path so we can release the lock before I/O.
+    let repo_root = {
+        let s = state.lock().unwrap();
+        let ctx = match s.workspaces.get(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get(&agent_id) {
+            Some(info) => PathBuf::from(&info.repo_path),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "ok": false, "error": format!("agent not found: {agent_id}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // 2. Read + merge me.json (preserves untouched fields like github_email).
+    let me_path = repo_root.join(".gitim/me.json");
+    let me_content = match std::fs::read_to_string(&me_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false, "error": format!("read me.json failed: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut me: serde_json::Value = match serde_json::from_str(&me_content) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false, "error": format!("parse me.json failed: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Three-state semantics for system_prompt:
+    //   absent (None)       → no-op
+    //   Some(None)          → remove field
+    //   Some(Some(""))      → remove field
+    //   Some(Some(s))       → set to s
+    if let Some(sp_opt) = &req.system_prompt {
+        match sp_opt {
+            Some(s) if !s.is_empty() => {
+                me["system_prompt"] = serde_json::Value::String(s.clone());
+            }
+            _ => {
+                if let Some(obj) = me.as_object_mut() {
+                    obj.remove("system_prompt");
+                }
+            }
+        }
+    }
+
+    // Env validation + whole-map replacement.
+    // absent (None)       → no-op
+    // Some({})            → remove "env" field entirely
+    // Some({k: v, ...})   → validate keys, then replace wholesale
+    if let Some(env_map) = &req.env {
+        for key in env_map.keys() {
+            if !is_valid_env_key(key) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("invalid env var name: {key}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        if env_map.is_empty() {
+            if let Some(obj) = me.as_object_mut() {
+                obj.remove("env");
+            }
+        } else {
+            me["env"] = serde_json::to_value(env_map).unwrap();
+        }
+    }
+
+    // dotenv size cap — validated before any disk write for fail-fast.
+    if let Some(contents) = &req.dotenv {
+        if contents.len() > DOTENV_MAX_BYTES {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "dotenv exceeds 64 KB limit"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("write me.json failed: {e}")
+            })),
+        )
+            .into_response();
+    }
+
+    // Write or delete <repo_root>/.env based on dotenv field.
+    // File-only: dotenv is kept out of in-memory AgentInfo to avoid secrets
+    // leaking into API responses or process memory beyond what's needed.
+    //
+    // Partial-failure contract: me.json has already been written by this point.
+    // If the .env write/delete below fails, the caller sees 500 but me.json is
+    // already updated on disk. Accepted trade-off: system_prompt/env updates are
+    // idempotent and the client can retry the full PATCH. True atomicity across
+    // two files would require a WAL and is out of scope for v1.
+    if let Some(contents) = &req.dotenv {
+        let env_path = repo_root.join(".env");
+        if contents.is_empty() {
+            if env_path.exists() {
+                if let Err(e) = std::fs::remove_file(&env_path) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "ok": false, "error": format!("delete .env failed: {e}")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            if let Err(e) = std::fs::write(&env_path, contents) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false, "error": format!("write .env failed: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // File now contains live secrets. chmod failure must be observable:
+                // silent fallthrough leaves 0o644 (world-readable on typical umask)
+                // while caller sees 200 OK, defeating the security guarantee.
+                match std::fs::metadata(&env_path) {
+                    Ok(meta) => {
+                        let mut perm = meta.permissions();
+                        perm.set_mode(0o600);
+                        if let Err(e) = std::fs::set_permissions(&env_path, perm) {
+                            tracing::warn!(
+                                path = %env_path.display(),
+                                error = %e,
+                                "failed to set 0600 on .env — file may be world-readable"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %env_path.display(),
+                            error = %e,
+                            "stat .env after write failed — mode not set"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 3+4. Update in-memory AgentInfo + take fresh snapshot under one lock.
+    // Folding these into one acquisition prevents a TOCTOU panic when
+    // `agents_remove` lands between the update and the snapshot.  If the agent
+    // (or workspace) disappeared mid-flight, caller gets 404 — the on-disk
+    // me.json write is harmless residual since the agent dir gets cleaned up
+    // on remove anyway.
+    let response = {
+        let mut s = state.lock().unwrap();
+        if let Some(ctx) = s.workspaces.get_mut(&slug) {
+            if let Some(info) = ctx.agents.get_mut(&agent_id) {
+                if let Some(sp_opt) = &req.system_prompt {
+                    info.system_prompt = match sp_opt {
+                        Some(s) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    };
+                }
+                if let Some(env_map) = &req.env {
+                    info.env = env_map.clone();
+                }
+                Some(info.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    match response {
+        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false, "error": format!("agent not found: {agent_id}")
+            })),
+        )
+            .into_response(),
+    }
+}
+
 // -- /agents/remove --
 
 async fn agents_remove(
@@ -2015,6 +2291,8 @@ async fn provision_local_workspace(
             )
         })?;
 
+    apply_dotenv_gitignore(&human_dir);
+
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -2134,6 +2412,8 @@ async fn provision_github_workspace(
                     redacted_url(&format!("provision_human failed: {e}")),
                 )
             })?;
+
+        apply_dotenv_gitignore(&final_human);
 
         // Best-effort email fetch: a failure or null email (private account)
         // falls back to the `<handler>@gitim` sentinel. Never blocks init —
@@ -2450,7 +2730,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
-        .route("/agents/{id}", get(agents_get));
+        .route("/agents/{id}", get(agents_get).patch(agents_patch));
 
     let router = Router::new()
         .route("/health", get(health))
@@ -2476,6 +2756,75 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .with_state(state.clone());
 
     (router, state)
+}
+
+/// Ensure the human clone's .gitignore excludes .env and commit if we added it.
+/// Best-effort — failures are logged, not propagated; a missing rule is cosmetic,
+/// the secret file is per-clone anyway.
+fn apply_dotenv_gitignore(human_clone: &Path) {
+    match ensure_env_gitignored(human_clone) {
+        Ok(false) => {}
+        Ok(true) => {
+            let add = std::process::Command::new("git")
+                .args(["add", ".gitignore"])
+                .current_dir(human_clone)
+                .output();
+            match &add {
+                Ok(o) if !o.status.success() => {
+                    tracing::warn!(
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "git add .gitignore failed"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "git add .gitignore spawn failed");
+                    return;
+                }
+                _ => {}
+            }
+            let commit = std::process::Command::new("git")
+                .args([
+                    "-c", "user.email=system@gitim",
+                    "-c", "user.name=system",
+                    "commit", "-m", "chore: gitignore .env (runtime init)",
+                ])
+                .current_dir(human_clone)
+                .output();
+            match &commit {
+                Ok(o) if !o.status.success() => {
+                    tracing::warn!(
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "git commit .gitignore failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "git commit .gitignore spawn failed");
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "ensure_env_gitignored failed");
+        }
+    }
+}
+
+/// Validate an environment variable key name.
+///
+/// Rejects empty strings, keys starting with a digit or non-ASCII character,
+/// and keys containing anything other than ASCII alphanumerics or underscores.
+/// (POSIX convention: `[A-Za-z_][A-Za-z0-9_]*`.)
+fn is_valid_env_key(k: &str) -> bool {
+    if k.is_empty() {
+        return false;
+    }
+    let bytes = k.as_bytes();
+    let first = bytes[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 #[cfg(test)]

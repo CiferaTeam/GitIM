@@ -117,6 +117,11 @@ export function AgentCard({ agent }: AgentCardProps) {
               </div>
               <div className="min-w-0">
                 <span className="font-semibold text-lg truncate block">{agent.name}</span>
+                <span className="text-xs text-text-muted truncate block">
+                  {agent.provider ?? "—"} ·{" "}
+                  {agent.model ??
+                    (agent.provider === "opencode" ? "default" : "—")}
+                </span>
                 {agent.status === "error" && (
                   <p className="text-xs text-destructive truncate">
                     {agent.errorMessage ?? "unknown error"}

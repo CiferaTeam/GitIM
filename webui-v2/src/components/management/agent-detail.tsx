@@ -1,15 +1,18 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
-import { ArrowLeft, Play, Pause, Trash2 } from "lucide-react";
+import { ArrowLeft, Play, Pause, Trash2, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-card";
+import { ProviderBadge } from "./provider-badge";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
-import { useState } from "react";
+import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 
 function Field({
@@ -48,6 +51,122 @@ export function AgentDetail() {
   const agents = useAgentStore((s) => s.agents);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const [removeOpen, setRemoveOpen] = useState(false);
+
+  type Mode = "view" | "edit" | "saving";
+  const [mode, setMode] = useState<Mode>("view");
+  const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
+  const [draftDotenv, setDraftDotenv] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+
+  function enterEditMode() {
+    if (!agent) return;
+    setDraftPrompt(agent.systemPrompt ?? "");
+    setDraftEnv(
+      Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
+    );
+    setDraftDotenv("");
+    setEditError(null);
+    setMode("edit");
+  }
+
+  const isDirty =
+    mode === "edit" &&
+    agent !== undefined &&
+    (() => {
+      // Prompt
+      if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
+      // Dotenv
+      if (draftDotenv.length > 0) return true;
+      // Env
+      const newEnv: Record<string, string> = {};
+      for (const { key, value } of draftEnv) {
+        const k = key.trim();
+        if (k) newEnv[k] = value;
+      }
+      const oldEnv = agent.env ?? {};
+      if (Object.keys(newEnv).length !== Object.keys(oldEnv).length) return true;
+      if (Object.entries(newEnv).some(([k, v]) => oldEnv[k] !== v)) return true;
+      return false;
+    })();
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
+
+  function cancelEdit() {
+    if (isDirty && !window.confirm("Discard unsaved changes?")) {
+      return;
+    }
+    setMode("view");
+    setEditError(null);
+  }
+
+  async function handleSave() {
+    if (!activeSlug || !agent) return;
+
+    // Build patch with only changed fields so backend merge is minimal.
+    const patch: {
+      system_prompt?: string | null;
+      env?: Record<string, string>;
+      dotenv?: string;
+    } = {};
+
+    const newPrompt = draftPrompt.trim();
+    const oldPrompt = (agent.systemPrompt ?? "").trim();
+    const promptChanged = newPrompt !== oldPrompt;
+    if (promptChanged) {
+      patch.system_prompt = newPrompt === "" ? null : newPrompt;
+    }
+
+    const newEnv: Record<string, string> = {};
+    for (const { key, value } of draftEnv) {
+      const k = key.trim();
+      if (k) newEnv[k] = value;
+    }
+    const oldEnv = agent.env ?? {};
+    const envChanged =
+      Object.keys(newEnv).length !== Object.keys(oldEnv).length ||
+      Object.entries(newEnv).some(([k, v]) => oldEnv[k] !== v);
+    if (envChanged) patch.env = newEnv;
+
+    const dotenvChanged = draftDotenv.length > 0;
+    if (dotenvChanged) patch.dotenv = draftDotenv;
+
+    if (Object.keys(patch).length === 0) {
+      setMode("view");
+      return;
+    }
+
+    setMode("saving");
+    setEditError(null);
+    const res = await client.updateAgent(activeSlug, agent.id, patch);
+    if (res.ok && res.data?.agent) {
+      updateAgent(agent.id, res.data.agent as Partial<Agent>);
+      setMode("view");
+
+      // Generation-aware toast lines.
+      const lines: string[] = [];
+      if (envChanged || dotenvChanged) {
+        lines.push("Environment & .env → take effect on next message");
+      }
+      if (promptChanged) {
+        lines.push(
+          "System prompt → takes effect on next session (auto-rolls when current session fills)",
+        );
+      }
+      toast.success("Saved", { description: lines.join("\n") });
+    } else {
+      setEditError(res.error ?? "Save failed");
+      setMode("edit");
+    }
+  }
 
   const activities = useAgentActivityStore((s) => s.activities);
 
@@ -93,7 +212,12 @@ export function AgentDetail() {
         variant="ghost"
         size="sm"
         className="mb-4 text-text-secondary hover:text-foreground"
-        onClick={() => navigate("/management")}
+        onClick={() => {
+          if (isDirty && !window.confirm("Discard unsaved changes?")) {
+            return;
+          }
+          navigate("/management");
+        }}
       >
         <ArrowLeft className="size-4 mr-1" />
         Back
@@ -116,6 +240,17 @@ export function AgentDetail() {
             {agent.id}
           </p>
         </div>
+        {mode === "view" && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={enterEditMode}
+            className="border-border-strong hover:bg-surface-hover"
+          >
+            <Pencil className="size-4 mr-1.5" />
+            Edit
+          </Button>
+        )}
       </div>
 
       {/* Info grid */}
@@ -126,10 +261,22 @@ export function AgentDetail() {
           </code>
         </Field>
 
+        <Field label="Provider">
+          <ProviderBadge provider={agent.provider} />
+        </Field>
+
         <Field label="Model">
-          <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
-            {agent.model ?? "claude-sonnet-4-6"}
-          </span>
+          {agent.model ? (
+            <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
+              {agent.model}
+            </span>
+          ) : agent.provider === "opencode" ? (
+            <span className="text-text-muted italic text-sm">
+              Default (from opencode auth login)
+            </span>
+          ) : (
+            <span className="text-text-muted">—</span>
+          )}
         </Field>
 
         <Field label="Messages Processed">
@@ -146,27 +293,69 @@ export function AgentDetail() {
       {/* System Prompt */}
       <div className="mb-8">
         <Field label="System Prompt">
-          <div className="mt-2 rounded-xl border border-border bg-card/50 p-4">
-            <pre className="text-sm whitespace-pre-wrap font-mono break-words text-text-secondary leading-relaxed">
-              {agent.systemPrompt || "(none)"}
-            </pre>
-          </div>
+          {mode === "view" ? (
+            <div className="mt-2 rounded-xl border border-border bg-card/50 p-4">
+              <pre className="text-sm whitespace-pre-wrap font-mono break-words text-text-secondary leading-relaxed">
+                {agent.systemPrompt || "(none)"}
+              </pre>
+            </div>
+          ) : (
+            <Textarea
+              value={draftPrompt}
+              onChange={(e) => setDraftPrompt(e.target.value)}
+              rows={4}
+              className="mt-2 font-mono text-sm"
+              placeholder="Describe the agent's role and behavior…"
+            />
+          )}
         </Field>
       </div>
 
       {/* Environment Variables */}
-      {agent.env && Object.keys(agent.env).length > 0 && (
+      <div className="mb-8">
+        <Field label="Environment Variables">
+          <p className="text-xs text-text-muted mt-1 mb-2">
+            Injected as process env vars to the agent CLI. Flat key-value.
+          </p>
+          {mode === "view" ? (
+            agent.env && Object.keys(agent.env).length > 0 ? (
+              <div className="mt-2 rounded-xl border border-border bg-card/50 p-4 space-y-2">
+                {Object.entries(agent.env).map(([key, value]) => (
+                  <div key={key} className="text-sm font-mono flex items-center gap-2">
+                    <span className="text-primary font-medium">{key}</span>
+                    <span className="text-text-muted">=</span>
+                    <span className="text-text-secondary">{value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-text-muted mt-2">(none)</p>
+            )
+          ) : (
+            <EnvVarsEditor value={draftEnv} onChange={setDraftEnv} />
+          )}
+        </Field>
+      </div>
+
+      {/* Secrets (.env file) — only shown in edit mode */}
+      {mode !== "view" && (
         <div className="mb-8">
-          <Field label="Environment Variables">
-            <div className="mt-2 rounded-xl border border-border bg-card/50 p-4 space-y-2">
-              {Object.entries(agent.env).map(([key, value]) => (
-                <div key={key} className="text-sm font-mono flex items-center gap-2">
-                  <span className="text-primary font-medium">{key}</span>
-                  <span className="text-text-muted">=</span>
-                  <span className="text-text-secondary">{value}</span>
-                </div>
-              ))}
-            </div>
+          <Field label="Secrets (.env file)">
+            <p className="text-xs text-text-muted mt-1 mb-2">
+              Written to <code>&lt;agent-clone&gt;/.env</code> (gitignored).
+              Agent reads via <code>source .env</code>, dotenv libraries, or{" "}
+              <code>cat</code> at runtime. Use for API keys and multi-line
+              secrets. Contents are <strong>not</strong> shown here — leave
+              empty to keep the existing file; type to replace; submit empty
+              after editing to delete.
+            </p>
+            <Textarea
+              value={draftDotenv}
+              onChange={(e) => setDraftDotenv(e.target.value)}
+              rows={8}
+              className="mt-2 font-mono text-xs"
+              placeholder="OPENAI_API_KEY=sk-..."
+            />
           </Field>
         </div>
       )}
@@ -201,28 +390,57 @@ export function AgentDetail() {
 
       {/* Actions */}
       <div className="flex gap-3">
-        <Button
-          variant={isRunning ? "outline" : "default"}
-          size="default"
-          onClick={handleToggle}
-          className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
-        >
-          {isRunning ? (
-            <><Pause className="size-4 mr-1.5" /> Stop</>
-          ) : (
-            <><Play className="size-4 mr-1.5" /> Start</>
-          )}
-        </Button>
-        <Button
-          variant="ghost"
-          size="default"
-          onClick={() => setRemoveOpen(true)}
-          className="text-destructive hover:text-destructive hover:bg-destructive/10"
-        >
-          <Trash2 className="size-4 mr-1.5" />
-          Remove
-        </Button>
+        {mode === "view" ? (
+          <>
+            <Button
+              variant={isRunning ? "outline" : "default"}
+              size="default"
+              onClick={handleToggle}
+              className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
+            >
+              {isRunning ? (
+                <><Pause className="size-4 mr-1.5" /> Stop</>
+              ) : (
+                <><Play className="size-4 mr-1.5" /> Start</>
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="default"
+              onClick={() => setRemoveOpen(true)}
+              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="size-4 mr-1.5" />
+              Remove
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              variant="default"
+              size="default"
+              onClick={handleSave}
+              disabled={mode === "saving"}
+            >
+              {mode === "saving" ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              variant="outline"
+              size="default"
+              onClick={cancelEdit}
+              disabled={mode === "saving"}
+            >
+              Cancel
+            </Button>
+          </>
+        )}
       </div>
+
+      {editError && (
+        <div className="mt-3 p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-sm text-destructive">
+          {editError}
+        </div>
+      )}
 
       <RemoveAgentDialog
         agentId={agent.id}
