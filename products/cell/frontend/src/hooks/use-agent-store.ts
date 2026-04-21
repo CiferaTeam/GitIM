@@ -10,6 +10,8 @@ interface AgentState {
   removeAgent: (id: string) => void;
   updateAgent: (id: string, updates: Partial<Agent>) => void;
   selectAgent: (id: string | null) => void;
+  /** Clear all workspace-scoped agent state. Called on workspace switch. */
+  resetForWorkspaceSwitch: () => void;
 }
 
 export const useAgentStore = create<AgentState>((set) => ({
@@ -34,4 +36,7 @@ export const useAgentStore = create<AgentState>((set) => ({
     })),
 
   selectAgent: (id) => set({ selectedAgentId: id }),
+
+  resetForWorkspaceSwitch: () =>
+    set({ agents: [], selectedAgentId: null }),
 }));
