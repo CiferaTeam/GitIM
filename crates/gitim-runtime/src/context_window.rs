@@ -27,18 +27,25 @@ pub fn default_max_tokens(provider: &str, model: &str) -> Option<u64> {
 }
 
 fn claude_max_tokens(model_lc: &str) -> u64 {
-    // Explicit 1M opt-in marker (e.g. `claude-sonnet-4-6[1m]`,
-    // `claude-opus-4-7[1m]`). Anthropic exposes the 1M window as a beta flag;
-    // we surface it through the model string so per-agent config can pick it.
+    // Explicit 1M marker on the model string (legacy opt-in, still honored
+    // for older agents whose me.json was onboarded before 4.x became the
+    // default). The `[1m]` / `-1m` suffix was how Claude Code surfaced the
+    // beta flag before the 1M window became the native default for 4.x.
     if model_lc.contains("[1m]") || model_lc.contains("-1m") {
         return 1_000_000;
     }
-    // Sonnet 4.5+ supports a 1M beta by default in Claude CLI ≥ 1.0.
-    // sonnet-4-6 is the common default in WebUI; give it the full 1M.
-    if model_lc.contains("sonnet-4-6") || model_lc.contains("sonnet-4-7") {
+    // Claude 4.x models ship with a 1M context window by default:
+    //   - sonnet-4-6 / sonnet-4-7
+    //   - opus-4-7 (Opus lifted the ceiling from 200k to 1M at 4.7)
+    // Match on version stems so future `sonnet-4-8` / `opus-4-8` inherit
+    // this default without a code change.
+    if model_lc.contains("sonnet-4-6")
+        || model_lc.contains("sonnet-4-7")
+        || model_lc.contains("opus-4-7")
+    {
         return 1_000_000;
     }
-    // Opus / Haiku / older Sonnet → classic 200k window.
+    // Haiku + older Sonnet + older Opus → classic 200k window.
     200_000
 }
 
@@ -73,8 +80,20 @@ mod default_max_tests {
     }
 
     #[test]
-    fn claude_opus_default_is_200k() {
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-7"), Some(200_000));
+    fn claude_opus_4_7_is_1m_by_default() {
+        // opus-4-7 natively supports a 1M window; the `[1m]` suffix is legacy
+        // from the beta-flag era and the bare model string now gets the same
+        // ceiling. Prior behaviour (200k) triple-counted relative to reality
+        // and inflated the usage HUD roughly 5×.
+        assert_eq!(default_max_tokens("claude", "claude-opus-4-7"), Some(1_000_000));
+    }
+
+    #[test]
+    fn claude_opus_older_generations_stay_at_200k() {
+        // Opus 3 / 4 (pre-4.7) never got the 1M upgrade; they still need the
+        // conservative denominator so the threshold preamble fires in time.
+        assert_eq!(default_max_tokens("claude", "claude-opus-4-1"), Some(200_000));
+        assert_eq!(default_max_tokens("claude", "claude-3-opus"), Some(200_000));
     }
 
     #[test]
