@@ -2758,11 +2758,6 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
     (router, state)
 }
 
-/// Validate an environment variable key name.
-///
-/// Rejects empty strings, keys starting with a digit or non-ASCII character,
-/// and keys containing anything other than ASCII alphanumerics or underscores.
-/// (POSIX convention: `[A-Za-z_][A-Za-z0-9_]*`.)
 /// Ensure the human clone's .gitignore excludes .env and commit if we added it.
 /// Best-effort — failures are logged, not propagated; a missing rule is cosmetic,
 /// the secret file is per-clone anyway.
@@ -2790,8 +2785,8 @@ fn apply_dotenv_gitignore(human_clone: &Path) {
             }
             let commit = std::process::Command::new("git")
                 .args([
-                    "-c", "user.email=runtime@gitim",
-                    "-c", "user.name=gitim",
+                    "-c", "user.email=system@gitim",
+                    "-c", "user.name=system",
                     "commit", "-m", "chore: gitignore .env (runtime init)",
                 ])
                 .current_dir(human_clone)
@@ -2815,6 +2810,11 @@ fn apply_dotenv_gitignore(human_clone: &Path) {
     }
 }
 
+/// Validate an environment variable key name.
+///
+/// Rejects empty strings, keys starting with a digit or non-ASCII character,
+/// and keys containing anything other than ASCII alphanumerics or underscores.
+/// (POSIX convention: `[A-Za-z_][A-Za-z0-9_]*`.)
 fn is_valid_env_key(k: &str) -> bool {
     if k.is_empty() {
         return false;

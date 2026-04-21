@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use common::{ensure_daemon_in_path, short_tempdir};
 use gitim_runtime::http::create_router;
+use serial_test::serial;
 
 async fn spawn_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let (router, _state) = create_router();
@@ -40,6 +41,7 @@ fn kill_daemon_in(workspace_path: &std::path::Path) {
 }
 
 #[tokio::test]
+#[serial]
 async fn local_git_init_adds_env_to_gitignore_and_commits() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
@@ -83,6 +85,7 @@ async fn local_git_init_adds_env_to_gitignore_and_commits() {
 }
 
 #[tokio::test]
+#[serial]
 async fn local_git_init_commits_env_gitignore_exactly_once() {
     ensure_daemon_in_path();
     let tmp = short_tempdir();
