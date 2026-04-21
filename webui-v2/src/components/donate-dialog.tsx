@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy, Check, Heart } from "lucide-react";
+import { Copy, Check, Coffee } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -33,22 +33,29 @@ export function DonateDialog() {
           title="Support developer"
           className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
         >
-          <Heart className="size-4" />
+          <Coffee className="size-4" />
         </button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md bg-background border-border">
         <DialogHeader>
-          <DialogTitle className="text-foreground">Support GitIM</DialogTitle>
+          <DialogTitle className="text-foreground">请作者喝杯咖啡 ☕</DialogTitle>
           <DialogDescription className="text-text-muted">
-            GitIM is an independently developed project. If you find it useful,
-            consider supporting the developer.
+            这个项目是独立开发的，如果你觉得有帮到你，欢迎打赏给作者鼓励~
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="rounded-lg border border-border bg-surface/50 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-text-muted uppercase tracking-wider">
-                Network
+                建议金额
+              </span>
+              <span className="text-sm font-medium text-foreground">
+                2 USDT（随意）
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-text-muted uppercase tracking-wider">
+                网络
               </span>
               <span className="text-sm font-medium text-foreground">
                 {CHAIN_NAME}
@@ -56,10 +63,10 @@ export function DonateDialog() {
             </div>
             <div className="space-y-1.5">
               <span className="text-xs font-medium text-text-muted uppercase tracking-wider">
-                Address
+                地址
               </span>
               <div className="flex items-center gap-2">
-                <code className="flex-1 text-xs font-mono bg-background border border-border rounded-md px-2.5 py-2 text-foreground break-all">
+                <code className="flex-1 text-xs font-mono bg-background border border-border rounded-md px-2.5 py-2 text-foreground whitespace-nowrap overflow-x-auto">
                   {DONATE_ADDRESS}
                 </code>
                 <button
@@ -77,10 +84,6 @@ export function DonateDialog() {
               </div>
             </div>
           </div>
-          <p className="text-xs text-text-muted text-center">
-            Only send tokens on {CHAIN_NAME}. Sending assets on other chains may
-            result in permanent loss.
-          </p>
         </div>
       </DialogContent>
     </Dialog>
