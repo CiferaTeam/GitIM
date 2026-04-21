@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# rustup's cargo/rustc shims MUST win over Homebrew rust, otherwise cross-target
+# builds fail with "can't find crate for core" — Homebrew rustc doesn't know
+# about targets installed by rustup (they live in ~/.rustup/toolchains/...).
+export PATH="$HOME/.cargo/bin:$PATH"
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 RELEASES_REPO="CiferaTeam/gitim-releases"
 
