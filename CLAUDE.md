@@ -50,17 +50,17 @@ gitim-runtime ──→ gitim-client
 
 | 目录 | 状态 | 说明 |
 |------|------|------|
-| `webui-v2/` | **当前主线** | React 19 + Vite + Radix UI + Tailwind + Zustand |
-| `webui/` | 遗留 | 早期 React 原型，含 `legacy_client/`（Node.js bridge server）|
+| `products/cell/frontend/` | **当前主线** | Cell 产品前端（cell.gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
+| `products/site/frontend/` | 活跃 | 营销/文档站点（Vite + React + shadcn/ui） |
 
 ### 遗留 / 不要修改
 
 | 目录 | 说明 |
 |------|------|
+| `webui/` | 早期 React 原型 |
+| `webui/legacy_client/` | 旧版 Node.js bridge server |
 | `legacy/cli/` | 旧版 TypeScript CLI（`@gitim-runtime/cli`），已被 Rust `gitim-cli` 取代 |
 | `legacy/packages/` | 旧版 npm 包 |
-| `webui/legacy_client/` | 旧版 Node.js bridge server |
-| `products/site/` | 文档站点 |
 | `demo/` | 演示用 |
 
 ## Onboard 流程

@@ -23,8 +23,8 @@
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` Perf P1。
 **Added:** 2026-04-17 via /plan-eng-review
 
-### webui-v2 前端测试基建
-**What:** webui-v2 引入 vitest + 至少一个 MemberPicker 等组件的 unit test 范例。
+### cell-frontend 前端测试基建
+**What:** `products/cell/frontend` 引入 vitest + 至少一个 MemberPicker 等组件的 unit test 范例。
 **Why:** 群聊邀请功能落地时发现前端缺少测试基建，只能靠 cargo test 覆盖后端。长期看前端逻辑（搜索过滤、多选、排除）应有单元测试。
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` 测试要点。
 **Added:** 2026-04-17 via /plan-eng-review
@@ -44,7 +44,7 @@
 **Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
 
 ### WebUI `activeSlug` 失联时的自动 fallback
-**What:** `webui-v2/src/hooks/use-workspace-store.ts`: 当 `activeSlug` 引用的 workspace 被其它客户端(或另一台机)删除后,poll 轮询 / SSE 重连发现 404/stream 关闭时,应自动 trigger `fetchAll()` 并切到第一个可用 workspace。当前仅在 `fetchAll` 内部修复(启动 + 本地 create/remove 时触发),线上 workspace 消失时 UI 卡住。
+**What:** `products/cell/frontend/src/hooks/use-workspace-store.ts`: 当 `activeSlug` 引用的 workspace 被其它客户端(或另一台机)删除后,poll 轮询 / SSE 重连发现 404/stream 关闭时,应自动 trigger `fetchAll()` 并切到第一个可用 workspace。当前仅在 `fetchAll` 内部修复(启动 + 本地 create/remove 时触发),线上 workspace 消失时 UI 卡住。
 **Why:** 多设备或多 runtime 实例场景下 workspace 列表会异步变化。
 **Context:** 2026-04-18 Codex review P2 for multi-workspace-runtime feature。`use-agent-activity.ts:56` 的 `onerror` 当前是 no-op。
 **Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)

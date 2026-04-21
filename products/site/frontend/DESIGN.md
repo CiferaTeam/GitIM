@@ -133,5 +133,5 @@ gitim.io (主页) 和 app.gitim.io (产品) 共享：
 | 2026-04-14 | zinc neutral scale | 近黑微暖背景，降低纯黑对比度，长时间阅读不疲劳 |
 | 2026-04-14 | 产品优先定位 | 主页核心任务是展示产品价值和驱动"申请内测"，不是推广开源协议 |
 | 2026-04-14 | 不提供 light mode | 目标用户是开发者，dark mode 是唯一模式 |
-| 2026-04-14 | Vite + React + shadcn/ui | 与 webui-v2 同源技术栈，共享组件模式和依赖 |
+| 2026-04-14 | Vite + React + shadcn/ui | 与 `products/cell/frontend` 同源技术栈，共享组件模式和依赖 |
 | 2026-04-14 | products/site/frontend 目录结构 | monorepo 按产品线分，支持未来多产品扩展和 packages/ 公用库提取 |

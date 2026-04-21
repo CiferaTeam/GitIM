@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, "../..");
-export const WEBUI_DIR = path.join(ROOT, "webui-v2");
+export const WEBUI_DIR = path.join(ROOT, "products/cell/frontend");
 
 export interface RuntimeEnv {
   runtimePort: number;
