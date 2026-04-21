@@ -1450,7 +1450,6 @@ struct AgentUpdateRequest {
     #[serde(default, deserialize_with = "deser_triple_option")]
     system_prompt: Option<Option<String>>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed in Task 3
     env: Option<HashMap<String, String>>,
     #[serde(default)]
     #[allow(dead_code)] // consumed in Task 3
@@ -1543,6 +1542,32 @@ async fn agents_patch(
         }
     }
 
+    // Env validation + whole-map replacement.
+    // absent (None)       → no-op
+    // Some({})            → remove "env" field entirely
+    // Some({k: v, ...})   → validate keys, then replace wholesale
+    if let Some(env_map) = &req.env {
+        for key in env_map.keys() {
+            if !is_valid_env_key(key) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("invalid env var name: {key}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        if env_map.is_empty() {
+            if let Some(obj) = me.as_object_mut() {
+                obj.remove("env");
+            }
+        } else {
+            me["env"] = serde_json::to_value(env_map).unwrap();
+        }
+    }
+
     if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1568,6 +1593,9 @@ async fn agents_patch(
                         Some(s) if !s.is_empty() => Some(s.clone()),
                         _ => None,
                     };
+                }
+                if let Some(env_map) = &req.env {
+                    info.env = env_map.clone();
                 }
                 Some(info.clone())
             } else {
@@ -2643,6 +2671,23 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .with_state(state.clone());
 
     (router, state)
+}
+
+/// Validate an environment variable key name.
+///
+/// Rejects empty strings, keys starting with a digit or non-ASCII character,
+/// and keys containing anything other than ASCII alphanumerics or underscores.
+/// (POSIX convention: `[A-Za-z_][A-Za-z0-9_]*`.)
+fn is_valid_env_key(k: &str) -> bool {
+    if k.is_empty() {
+        return false;
+    }
+    let bytes = k.as_bytes();
+    let first = bytes[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 #[cfg(test)]

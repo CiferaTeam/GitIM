@@ -229,6 +229,78 @@ async fn patch_system_prompt_null_clears_field() {
     assert_eq!(me["provider"], json!("claude"));
 }
 
+// -- Helper: seed with explicit env map ---------------------------------------
+
+/// Like `seed_agent_in_workspace` but accepts an explicit initial env map that
+/// is written both into `me.json` and into the in-memory `AgentInfo`.
+fn seed_agent_with_env(
+    state: &SharedRuntimeState,
+    slug_str: &str,
+    agent_id: &str,
+    initial_env: std::collections::HashMap<String, String>,
+) -> tempfile::TempDir {
+    use gitim_runtime::http::AgentInfo;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let gitim_dir = dir.path().join(".gitim");
+    std::fs::create_dir_all(&gitim_dir).unwrap();
+
+    // Build me.json with the env map included.
+    let me_json = serde_json::json!({
+        "provider": "claude",
+        "env": initial_env,
+    });
+    std::fs::write(
+        gitim_dir.join("me.json"),
+        serde_json::to_string_pretty(&me_json).unwrap(),
+    )
+    .unwrap();
+
+    let info = AgentInfo {
+        id: agent_id.to_string(),
+        handler: agent_id.to_string(),
+        display_name: "Test Agent".to_string(),
+        status: "idle".to_string(),
+        last_activity: None,
+        messages_processed: 0,
+        repo_path: dir.path().display().to_string(),
+        provider: Some("claude".to_string()),
+        model: None,
+        system_prompt: None,
+        env: initial_env,
+        error_message: None,
+        session_usage: None,
+        loop_handle: None,
+    };
+
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get_mut(slug_str)
+        .expect("workspace must be injected first")
+        .agents
+        .insert(agent_id.to_string(), info);
+
+    dir
+}
+
+// Helper shortcut for PATCH requests used by env tests.
+async fn send_patch(
+    router: &axum::Router,
+    slug: &str,
+    agent_id: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    send(
+        router.clone(),
+        "PATCH",
+        &format!("/workspaces/{slug}/agents/{agent_id}"),
+        Some(body),
+    )
+    .await
+}
+
 // -- 4. PATCH empty body does not touch system_prompt -------------------------
 
 #[tokio::test]
@@ -272,5 +344,116 @@ async fn patch_missing_field_does_not_touch_it() {
         me["system_prompt"],
         json!("keep me"),
         "system_prompt must be untouched when field is absent from request"
+    );
+}
+
+// -- 5. PATCH env replaces full map (A and B gone after PATCH {C: 3}) ---------
+
+#[tokio::test]
+async fn patch_env_replaces_full_map() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws5");
+    let initial_env: std::collections::HashMap<String, String> = [
+        ("A".to_string(), "1".to_string()),
+        ("B".to_string(), "2".to_string()),
+    ]
+    .into();
+    let _dir = seed_agent_with_env(&state, "ws5", "alice", initial_env);
+
+    let agent_dir = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws5")
+        .unwrap()
+        .agents
+        .get("alice")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, body) = send_patch(&router, "ws5", "alice", json!({ "env": { "C": "3" } })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], json!(true));
+    // Response env should contain only C.
+    let resp_env = body["agent"]["env"].as_object().expect("env should be object");
+    assert_eq!(resp_env.get("C").and_then(|v| v.as_str()), Some("3"), "C must be present");
+    assert!(resp_env.get("A").is_none(), "A must be gone — replacement, not merge");
+    assert!(resp_env.get("B").is_none(), "B must be gone — replacement, not merge");
+
+    // On-disk me.json must also reflect replacement.
+    let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
+    let me: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    let disk_env = me["env"].as_object().expect("env should be object on disk");
+    assert_eq!(disk_env.get("C").and_then(|v| v.as_str()), Some("3"));
+    assert!(disk_env.get("A").is_none(), "A must be absent from me.json after replacement");
+    assert!(disk_env.get("B").is_none(), "B must be absent from me.json after replacement");
+    // Other fields survive (merge semantics for non-env fields).
+    assert_eq!(me["provider"], json!("claude"));
+}
+
+// -- 6. PATCH env empty map clears all env vars --------------------------------
+
+#[tokio::test]
+async fn patch_env_empty_clears_all() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws6");
+    let initial_env: std::collections::HashMap<String, String> =
+        [("A".to_string(), "1".to_string())].into();
+    let _dir = seed_agent_with_env(&state, "ws6", "alice", initial_env);
+
+    let agent_dir = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("ws6")
+        .unwrap()
+        .agents
+        .get("alice")
+        .unwrap()
+        .repo_path
+        .clone();
+
+    let (status, body) = send_patch(&router, "ws6", "alice", json!({ "env": {} })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], json!(true));
+
+    // On-disk: env field should be absent or empty.
+    let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
+    let me: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    let no_env = me.get("env").map_or(true, |v| {
+        v.as_object().map_or(true, |o| o.is_empty())
+    });
+    assert!(no_env, "env must be absent or empty after PATCH {{env: {{}}}}; got: {me}");
+    assert!(
+        me.get("env").map_or(true, |v| v.as_object().map_or(true, |o| o.get("A").is_none())),
+        "A must be gone"
+    );
+}
+
+// -- 7. PATCH env with illegal key returns 400 --------------------------------
+
+#[tokio::test]
+async fn patch_env_rejects_illegal_key() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws7");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws7",
+        "alice",
+        json!({ "provider": "claude" }),
+    );
+
+    let (status, body) = send_patch(&router, "ws7", "alice", json!({ "env": { "1bad": "x" } })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["ok"], json!(false));
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("invalid env var"),
+        "error should mention 'invalid env var'; got: {body}"
     );
 }
