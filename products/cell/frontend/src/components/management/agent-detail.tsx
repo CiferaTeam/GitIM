@@ -199,7 +199,8 @@ export function AgentDetail() {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-6 max-w-3xl">
+    <div className="h-full overflow-y-auto">
+      <div className="p-6 max-w-3xl">
       <Button
         variant="ghost"
         size="sm"
@@ -418,6 +419,7 @@ export function AgentDetail() {
         onOpenChange={setRemoveOpen}
         onRemoved={() => navigate("/management")}
       />
+      </div>
     </div>
   );
 }
