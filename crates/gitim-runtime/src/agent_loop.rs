@@ -293,6 +293,27 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Clear the in-memory mirror of `session_usage` on the runtime's shared
+    /// state and broadcast an empty `usage` activity event.
+    ///
+    /// Pairs with `AgentState::clear_session()` on disk so the WebUI HUD does
+    /// not keep displaying the pre-reset percentage after `[[RESET]]` or a
+    /// failed execute. A missing runtime_state or activity_tx is fine —
+    /// standalone CLI / tests skip silently.
+    fn clear_runtime_session_usage(&self) {
+        if let Some(rs) = &self.runtime_state {
+            if let Ok(mut s) = rs.lock() {
+                if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
+                    if let Some(info) = ctx.agents.get_mut(&self.handler) {
+                        info.session_usage = None;
+                    }
+                }
+            }
+        }
+        // Empty payload tells reactive clients to drop their cached snapshot.
+        self.emit_activity("usage", "");
+    }
+
     /// Initialize the poller cursor if not already set.
     /// Call this once before entering a manual run_once() loop.
     pub async fn init(&mut self) -> Result<(), RuntimeError> {
@@ -453,7 +474,14 @@ impl AgentLoop {
         // Silent reset short-circuit: agent asked to reset its own context.
         // Clear session_token so next cycle rebuilds the system prompt.
         // Cursor is preserved — the messages in this cycle have been consumed.
-        // Intentionally skip status match + emit_activity: this is invisible to IM and UI.
+        //
+        // Reset is invisible to IM (no chat message), but the WebUI HUD still
+        // needs a terminal signal — otherwise the `thinking`/`processing...`
+        // spinner stays on indefinitely and the pre-reset `used_percent`
+        // sticks on screen. Emit a `done` activity with `detail="reset"` so
+        // reactive clients can terminate the spinner without showing a
+        // user-facing completion message, and clear the in-memory
+        // session_usage mirror to match the on-disk clear_session().
         if reset_requested {
             info!(
                 handler = %self.handler,
@@ -466,6 +494,8 @@ impl AgentLoop {
             state.clear_session();
             state.save(&self.repo_root)?;
             tracing::info!(session_id = ?sid_for_log, reason = "agent_emitted_reset", "session_reset");
+            self.clear_runtime_session_usage();
+            self.emit_activity("done", "reset");
             self.save_state()?;
             return Ok(true);
         }
@@ -485,6 +515,9 @@ impl AgentLoop {
                 let mut state = AgentState::load(&self.repo_root)?;
                 state.clear_session();
                 state.save(&self.repo_root)?;
+                // Mirror the on-disk clear into the runtime's shared state
+                // so the HUD stops showing a stale percentage.
+                self.clear_runtime_session_usage();
             }
             ExecStatus::Aborted => {
                 info!(
@@ -847,6 +880,7 @@ pub fn build_usage_notice_preamble(used_percent: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::RuntimeState;
 
     #[test]
     fn agent_activity_event_includes_workspace_id() {
@@ -859,5 +893,136 @@ mod tests {
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws1\""));
+    }
+
+    /// Build a minimal AgentLoop + SharedRuntimeState + workspace with one
+    /// agent that has a 89%-full `session_usage` snapshot installed. Returns
+    /// the loop, the shared state, and a broadcast receiver wired to the
+    /// workspace's activity channel. Caller can drive `clear_runtime_session_usage`
+    /// and assert both the state mutation and the broadcast side-effect.
+    fn harness_with_usage_snapshot(
+        handler: &str,
+        slug: &str,
+    ) -> (
+        AgentLoop,
+        SharedRuntimeState,
+        tokio::sync::broadcast::Receiver<AgentActivityEvent>,
+        tempfile::TempDir,
+    ) {
+        use crate::state::{SessionUsageSnapshot, UsageSource};
+        use crate::workspace::WorkspaceContext;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let gitim_dir = tmp.path().join(".gitim");
+        std::fs::create_dir_all(&gitim_dir).unwrap();
+        std::fs::write(
+            gitim_dir.join("me.json"),
+            format!("{{\"handler\":\"{handler}\"}}"),
+        )
+        .unwrap();
+
+        let mut loop_ =
+            AgentLoop::with_provider(tmp.path(), "mock", handler).expect("build loop");
+
+        let mut ctx = WorkspaceContext::new(
+            slug.to_string(),
+            slug.to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let rx = ctx.activity_tx.subscribe();
+        let activity_tx = ctx.activity_tx.clone();
+
+        ctx.agents.insert(
+            handler.to_string(),
+            crate::http::AgentInfo {
+                id: handler.to_string(),
+                handler: handler.to_string(),
+                display_name: handler.to_string(),
+                status: "running".to_string(),
+                last_activity: None,
+                messages_processed: 0,
+                repo_path: tmp.path().display().to_string(),
+                provider: Some("mock".to_string()),
+                model: None,
+                system_prompt: None,
+                env: Default::default(),
+                error_message: None,
+                session_usage: Some(SessionUsageSnapshot {
+                    session_id: "sid-pre-reset".to_string(),
+                    input_tokens: Some(7),
+                    output_tokens: Some(100),
+                    max_tokens: Some(200_000),
+                    used_percent: 89.0,
+                    source: UsageSource::ProviderReported,
+                    updated_at: "2026-04-21T07:34:02Z".to_string(),
+                }),
+                loop_handle: None,
+            },
+        );
+
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .insert(slug.to_string(), ctx);
+
+        loop_.set_runtime_state(state.clone());
+        loop_.set_activity_tx_with_workspace(activity_tx, slug.to_string());
+
+        (loop_, state, rx, tmp)
+    }
+
+    #[test]
+    fn clear_runtime_session_usage_drops_hud_snapshot() {
+        // Guards against the regression where the WebUI HUD kept displaying
+        // the pre-reset percentage after [[RESET]] — the in-memory mirror
+        // was never cleared to match the on-disk clear_session().
+        let (loop_, state, _rx, _tmp) =
+            harness_with_usage_snapshot("framer-opus", "gitim-company");
+
+        // Sanity: pre-condition — HUD snapshot is installed at 89%.
+        {
+            let s = state.lock().unwrap();
+            let info = s.workspaces["gitim-company"]
+                .agents
+                .get("framer-opus")
+                .expect("agent present");
+            assert_eq!(
+                info.session_usage.as_ref().unwrap().used_percent,
+                89.0,
+                "precondition: agent should have 89% snapshot"
+            );
+        }
+
+        loop_.clear_runtime_session_usage();
+
+        let s = state.lock().unwrap();
+        let info = s.workspaces["gitim-company"]
+            .agents
+            .get("framer-opus")
+            .expect("agent still present");
+        assert!(
+            info.session_usage.is_none(),
+            "clear must drop the in-memory snapshot so HUD stops showing stale percent"
+        );
+    }
+
+    #[test]
+    fn clear_runtime_session_usage_broadcasts_empty_usage_event() {
+        // Reactive SSE clients cache the last `usage` event's payload. An
+        // empty payload tells them "drop the cached snapshot" so the HUD
+        // number disappears without requiring a poll of GET /agents/:id.
+        let (loop_, _state, mut rx, _tmp) =
+            harness_with_usage_snapshot("framer-opus", "gitim-company");
+
+        loop_.clear_runtime_session_usage();
+
+        let ev = rx.try_recv().expect("activity event must be emitted");
+        assert_eq!(ev.event_type, "usage");
+        assert_eq!(ev.detail, "", "empty detail signals 'drop cached snapshot'");
+        assert_eq!(ev.workspace_id, "gitim-company");
+        assert_eq!(ev.agent_id, "framer-opus");
     }
 }
