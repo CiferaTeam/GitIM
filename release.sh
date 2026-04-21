@@ -199,6 +199,35 @@ else
     "${NOTES_ARGS[@]}"
 fi
 
+# ---------- Sync install.sh to releases repo (only if changed) ----------
+#
+# Users fetch install.sh from the releases repo's main branch
+# (`curl -sSf https://raw.githubusercontent.com/<repo>/main/install.sh | sh`).
+# The authoritative source lives in the main GitIM repo; this step pushes any
+# changes to the releases repo so curl-installs get the current platform list
+# and SHA verification logic.
+#
+# Skip if identical — no-op commit noise is worse than silent skip.
+# Fail-fast if sync fails — the Release is already uploaded, so stopping here
+# surfaces drift loudly rather than letting users pull a stale installer.
+echo ""
+echo "==> Checking install.sh sync to ${RELEASES_REPO}..."
+SYNC_DIR="$STAGING/releases-repo-sync"
+rm -rf "$SYNC_DIR"
+gh repo clone "$RELEASES_REPO" "$SYNC_DIR" -- --depth=1 --single-branch --branch=main --quiet
+if cmp -s "$ROOT/install.sh" "$SYNC_DIR/install.sh"; then
+  echo "    install.sh unchanged — skipping sync"
+else
+  cp "$ROOT/install.sh" "$SYNC_DIR/install.sh"
+  (
+    cd "$SYNC_DIR"
+    git add install.sh
+    git commit -m "chore(install): sync install.sh from gitim ${TAG}"
+    git push origin main
+  )
+  echo "    install.sh synced to ${RELEASES_REPO}@main ✓"
+fi
+
 echo ""
 echo "==> Published ${TAG}"
 echo "    https://github.com/${RELEASES_REPO}/releases/tag/${TAG}"
