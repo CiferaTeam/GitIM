@@ -854,25 +854,33 @@ pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
 /// `used_percent` first crosses `WARN_AT_PERCENT`. Written to speak to the
 /// agent as a model would experience context pressure — "handoff, not
 /// completion" framing. Per 01-design.md §4.5.
+///
+/// Rewritten after the 2026-04-21 repro (sid f6cf86eb, framer-opus): the
+/// previous numbered list had "停下所有新的工具调用" as step 1 and "在记忆
+/// 文件里留一段 orientation" as step 2, which literally contradicts itself
+/// (writing to a memory file requires Read + Edit). Under context pressure
+/// the agent resolved the conflict loosely and fired misdirected side
+/// actions (wrong-channel DMs) before the `[[RESET]]` sentinel. The
+/// rewritten copy uses a single flowing imperative that names the allowed
+/// tool surface explicitly.
 pub fn build_usage_notice_preamble(used_percent: f64) -> String {
     format!(
-        "[系统通知] 对话窗口已用 {pct:.0}%，容量接近上限。\n\
+        "[系统通知] 对话窗口已用 {pct:.0}%。\n\
          \n\
-         你手里大概同时压着好几件事。继续在这个窗口里推进的边际收益已经很低 —— \
-         注意力被稀释，新细节越来越难稳定保持。此刻最有价值的动作不是把手头的事收尾，\
-         而是给下一个窗口的你做一次干净的交接。\n\
+         此刻对你最有价值的动作是给下一个窗口的你做一次干净的交接 —— \
+         注意力被稀释后继续推进新任务的边际收益很低。\n\
          \n\
-         请立即：\n\
-         1. 停下所有新的工具调用和任务步骤\n\
-         2. 在你的记忆文件里留一段 orientation（方向感，不是流水账）：\n\
-            - 当前任务位置 / 下一步该做什么\n\
-            - 已经形成但还没落笔的判断、用户偏好、关键未决 tension\n\
-            - 让冷启动的你能快速接回当前位置的最小定向信息\n\
-         3. 输出末尾附加 [[RESET]]，runtime 会给你开一个干净的新窗口\n\
+         立即只做这一件事：在你的记忆文件里写一段 orientation \
+         （方向感，不是流水账）—— 当前任务位置 / 下一步该做什么 / \
+         已经形成但还没落笔的判断、用户偏好、关键未决 tension —— \
+         让冷启动的你能快速接回。\n\
          \n\
-         新窗口的你会读这些记忆文件冷启动。你此刻留下什么，它就从什么开始。\n\
+         允许的工具：Read 和 Edit 记忆文件。不要发消息、不要回复用户、\
+         不要启动新任务。写完后，在输出末尾附加 [[RESET]]，\
+         runtime 会给你开一个干净的新窗口。\n\
          \n\
-         本提醒仅发送一次。",
+         新窗口的你会读这些记忆文件冷启动 —— 你此刻留下什么，\
+         它就从什么开始。本提醒仅发送一次。",
         pct = used_percent,
     )
 }

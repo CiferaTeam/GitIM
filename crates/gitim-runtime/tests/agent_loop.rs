@@ -339,3 +339,29 @@ fn preamble_frames_as_handoff_not_completion() {
         "must NOT tell the agent to finish its work first: {p}"
     );
 }
+
+#[test]
+fn preamble_does_not_blanket_ban_tool_use() {
+    // Regression guard for the 2026-04-21 repro (sid f6cf86eb): the old
+    // preamble said "停下所有新的工具调用和任务步骤" in step 1 and then
+    // asked the agent to "在记忆文件里留一段 orientation" in step 2 —
+    // which requires Read + Edit tool calls. The agent resolved the
+    // contradiction by firing misdirected DMs before [[RESET]]. The
+    // rewritten copy must name the allowed tool surface explicitly
+    // (Read + Edit of memory files) and must NOT contain a blanket
+    // "stop all tool calls" instruction.
+    let p = build_usage_notice_preamble(85.0);
+    assert!(
+        !p.contains("停下所有新的工具调用"),
+        "blanket tool-use ban contradicts the write-orientation step: {p}"
+    );
+    assert!(
+        p.contains("Read") && p.contains("Edit"),
+        "must name the allowed tools so the agent does not guess: {p}"
+    );
+    assert!(
+        p.contains("不要发消息") || p.contains("不要回复用户"),
+        "must explicitly prohibit the side-channel actions the agent \
+         was observed to drift into (misdirected DMs in f6cf86eb): {p}"
+    );
+}
