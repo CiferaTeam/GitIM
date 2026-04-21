@@ -3,7 +3,7 @@
 //! gitim-updater: shared core for GitIM self-update.
 //!
 //! Pure helpers (version parsing, platform detection, URL formatting) sit
-//! alongside async IO helpers (`fetch_latest_tag`, `download_and_extract`) and
+//! alongside async IO helpers (`fetch_latest_tag`, `install_update`) and
 //! a sync atomic-replace helper (`replace_binaries`). The CLI and runtime both
 //! drive the flow through these — no direct reqwest / tar calls at callsites.
 
@@ -40,6 +40,12 @@ pub enum UpdateError {
     #[error("missing binary in archive: {0}")]
     MissingBinary(String),
 
+    #[error("sha256 mismatch: expected {expected}, actual {actual}")]
+    Sha256Mismatch { expected: String, actual: String },
+
+    #[error("sha256 line not found in SHA256SUMS for {0}")]
+    Sha256LineMissing(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -64,6 +70,44 @@ pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
         return None;
     }
     Some((major, minor, patch))
+}
+
+/// Verify that `bytes` hash to `expected_hex` under SHA-256.
+///
+/// `expected_hex` is a 64-char lowercase hex string (uppercase tolerated) —
+/// the canonical SHA-256 output format from `shasum -a 256` / `sha256sum`.
+/// Anything shorter, longer, or non-hex is rejected as
+/// `UpdateError::Sha256Mismatch` (fail closed — we never silently accept a
+/// malformed expectation).
+pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), UpdateError> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual_bytes = hasher.finalize();
+    let actual_hex = hex::encode(actual_bytes);
+
+    // Case-insensitive compare — sha256sum on BSD/mac emits lowercase, GNU
+    // coreutils also lowercase, but older shasum(1) on macOS emits uppercase
+    // for some flags. Normalize both.
+    let expected_norm = expected_hex.trim().to_lowercase();
+
+    // Length guard: SHA-256 is always 32 bytes = 64 hex chars. Anything else
+    // is malformed upstream data — treat as mismatch rather than a separate
+    // error variant (callers only care "verify failed").
+    if expected_norm.len() != 64 || !expected_norm.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(UpdateError::Sha256Mismatch {
+            expected: expected_hex.to_string(),
+            actual: actual_hex,
+        });
+    }
+
+    if expected_norm != actual_hex {
+        return Err(UpdateError::Sha256Mismatch {
+            expected: expected_norm,
+            actual: actual_hex,
+        });
+    }
+    Ok(())
 }
 
 /// True iff `remote` is strictly newer than `current`. Malformed inputs -> false
@@ -165,11 +209,12 @@ pub async fn fetch_latest_tag() -> Result<String, UpdateError> {
         .ok_or_else(|| UpdateError::Extract("no tag_name in release response".to_string()))
 }
 
-/// Download a tarball from `url` and unpack it into `dest`.
+/// Fetch the full body of `url` into memory. Used for both small SHA256SUMS
+/// text files and the release tarball (10-20 MB at current binary sizes —
+/// well within RAM, streaming to disk not worth the complexity).
 ///
-/// Small (5-20MB) tarballs are read fully into memory — streaming to disk adds
-/// complexity the current sizes don't warrant.
-pub async fn download_and_extract(url: &str, dest: &Path) -> Result<(), UpdateError> {
+/// Non-2xx -> `UpdateError::HttpStatus(code)`.
+pub async fn download_bytes(url: &str) -> Result<Vec<u8>, UpdateError> {
     let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();
@@ -177,19 +222,74 @@ pub async fn download_and_extract(url: &str, dest: &Path) -> Result<(), UpdateEr
         return Err(UpdateError::HttpStatus(status.as_u16()));
     }
     let bytes = resp.bytes().await?;
-    let decoder = flate2::read::GzDecoder::new(&bytes[..]);
+    Ok(bytes.to_vec())
+}
+
+/// Extract a gzipped-tar byte slice into `dest` on disk.
+///
+/// Pure sync; no network. The `tar` 0.4 default `Archive::unpack` rejects
+/// absolute paths and `..` traversal — we rely on that for defense in depth.
+/// Do not call `archive.set_preserve_permissions(true)` or relax the path
+/// checks without re-evaluating the trust model.
+pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), UpdateError> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
-    // Archive corruption / malformed tar entries -> Extract (semantic mismatch
-    // with the archive contract), not raw Io.
-    //
-    // `tar` 0.4's default `Archive::unpack` rejects absolute paths and `..`
-    // traversal — we rely on that for defense in depth. Do not call
-    // `archive.set_preserve_permissions(true)` or relax the path checks
-    // without re-evaluating the trust model (release tarballs from the
-    // official repo are trusted, but multiple consumers now call this).
     archive
         .unpack(dest)
         .map_err(|e| UpdateError::Extract(format!("tar unpack failed: {e}")))?;
+    Ok(())
+}
+
+/// Parse one line out of a `SHA256SUMS` file, matching by exact trailing
+/// filename. Lines follow GNU/BSD format: `<64 hex>  <filename>\n` (two spaces
+/// for binary mode, one space + `*` for text mode — we accept both).
+///
+/// Returns `Sha256LineMissing(archive_name)` if `SHA256SUMS` has no matching
+/// line. Malformed lines are skipped silently — one bad line shouldn't poison
+/// the rest of the file, and we fail-close on "no match" anyway.
+pub fn parse_sha256sums_line(body: &str, archive_name: &str) -> Result<String, UpdateError> {
+    for line in body.lines() {
+        // Split on first whitespace run. First token = hex, rest = name.
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let Some(hex_tok) = parts.next() else { continue };
+        let Some(rest) = parts.next() else { continue };
+        // BSD/GNU text mode prefixes filename with `*`; strip.
+        let name = rest.trim_start().trim_start_matches('*').trim();
+        if name == archive_name {
+            return Ok(hex_tok.trim().to_string());
+        }
+    }
+    Err(UpdateError::Sha256LineMissing(archive_name.to_string()))
+}
+
+/// Orchestrate a self-update:
+///   1. Fetch SHA256SUMS
+///   2. Parse expected hash for `gitim-{tag}-{platform}.tar.gz`
+///   3. Download the tarball
+///   4. Verify SHA — on mismatch, fail-closed and do NOT extract
+///   5. Extract into `dest`
+///
+/// `base_download_url` is the URL prefix up to (not including) the tag-scoped
+/// path segment. In production: `https://github.com/<repo>/releases/download`.
+/// The function appends `/<tag>/SHA256SUMS` and `/<tag>/gitim-...tar.gz`.
+pub async fn install_update(
+    base_download_url: &str,
+    tag: &str,
+    platform: &str,
+    dest: &Path,
+) -> Result<(), UpdateError> {
+    let archive = format!("gitim-{tag}-{platform}.tar.gz");
+    let sha_url = format!("{base_download_url}/{tag}/SHA256SUMS");
+    let tarball_url = format!("{base_download_url}/{tag}/{archive}");
+
+    let sha_body_bytes = download_bytes(&sha_url).await?;
+    let sha_body = String::from_utf8(sha_body_bytes)
+        .map_err(|e| UpdateError::Extract(format!("SHA256SUMS not UTF-8: {e}")))?;
+    let expected_hex = parse_sha256sums_line(&sha_body, &archive)?;
+
+    let tarball_bytes = download_bytes(&tarball_url).await?;
+    verify_sha256(&tarball_bytes, &expected_hex)?;
+    extract_tarball(&tarball_bytes, dest)?;
     Ok(())
 }
 

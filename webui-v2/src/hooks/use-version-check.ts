@@ -5,6 +5,31 @@ import { checkVersion } from "../lib/cell-api";
 import { health, updateAndRestart } from "../lib/client";
 import { useConnectionStore } from "./use-connection-store";
 
+// Human-readable messages for structured error codes from the backend updater.
+// Codes sourced from `crates/gitim-runtime/src/update.rs::error_codes` — keep
+// this map in sync when new codes are added there. Codes not in this map fall
+// back to the raw `detail` field or a generic message.
+const UPDATE_ERROR_MESSAGES: Record<string, string> = {
+  sha_mismatch:
+    "校验失败：下载的安装包哈希与官方发布不一致，已拒绝安装。请稍后重试或联系维护者。",
+  sha_line_missing:
+    "校验失败：SHA256SUMS 未列出当前平台，疑似 release 不完整。请查看 Release 页面。",
+  download_failed: "下载失败，请检查网络后重试。",
+  extract_failed: "解压失败，请查看后端日志。",
+};
+
+function friendlyUpdateError(
+  errorCode: string | undefined,
+  detail: string | undefined,
+): string {
+  if (errorCode && UPDATE_ERROR_MESSAGES[errorCode]) {
+    return UPDATE_ERROR_MESSAGES[errorCode];
+  }
+  if (detail) return `升级失败：${detail}`;
+  if (errorCode) return `升级失败：${errorCode}`;
+  return "升级失败，请查看后端日志。";
+}
+
 const ONE_HOUR_MS = 60 * 60 * 1000;
 // Restart-window poll cadence. Short enough to feel responsive; the child
 // process re-binds the port in well under a second after parent exit.
@@ -160,7 +185,7 @@ export function useVersionCheck(): VersionCheckResult {
         await Promise.all([refreshCurrent(), refreshLatest()]);
         return;
       }
-      const msg = accept.error ?? "Failed to start update";
+      const msg = friendlyUpdateError(accept.error_code, accept.error);
       setUpdateError(msg);
       toast.error(msg);
       return;
@@ -182,8 +207,8 @@ export function useVersionCheck(): VersionCheckResult {
           }
           setIsUpdating(false);
           setIsRestarting(false);
-          setUpdateError("Update may have failed, please restart manually");
-          toast.error("Update may have failed, please restart manually");
+          setUpdateError("升级可能失败,请手动重启 Runtime。");
+          toast.error("升级可能失败,请手动重启 Runtime。");
           restartingRef.current = false;
           resolve();
           return;

@@ -1,0 +1,10 @@
+# Pinned cross-rs/cross Docker images. Updating these is a manual decision —
+# don't follow `main`, because it breaks reproducibility of releases we shipped
+# against a specific sysroot. Bump with intent, re-run full release, verify
+# binaries still work on the oldest target distros we claim to support.
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5"

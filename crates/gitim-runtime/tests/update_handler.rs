@@ -25,7 +25,7 @@
 //! branches are already covered one level down:
 //!
 //! - `gitim-updater` has wiremock coverage of `fetch_latest_tag`,
-//!   `download_and_extract`, and `HttpStatus` vs `Network` error shapes.
+//!   `install_update`, and `HttpStatus` vs `Network` error shapes.
 //! - `update::tests` (lib) covers `strict_install_dir_check`,
 //!   `status_for`, and `sanity_check_new_runtime` with fake
 //!   `sleep`/`echo` processes.
@@ -144,6 +144,21 @@ async fn atomic_swap_supports_guard_contract() {
     assert!(!prev, "initial state must be false");
     let prev = guard.swap(true, Ordering::SeqCst);
     assert!(prev, "second swap must observe true");
+}
+
+// -- SHA error codes: contract lock -----------------------------------------
+//
+// The sha_mismatch / sha_line_missing error codes are produced inside
+// `run_sync_phase` (past the strict install-dir gate), so we cannot reach them
+// via a real HTTP call in this test file without mocking `$HOME`. Instead we
+// assert the string values directly — these are part of the HTTP contract and
+// must stay stable so WebUI can pattern-match on them.
+
+#[test]
+fn sha_error_codes_have_correct_string_values() {
+    use gitim_runtime::update::error_codes;
+    assert_eq!(error_codes::SHA_MISMATCH, "sha_mismatch");
+    assert_eq!(error_codes::SHA_LINE_MISSING, "sha_line_missing");
 }
 
 // -- response body shape ----------------------------------------------------
