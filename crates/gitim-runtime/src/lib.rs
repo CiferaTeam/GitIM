@@ -6,6 +6,7 @@ pub mod context_window;
 pub mod daemon_log;
 pub mod error;
 pub mod git_config;
+pub mod gitignore;
 pub mod github;
 pub mod http;
 pub mod poller;
