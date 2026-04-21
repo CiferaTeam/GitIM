@@ -17,6 +17,17 @@ done
 
 $DRY_RUN && echo "==> DRY RUN (will not publish)"
 
+# Single-target builds must not publish. Uploading one tarball + a truncated
+# SHA256SUMS would overwrite the full multi-target file via `gh upload --clobber`,
+# silently deleting hashes for the other 3 platforms and breaking their installs.
+if [ -n "$ONLY_TARGET" ] && ! $DRY_RUN; then
+  echo "Error: --target <slug> is debug-only (requires --dry-run)."
+  echo "  Single-target upload would truncate SHA256SUMS and break other platforms."
+  echo "  For a real release run all 4 targets:     ./release.sh"
+  echo "  For single-target debugging add --dry-run: ./release.sh --target $ONLY_TARGET --dry-run"
+  exit 1
+fi
+
 # ---------- Read version from Cargo workspace ----------
 VERSION=$(grep 'version = "' "$ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 TAG="v${VERSION}"
@@ -121,9 +132,11 @@ build_target() {
         linux-arm64)  arch_tag="linux/arm64" ;;
       esac
       echo "==> [$slug] smoke test (docker alpine, $arch_tag)"
+      # Smoke-test all three shipped binaries — a musl link error in
+      # gitim-daemon or gitim-runtime would otherwise ship silently.
       docker run --rm --platform "$arch_tag" \
-        -v "$out_dir/gitim:/gitim:ro" \
-        alpine:3 /gitim --version >/dev/null
+        -v "$out_dir:/bins:ro" \
+        alpine:3 sh -c '/bins/gitim --version && /bins/gitim-daemon --version && /bins/gitim-runtime --version' >/dev/null
       ;;
   esac
 

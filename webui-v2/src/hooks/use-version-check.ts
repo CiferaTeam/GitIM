@@ -6,14 +6,14 @@ import { health, updateAndRestart } from "../lib/client";
 import { useConnectionStore } from "./use-connection-store";
 
 // Human-readable messages for structured error codes from the backend updater.
-// Codes not in this map fall back to the raw `detail` field or a generic message.
+// Codes sourced from `crates/gitim-runtime/src/update.rs::error_codes` — keep
+// this map in sync when new codes are added there. Codes not in this map fall
+// back to the raw `detail` field or a generic message.
 const UPDATE_ERROR_MESSAGES: Record<string, string> = {
   sha_mismatch:
     "校验失败：下载的安装包哈希与官方发布不一致，已拒绝安装。请稍后重试或联系维护者。",
   sha_line_missing:
     "校验失败：SHA256SUMS 未列出当前平台，疑似 release 不完整。请查看 Release 页面。",
-  sha_file_missing:
-    "校验失败：该版本未提供 SHA256SUMS（可能是 v0.6.0 之前的旧版本），请先手动升级到 v0.6.0+。",
   download_failed: "下载失败，请检查网络后重试。",
   extract_failed: "解压失败，请查看后端日志。",
 };

@@ -63,7 +63,7 @@ SHA_FILE="$TMPDIR/SHA256SUMS"
 if ! curl -sSfL -o "$SHA_FILE" "$SHA_URL"; then
   echo "Error: SHA256SUMS not found at $SHA_URL"
   echo "This release may be pre-v0.6.0. Upgrade path:"
-  echo "  1. Install v0.5.x manually (or skip SHA check: SKIP_SHA=1 sh install.sh)"
+  echo "  1. Install v0.5.x manually (or skip SHA check: SKIP_SHA=1 bash install.sh)"
   echo "  2. Run \`gitim update\` after install to jump to the current version."
   # Allow explicit bypass for one-shot recovery; never default to off.
   if [ "${SKIP_SHA:-0}" != "1" ]; then
@@ -71,12 +71,24 @@ if ! curl -sSfL -o "$SHA_FILE" "$SHA_URL"; then
   fi
   echo "==> SKIP_SHA=1 — skipping SHA verification (unsafe)"
 else
-  EXPECTED_SHA=$(grep " $ARCHIVE_NAME$" "$SHA_FILE" | awk '{print $1}' | head -1)
+  # Literal match on last whitespace-separated field (the filename). Avoids the
+  # pipefail trap of `grep | awk | head -1` — a non-matching grep exits the pipe
+  # non-zero and the script dies before the empty-check below can fire.
+  EXPECTED_SHA=$(awk -v name="$ARCHIVE_NAME" '$NF == name { print $1; exit }' "$SHA_FILE")
   if [ -z "$EXPECTED_SHA" ]; then
     echo "Error: SHA256SUMS has no line for $ARCHIVE_NAME"
     exit 1
   fi
-  ACTUAL_SHA=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
+  # Prefer coreutils sha256sum (default on Linux). Fall back to BSD shasum -a 256
+  # (default on macOS). Alpine / minimal Debian frequently lack `shasum`.
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SHA=$(sha256sum "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_SHA=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
+  else
+    echo "Error: neither sha256sum nor shasum found; cannot verify SHA256"
+    exit 1
+  fi
   if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
     echo "Error: SHA256 mismatch"
     echo "  expected: $EXPECTED_SHA"
