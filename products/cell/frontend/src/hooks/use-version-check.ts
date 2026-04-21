@@ -36,6 +36,11 @@ const ONE_HOUR_MS = 60 * 60 * 1000;
 const RESTART_POLL_MS = 500;
 // Hard ceiling on the restart window before we give up and surface an error.
 const RESTART_TIMEOUT_MS = 30_000;
+// Per-poll fetch cap. The parent-exit → child-bind gap is ~100-500ms in
+// practice, but TCP SYN retries on a just-closed socket can stall fetch for
+// seconds. Abort each poll's request at 2s so we don't starve subsequent
+// polls when the old process is tearing down.
+const POLL_FETCH_TIMEOUT_MS = 2_000;
 
 // `/health` returns the bare CARGO_PKG_VERSION ("0.4.2") while the update
 // endpoint's `target_version` comes from the GitHub tag ("v0.4.2"). Strict
@@ -117,8 +122,8 @@ export function useVersionCheck(): VersionCheckResult {
 
   // Guard against overlapping restart polls and StrictMode double-fire.
   const restartingRef = useRef(false);
-  // Tracks the active restart-window interval so unmount can tear it down.
-  const pollHandleRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Tracks the currently-scheduled poll timer so unmount can tear it down.
+  const pollHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Refresh primitives ----------------------------------------------------
 
@@ -161,7 +166,7 @@ export function useVersionCheck(): VersionCheckResult {
   useEffect(
     () => () => {
       if (pollHandleRef.current !== null) {
-        clearInterval(pollHandleRef.current);
+        clearTimeout(pollHandleRef.current);
         pollHandleRef.current = null;
       }
     },
@@ -197,33 +202,45 @@ export function useVersionCheck(): VersionCheckResult {
     const startedAt = Date.now();
     let sawDisconnect = false;
 
+    // Recursive setTimeout instead of setInterval: ensures a single in-flight
+    // poll at a time. With setInterval, a fetch that stalls past the 500ms
+    // cadence (e.g. TCP SYN retry against a just-closed old socket) would pile
+    // concurrent callbacks on top of each other, and a delayed resolution
+    // could race the success branch after cleanup had already fired. Stepping
+    // one at a time keeps the state transitions linear.
     await new Promise<void>((resolve) => {
-      pollHandleRef.current = setInterval(async () => {
+      const finish = () => {
+        if (pollHandleRef.current !== null) {
+          clearTimeout(pollHandleRef.current);
+          pollHandleRef.current = null;
+        }
+        restartingRef.current = false;
+        resolve();
+      };
+
+      const poll = async () => {
         // Timeout — couldn't confirm the new version came up.
         if (Date.now() - startedAt > RESTART_TIMEOUT_MS) {
-          if (pollHandleRef.current !== null) {
-            clearInterval(pollHandleRef.current);
-            pollHandleRef.current = null;
-          }
           setIsUpdating(false);
           setIsRestarting(false);
           setUpdateError("升级可能失败,请手动重启 Runtime。");
           toast.error("升级可能失败,请手动重启 Runtime。");
-          restartingRef.current = false;
-          resolve();
+          finish();
           return;
         }
 
-        // `health()` propagates fetch rejections (network down, connection
-        // refused) as thrown errors — the exact shape of the restart window
-        // when the old process has exited and the new one hasn't yet bound.
-        // Catch here so the interval callback doesn't leak unhandled
-        // rejections and so we still flip into the Restarting state.
+        // Per-poll abort: caps this fetch so a stalled request doesn't eat
+        // the polling budget. `health()` throws on abort; the catch below
+        // treats it identically to a network failure.
+        const ac = new AbortController();
+        const abortTimer = setTimeout(() => ac.abort(), POLL_FETCH_TIMEOUT_MS);
         let res: Awaited<ReturnType<typeof health>>;
         try {
-          res = await health();
+          res = await health(ac.signal);
         } catch {
           res = { ok: false, error: "fetch failed" };
+        } finally {
+          clearTimeout(abortTimer);
         }
 
         if (!res.ok) {
@@ -232,29 +249,29 @@ export function useVersionCheck(): VersionCheckResult {
             sawDisconnect = true;
             setIsRestarting(true);
           }
+          pollHandleRef.current = setTimeout(poll, RESTART_POLL_MS);
           return;
         }
 
         const version = (res.data as { version?: string } | undefined)?.version ?? null;
         if (version && stripV(version) === stripV(targetVersion)) {
-          if (pollHandleRef.current !== null) {
-            clearInterval(pollHandleRef.current);
-            pollHandleRef.current = null;
-          }
           setIsUpdating(false);
           setIsRestarting(false);
           setUpdateError(null);
           setRuntimeVersion(version);
           toast.success(`Updated to v${stripV(version)}`);
-          restartingRef.current = false;
+          finish();
           // Hard reload: reset every store and re-subscribe all live channels.
           // See hook docstring for rationale.
           setTimeout(() => window.location.reload(), 250);
-          resolve();
+          return;
         }
-        // else: health came back but version doesn't match yet (could be the
-        // old process still answering). Keep polling.
-      }, RESTART_POLL_MS);
+        // Health came back but version doesn't match yet (could be the old
+        // process still answering). Keep polling.
+        pollHandleRef.current = setTimeout(poll, RESTART_POLL_MS);
+      };
+
+      void poll();
     });
   }, [
     refreshCurrent,

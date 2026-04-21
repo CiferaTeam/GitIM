@@ -32,8 +32,16 @@ function wsBase(slug: string): string {
 
 // --- Health ---
 
-export async function health(): Promise<ApiResponse> {
-  const res = await fetch(`${baseUrl()}/health`);
+// `cache: "no-store"` is load-bearing for the self-update restart poll:
+// /health sets no Cache-Control, and browsers happily serve repeated fetches
+// from the memory cache within a few seconds. During the restart window the
+// first poll can latch onto the old process's {version: "0.5.x"} response and
+// never see the new runtime's version no matter how many times we poll,
+// causing the 30s timeout to fire even though the update actually succeeded.
+// `signal` lets the caller cap a single in-flight request so the poll loop
+// can move on if the old process is tearing down mid-fetch.
+export async function health(signal?: AbortSignal): Promise<ApiResponse> {
+  const res = await fetch(`${baseUrl()}/health`, { cache: "no-store", signal });
   if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
   const data = await res.json();
   return { ok: true, data };
