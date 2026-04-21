@@ -12,7 +12,7 @@ import { relativeTime, statusBadge } from "./agent-card";
 import { ProviderBadge } from "./provider-badge";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 
 function Field({
@@ -70,7 +70,40 @@ export function AgentDetail() {
     setMode("edit");
   }
 
+  const isDirty =
+    mode === "edit" &&
+    agent !== undefined &&
+    (() => {
+      // Prompt
+      if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
+      // Dotenv
+      if (draftDotenv.length > 0) return true;
+      // Env
+      const newEnv: Record<string, string> = {};
+      for (const { key, value } of draftEnv) {
+        const k = key.trim();
+        if (k) newEnv[k] = value;
+      }
+      const oldEnv = agent.env ?? {};
+      if (Object.keys(newEnv).length !== Object.keys(oldEnv).length) return true;
+      if (Object.entries(newEnv).some(([k, v]) => oldEnv[k] !== v)) return true;
+      return false;
+    })();
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
+
   function cancelEdit() {
+    if (isDirty && !window.confirm("Discard unsaved changes?")) {
+      return;
+    }
     setMode("view");
     setEditError(null);
   }
@@ -179,7 +212,12 @@ export function AgentDetail() {
         variant="ghost"
         size="sm"
         className="mb-4 text-text-secondary hover:text-foreground"
-        onClick={() => navigate("/management")}
+        onClick={() => {
+          if (isDirty && !window.confirm("Discard unsaved changes?")) {
+            return;
+          }
+          navigate("/management");
+        }}
       >
         <ArrowLeft className="size-4 mr-1" />
         Back
