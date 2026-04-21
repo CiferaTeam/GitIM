@@ -2,9 +2,17 @@
 # don't follow `main`, because it breaks reproducibility of releases we shipped
 # against a specific sysroot. Bump with intent, re-run full release, verify
 # binaries still work on the oldest target distros we claim to support.
+#
+# toolchain = ["linux/amd64"] forces Docker to pull the amd64 manifest for
+# each image. cross 0.2.5 only publishes amd64 images (multi-arch comes in
+# 0.3.x). On Apple Silicon, Docker Desktop 4.x runs these via Rosetta 2
+# — slower than native, but avoids the "no matching manifest for linux/arm64"
+# pull error that otherwise kills the first cross target in the matrix.
 
 [target.x86_64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
+image.name = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
+image.toolchain = ["linux/amd64"]
 
 [target.aarch64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5"
+image.name = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5"
+image.toolchain = ["linux/amd64"]
