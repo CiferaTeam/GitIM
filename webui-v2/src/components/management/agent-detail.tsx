@@ -75,6 +75,66 @@ export function AgentDetail() {
     setEditError(null);
   }
 
+  async function handleSave() {
+    if (!activeSlug || !agent) return;
+
+    // Build patch with only changed fields so backend merge is minimal.
+    const patch: {
+      system_prompt?: string | null;
+      env?: Record<string, string>;
+      dotenv?: string;
+    } = {};
+
+    const newPrompt = draftPrompt.trim();
+    const oldPrompt = (agent.systemPrompt ?? "").trim();
+    const promptChanged = newPrompt !== oldPrompt;
+    if (promptChanged) {
+      patch.system_prompt = newPrompt === "" ? null : newPrompt;
+    }
+
+    const newEnv: Record<string, string> = {};
+    for (const { key, value } of draftEnv) {
+      const k = key.trim();
+      if (k) newEnv[k] = value;
+    }
+    const oldEnv = agent.env ?? {};
+    const envChanged =
+      Object.keys(newEnv).length !== Object.keys(oldEnv).length ||
+      Object.entries(newEnv).some(([k, v]) => oldEnv[k] !== v);
+    if (envChanged) patch.env = newEnv;
+
+    const dotenvChanged = draftDotenv.length > 0;
+    if (dotenvChanged) patch.dotenv = draftDotenv;
+
+    if (Object.keys(patch).length === 0) {
+      setMode("view");
+      return;
+    }
+
+    setMode("saving");
+    setEditError(null);
+    const res = await client.updateAgent(activeSlug, agent.id, patch);
+    if (res.ok && res.data?.agent) {
+      updateAgent(agent.id, res.data.agent as Partial<Agent>);
+      setMode("view");
+
+      // Generation-aware toast lines.
+      const lines: string[] = [];
+      if (envChanged || dotenvChanged) {
+        lines.push("Environment & .env → take effect on next message");
+      }
+      if (promptChanged) {
+        lines.push(
+          "System prompt → takes effect on next session (auto-rolls when current session fills)",
+        );
+      }
+      toast.success("Saved", { description: lines.join("\n") });
+    } else {
+      setEditError(res.error ?? "Save failed");
+      setMode("edit");
+    }
+  }
+
   const activities = useAgentActivityStore((s) => s.activities);
 
   const agent: Agent | undefined = agents.find((a) => a.id === agentId);
@@ -290,45 +350,59 @@ export function AgentDetail() {
         </ScrollArea>
       </div>
 
-      {/* Error display */}
-      {editError && (
-        <p className="mb-4 text-sm text-destructive">{editError}</p>
-      )}
-
       {/* Actions */}
       <div className="flex gap-3">
-        {mode !== "view" && (
-          <Button
-            variant="outline"
-            size="default"
-            onClick={cancelEdit}
-            className="border-border-strong hover:bg-surface-hover"
-          >
-            Cancel
-          </Button>
+        {mode === "view" ? (
+          <>
+            <Button
+              variant={isRunning ? "outline" : "default"}
+              size="default"
+              onClick={handleToggle}
+              className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
+            >
+              {isRunning ? (
+                <><Pause className="size-4 mr-1.5" /> Stop</>
+              ) : (
+                <><Play className="size-4 mr-1.5" /> Start</>
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="default"
+              onClick={() => setRemoveOpen(true)}
+              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="size-4 mr-1.5" />
+              Remove
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              variant="default"
+              size="default"
+              onClick={handleSave}
+              disabled={mode === "saving"}
+            >
+              {mode === "saving" ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              variant="outline"
+              size="default"
+              onClick={cancelEdit}
+              disabled={mode === "saving"}
+            >
+              Cancel
+            </Button>
+          </>
         )}
-        <Button
-          variant={isRunning ? "outline" : "default"}
-          size="default"
-          onClick={handleToggle}
-          className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
-        >
-          {isRunning ? (
-            <><Pause className="size-4 mr-1.5" /> Stop</>
-          ) : (
-            <><Play className="size-4 mr-1.5" /> Start</>
-          )}
-        </Button>
-        <Button
-          variant="ghost"
-          size="default"
-          onClick={() => setRemoveOpen(true)}
-          className="text-destructive hover:text-destructive hover:bg-destructive/10"
-        >
-          <Trash2 className="size-4 mr-1.5" />
-          Remove
-        </Button>
       </div>
+
+      {editError && (
+        <div className="mt-3 p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-sm text-destructive">
+          {editError}
+        </div>
+      )}
 
       <RemoveAgentDialog
         agentId={agent.id}
