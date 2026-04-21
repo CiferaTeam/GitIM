@@ -61,6 +61,8 @@ interface CardState {
   ) => void;
   markPendingCardFailed: (pathKey: string, pendingId: string) => void;
   removePendingCardMessage: (pathKey: string, pendingId: string) => void;
+  /** Clear all workspace-scoped card state. Called on workspace switch. */
+  resetForWorkspaceSwitch: () => void;
 }
 
 export const useCardStore = create<CardState>((set) => ({
@@ -252,6 +254,15 @@ export const useCardStore = create<CardState>((set) => ({
           [pathKey]: existing.filter((m) => m._pendingId !== pendingId),
         },
       };
+    }),
+
+  resetForWorkspaceSwitch: () =>
+    set({
+      cards: [],
+      archivedCards: [],
+      showArchived: false,
+      cardMessagesByPath: {},
+      inFlightCardPaths: new Set<string>(),
     }),
 }));
 

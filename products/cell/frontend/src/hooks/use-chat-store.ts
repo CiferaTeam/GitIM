@@ -49,6 +49,10 @@ interface ChatState {
   setThreadMessages: (m: Message[]) => void;
   pushNav: (entry: NavEntry) => void;
   popNav: () => NavEntry | null;
+  /** Clear all workspace-scoped chat state. Called on workspace switch so
+   *  ws-A's messages / channel selection / thread / nav history don't leak
+   *  into ws-B's chat view. */
+  resetForWorkspaceSwitch: () => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -217,4 +221,22 @@ export const useChatStore = create<ChatState>((set) => ({
     useChatStore.setState({ navHistory: s.navHistory.slice(0, -1) });
     return last;
   },
+
+  resetForWorkspaceSwitch: () =>
+    set({
+      connected: false,
+      currentUser: "",
+      isGuest: false,
+      users: [],
+      channels: [],
+      archivedChannels: [],
+      currentChannel: null,
+      messages: [],
+      replyTo: null,
+      highlightLine: null,
+      pendingScrollLine: null,
+      threadRoot: null,
+      threadMessages: [],
+      navHistory: [],
+    }),
 }));

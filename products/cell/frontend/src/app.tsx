@@ -91,10 +91,13 @@ export default function App() {
   const setConnected = useChatStore((s) => s.setConnected);
   const addMessages = useChatStore((s) => s.addMessages);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
+  const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
+  const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
   const setCards = useCardStore((s) => s.setCards);
   const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
+  const resetCardsForSwitch = useCardStore((s) => s.resetForWorkspaceSwitch);
   const port = useConnectionStore((s) => s.port);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
 
@@ -254,13 +257,13 @@ export default function App() {
     if (!port || !activeSlug) return;
 
     // Reset per-workspace store slices on switch so stale data from the
-    // previous workspace doesn't flash into the new one.
-    setChannels([]);
-    setUsers([]);
-    setAgents([]);
-    setCards([]);
-    setCurrentUser("");
-    setConnected(false);
+    // previous workspace doesn't leak into the new one. Each store owns
+    // the knowledge of which of its fields are workspace-scoped — in
+    // particular chat resets `currentChannel` + `messages` so poll-driven
+    // `addMessages` can't append ws-B entries onto ws-A's list.
+    resetChatForSwitch();
+    resetAgentsForSwitch();
+    resetCardsForSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
     setHeadCommit(null);
@@ -319,6 +322,9 @@ export default function App() {
     setCards,
     setConnected,
     setHeadCommit,
+    resetChatForSwitch,
+    resetAgentsForSwitch,
+    resetCardsForSwitch,
     runPoll,
   ]);
 
