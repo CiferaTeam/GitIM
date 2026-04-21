@@ -1423,6 +1423,36 @@ async fn agents_get(
     }
 }
 
+// -- /agents PATCH --
+
+#[derive(Deserialize, Default)]
+#[allow(dead_code)] // fields consumed in Task 2 (agents_patch merge logic)
+struct AgentUpdateRequest {
+    #[serde(default)]
+    system_prompt: Option<Option<String>>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    dotenv: Option<String>,
+}
+
+async fn agents_patch(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, agent_id)): axum::extract::Path<(String, String)>,
+    Json(req): Json<AgentUpdateRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let _ = (state, slug, agent_id, req); // stub — merge logic lands in Task 2
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "ok": false, "error": "agent not found"
+        })),
+    )
+        .into_response()
+}
+
 // -- /agents/remove --
 
 async fn agents_remove(
@@ -2450,7 +2480,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
-        .route("/agents/{id}", get(agents_get));
+        .route("/agents/{id}", get(agents_get).patch(agents_patch));
 
     let router = Router::new()
         .route("/health", get(health))
