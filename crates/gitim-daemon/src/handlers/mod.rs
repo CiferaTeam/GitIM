@@ -2,7 +2,7 @@ mod channel;
 mod poll;
 mod read;
 mod search;
-mod serde;
+pub(crate) mod serde;
 mod send;
 mod user;
 
