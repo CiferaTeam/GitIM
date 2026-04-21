@@ -1,7 +1,11 @@
-import { useState } from "react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
 import type { AgentActivityEvent } from "../../lib/types";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "../ui/hover-card";
 
 const EMPTY_ACTIVITIES: AgentActivityEvent[] = [];
 
@@ -72,7 +76,6 @@ function UsageBadge({ agentId }: { agentId: string }) {
 }
 
 function AgentRow({ agentId, name }: { agentId: string; name: string }) {
-  const [expanded, setExpanded] = useState(false);
   const activities = useAgentActivityStore(
     (s) => s.activities[agentId] ?? EMPTY_ACTIVITIES,
   );
@@ -84,15 +87,14 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
   );
   const latest = activities[0];
   const showError = status === "error";
+  const hasDetail = activities.length > 0;
 
-  return (
-    <div
-      className="relative rounded-md border border-border/60 bg-background/40"
-      onMouseLeave={() => setExpanded(false)}
-    >
+  const row = (
+    <div className="relative rounded-md border border-border/60 bg-background/40">
       <div
-        className="flex items-center gap-2 px-2.5 py-1.5 min-w-0 cursor-pointer select-none hover:bg-surface-hover rounded-md transition-colors"
-        onClick={() => setExpanded((v) => !v)}
+        className={`flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors ${
+          hasDetail ? "cursor-default hover:bg-surface-hover" : ""
+        }`}
       >
         <StatusDot status={status} />
         <span className="text-xs font-medium text-text-secondary shrink-0">
@@ -110,21 +112,31 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
           <span className="text-[11px] text-text-faint italic">idle</span>
         )}
       </div>
-
-      {expanded && activities.length > 0 && (
-        <div className="absolute left-0 top-full z-50 w-max max-w-[32rem] min-w-72 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-xl p-2 mt-1">
-          <div className="mb-1.5">
-            <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
-              {name} — Recent Activity
-            </p>
-            <UsageBadge agentId={agentId} />
-          </div>
-          {activities.map((evt, i) => (
-            <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} />
-          ))}
-        </div>
-      )}
     </div>
+  );
+
+  if (!hasDetail) return row;
+
+  return (
+    <HoverCard>
+      <HoverCardTrigger asChild>{row}</HoverCardTrigger>
+      <HoverCardContent
+        side="bottom"
+        align="start"
+        sideOffset={4}
+        className="w-max max-w-[32rem] min-w-72 max-h-52 overflow-y-auto p-2 shadow-xl"
+      >
+        <div className="mb-1.5">
+          <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
+            {name} — Recent Activity
+          </p>
+          <UsageBadge agentId={agentId} />
+        </div>
+        {activities.map((evt, i) => (
+          <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} />
+        ))}
+      </HoverCardContent>
+    </HoverCard>
   );
 }
 
