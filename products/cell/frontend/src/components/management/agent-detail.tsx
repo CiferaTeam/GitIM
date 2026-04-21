@@ -56,7 +56,6 @@ export function AgentDetail() {
   const [mode, setMode] = useState<Mode>("view");
   const [draftPrompt, setDraftPrompt] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
-  const [draftDotenv, setDraftDotenv] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
 
   const activities = useAgentActivityStore((s) => s.activities);
@@ -70,7 +69,6 @@ export function AgentDetail() {
     setDraftEnv(
       Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
     );
-    setDraftDotenv("");
     setEditError(null);
     setMode("edit");
   }
@@ -81,8 +79,6 @@ export function AgentDetail() {
     (() => {
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
-      // Dotenv
-      if (draftDotenv.length > 0) return true;
       // Env
       const newEnv: Record<string, string> = {};
       for (const { key, value } of draftEnv) {
@@ -120,7 +116,6 @@ export function AgentDetail() {
     const patch: {
       system_prompt?: string | null;
       env?: Record<string, string>;
-      dotenv?: string;
     } = {};
 
     const newPrompt = draftPrompt.trim();
@@ -141,9 +136,6 @@ export function AgentDetail() {
       Object.entries(newEnv).some(([k, v]) => oldEnv[k] !== v);
     if (envChanged) patch.env = newEnv;
 
-    const dotenvChanged = draftDotenv.length > 0;
-    if (dotenvChanged) patch.dotenv = draftDotenv;
-
     if (Object.keys(patch).length === 0) {
       setMode("view");
       return;
@@ -158,8 +150,8 @@ export function AgentDetail() {
 
       // Generation-aware toast lines.
       const lines: string[] = [];
-      if (envChanged || dotenvChanged) {
-        lines.push("Environment & .env → take effect on next message");
+      if (envChanged) {
+        lines.push("Environment → takes effect on next message");
       }
       if (promptChanged) {
         lines.push(
@@ -207,7 +199,7 @@ export function AgentDetail() {
   }
 
   return (
-    <div className="p-6 max-w-3xl">
+    <div className="h-full overflow-y-auto p-6 max-w-3xl">
       <Button
         variant="ghost"
         size="sm"
@@ -336,29 +328,6 @@ export function AgentDetail() {
           )}
         </Field>
       </div>
-
-      {/* Secrets (.env file) — only shown in edit mode */}
-      {mode !== "view" && (
-        <div className="mb-8">
-          <Field label="Secrets (.env file)">
-            <p className="text-xs text-text-muted mt-1 mb-2">
-              Written to <code>&lt;agent-clone&gt;/.env</code> (gitignored).
-              Agent reads via <code>source .env</code>, dotenv libraries, or{" "}
-              <code>cat</code> at runtime. Use for API keys and multi-line
-              secrets. Contents are <strong>not</strong> shown here — leave
-              empty to keep the existing file; type to replace; submit empty
-              after editing to delete.
-            </p>
-            <Textarea
-              value={draftDotenv}
-              onChange={(e) => setDraftDotenv(e.target.value)}
-              rows={8}
-              className="mt-2 font-mono text-xs"
-              placeholder="OPENAI_API_KEY=sk-..."
-            />
-          </Field>
-        </div>
-      )}
 
       {/* Activity Log */}
       <div className="mb-8">
