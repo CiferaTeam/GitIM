@@ -96,6 +96,7 @@ export default function App() {
   const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
   const port = useConnectionStore((s) => s.port);
+  const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -149,6 +150,7 @@ export default function App() {
       if (workspaceRef.current) {
         saveCursor(workspaceRef.current, sinceRef.current);
       }
+      setHeadCommit(sinceRef.current);
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
@@ -243,6 +245,7 @@ export default function App() {
     setAgents,
     mergeCards,
     addCardMessages,
+    setHeadCommit,
   ]);
 
   // Init + poll loop — runs whenever port + activeSlug are both set, and
@@ -260,6 +263,7 @@ export default function App() {
     setConnected(false);
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
+    setHeadCommit(null);
 
     // Guard against React 19 Strict Mode's simulated unmount: if cleanup
     // ran before init() resolved, skip the setInterval so we don't leak an
@@ -314,6 +318,7 @@ export default function App() {
     setAgents,
     setCards,
     setConnected,
+    setHeadCommit,
     runPoll,
   ]);
 

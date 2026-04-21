@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import type { WorkspaceSummary } from "@/lib/types";
 import { CreateWorkspaceForm } from "./create-workspace-form";
@@ -34,6 +35,7 @@ export function WorkspaceSwitcher() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const setActive = useWorkspaceStore((s) => s.setActive);
   const remove = useWorkspaceStore((s) => s.remove);
+  const headCommit = useConnectionStore((s) => s.headCommit);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -53,6 +55,14 @@ export function WorkspaceSwitcher() {
           >
             {active && <ProviderIcon provider={active.provider} />}
             <span className="truncate text-sm font-medium">{label}</span>
+            {headCommit && (
+              <span
+                className="text-[10px] text-text-muted font-mono shrink-0"
+                title={`HEAD ${headCommit}`}
+              >
+                @{headCommit.slice(0, 7)}
+              </span>
+            )}
             <ChevronsUpDown className="size-3.5 text-text-muted shrink-0" />
           </Button>
         </DropdownMenuTrigger>

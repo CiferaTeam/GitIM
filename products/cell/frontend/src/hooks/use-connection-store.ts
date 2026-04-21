@@ -11,6 +11,11 @@ interface ConnectionState {
   status: ConnectionStatus;
   port: number | null;
   runtimeVersion: string | null;
+  // Active workspace's current git HEAD commit, refreshed on every /im/poll.
+  // Advances as sync_loop fetches/pushes — visible indicator that the
+  // workspace is "live" and progressing. Null before first successful poll
+  // or immediately after a workspace switch.
+  headCommit: string | null;
   error: string | null;
 
   // Self-update state machine (Task 8). Set by `useVersionCheck.triggerUpdate`.
@@ -24,6 +29,7 @@ interface ConnectionState {
   setStatus: (s: ConnectionStatus) => void;
   setPort: (p: number) => void;
   setRuntimeVersion: (v: string | null) => void;
+  setHeadCommit: (v: string | null) => void;
   setError: (e: string | null) => void;
   setIsUpdating: (v: boolean) => void;
   setIsRestarting: (v: boolean) => void;
@@ -42,6 +48,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   status: "checking",
   port: loadStoredPort(),
   runtimeVersion: null,
+  headCommit: null,
   error: null,
 
   isUpdating: false,
@@ -54,6 +61,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ port: p });
   },
   setRuntimeVersion: (v) => set({ runtimeVersion: v }),
+  setHeadCommit: (v) => set({ headCommit: v }),
   setError: (e) => set({ error: e }),
   setIsUpdating: (v) => set({ isUpdating: v }),
   setIsRestarting: (v) => set({ isRestarting: v }),
