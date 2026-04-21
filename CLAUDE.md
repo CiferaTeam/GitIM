@@ -181,7 +181,7 @@ Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
 ## Current Orientation
-**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。
-**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制
-**Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。
-**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk
+**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。**Agent 配置可编辑**已落地：detail 页 Edit 模式可改 `system_prompt` / `env` / `.env` 文件（via `PATCH /workspaces/{slug}/agents/{id}`）；`.env` 文件落 `<agent-clone>/.env`（chmod 0600、64KB 上限），workspace `/git/init` 自动把 `.env` 加到仓库 `.gitignore`（幂等，用 `system@gitim` 作者 commit）；provider/model 仍 immutable。
+**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制、provider/model 修改（需 session 迁移方案）
+**Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。Serde 的 `Option<Option<T>>` + `#[serde(default)]` 不能天然区分"字段缺省"和"字段 = null"—— 两者都解析成 `None`，三态语义需要自定义 deserializer 用 `Value` 中转（见 http.rs `deser_triple_option`）。
+**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk；PATCH agent 的 me.json 写 + `.env` 写是**顺序而非事务**（无 WAL），`.env` 写失败时 me.json 已更新，客户端收到 500，靠幂等重试恢复。
