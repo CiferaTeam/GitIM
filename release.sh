@@ -6,6 +6,13 @@ set -euo pipefail
 # about targets installed by rustup (they live in ~/.rustup/toolchains/...).
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# cross 0.2.5 only publishes amd64 manifests for its images. On Apple Silicon,
+# Docker defaults to linux/arm64 pull and fails with 'no matching manifest for
+# linux/arm64/v8'. Force amd64 here so Docker Desktop runs the amd64 image via
+# Rosetta 2. (Smoke-test docker-run calls pass --platform explicitly, so they
+# are not affected by this default.)
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 RELEASES_REPO="CiferaTeam/gitim-releases"
 
