@@ -58,10 +58,15 @@ pub async fn verify_token(token: &str, api_base: &str) -> Result<(), GithubError
 ///
 /// Prefers the public email on /user. Falls back to the GitHub-hosted
 /// noreply address `{id}+{login}@users.noreply.github.com` when public
-/// email is null — fine-grained PATs without "Email addresses" permission
-/// and accounts with "Keep my email addresses private" both land there.
-/// The noreply form is always verified on the account so the graph still
-/// credits the user, and it requires no extra PAT scope.
+/// email is null. Both common causes land there:
+///   - fine-grained PAT without the Account-level "Email addresses" read
+///     permission (note: it lives under Account permissions, not
+///     Repository permissions — easy to miss)
+///   - accounts with "Keep my email addresses private" set (the default
+///     for new accounts), which keeps /user.email null regardless of
+///     what the PAT is allowed to read
+/// The noreply form is always verified on the account so the contribution
+/// graph still credits the user, and it requires no PAT scope at all.
 ///
 /// Returns `Ok(None)` only when the response is so degenerate we can't
 /// derive either (no `id` + no `login`) — in practice, only a mocked or
