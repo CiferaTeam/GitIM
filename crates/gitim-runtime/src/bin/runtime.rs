@@ -138,30 +138,36 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // single writer; nothing else in the crate needs to mutate this.
     state.lock().unwrap().listen_port = port;
 
-    gitim_runtime::http::recover_from_config(state.clone()).await;
+    // Token + email propagation MUST run before `recover_from_config`, because
+    // recovery spawns per-agent daemons and each daemon reads `me.json` /
+    // `.git/config` into memory at startup. If we propagate after, the daemons
+    // are already running with stale values and the fix won't take effect until
+    // the user manually restarts them — which nobody knows to do.
+    //
+    // Both propagation passes are file-only (no state dependency), so we can
+    // drive them straight from `user_config::read()` instead of from the
+    // runtime state populated by recovery.
+    let pre_recovery_paths: Vec<PathBuf> = gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .map(|w| PathBuf::from(&w.path))
+        .filter(|p| p.exists())
+        .collect();
 
     // If config.json's token was edited while the runtime was down, clones
     // still carry the old token. Resync on startup so fetch/push don't fail.
-    let recovered_paths: Vec<PathBuf> = state
-        .lock()
-        .unwrap()
-        .workspaces
-        .values()
-        .map(|w| w.path.clone())
-        .collect();
-    for workspace in &recovered_paths {
+    for workspace in &pre_recovery_paths {
         if let Err(e) = gitim_runtime::token_propagation::propagate_token(workspace) {
             tracing::warn!(error = %e, "token propagation on startup failed");
         }
     }
 
-    // Same best-effort treatment as token propagation: backfill
-    // `github_email` for workspaces that predate the email feature (or
-    // were provisioned when /user.email came back null). Net effect is
+    // Backfill `github_email` for workspaces that predate the email feature
+    // (or were provisioned when /user.email came back null). Net effect is
     // that existing github-mode workspaces start crediting commits to the
-    // owner's contribution graph after a restart — without a re-init.
-    // Running daemons still need a manual restart to see it.
-    for workspace in &recovered_paths {
+    // owner's contribution graph on the next runtime boot, no re-init and
+    // no manual daemon restart needed.
+    for workspace in &pre_recovery_paths {
         match gitim_runtime::email_propagation::backfill_github_email(
             workspace,
             gitim_runtime::email_propagation::GITHUB_API_BASE,
@@ -171,7 +177,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             Ok(true) => {
                 tracing::info!(
                     workspace = %workspace.display(),
-                    "email backfill applied; restart agent daemons to use the new author email",
+                    "email backfill applied",
                 );
             }
             Ok(false) => {}
@@ -180,6 +186,8 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    gitim_runtime::http::recover_from_config(state.clone()).await;
 
     // Idle watchdog: exit if no activity for 24 hours
     let idle_state = state.clone();
