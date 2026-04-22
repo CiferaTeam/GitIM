@@ -1,4 +1,6 @@
-use gitim_runtime::github::{check_repo_access, parse_github_url, verify_token, GithubError};
+use gitim_runtime::github::{
+    check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
+};
 use mockito::Server;
 use std::time::Duration;
 
@@ -157,6 +159,107 @@ async fn check_repo_access_403_returns_insufficient_scope() {
         .await
         .unwrap_err();
     assert!(matches!(err, GithubError::InsufficientScope), "got {err:?}");
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_returns_public_email_when_present() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(200)
+        .with_body(r#"{"id":12345,"login":"octocat","email":"octocat@example.com"}"#)
+        .create_async()
+        .await;
+
+    let email = fetch_user_email("tok", &server.url()).await.unwrap();
+    assert_eq!(email.as_deref(), Some("octocat@example.com"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_derives_noreply_when_email_null() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(200)
+        .with_body(r#"{"id":12345,"login":"octocat","email":null}"#)
+        .create_async()
+        .await;
+
+    let email = fetch_user_email("tok", &server.url()).await.unwrap();
+    assert_eq!(
+        email.as_deref(),
+        Some("12345+octocat@users.noreply.github.com")
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_derives_noreply_when_email_empty_string() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(200)
+        .with_body(r#"{"id":12345,"login":"octocat","email":""}"#)
+        .create_async()
+        .await;
+
+    let email = fetch_user_email("tok", &server.url()).await.unwrap();
+    assert_eq!(
+        email.as_deref(),
+        Some("12345+octocat@users.noreply.github.com")
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_derives_noreply_when_email_field_missing() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(200)
+        .with_body(r#"{"id":12345,"login":"octocat"}"#)
+        .create_async()
+        .await;
+
+    let email = fetch_user_email("tok", &server.url()).await.unwrap();
+    assert_eq!(
+        email.as_deref(),
+        Some("12345+octocat@users.noreply.github.com")
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_returns_none_when_id_and_login_missing() {
+    // Pathological response where we can't derive either a public email or a
+    // noreply address. In practice only a mocked/malformed /user hits this.
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(200)
+        .with_body(r#"{}"#)
+        .create_async()
+        .await;
+
+    let email = fetch_user_email("tok", &server.url()).await.unwrap();
+    assert!(email.is_none(), "expected None, got {email:?}");
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn fetch_user_email_maps_401_to_invalid_token() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/user")
+        .with_status(401)
+        .with_body(r#"{"message":"Bad credentials"}"#)
+        .create_async()
+        .await;
+
+    let err = fetch_user_email("tok", &server.url()).await.unwrap_err();
+    assert!(matches!(err, GithubError::InvalidToken), "got {err:?}");
     mock.assert_async().await;
 }
 

@@ -155,6 +155,32 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Same best-effort treatment as token propagation: backfill
+    // `github_email` for workspaces that predate the email feature (or
+    // were provisioned when /user.email came back null). Net effect is
+    // that existing github-mode workspaces start crediting commits to the
+    // owner's contribution graph after a restart — without a re-init.
+    // Running daemons still need a manual restart to see it.
+    for workspace in &recovered_paths {
+        match gitim_runtime::email_propagation::backfill_github_email(
+            workspace,
+            gitim_runtime::email_propagation::GITHUB_API_BASE,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::info!(
+                    workspace = %workspace.display(),
+                    "email backfill applied; restart agent daemons to use the new author email",
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "email backfill on startup failed");
+            }
+        }
+    }
+
     // Idle watchdog: exit if no activity for 24 hours
     let idle_state = state.clone();
     tokio::spawn(async move {

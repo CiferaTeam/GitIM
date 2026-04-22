@@ -53,12 +53,19 @@ pub async fn verify_token(token: &str, api_base: &str) -> Result<(), GithubError
     }
 }
 
-/// Fetch the authenticated user's public email from /user.
+/// Fetch an email for the authenticated user, good enough to attribute
+/// commits to their GitHub contribution graph.
 ///
-/// Returns `Ok(None)` when the account is valid but `email` is null / empty
-/// (user has "Keep my email addresses private" set). Returns an error for
-/// auth / network failures — callers typically best-effort this and fall
-/// back to the `<handler>@gitim` sentinel when no email is available.
+/// Prefers the public email on /user. Falls back to the GitHub-hosted
+/// noreply address `{id}+{login}@users.noreply.github.com` when public
+/// email is null — fine-grained PATs without "Email addresses" permission
+/// and accounts with "Keep my email addresses private" both land there.
+/// The noreply form is always verified on the account so the graph still
+/// credits the user, and it requires no extra PAT scope.
+///
+/// Returns `Ok(None)` only when the response is so degenerate we can't
+/// derive either (no `id` + no `login`) — in practice, only a mocked or
+/// malformed /user response. Auth / network failures surface as `Err`.
 pub async fn fetch_user_email(token: &str, api_base: &str) -> Result<Option<String>, GithubError> {
     let url = format!("{}/user", api_base.trim_end_matches('/'));
     let response = reqwest::Client::new()
@@ -79,12 +86,22 @@ pub async fn fetch_user_email(token: &str, api_base: &str) -> Result<Option<Stri
     }
 
     let body: serde_json::Value = response.json().await.map_err(GithubError::from)?;
-    let email = body
+    if let Some(email) = body
         .get("email")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    Ok(email)
+    {
+        return Ok(Some(email.to_string()));
+    }
+    let id = body.get("id").and_then(|v| v.as_u64());
+    let login = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    if let (Some(id), Some(login)) = (id, login) {
+        return Ok(Some(format!("{id}+{login}@users.noreply.github.com")));
+    }
+    Ok(None)
 }
 
 pub async fn check_repo_access(
