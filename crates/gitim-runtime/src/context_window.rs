@@ -26,26 +26,11 @@ pub fn default_max_tokens(provider: &str, model: &str) -> Option<u64> {
     }
 }
 
-fn claude_max_tokens(model_lc: &str) -> u64 {
-    // Explicit 1M marker on the model string (legacy opt-in, still honored
-    // for older agents whose me.json was onboarded before 4.x became the
-    // default). The `[1m]` / `-1m` suffix was how Claude Code surfaced the
-    // beta flag before the 1M window became the native default for 4.x.
-    if model_lc.contains("[1m]") || model_lc.contains("-1m") {
-        return 1_000_000;
-    }
-    // Claude 4.x models ship with a 1M context window by default:
-    //   - sonnet-4-6 / sonnet-4-7
-    //   - opus-4-7 (Opus lifted the ceiling from 200k to 1M at 4.7)
-    // Match on version stems so future `sonnet-4-8` / `opus-4-8` inherit
-    // this default without a code change.
-    if model_lc.contains("sonnet-4-6")
-        || model_lc.contains("sonnet-4-7")
-        || model_lc.contains("opus-4-7")
-    {
-        return 1_000_000;
-    }
-    // Haiku + older Sonnet + older Opus → classic 200k window.
+fn claude_max_tokens(_model_lc: &str) -> u64 {
+    // Product decision: GitIM currently treats all Claude variants as classic
+    // 200k-window agents. We intentionally ignore Claude Code's `[1m]` suffix
+    // and newer model defaults until the app exposes an explicit long-context
+    // mode end-to-end instead of inferring it from the model string.
     200_000
 }
 
@@ -70,22 +55,18 @@ mod default_max_tests {
     use super::*;
 
     #[test]
-    fn claude_sonnet_4_6_is_1m() {
-        assert_eq!(default_max_tokens("claude", "claude-sonnet-4-6"), Some(1_000_000));
+    fn claude_sonnet_4_6_is_200k() {
+        assert_eq!(default_max_tokens("claude", "claude-sonnet-4-6"), Some(200_000));
     }
 
     #[test]
-    fn claude_opus_1m_variant_is_1m() {
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-7[1m]"), Some(1_000_000));
+    fn claude_opus_1m_variant_is_still_200k() {
+        assert_eq!(default_max_tokens("claude", "claude-opus-4-7[1m]"), Some(200_000));
     }
 
     #[test]
-    fn claude_opus_4_7_is_1m_by_default() {
-        // opus-4-7 natively supports a 1M window; the `[1m]` suffix is legacy
-        // from the beta-flag era and the bare model string now gets the same
-        // ceiling. Prior behaviour (200k) triple-counted relative to reality
-        // and inflated the usage HUD roughly 5×.
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-7"), Some(1_000_000));
+    fn claude_opus_4_7_is_200k() {
+        assert_eq!(default_max_tokens("claude", "claude-opus-4-7"), Some(200_000));
     }
 
     #[test]
@@ -103,7 +84,7 @@ mod default_max_tests {
 
     #[test]
     fn claude_case_insensitive() {
-        assert_eq!(default_max_tokens("claude", "Claude-Sonnet-4-6"), Some(1_000_000));
+        assert_eq!(default_max_tokens("claude", "Claude-Sonnet-4-6"), Some(200_000));
     }
 
     #[test]
