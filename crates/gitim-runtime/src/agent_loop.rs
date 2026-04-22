@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gitim_agent_provider::{
-    ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage, create,
+    create, ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage,
 };
 use gitim_client::GitimClient;
 use tokio::sync::broadcast;
@@ -14,7 +14,6 @@ use crate::error::RuntimeError;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
 use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
-
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentLoopConfig {
@@ -94,10 +93,7 @@ impl AgentLoop {
     }
 
     /// Build an AgentLoop with full config (model, env, system_prompt).
-    pub fn with_config(
-        repo_root: &Path,
-        config: &AgentLoopConfig,
-    ) -> Result<Self, RuntimeError> {
+    pub fn with_config(repo_root: &Path, config: &AgentLoopConfig) -> Result<Self, RuntimeError> {
         let state = AgentState::load(repo_root)?;
 
         let poller = match state.cursor {
@@ -356,7 +352,11 @@ impl AgentLoop {
         // cause the notice to re-fire.
         let mut state = AgentState::load(&self.repo_root)?;
         let prompt = if state.usage_notice_pending {
-            let pct = state.session_usage.as_ref().map(|s| s.used_percent).unwrap_or(80.0);
+            let pct = state
+                .session_usage
+                .as_ref()
+                .map(|s| s.used_percent)
+                .unwrap_or(80.0);
             let preamble = build_usage_notice_preamble(pct);
             state.usage_notice_pending = false;
             format!("{preamble}\n\n---\n\n{prompt}")
@@ -651,6 +651,7 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
 pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -> Option<String> {
     let mut prompt = String::from("以下是你上次醒来后发生的事件：\n\n");
     let mut has_external = false;
+    let mention = format!("@{self_handler}");
 
     for change in changes {
         if change.kind == "channel_meta" {
@@ -683,11 +684,28 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
             } else {
                 format!("[{timestamp}] ")
             };
+            let mention_tag = if body.contains(&mention) {
+                "[MENTION] "
+            } else {
+                ""
+            };
+            let scope = match change.kind.as_str() {
+                "dm" => format!("[DM {}]", channel.strip_prefix("dm:").unwrap_or(channel)),
+                "card_thread" => {
+                    format!(
+                        "[CARD {}]",
+                        channel.strip_prefix("card:").unwrap_or(channel)
+                    )
+                }
+                _ => format!("[#{channel}]"),
+            };
 
             if line_id.is_empty() {
-                prompt.push_str(&format!("{ts}[#{channel}] @{author}: {body}\n"));
+                prompt.push_str(&format!("{ts}{mention_tag}{scope} @{author}: {body}\n"));
             } else {
-                prompt.push_str(&format!("{ts}[#{channel}] {line_id} @{author}: {body}\n"));
+                prompt.push_str(&format!(
+                    "{ts}{mention_tag}{scope} {line_id} @{author}: {body}\n"
+                ));
             }
         }
     }
@@ -771,28 +789,32 @@ pub fn compute_snapshot(
     max_tokens: Option<u64>,
     updated_at: &str,
 ) -> Option<SessionUsageSnapshot> {
-    let (used_percent, source, input_tokens, output_tokens) =
-        if let Some(pu) = provider_reported {
-            if let Some(pct) = pu.used_percent {
-                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
-            } else if let Some(max) = max_tokens {
-                let effective = effective_input_tokens(pu);
-                if effective == 0 {
-                    return compute_from_estimate(
-                        session_id,
-                        estimated_tokens,
-                        max_tokens,
-                        updated_at,
-                    );
-                }
-                let pct = (effective as f64) / (max as f64) * 100.0;
-                (pct, UsageSource::ProviderReported, pu.input_tokens, pu.output_tokens)
-            } else {
+    let (used_percent, source, input_tokens, output_tokens) = if let Some(pu) = provider_reported {
+        if let Some(pct) = pu.used_percent {
+            (
+                pct,
+                UsageSource::ProviderReported,
+                pu.input_tokens,
+                pu.output_tokens,
+            )
+        } else if let Some(max) = max_tokens {
+            let effective = effective_input_tokens(pu);
+            if effective == 0 {
                 return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
             }
+            let pct = (effective as f64) / (max as f64) * 100.0;
+            (
+                pct,
+                UsageSource::ProviderReported,
+                pu.input_tokens,
+                pu.output_tokens,
+            )
         } else {
             return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
-        };
+        }
+    } else {
+        return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+    };
 
     let used_percent = used_percent.clamp(0.0, 100.0);
     Some(SessionUsageSnapshot {
@@ -930,14 +952,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut loop_ =
-            AgentLoop::with_provider(tmp.path(), "mock", handler).expect("build loop");
+        let mut loop_ = AgentLoop::with_provider(tmp.path(), "mock", handler).expect("build loop");
 
-        let mut ctx = WorkspaceContext::new(
-            slug.to_string(),
-            slug.to_string(),
-            tmp.path().to_path_buf(),
-        );
+        let mut ctx =
+            WorkspaceContext::new(slug.to_string(), slug.to_string(), tmp.path().to_path_buf());
         let rx = ctx.activity_tx.subscribe();
         let activity_tx = ctx.activity_tx.clone();
 
@@ -987,8 +1005,7 @@ mod tests {
         // Guards against the regression where the WebUI HUD kept displaying
         // the pre-reset percentage after [[RESET]] — the in-memory mirror
         // was never cleared to match the on-disk clear_session().
-        let (loop_, state, _rx, _tmp) =
-            harness_with_usage_snapshot("framer-opus", "gitim-company");
+        let (loop_, state, _rx, _tmp) = harness_with_usage_snapshot("framer-opus", "gitim-company");
 
         // Sanity: pre-condition — HUD snapshot is installed at 89%.
         {
