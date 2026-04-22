@@ -260,6 +260,22 @@ export default function App() {
       if (agentsRes.ok && agentsRes.data) {
         setAgents(agentsRes.data.agents as Agent[]);
       }
+
+      // Periodically refresh the roster so DM/Create-Channel pickers see
+      // agents that were provisioned mid-session (on this or another clone).
+      // Initial `client.users` ran once during init; without a refresh the
+      // list stays frozen and new members look invisible to the UI.
+      // Daemon returns the list sorted → equal-length + index-wise equal
+      // is a sufficient change check.
+      const usersRes = await client.users(slug);
+      if (usersRes.ok && usersRes.data) {
+        const next = usersRes.data.users as string[];
+        const current = useChatStore.getState().users;
+        const changed =
+          next.length !== current.length ||
+          next.some((u, i) => u !== current[i]);
+        if (changed) setUsers(next);
+      }
     } catch {
       // Connectivity-level failure (fetch threw). Race guard: a poll that
       // started for slug A shouldn't flip slug B's state if the user
@@ -282,6 +298,7 @@ export default function App() {
     setChannels,
     setArchivedChannels,
     setAgents,
+    setUsers,
     mergeCards,
     addCardMessages,
     setHeadCommit,
