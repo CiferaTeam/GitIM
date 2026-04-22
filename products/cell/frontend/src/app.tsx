@@ -23,6 +23,16 @@ import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
 
+// Consecutive connectivity failures (fetch-level) before we flip the
+// header dot red. At 3s cadence, 3 fails ≈ 9s of unreachability.
+const FAILS_UNTIL_DISCONNECTED = 3;
+
+// After this many consecutive fails, demote connection status back to
+// "disconnected" so SetupGate re-renders ConnectForm and the user gets
+// an actionable reconnect path. At 3s cadence, 10 fails ≈ 30s — enough
+// room for a quick runtime restart before we kick the user out.
+const FAILS_UNTIL_STATUS_DEMOTE = 10;
+
 /** "dm:alice,lewis" -> "alice--lewis"; passthrough for channels */
 function apiToDisplay(channel: string): string {
   if (channel.startsWith("dm:")) {
@@ -100,6 +110,7 @@ export default function App() {
   const resetCardsForSwitch = useCardStore((s) => s.resetForWorkspaceSwitch);
   const port = useConnectionStore((s) => s.port);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
+  const setConnectionStatus = useConnectionStore((s) => s.setStatus);
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -112,6 +123,11 @@ export default function App() {
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
   const activeSlugRef = useRef<string | null>(null);
+
+  // Connectivity-failure counter for the poll loop. Incremented only when
+  // fetch itself throws (runtime unreachable), not on application errors
+  // like stale cursors — a daemon that returned JSON is still "alive".
+  const consecutiveFailuresRef = useRef(0);
 
   // Agent activity SSE is scoped to the active workspace
   useAgentActivitySSE(activeSlug);
@@ -154,6 +170,13 @@ export default function App() {
         saveCursor(workspaceRef.current, sinceRef.current);
       }
       setHeadCommit(sinceRef.current);
+
+      // Runtime answered — clear any prior fail-streak and restore the
+      // green dot if it was knocked red by a previous outage.
+      if (consecutiveFailuresRef.current >= FAILS_UNTIL_DISCONNECTED) {
+        setConnected(true);
+      }
+      consecutiveFailuresRef.current = 0;
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
@@ -238,7 +261,20 @@ export default function App() {
         setAgents(agentsRes.data.agents as Agent[]);
       }
     } catch {
-      // Silently skip failed polls
+      // Connectivity-level failure (fetch threw). Race guard: a poll that
+      // started for slug A shouldn't flip slug B's state if the user
+      // switched workspaces mid-request.
+      if (slug !== activeSlugRef.current) return;
+
+      consecutiveFailuresRef.current += 1;
+      if (consecutiveFailuresRef.current === FAILS_UNTIL_DISCONNECTED) {
+        setConnected(false);
+      }
+      if (consecutiveFailuresRef.current === FAILS_UNTIL_STATUS_DEMOTE) {
+        // SetupGate re-renders ConnectForm; App unmounts and clears the
+        // poll interval via the effect's cleanup.
+        setConnectionStatus("disconnected");
+      }
     }
   }, [
     addMessages,
@@ -249,6 +285,8 @@ export default function App() {
     mergeCards,
     addCardMessages,
     setHeadCommit,
+    setConnected,
+    setConnectionStatus,
   ]);
 
   // Init + poll loop — runs whenever port + activeSlug are both set, and
@@ -266,6 +304,7 @@ export default function App() {
     resetCardsForSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
+    consecutiveFailuresRef.current = 0;
     setHeadCommit(null);
 
     // Guard against React 19 Strict Mode's simulated unmount: if cleanup
