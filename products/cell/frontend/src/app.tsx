@@ -223,10 +223,18 @@ export default function App() {
             addMessages(change.entries as Message[]);
           }
         } else {
+          // Filter out self-authored entries before counting unread: after
+          // sending a message and switching channels, poll echoes our own
+          // send back, which would otherwise bump an unread marker on the
+          // channel we just left. Self-mentions don't count as a ping either.
           const me = useChatStore.getState().currentUser;
+          const othersEntries = ((change.entries ?? []) as Message[]).filter(
+            (e) => e.author !== me
+          );
+          if (othersEntries.length === 0) continue;
           const mentionTag = `<@${me}>`;
-          const mentioned = !!change.entries?.some((e) =>
-            (e as Message).body?.includes(mentionTag)
+          const mentioned = othersEntries.some((e) =>
+            e.body?.includes(mentionTag)
           );
           incrementUnread(displayName, mentioned);
         }
