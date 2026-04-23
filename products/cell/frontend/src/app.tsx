@@ -124,10 +124,11 @@ export default function App() {
   const channelsRef = useRef<Channel[]>([]);
   const activeSlugRef = useRef<string | null>(null);
 
-  // Connectivity-failure counter for the poll loop. Incremented only when
-  // fetch itself throws (runtime unreachable), not on application errors
-  // like stale cursors — a daemon that returned JSON is still "alive".
-  const consecutiveFailuresRef = useRef(0);
+  // Transport failures: fetch throws because the runtime port is gone.
+  const consecutiveTransportFailuresRef = useRef(0);
+  // Workspace/API failures: runtime still answers, but the active workspace
+  // routes are returning errors (for example 404 / unknown workspace).
+  const consecutiveWorkspaceFailuresRef = useRef(0);
 
   // Agent activity SSE is scoped to the active workspace
   useAgentActivitySSE(activeSlug);
@@ -150,6 +151,41 @@ export default function App() {
     fetchWorkspaces();
   }, [port, fetchWorkspaces]);
 
+  const markConnected = useCallback(() => {
+    consecutiveTransportFailuresRef.current = 0;
+    consecutiveWorkspaceFailuresRef.current = 0;
+    if (!useChatStore.getState().connected) {
+      setConnected(true);
+    }
+  }, [setConnected]);
+
+  const markWorkspaceUnavailable = useCallback(() => {
+    consecutiveWorkspaceFailuresRef.current += 1;
+    if (
+      consecutiveWorkspaceFailuresRef.current === FAILS_UNTIL_DISCONNECTED &&
+      useChatStore.getState().connected
+    ) {
+      setConnected(false);
+    }
+  }, [setConnected]);
+
+  const markTransportUnavailable = useCallback(() => {
+    consecutiveTransportFailuresRef.current += 1;
+    if (
+      consecutiveTransportFailuresRef.current === FAILS_UNTIL_DISCONNECTED &&
+      useChatStore.getState().connected
+    ) {
+      setConnected(false);
+    }
+    if (
+      consecutiveTransportFailuresRef.current === FAILS_UNTIL_STATUS_DEMOTE
+    ) {
+      // SetupGate re-renders ConnectForm; App unmounts and clears the
+      // poll interval via the effect's cleanup.
+      setConnectionStatus("disconnected");
+    }
+  }, [setConnected, setConnectionStatus]);
+
   const runPoll = useCallback(async () => {
     const slug = activeSlugRef.current;
     if (!slug) return;
@@ -162,6 +198,7 @@ export default function App() {
           clearCursor(workspaceRef.current);
           sinceRef.current = undefined;
         }
+        markWorkspaceUnavailable();
         return;
       }
 
@@ -171,12 +208,7 @@ export default function App() {
       }
       setHeadCommit(sinceRef.current);
 
-      // Runtime answered — clear any prior fail-streak and restore the
-      // green dot if it was knocked red by a previous outage.
-      if (consecutiveFailuresRef.current >= FAILS_UNTIL_DISCONNECTED) {
-        setConnected(true);
-      }
-      consecutiveFailuresRef.current = 0;
+      markConnected();
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
@@ -290,15 +322,7 @@ export default function App() {
       // switched workspaces mid-request.
       if (slug !== activeSlugRef.current) return;
 
-      consecutiveFailuresRef.current += 1;
-      if (consecutiveFailuresRef.current === FAILS_UNTIL_DISCONNECTED) {
-        setConnected(false);
-      }
-      if (consecutiveFailuresRef.current === FAILS_UNTIL_STATUS_DEMOTE) {
-        // SetupGate re-renders ConnectForm; App unmounts and clears the
-        // poll interval via the effect's cleanup.
-        setConnectionStatus("disconnected");
-      }
+      markTransportUnavailable();
     }
   }, [
     addMessages,
@@ -310,8 +334,9 @@ export default function App() {
     mergeCards,
     addCardMessages,
     setHeadCommit,
-    setConnected,
-    setConnectionStatus,
+    markConnected,
+    markWorkspaceUnavailable,
+    markTransportUnavailable,
   ]);
 
   // Init + poll loop — runs whenever port + activeSlug are both set, and
@@ -329,7 +354,8 @@ export default function App() {
     resetCardsForSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
-    consecutiveFailuresRef.current = 0;
+    consecutiveTransportFailuresRef.current = 0;
+    consecutiveWorkspaceFailuresRef.current = 0;
     setHeadCommit(null);
 
     // Guard against React 19 Strict Mode's simulated unmount: if cleanup
@@ -364,7 +390,15 @@ export default function App() {
       if (cardsRes.ok && cardsRes.data)
         setCards(cardsRes.data.cards as Card[]);
 
-      setConnected(true);
+      const bootstrapOk =
+        meRes.ok &&
+        channelsRes.ok &&
+        usersRes.ok &&
+        agentsRes.ok &&
+        cardsRes.ok;
+      if (bootstrapOk) {
+        markConnected();
+      }
     }
 
     init(activeSlug).then(() => {
@@ -384,11 +418,11 @@ export default function App() {
     setUsers,
     setAgents,
     setCards,
-    setConnected,
     setHeadCommit,
     resetChatForSwitch,
     resetAgentsForSwitch,
     resetCardsForSwitch,
+    markConnected,
     runPoll,
   ]);
 
