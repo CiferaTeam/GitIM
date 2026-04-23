@@ -1005,7 +1005,7 @@ async fn agents_add(
     // provision an agent with provider=mock; the UI still only offers
     // claude/codex per Q1 scope.
     match req.provider.as_str() {
-        "claude" | "codex" | "opencode" | "mock" => {}
+        "claude" | "codex" | "opencode" | "hermes" | "mock" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1969,11 +1969,11 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
         let provider_raw = me["provider"].as_str();
         let provider_error = match provider_raw {
             None => Some(format!(
-                "Missing \"provider\" in {}. Add \"provider\": \"claude\", \"codex\", or \"opencode\" to the file and restart the runtime.",
+                "Missing \"provider\" in {}. Add \"provider\": \"claude\", \"codex\", \"opencode\", or \"hermes\" to the file and restart the runtime.",
                 me_path.display()
             )),
-            Some(p) if p != "claude" && p != "codex" && p != "opencode" => Some(format!(
-                "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", or \"opencode\".",
+            Some(p) if p != "claude" && p != "codex" && p != "opencode" && p != "hermes" => Some(format!(
+                "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", \"opencode\", or \"hermes\".",
                 p,
                 me_path.display()
             )),
