@@ -228,7 +228,28 @@ CLAUDE.md 的内容已在你的上下文中。
 
 pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
     "\
-## 主动重置上下文
+## 主动净化上下文
+
+你有两种粒度的工具清理无关信号。**先考虑轻的再考虑重的**。
+
+### 轻：订阅级 — `gitim leave-channel <channel>`
+
+物理退出某个频道。daemon 把你从该频道 `meta.members` 移除，下次 poll 不再把该频道\
+任何事件推给你。**记忆、其他 channel、本次 session 的思考全部保留**。
+
+什么时候用：
+- 某频道的讨论与你的工作线不再相关
+- 你明确不再负责该频道所承载的工作
+- 被拉进一个其实不该拉你的频道
+
+什么时候不用：
+- 当前只是一两条噪声消息，不是整个频道都跟你无关 — 忽略即可，别 leave
+- 想躲避某个讨论或争议 — leave 是公开行为（写 event、改 meta、触发 sync），\
+  所有成员看得见是你退的；把它当逃避手段既藏不住也会留下痕迹
+
+退出后想回来：等人重新 `join-channel -t <你>` 邀请即可，语义可逆。
+
+### 重：Session 级 — `[[RESET]]`
 
 当你感觉本次 session 的上下文已经繁杂、失焦，或者你已经完成一个阶段性任务、\
 接下来要处理的事情跟当前上下文关联度不高时，你可以主动请求重置。
@@ -237,13 +258,19 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 你本次 session 积累的记忆会被清空，只有磁盘上的 `CLAUDE.md` 和 `notes/` 会保留下来 — \
 **这是你跨 session 延续自己的唯一方式**。
 
+### 粒度选择
+
+- 噪声集中在某**一个**频道 → `leave-channel`
+- 多个频道噪声混杂、session 整体失焦、或要切工作相位 → `[[RESET]]`
+- 拿不准 → 先 `leave-channel` 试试，不够再 reset。反向不成立（reset 后无法回头只 leave）
+
 ### 重置前必须做的准备
 
 1. 更新记忆文件的「当前状态」，把仍在进行的事项写清楚
 2. 需要保留的新知识（网络发现、用户偏好、决策理由）写进 `notes/` 对应文件
 3. 自检：下次醒来只凭记忆文件 + `notes/`，能不能在 30 秒内恢复方向感？不能就继续补充
 
-### 触发方式
+### `[[RESET]]` 触发方式
 
 两种触发都成立：
 - **系统通知触发**：runtime 会在上下文压力接近上限时提醒你交接并 reset
@@ -313,6 +340,7 @@ pub fn default_gitim_api(_ctx: &PromptContext) -> String {
 - `gitim channels` — 列出所有频道
 - `gitim create-channel <name>` — 创建频道
 - `gitim join-channel <channel> -t <handler>` — 邀请用户
+- `gitim leave-channel <channel>` — 退出频道。之后不再收到该频道事件。见「主动净化上下文」
 - `gitim archive-channel <name>` — 归档频道（仅 creator 可操作）
 - `gitim unarchive-channel <name>` — 取消归档频道
 - `gitim archived-channels` — 列出归档频道

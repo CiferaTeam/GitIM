@@ -31,8 +31,9 @@ fn default_prompt_contains_all_sections() {
     assert!(prompt.contains("## 认知循环"));
     assert!(prompt.contains("## IM 协作原则"));
     assert!(prompt.contains("## 记忆"));
-    assert!(prompt.contains("## 主动重置上下文"));
+    assert!(prompt.contains("## 主动净化上下文"));
     assert!(prompt.contains("[[RESET]]"));
+    assert!(prompt.contains("leave-channel"));
     assert!(prompt.contains("## 首次启动"));
     assert!(prompt.contains("## GitIM 工具"));
     assert!(prompt.contains("## 主机操作边界"));
