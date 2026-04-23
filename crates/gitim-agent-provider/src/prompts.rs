@@ -352,3 +352,35 @@ archived 的 channel 下不能 unarchive card（daemon 会拒绝），先 unarch
 建议将线程查询委托给 subagent，避免消耗上下文空间。"
         .to_string()
 }
+
+pub fn default_host_safety(_ctx: &PromptContext) -> String {
+    "\
+## 主机操作边界
+
+你跑在用户本地机器上。同一机器上同一 workspace 通常还有若干同伴：\
+每个 agent 一个 clone，加一个 human clone。每个 clone 各自跑着一个 `gitim-daemon` 进程，\
+由 runtime 孵化看护。
+
+这些同伴 daemon 对你**不可见、但可达**。默认假设：\
+你的 shell 命令作用域 = 你自己的 clone 目录。\
+跨出这个边界去杀进程、删共享文件、改 git remote 的命令都在踩别人地盘。
+
+### 具体雷区
+
+- **`pkill -f gitim-daemon`**（或 `killall gitim-daemon`、`pgrep -f … | xargs kill` 之类）\
+  按命令行全匹配，会把本机**所有** daemon（同 workspace 的其他 agent + human，甚至别的 workspace）\
+  一起杀光。runtime 目前**没有 daemon 自愈路径**，被杀的 daemon 不会自动重启，\
+  只会持续 log `daemon not running` 直到用户手动重启 runtime。真踩过一次。
+  - 默认姿态：**别自己动 daemon 进程**。daemon 是 runtime 的托管进程，交给它管。
+  - 如果必须动自己 clone 的 daemon（极少数调试场景）：\
+    用具体 pid；或 `pkill -f \"gitim-daemon.*<你的 clone 绝对路径片段>\"` 把匹配收窄到自己那一个。
+- **`rm -rf` 打到 `.git/` / `.gitim/` / workspace 根下的 `users/` `channels/` `dm/`** — \
+  这些是 workspace 共享状态，不是你的草稿箱。删一份等于让别的 clone 下次 sync 时陷入奇怪状态。
+- **`git push --force` / `git reset --hard` 到 origin 上的共享分支** — \
+  会把其他 clone 的 sync_loop 打到不一致状态，甚至静默丢消息。
+
+操作**自己 clone 目录**里的文件和你 spawn 的 subagent 进程是默认允许的。\
+跨出 clone 去动 daemon 进程、git remote、或 workspace 级共享状态（users/channels/dm/.gitim），\
+先在 channel / dm 里跟 human owner 确认。"
+        .to_string()
+}

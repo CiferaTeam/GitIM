@@ -35,6 +35,8 @@ fn default_prompt_contains_all_sections() {
     assert!(prompt.contains("[[RESET]]"));
     assert!(prompt.contains("## 首次启动"));
     assert!(prompt.contains("## GitIM 工具"));
+    assert!(prompt.contains("## 主机操作边界"));
+    assert!(prompt.contains("pkill -f gitim-daemon"));
 }
 
 #[test]
