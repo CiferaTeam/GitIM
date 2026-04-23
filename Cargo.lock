@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-agent-provider"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-cli"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "clap",
  "gitim-client",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-client"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "libc",
  "pretty_assertions",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-stream",
  "axum",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-runtime"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "gitim-core",
  "notify",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-updater"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "flate2",
  "hex",
@@ -1811,9 +1811,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.38"
+version = "0.23.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
+checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
 dependencies = [
  "once_cell",
  "ring",
@@ -1835,9 +1835,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
