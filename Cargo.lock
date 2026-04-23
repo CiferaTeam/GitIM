@@ -793,6 +793,7 @@ dependencies = [
  "gitim-sync",
  "gitim-updater",
  "http-body-util",
+ "libc",
  "mockito",
  "regex",
  "reqwest",

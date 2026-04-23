@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lc = lifecycle::DaemonLifecycle::new(&repo_root);
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        shutdown_signal().await;
         lc.cleanup();
         std::process::exit(0);
     });
@@ -208,4 +208,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server::start_unix_socket(&socket_path, app_state).await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }

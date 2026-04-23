@@ -45,7 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() < 4 {
         eprintln!("Usage:");
         eprintln!("  gitim-runtime [--port <PORT>] [-d|--daemon]               (shell mode, default port {DEFAULT_PORT})");
-        eprintln!("  gitim-runtime <remote_url> <handler> <display_name> [agents_dir]  (agent mode)");
+        eprintln!(
+            "  gitim-runtime <remote_url> <handler> <display_name> [agents_dir]  (agent mode)"
+        );
         std::process::exit(1);
     }
 
@@ -100,14 +102,17 @@ fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // `run_shell()` writes it at startup. That way a future self-replace
     // path (fork-exec a fresh runtime with new binary) doesn't need to
     // also remember to rewrite the PID file from the exiting parent.
-    let child = std::process::Command::new(exe)
-        .args(["--port", &port.to_string()])
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["--port", &port.to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(log_file.try_clone()?)
-        .stderr(log_file)
-        .spawn()?;
+        .stderr(log_file);
+    let child = gitim_runtime::background::spawn_detached(&mut cmd)?;
 
-    eprintln!("runtime started in background (pid: {}, port: {port})", child.id());
+    eprintln!(
+        "runtime started in background (pid: {}, port: {port})",
+        child.id()
+    );
     eprintln!("log: {}", log_path.display());
 
     Ok(())
@@ -234,16 +239,18 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(l) => break l,
                 Err(e) if attempts < 10 && e.kind() == std::io::ErrorKind::AddrInUse => {
                     attempts += 1;
-                    tracing::warn!(?e, attempts, "port in use (likely restart race), retrying in 100ms");
+                    tracing::warn!(
+                        ?e,
+                        attempts,
+                        "port in use (likely restart race), retrying in 100ms"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 Err(e) => return Err(e.into()),
             }
         }
     };
-    let mut server = tokio::spawn(async move {
-        axum::serve(listener, router).await
-    });
+    let mut server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     // Wait for shutdown signal; also bail if the server itself errors out
     tokio::select! {
@@ -278,4 +285,3 @@ async fn shutdown_signal() {
 
     eprintln!("\nshutting down...");
 }
-
