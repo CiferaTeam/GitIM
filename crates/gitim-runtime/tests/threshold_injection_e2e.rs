@@ -45,8 +45,7 @@ async fn threshold_crossing_sets_notice_pending() {
     let tmp = bootstrap_workspace("threshold-agent");
     let repo_root = tmp.path();
 
-    let loop_ =
-        AgentLoop::with_provider(repo_root, "mock", "threshold-agent").expect("loop");
+    let loop_ = AgentLoop::with_provider(repo_root, "mock", "threshold-agent").expect("loop");
 
     // ---- Turn 1: 55% ------------------------------------------------------
     let usage_t1 = ProviderUsage {

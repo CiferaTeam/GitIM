@@ -20,7 +20,11 @@ pub(crate) fn detect_git_config(key: &str, cwd: &Path) -> Option<String> {
         .ok()?;
     if output.status.success() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() { None } else { Some(value) }
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
     } else {
         None
     }
@@ -75,9 +79,11 @@ pub async fn provision_human(
     let log_path = daemon_log_path(&human_dir);
     tokio::task::spawn_blocking(move || ensure_daemon_with_log(&root, &log_path))
         .await
-        .map_err(|e| RuntimeError::DaemonStartFailed(
-            gitim_client::ClientError::ConnectionFailed(format!("task panicked: {e}"))
-        ))??;
+        .map_err(|e| {
+            RuntimeError::DaemonStartFailed(gitim_client::ClientError::ConnectionFailed(format!(
+                "task panicked: {e}"
+            )))
+        })??;
     info!("human daemon running");
 
     let client = GitimClient::new(&human_dir);
@@ -153,9 +159,11 @@ pub async fn provision_agent(
     let log_path = daemon_log_path(&repo_root);
     tokio::task::spawn_blocking(move || ensure_daemon_with_log(&root, &log_path))
         .await
-        .map_err(|e| RuntimeError::DaemonStartFailed(
-            gitim_client::ClientError::ConnectionFailed(format!("task panicked: {e}"))
-        ))??;
+        .map_err(|e| {
+            RuntimeError::DaemonStartFailed(gitim_client::ClientError::ConnectionFailed(format!(
+                "task panicked: {e}"
+            )))
+        })??;
     info!(handler = %config.handler, "daemon running");
 
     // Onboard (idempotent — daemon handles repeat calls).

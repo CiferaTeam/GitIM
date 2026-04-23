@@ -35,8 +35,12 @@ impl Default for DaemonConfig {
     }
 }
 
-fn default_sync_interval() -> u32 { 3 }
-fn default_debug_port() -> u16 { 3000 }
+fn default_sync_interval() -> u32 {
+    3
+}
+fn default_debug_port() -> u16 {
+    3000
+}
 
 impl Default for Config {
     fn default() -> Self {

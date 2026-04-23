@@ -28,10 +28,7 @@ pub enum Event {
     },
 
     #[serde(rename = "card_created")]
-    CardCreated {
-        channel: String,
-        card_id: String,
-    },
+    CardCreated { channel: String, card_id: String },
 
     #[serde(rename = "card_status_changed")]
     CardStatusChanged {
@@ -284,7 +281,11 @@ mod tests {
         let json = r#"{"method":"archive_card","channel":"foo","card_id":"abc","author":"lewis"}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         match req {
-            Request::ArchiveCard { channel, card_id, author } => {
+            Request::ArchiveCard {
+                channel,
+                card_id,
+                author,
+            } => {
                 assert_eq!(channel, "foo");
                 assert_eq!(card_id, "abc");
                 assert_eq!(author, "lewis");
@@ -295,10 +296,15 @@ mod tests {
 
     #[test]
     fn test_unarchive_card_request_roundtrip() {
-        let json = r#"{"method":"unarchive_card","channel":"bar","card_id":"xyz","author":"alice"}"#;
+        let json =
+            r#"{"method":"unarchive_card","channel":"bar","card_id":"xyz","author":"alice"}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         match req {
-            Request::UnarchiveCard { channel, card_id, author } => {
+            Request::UnarchiveCard {
+                channel,
+                card_id,
+                author,
+            } => {
                 assert_eq!(channel, "bar");
                 assert_eq!(card_id, "xyz");
                 assert_eq!(author, "alice");
@@ -336,7 +342,10 @@ mod tests {
             author: "bob".to_string(),
         };
         let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"event\":\"card_archived\""), "json was: {json}");
+        assert!(
+            json.contains("\"event\":\"card_archived\""),
+            "json was: {json}"
+        );
         assert!(json.contains("\"channel\":\"general\""));
         assert!(json.contains("\"card_id\":\"card-1\""));
         assert!(json.contains("\"author\":\"bob\""));
@@ -350,7 +359,10 @@ mod tests {
             author: "carol".to_string(),
         };
         let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"event\":\"card_unarchived\""), "json was: {json}");
+        assert!(
+            json.contains("\"event\":\"card_unarchived\""),
+            "json was: {json}"
+        );
         assert!(json.contains("\"channel\":\"design\""));
         assert!(json.contains("\"card_id\":\"card-2\""));
         assert!(json.contains("\"author\":\"carol\""));

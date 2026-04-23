@@ -77,5 +77,8 @@ async fn test_provision_invalid_remote() {
 
     let result = provision_agent(&agents_dir, &config).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), RuntimeError::GitCloneFailed(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        RuntimeError::GitCloneFailed(_)
+    ));
 }

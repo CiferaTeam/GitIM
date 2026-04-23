@@ -42,8 +42,7 @@ async fn test_preflight_opencode_not_installed() {
 #[tokio::test]
 async fn test_preflight_opencode_exit_nonzero() {
     // `false` exits 1 immediately — Other branch (non-zero exit).
-    let result =
-        preflight_opencode_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
+    let result = preflight_opencode_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -53,8 +52,7 @@ async fn test_preflight_opencode_exit_nonzero() {
 #[tokio::test]
 async fn test_preflight_opencode_empty_output() {
     // `true` exits 0 with empty stdout — Other via "did not contain GITIM_OK".
-    let result =
-        preflight_opencode_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
+    let result = preflight_opencode_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -69,11 +67,8 @@ async fn test_preflight_opencode_timeout() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let result = preflight_opencode_with(
-        script.to_str().unwrap(),
-        Duration::from_millis(500),
-    )
-    .await;
+    let result =
+        preflight_opencode_with(script.to_str().unwrap(), Duration::from_millis(500)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));

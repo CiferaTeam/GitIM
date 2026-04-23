@@ -6,9 +6,7 @@ use serde_json::json;
 fn parse_system_message_extracts_session_id() {
     let line = r#"{"type":"system","subtype":"init","session_id":"sess-123"}"#;
     let msg = parse_line(line).unwrap();
-    assert!(
-        matches!(msg, ParsedMessage::System { session_id } if session_id == "sess-123")
-    );
+    assert!(matches!(msg, ParsedMessage::System { session_id } if session_id == "sess-123"));
 }
 
 #[test]
@@ -25,9 +23,7 @@ fn parse_assistant_text() {
     match msg {
         ParsedMessage::AssistantEvents { events, .. } => {
             assert_eq!(events.len(), 1);
-            assert!(
-                matches!(&events[0], Event::Text { content } if content == "Hello world")
-            );
+            assert!(matches!(&events[0], Event::Text { content } if content == "Hello world"));
         }
         _ => panic!("expected Events"),
     }
@@ -100,9 +96,7 @@ fn parse_user_tool_result() {
     match msg {
         ParsedMessage::UserEvents(events) => {
             assert_eq!(events.len(), 1);
-            assert!(
-                matches!(&events[0], Event::ToolResult { call_id, .. } if call_id == "call-1")
-            );
+            assert!(matches!(&events[0], Event::ToolResult { call_id, .. } if call_id == "call-1"));
         }
         _ => panic!("expected UserEvents"),
     }

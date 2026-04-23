@@ -8,11 +8,7 @@ struct TestOverrideProvider;
 
 #[async_trait]
 impl Provider for TestOverrideProvider {
-    async fn execute(
-        &self,
-        _prompt: &str,
-        _opts: ExecOptions,
-    ) -> Result<Session, ProviderError> {
+    async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
         Err(ProviderError::NotImplemented("test".to_string()))
     }
 
@@ -23,8 +19,7 @@ impl Provider for TestOverrideProvider {
 
 #[test]
 fn default_prompt_contains_all_sections() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "test-bot",
         model: None,
@@ -44,8 +39,7 @@ fn default_prompt_contains_all_sections() {
 
 #[test]
 fn default_memory_references_claude_md() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "bot",
         model: None,
@@ -78,8 +72,7 @@ fn override_replaces_single_section() {
 
 #[test]
 fn prompt_context_handler_is_interpolated() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "my-agent",
         model: None,
@@ -90,8 +83,7 @@ fn prompt_context_handler_is_interpolated() {
 
 #[test]
 fn gitim_api_exposes_card_and_archive_commands() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "bot",
         model: None,
@@ -118,8 +110,7 @@ fn gitim_api_exposes_card_and_archive_commands() {
 
 #[test]
 fn codex_provider_uses_agents_md() {
-    let provider =
-        gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "codex-bot",
         model: None,

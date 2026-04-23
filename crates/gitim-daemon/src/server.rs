@@ -1,9 +1,9 @@
 use crate::api::{Request, Response};
 use crate::state::SharedState;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
 
 pub async fn start_unix_socket(

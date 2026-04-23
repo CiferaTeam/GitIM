@@ -100,20 +100,36 @@ pub fn kill_managed_daemons(state: &crate::http::SharedRuntimeState) {
 
 async fn kill_pid_at(repo: &Path) {
     let pid_file = repo.join(".gitim/run/gitim.pid");
-    let Ok(content) = std::fs::read_to_string(&pid_file) else { return; };
-    let Ok(pid) = content.trim().parse::<u32>() else { return; };
-    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+    let Ok(content) = std::fs::read_to_string(&pid_file) else {
+        return;
+    };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        return;
+    };
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .output();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 }
 
 fn kill_pid_at_blocking(repo: &Path) {
     let pid_file = repo.join(".gitim/run/gitim.pid");
-    let Ok(content) = std::fs::read_to_string(&pid_file) else { return; };
-    let Ok(pid) = content.trim().parse::<u32>() else { return; };
-    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+    let Ok(content) = std::fs::read_to_string(&pid_file) else {
+        return;
+    };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        return;
+    };
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .output();
     std::thread::sleep(std::time::Duration::from_millis(500));
-    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 }
 
 #[cfg(test)]
@@ -164,16 +180,8 @@ mod tests {
 
     #[test]
     fn per_workspace_broadcast_isolated() {
-        let a = WorkspaceContext::new(
-            "a".to_string(),
-            "A".to_string(),
-            PathBuf::from("/a"),
-        );
-        let b = WorkspaceContext::new(
-            "b".to_string(),
-            "B".to_string(),
-            PathBuf::from("/b"),
-        );
+        let a = WorkspaceContext::new("a".to_string(), "A".to_string(), PathBuf::from("/a"));
+        let b = WorkspaceContext::new("b".to_string(), "B".to_string(), PathBuf::from("/b"));
         let mut rx_a = a.activity_tx.subscribe();
         let _ = b.activity_tx.send(AgentActivityEvent {
             agent_id: "x".to_string(),

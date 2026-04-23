@@ -135,13 +135,19 @@ mod tests {
     #[test]
     fn join_target_not_registered() {
         let result = validate_join("alice", &["unknown"], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::TargetNotRegistered("unknown".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::TargetNotRegistered("unknown".into()))
+        );
     }
 
     #[test]
     fn join_author_not_registered() {
         let result = validate_join("nobody", &[], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::AuthorNotRegistered("nobody".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::AuthorNotRegistered("nobody".into()))
+        );
     }
 
     #[test]
@@ -173,7 +179,10 @@ mod tests {
     #[test]
     fn leave_author_not_registered() {
         let result = validate_leave("nobody", &[], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::AuthorNotRegistered("nobody".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::AuthorNotRegistered("nobody".into()))
+        );
     }
 
     #[test]

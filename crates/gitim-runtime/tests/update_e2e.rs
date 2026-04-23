@@ -91,8 +91,7 @@ fn fake_runtime_bin() -> PathBuf {
 fn install_fake(dir: &Path, name: &str) -> PathBuf {
     let src = fake_runtime_bin();
     let dest = dir.join(name);
-    std::fs::copy(&src, &dest)
-        .unwrap_or_else(|e| panic!("copy {src:?} -> {dest:?}: {e}"));
+    std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("copy {src:?} -> {dest:?}: {e}"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -159,7 +158,9 @@ fn fetch_health_once(port: u16) -> Result<String, String> {
         .write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&buf).to_string();
     // Strip HTTP headers — body is whatever follows the blank line.
     let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
@@ -298,8 +299,7 @@ async fn async_phase_replaces_and_forks_new_runtime() {
     // We have to consume the src_dir tempdir so replace_binaries can walk it;
     // ownership transfer is what the real handler does too.
     let job_id = "test-happy".to_string();
-    let outcome =
-        run_async_install_and_spawn(state.clone(), job_id.clone(), src_dir).await;
+    let outcome = run_async_install_and_spawn(state.clone(), job_id.clone(), src_dir).await;
 
     let child_pid = match outcome {
         AsyncPhaseOutcome::Done { child_pid } => child_pid,
@@ -365,8 +365,7 @@ async fn async_phase_replace_failure_leaves_old_runtime_alive() {
     // Inject a rename-blocker: `replace_binaries` will try to rename
     // `install_dir/gitim-daemon` to `install_dir/gitim-daemon.old`, but we've
     // made that name a directory — the rename fails and rollback kicks in.
-    std::fs::create_dir(install_dir.path().join("gitim-daemon.old"))
-        .expect("pre-create blocker");
+    std::fs::create_dir(install_dir.path().join("gitim-daemon.old")).expect("pre-create blocker");
 
     let port = pick_free_port();
     let state = state_for(install_dir.path(), port);
@@ -472,19 +471,14 @@ async fn async_phase_fork_exec_failure_records_error() {
     //
     // Trick: point canonical_exe_path at a non-exec path by overwriting the
     // state's canonical after state construction, bypassing canonicalize.
-    state.lock().unwrap().canonical_exe_path =
-        install_dir.path().join("definitely-nonexistent");
+    state.lock().unwrap().canonical_exe_path = install_dir.path().join("definitely-nonexistent");
 
     let _version_guard = FakeVersionGuard::install("9.9.9");
     // Same rationale as the replace-failure test: respawn path reads $HOME.
     let _home_guard = HomeGuard::install();
 
-    let outcome = run_async_install_and_spawn(
-        state.clone(),
-        "test-spawn-fail".to_string(),
-        src_dir,
-    )
-    .await;
+    let outcome =
+        run_async_install_and_spawn(state.clone(), "test-spawn-fail".to_string(), src_dir).await;
 
     match outcome {
         AsyncPhaseOutcome::Failed { detail } => {
@@ -497,13 +491,11 @@ async fn async_phase_fork_exec_failure_records_error() {
     }
 
     // Guard must be cleared.
-    assert!(
-        !state
-            .lock()
-            .unwrap()
-            .update_in_progress
-            .load(std::sync::atomic::Ordering::SeqCst)
-    );
+    assert!(!state
+        .lock()
+        .unwrap()
+        .update_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst));
 
     // update_last_error populated.
     let last_err = state
@@ -570,4 +562,3 @@ mod scopeguard {
         }
     }
 }
-

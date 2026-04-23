@@ -406,16 +406,10 @@ pub async fn handle_unarchive_channel(
                         attempt, MAX_PUSH_RETRIES
                     );
                     if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!(
-                            "unarchive_channel fetch failed: {}",
-                            e
-                        ));
+                        return Response::error(format!("unarchive_channel fetch failed: {}", e));
                     }
                     if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!(
-                            "unarchive_channel rebase failed: {}",
-                            e
-                        ));
+                        return Response::error(format!("unarchive_channel rebase failed: {}", e));
                     }
                 }
                 Err(e) => {
@@ -560,8 +554,7 @@ pub(super) async fn write_channel_event(
         },
         Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
     };
-    let latest_members: Vec<&str> =
-        latest_meta.members.iter().map(|s| s.as_str()).collect();
+    let latest_members: Vec<&str> = latest_meta.members.iter().map(|s| s.as_str()).collect();
     let revalidate = match event_type {
         "join" => im_rules::validate_join(&author, &target_refs, &user_refs, &latest_members),
         "leave" => im_rules::validate_leave(&author, &target_refs, &user_refs, &latest_members),
@@ -584,8 +577,7 @@ pub(super) async fn write_channel_event(
     // Compliance check: same belt-and-suspenders defense used on the message
     // path. Under the lock this can't fail on concurrency; it still catches
     // any out-of-band thread mutation (e.g. a hand-edit).
-    let allowed_refs: Vec<&str> =
-        channel_meta.members.iter().map(|s| s.as_str()).collect();
+    let allowed_refs: Vec<&str> = channel_meta.members.iter().map(|s| s.as_str()).collect();
     if let Err(e) = validate_append(&existing, &new_content, &user_refs, &allowed_refs) {
         return Response::error(format!("compliance check failed: {}", e));
     }

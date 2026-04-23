@@ -159,7 +159,9 @@ fn spawn_daemon(repo_root: &Path, stdio: DaemonStdio) -> Result<(), ClientError>
                     Ok(())
                 })
                 .spawn()
-                .map_err(|e| ClientError::ConnectionFailed(format!("failed to spawn daemon: {e}")))?;
+                .map_err(|e| {
+                    ClientError::ConnectionFailed(format!("failed to spawn daemon: {e}"))
+                })?;
         }
     }
 

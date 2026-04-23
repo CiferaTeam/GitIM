@@ -16,11 +16,7 @@ async fn spawn_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     (addr, handle)
 }
 
-async fn post_json(
-    addr: SocketAddr,
-    path: &str,
-    body: serde_json::Value,
-) -> serde_json::Value {
+async fn post_json(addr: SocketAddr, path: &str, body: serde_json::Value) -> serde_json::Value {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}{path}"))
@@ -49,7 +45,10 @@ async fn git_init_local_creates_bare_and_human_and_config() {
         }),
     )
     .await;
-    assert_eq!(init_resp["ok"], true, "workspace create failed: {init_resp:?}");
+    assert_eq!(
+        init_resp["ok"], true,
+        "workspace create failed: {init_resp:?}"
+    );
 
     assert!(
         workspace_path.join("repo.git").exists(),

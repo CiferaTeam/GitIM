@@ -295,7 +295,10 @@ fn search_excludes_cards_by_default() {
             include_cards: false,
         })
         .unwrap();
-    assert_eq!(result.total, 2, "cards should be excluded when include_cards=false");
+    assert_eq!(
+        result.total, 2,
+        "cards should be excluded when include_cards=false"
+    );
 }
 
 #[test]
@@ -333,7 +336,10 @@ fn search_includes_cards_when_flag_set() {
             include_cards: true,
         })
         .unwrap();
-    assert_eq!(result.total, 4, "all 4 messages (channel + card) should be returned when include_cards=true");
+    assert_eq!(
+        result.total, 4,
+        "all 4 messages (channel + card) should be returned when include_cards=true"
+    );
 }
 
 #[test]

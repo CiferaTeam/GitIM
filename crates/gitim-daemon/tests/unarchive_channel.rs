@@ -152,25 +152,21 @@ async fn test_unarchive_channel_happy_path() {
 
     // Archive copies gone.
     assert!(
-        !state.repo_root.join("archive/channels/dev.meta.yaml").exists(),
+        !state
+            .repo_root
+            .join("archive/channels/dev.meta.yaml")
+            .exists(),
         "meta should be removed from archive"
     );
     assert!(
-        !state
-            .repo_root
-            .join("archive/channels/dev.thread")
-            .exists(),
+        !state.repo_root.join("archive/channels/dev.thread").exists(),
         "thread should be removed from archive"
     );
 
     // Commit history contains both archive and unarchive ops (in reverse order).
     let log = git_log_subjects(&state.repo_root);
     assert!(log.contains("archive: #dev by @alice"), "log: {}", log);
-    assert!(
-        log.contains("unarchive: #dev by @alice"),
-        "log: {}",
-        log
-    );
+    assert!(log.contains("unarchive: #dev by @alice"), "log: {}", log);
 
     // SSE event emitted.
     let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -242,10 +238,7 @@ async fn test_unarchive_channel_non_creator() {
         .repo_root
         .join("archive/channels/dev.meta.yaml")
         .exists());
-    assert!(state
-        .repo_root
-        .join("archive/channels/dev.thread")
-        .exists());
+    assert!(state.repo_root.join("archive/channels/dev.thread").exists());
     assert!(!state.repo_root.join("channels/dev.meta.yaml").exists());
 
     // No new commit.
@@ -297,10 +290,7 @@ async fn test_unarchive_channel_name_conflict() {
         .repo_root
         .join("archive/channels/dev.meta.yaml")
         .exists());
-    assert!(state
-        .repo_root
-        .join("archive/channels/dev.thread")
-        .exists());
+    assert!(state.repo_root.join("archive/channels/dev.thread").exists());
 
     // No new commit.
     let after_log = git_log_subjects(&state.repo_root);
@@ -332,7 +322,11 @@ async fn test_unarchive_channel_rolls_back_on_commit_failure() {
     let resp = unarchive_dev_as(state.clone(), "alice").await;
     assert!(!resp.ok, "unarchive should fail when commit is rejected");
     let err = resp.error.unwrap();
-    assert!(err.contains("rolled back"), "err should mention rollback: {}", err);
+    assert!(
+        err.contains("rolled back"),
+        "err should mention rollback: {}",
+        err
+    );
 
     // Both files must be back in archive/ (rollback reversed BOTH mvs).
     assert!(
@@ -343,10 +337,7 @@ async fn test_unarchive_channel_rolls_back_on_commit_failure() {
         "meta should be back in archive after rollback"
     );
     assert!(
-        state
-            .repo_root
-            .join("archive/channels/dev.thread")
-            .exists(),
+        state.repo_root.join("archive/channels/dev.thread").exists(),
         "thread should be back in archive after rollback"
     );
 

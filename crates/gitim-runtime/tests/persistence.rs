@@ -82,10 +82,7 @@ async fn test_cursor_restore_skips_old_messages() {
     state.save(&handle.repo_root).unwrap();
 
     // Phase 2: create NEW poller with restored cursor — should NOT see old message
-    let mut poller2 = Poller::with_cursor(
-        GitimClient::new(&handle.repo_root),
-        saved_cursor,
-    );
+    let mut poller2 = Poller::with_cursor(GitimClient::new(&handle.repo_root), saved_cursor);
     let result = poller2.poll().await.unwrap();
     assert!(
         result.changes.is_empty(),

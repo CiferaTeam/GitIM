@@ -1,15 +1,15 @@
 pub mod card;
 pub mod channel;
+pub mod config;
 pub mod handler;
 pub mod link;
 pub mod message;
 pub mod meta;
-pub mod config;
 
 pub use card::{validate_labels, CardError, CardMeta, CardStatus};
 pub use channel::ChannelName;
+pub use config::Config;
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
-pub use message::{Message, ChannelEvent, ThreadEntry, ThreadLine, ThreadFile};
-pub use meta::{UserMeta, ChannelMeta};
-pub use config::Config;
+pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
+pub use meta::{ChannelMeta, UserMeta};

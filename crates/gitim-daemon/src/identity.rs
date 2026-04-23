@@ -31,19 +31,11 @@ pub enum AuthData {
         github_email: Option<String>,
     },
     #[serde(rename = "github")]
-    GitHub {
-        token: String,
-    },
+    GitHub { token: String },
     #[serde(rename = "gitea")]
-    Gitea {
-        token: String,
-        url: String,
-    },
+    Gitea { token: String, url: String },
     #[serde(rename = "gitlab")]
-    GitLab {
-        token: String,
-        url: String,
-    },
+    GitLab { token: String, url: String },
 }
 
 #[derive(Debug, Clone)]
@@ -255,8 +247,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.email.is_none(),
-            "empty string should not produce a fake git author email");
+        assert!(
+            result.email.is_none(),
+            "empty string should not produce a fake git author email"
+        );
     }
 
     #[test]

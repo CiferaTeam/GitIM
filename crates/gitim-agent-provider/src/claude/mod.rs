@@ -93,10 +93,26 @@ impl Provider for ClaudeProvider {
         let cancel_token_inner = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stdin, stderr, event_tx, result_tx, timeout, pid, cancel_token_inner).await;
+            drive_session(
+                child,
+                stdout,
+                stdin,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                cancel_token_inner,
+            )
+            .await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            join_handle.abort_handle(),
+            cancel_token,
+        ))
     }
 }
 
@@ -280,14 +296,18 @@ async fn drive_session(
     }
 
     let duration = start.elapsed();
-    info!(pid, ?final_status, turns = num_turns, ?duration, "claude finished");
+    info!(
+        pid,
+        ?final_status,
+        turns = num_turns,
+        ?duration,
+        "claude finished"
+    );
 
     stderr_handle.abort();
 
     // If failed with no error message, fall back to stderr tail
-    if final_status == ExecStatus::Failed
-        && final_error.as_ref().is_none_or(|e| e.is_empty())
-    {
+    if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
@@ -661,7 +681,10 @@ mod usage_parse_tests {
         assert_eq!(usage.input_tokens, Some(1));
         assert_eq!(usage.cache_read_tokens, Some(59_560));
         assert_eq!(usage.cache_creation_tokens, Some(325));
-        assert!(usage.used_percent.is_none(), "Claude never sets used_percent");
+        assert!(
+            usage.used_percent.is_none(),
+            "Claude never sets used_percent"
+        );
 
         // Effective = 59,886 — the actual window-occupancy number the runtime
         // should divide into max_tokens. The aggregated 177k across 3

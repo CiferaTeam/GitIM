@@ -1,9 +1,7 @@
 use crate::api::{Event, Response};
 use crate::state::{PendingMessage, PushResult, SharedState};
 use crate::thread_io;
-use gitim_core::types::{
-    validate_labels, CardMeta, CardStatus, ChannelName, Handler,
-};
+use gitim_core::types::{validate_labels, CardMeta, CardStatus, ChannelName, Handler};
 use gitim_sync::git::GitError;
 use tracing::{error, info, warn};
 
@@ -203,14 +201,8 @@ pub async fn handle_create_card(
         updated_at: now,
     };
     let meta_str = serde_yaml::to_string(&meta).unwrap();
-    let meta_rel = format!(
-        "channels/{}/cards/{}/card.meta.yaml",
-        ch_name, card_id
-    );
-    let thread_rel = format!(
-        "channels/{}/cards/{}/discussion.thread",
-        ch_name, card_id
-    );
+    let meta_rel = format!("channels/{}/cards/{}/card.meta.yaml", ch_name, card_id);
+    let thread_rel = format!("channels/{}/cards/{}/discussion.thread", ch_name, card_id);
     if let Err(e) = std::fs::write(card_dir.join("card.meta.yaml"), &meta_str) {
         return Response::error(format!("failed to write card meta: {}", e));
     }
@@ -218,10 +210,7 @@ pub async fn handle_create_card(
         return Response::error(format!("failed to write card thread: {}", e));
     }
 
-    let commit_msg = format!(
-        "card: create {} in {} by @{}",
-        card_id, channel, author
-    );
+    let commit_msg = format!("card: create {} in {} by @{}", card_id, channel, author);
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
         &[&meta_rel, &thread_rel],
@@ -240,7 +229,10 @@ pub async fn handle_create_card(
         card_id: card_id.clone(),
     });
 
-    info!("card '{}' created in channel '{}' by @{}", card_id, channel, author);
+    info!(
+        "card '{}' created in channel '{}' by @{}",
+        card_id, channel, author
+    );
 
     Response::success(serde_json::json!({
         "channel": ch_name.to_string(),
@@ -273,19 +265,34 @@ pub async fn handle_archive_card(
 
     // 4. Locate card
     let located = match locate_card(&state, &ch_name, &card_id) {
-        None => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
-        Some(loc) if loc.is_archived => return Response::error(format!("card '{}' is already archived", card_id)),
+        None => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
+        Some(loc) if loc.is_archived => {
+            return Response::error(format!("card '{}' is already archived", card_id))
+        }
         Some(loc) => loc,
     };
 
     // 5. Read card.meta.yaml
-    let meta_path = state.repo_root.join(&located.rel_path).join("card.meta.yaml");
+    let meta_path = state
+        .repo_root
+        .join(&located.rel_path)
+        .join("card.meta.yaml");
     let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
             Ok(m) => m,
             Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
         },
-        Err(_) => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+        Err(_) => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
     };
 
     // 6. Permission check: only creator or assignee can archive
@@ -327,7 +334,10 @@ pub async fn handle_archive_card(
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("archive_card: rollback mv also failed: {}", rb_err);
         }
-        return Response::error(format!("archive_card commit failed: {}; rolled back git mv", e));
+        return Response::error(format!(
+            "archive_card commit failed: {}; rolled back git mv",
+            e
+        ));
     }
 
     // 10. Push with retry
@@ -343,7 +353,10 @@ pub async fn handle_archive_card(
     });
 
     // 12. Info log
-    info!("card '{}' archived in channel '{}' by @{}", card_id, channel, author);
+    info!(
+        "card '{}' archived in channel '{}' by @{}",
+        card_id, channel, author
+    );
 
     // 13. Return success
     Response::success(serde_json::json!({
@@ -377,8 +390,15 @@ pub async fn handle_unarchive_card(
 
     // 4. Locate card — must be archived
     let located = match locate_card(&state, &ch_name, &card_id) {
-        None => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
-        Some(loc) if !loc.is_archived => return Response::error(format!("card '{}' is not archived", card_id)),
+        None => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
+        Some(loc) if !loc.is_archived => {
+            return Response::error(format!("card '{}' is not archived", card_id))
+        }
         Some(loc) => loc,
     };
 
@@ -391,13 +411,21 @@ pub async fn handle_unarchive_card(
     }
 
     // 5. Read card.meta.yaml
-    let meta_path = state.repo_root.join(&located.rel_path).join("card.meta.yaml");
+    let meta_path = state
+        .repo_root
+        .join(&located.rel_path)
+        .join("card.meta.yaml");
     let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
             Ok(m) => m,
             Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
         },
-        Err(_) => return Response::error(format!("card '{}' not found in channel '{}'", card_id, channel)),
+        Err(_) => {
+            return Response::error(format!(
+                "card '{}' not found in channel '{}'",
+                card_id, channel
+            ))
+        }
     };
 
     // 6. Permission check: only creator or assignee can unarchive
@@ -438,7 +466,10 @@ pub async fn handle_unarchive_card(
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("unarchive_card: rollback mv also failed: {}", rb_err);
         }
-        return Response::error(format!("unarchive_card commit failed: {}; rolled back git mv", e));
+        return Response::error(format!(
+            "unarchive_card commit failed: {}; rolled back git mv",
+            e
+        ));
     }
 
     // 10. Push with retry
@@ -454,7 +485,10 @@ pub async fn handle_unarchive_card(
     });
 
     // 12. Info log
-    info!("card '{}' unarchived in channel '{}' by @{}", card_id, channel, author);
+    info!(
+        "card '{}' unarchived in channel '{}' by @{}",
+        card_id, channel, author
+    );
 
     // 13. Return success
     Response::success(serde_json::json!({
@@ -556,16 +590,17 @@ pub async fn handle_list_cards(
     cards.sort_by(|a, b| {
         let ca = a["channel"].as_str().unwrap_or("");
         let cb = b["channel"].as_str().unwrap_or("");
-        ca.cmp(cb)
-            .then(a["card_id"].as_str().unwrap_or("").cmp(b["card_id"].as_str().unwrap_or("")))
+        ca.cmp(cb).then(
+            a["card_id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["card_id"].as_str().unwrap_or("")),
+        )
     });
     Response::success(serde_json::json!({ "cards": cards }))
 }
 
-pub async fn handle_list_archived_cards(
-    state: SharedState,
-    channel: Option<String>,
-) -> Response {
+pub async fn handle_list_archived_cards(state: SharedState, channel: Option<String>) -> Response {
     // Determine which channel directories to scan under archive/channels/
     let arch_channels_dir = state.repo_root.join("archive").join("channels");
 
@@ -632,8 +667,12 @@ pub async fn handle_list_archived_cards(
     cards.sort_by(|a, b| {
         let ca = a["channel"].as_str().unwrap_or("");
         let cb = b["channel"].as_str().unwrap_or("");
-        ca.cmp(cb)
-            .then(a["card_id"].as_str().unwrap_or("").cmp(b["card_id"].as_str().unwrap_or("")))
+        ca.cmp(cb).then(
+            a["card_id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["card_id"].as_str().unwrap_or("")),
+        )
     });
     Response::success(serde_json::json!({ "cards": cards }))
 }
@@ -759,8 +798,7 @@ pub async fn handle_send_card_message(
         &[&thread_rel],
         &commit_msg,
         Some((&author_name, &author_email)),
-    )
-    {
+    ) {
         Ok(()) => "committed",
         Err(e) => {
             warn!(
@@ -927,17 +965,13 @@ pub async fn handle_update_card(
     }
 
     let meta_rel = format!("{}/card.meta.yaml", located.rel_path);
-    let commit_msg = format!(
-        "card: update {} in {} by @{}",
-        card_id, channel, author
-    );
+    let commit_msg = format!("card: update {} in {} by @{}", card_id, channel, author);
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
         &[&meta_rel],
         &commit_msg,
         Some((&author_name, &author_email)),
-    )
-    {
+    ) {
         return Response::error(format!("update_card commit failed: {}", e));
     }
 
@@ -955,7 +989,10 @@ pub async fn handle_update_card(
         });
     }
 
-    info!("card '{}' updated in channel '{}' by @{}", card_id, channel, author);
+    info!(
+        "card '{}' updated in channel '{}' by @{}",
+        card_id, channel, author
+    );
 
     Response::success(serde_json::json!({
         "channel": ch_name.to_string(),
@@ -1040,20 +1077,14 @@ mod tests {
     async fn test_locate_card_finds_active_path() {
         let (_tmp, state) = setup_test_repo().await;
         let ch = ChannelName::new("foo").unwrap();
-        let card_dir = state
-            .repo_root
-            .join("channels/foo/cards")
-            .join(CARD_ID);
+        let card_dir = state.repo_root.join("channels/foo/cards").join(CARD_ID);
         std::fs::create_dir_all(&card_dir).unwrap();
         write_card_meta(&card_dir.join("card.meta.yaml"), "foo");
 
         let result = locate_card(&state, &ch, CARD_ID);
         let loc = result.expect("should find the active card");
         assert!(!loc.is_archived, "should be active");
-        assert_eq!(
-            loc.rel_path,
-            format!("channels/foo/cards/{}", CARD_ID)
-        );
+        assert_eq!(loc.rel_path, format!("channels/foo/cards/{}", CARD_ID));
     }
 
     #[tokio::test]
@@ -1082,10 +1113,7 @@ mod tests {
         let ch = ChannelName::new("foo").unwrap();
 
         // Setup both paths (anomalous state)
-        let active_dir = state
-            .repo_root
-            .join("channels/foo/cards")
-            .join(CARD_ID);
+        let active_dir = state.repo_root.join("channels/foo/cards").join(CARD_ID);
         std::fs::create_dir_all(&active_dir).unwrap();
         write_card_meta(&active_dir.join("card.meta.yaml"), "foo");
 
@@ -1099,10 +1127,7 @@ mod tests {
         let result = locate_card(&state, &ch, CARD_ID);
         let loc = result.expect("should find a card");
         assert!(!loc.is_archived, "should prefer active over archived");
-        assert_eq!(
-            loc.rel_path,
-            format!("channels/foo/cards/{}", CARD_ID)
-        );
+        assert_eq!(loc.rel_path, format!("channels/foo/cards/{}", CARD_ID));
     }
 
     #[tokio::test]
@@ -1127,10 +1152,7 @@ mod tests {
         )
         .await;
         assert!(resp.ok, "create_card should succeed: {:?}", resp.error);
-        resp.data.unwrap()["card_id"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        resp.data.unwrap()["card_id"].as_str().unwrap().to_string()
     }
 
     #[tokio::test]
@@ -1174,10 +1196,7 @@ mod tests {
         assert!(send_resp.ok, "send should succeed");
 
         // Manually move the card directory to the archive location
-        let active_dir = state
-            .repo_root
-            .join("channels/dev/cards")
-            .join(&card_id);
+        let active_dir = state.repo_root.join("channels/dev/cards").join(&card_id);
         let archive_dir = state
             .repo_root
             .join("archive/channels/dev/cards")
@@ -1193,7 +1212,11 @@ mod tests {
             None,
         )
         .await;
-        assert!(resp.ok, "read of archived card should succeed: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "read of archived card should succeed: {:?}",
+            resp.error
+        );
         let data = resp.data.unwrap();
         assert_eq!(
             data["archived"].as_bool().unwrap(),
@@ -1201,7 +1224,10 @@ mod tests {
             "archived card should have archived=true"
         );
         let entries = data["entries"].as_array().unwrap();
-        assert!(!entries.is_empty(), "archived card entries should be readable");
+        assert!(
+            !entries.is_empty(),
+            "archived card entries should be readable"
+        );
     }
 
     #[tokio::test]
@@ -1232,10 +1258,7 @@ mod tests {
         let card_id = create_active_card_fixture(&state, "dev").await;
 
         // Move to archive
-        let active_dir = state
-            .repo_root
-            .join("channels/dev/cards")
-            .join(&card_id);
+        let active_dir = state.repo_root.join("channels/dev/cards").join(&card_id);
         let archive_dir = state
             .repo_root
             .join("archive/channels/dev/cards")
@@ -1269,10 +1292,7 @@ mod tests {
         let card_id = create_active_card_fixture(&state, "dev").await;
 
         // Move to archive
-        let active_dir = state
-            .repo_root
-            .join("channels/dev/cards")
-            .join(&card_id);
+        let active_dir = state.repo_root.join("channels/dev/cards").join(&card_id);
         let archive_dir = state
             .repo_root
             .join("archive/channels/dev/cards")
@@ -1377,7 +1397,11 @@ mod tests {
             "alice".to_string(),
         )
         .await;
-        assert!(resp.ok, "archive by creator should succeed: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "archive by creator should succeed: {:?}",
+            resp.error
+        );
 
         // Active path should no longer exist
         let active_dir = state
@@ -1402,12 +1426,20 @@ mod tests {
 
         // Meta content should be preserved (status unchanged)
         let content = std::fs::read_to_string(&archive_meta).unwrap();
-        assert!(content.contains("status: todo"), "status should be preserved: {}", content);
+        assert!(
+            content.contains("status: todo"),
+            "status should be preserved: {}",
+            content
+        );
 
         // CardArchived event should be emitted
         let event = event_rx.try_recv().expect("should have received an event");
         match event {
-            crate::api::Event::CardArchived { channel, card_id, author } => {
+            crate::api::Event::CardArchived {
+                channel,
+                card_id,
+                author,
+            } => {
                 assert_eq!(channel, "dev");
                 assert_eq!(card_id, ARCHIVE_CARD_ID);
                 assert_eq!(author, "alice");
@@ -1448,7 +1480,11 @@ mod tests {
             "lewis".to_string(), // assignee archives it
         )
         .await;
-        assert!(resp.ok, "archive by assignee should succeed: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "archive by assignee should succeed: {:?}",
+            resp.error
+        );
 
         let archive_dir = state
             .repo_root
@@ -1724,7 +1760,11 @@ mod tests {
             "alice".to_string(),
         )
         .await;
-        assert!(resp.ok, "unarchive by creator should succeed: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "unarchive by creator should succeed: {:?}",
+            resp.error
+        );
 
         // Active path should now exist with card.meta.yaml
         let active_meta = state
@@ -1732,19 +1772,29 @@ mod tests {
             .join("channels/dev/cards")
             .join(UNARCHIVE_CARD_ID)
             .join("card.meta.yaml");
-        assert!(active_meta.exists(), "card.meta.yaml should exist in active location");
+        assert!(
+            active_meta.exists(),
+            "card.meta.yaml should exist in active location"
+        );
 
         // Archive path should be gone
         let archive_dir = state
             .repo_root
             .join("archive/channels/dev/cards")
             .join(UNARCHIVE_CARD_ID);
-        assert!(!archive_dir.exists(), "archived dir should be gone after unarchive");
+        assert!(
+            !archive_dir.exists(),
+            "archived dir should be gone after unarchive"
+        );
 
         // CardUnarchived event should be emitted
         let event = event_rx.try_recv().expect("should have received an event");
         match event {
-            crate::api::Event::CardUnarchived { channel, card_id, author } => {
+            crate::api::Event::CardUnarchived {
+                channel,
+                card_id,
+                author,
+            } => {
                 assert_eq!(channel, "dev");
                 assert_eq!(card_id, UNARCHIVE_CARD_ID);
                 assert_eq!(author, "alice");
@@ -1776,13 +1826,20 @@ mod tests {
             "lewis".to_string(),
         )
         .await;
-        assert!(resp.ok, "unarchive by assignee should succeed: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "unarchive by assignee should succeed: {:?}",
+            resp.error
+        );
 
         let active_dir = state
             .repo_root
             .join("channels/dev/cards")
             .join(UNARCHIVE_CARD_ID);
-        assert!(active_dir.exists(), "active dir should exist after unarchive");
+        assert!(
+            active_dir.exists(),
+            "active dir should exist after unarchive"
+        );
     }
 
     #[tokio::test]
@@ -1984,10 +2041,7 @@ mod tests {
         );
 
         // Active location must not exist (no partial move left behind)
-        let active_dir = state
-            .repo_root
-            .join("channels/dev/cards")
-            .join(card_id);
+        let active_dir = state.repo_root.join("channels/dev/cards").join(card_id);
         assert!(
             !active_dir.exists(),
             "active dir should not exist after rollback"
@@ -2035,7 +2089,10 @@ mod tests {
         assert!(resp.ok, "should succeed: {:?}", resp.error);
         let data = resp.data.unwrap();
         let cards = data["cards"].as_array().unwrap();
-        assert!(cards.is_empty(), "no archived cards should return empty list");
+        assert!(
+            cards.is_empty(),
+            "no archived cards should return empty list"
+        );
     }
 
     #[tokio::test]
@@ -2086,7 +2143,11 @@ mod tests {
 
         // Channel "nonexistent" has no archived cards — should return empty, not error
         let resp = handle_list_archived_cards(state.clone(), Some("nonexistent".to_string())).await;
-        assert!(resp.ok, "should succeed even for unknown channel: {:?}", resp.error);
+        assert!(
+            resp.ok,
+            "should succeed even for unknown channel: {:?}",
+            resp.error
+        );
         let data = resp.data.unwrap();
         let cards = data["cards"].as_array().unwrap();
         assert!(cards.is_empty(), "unknown channel should return empty list");
@@ -2110,6 +2171,9 @@ mod tests {
         let data = resp.data.unwrap();
         let cards = data["cards"].as_array().unwrap();
         assert_eq!(cards.len(), 1, "should only return the archived card");
-        assert_eq!(cards[0]["card_id"].as_str().unwrap(), "20260101-000001-arch");
+        assert_eq!(
+            cards[0]["card_id"].as_str().unwrap(),
+            "20260101-000001-arch"
+        );
     }
 }

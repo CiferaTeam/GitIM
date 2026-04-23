@@ -2,8 +2,8 @@ mod channel;
 mod poll;
 mod read;
 mod search;
-pub(crate) mod serde;
 mod send;
+pub(crate) mod serde;
 mod user;
 
 pub use channel::*;
@@ -19,7 +19,10 @@ use crate::api::{Request, Response};
 use crate::state::SharedState;
 
 /// Resolve author from explicit param or daemon identity.
-pub(super) async fn resolve_author(author: Option<String>, state: &SharedState) -> Result<String, Response> {
+pub(super) async fn resolve_author(
+    author: Option<String>,
+    state: &SharedState,
+) -> Result<String, Response> {
     match author {
         Some(a) if !a.is_empty() => Ok(a),
         _ => {
@@ -169,7 +172,15 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            handle_create_channel(state, name, display_name, introduction, resolved_author, invitees).await
+            handle_create_channel(
+                state,
+                name,
+                display_name,
+                introduction,
+                resolved_author,
+                invitees,
+            )
+            .await
         }
         Request::Search {
             query,
@@ -179,7 +190,19 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             limit,
             offset,
             include_cards,
-        } => handle_search(state, query, author, channel, channel_type, limit, offset, include_cards).await,
+        } => {
+            handle_search(
+                state,
+                query,
+                author,
+                channel,
+                channel_type,
+                limit,
+                offset,
+                include_cards,
+            )
+            .await
+        }
         Request::Reindex => handle_reindex(state).await,
         Request::ArchiveChannel { channel, author } => {
             let resolved_author = match resolve_author(author, &state).await {
@@ -209,11 +232,22 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             crate::card_handlers::handle_create_card(
-                state, channel, title, labels, assignee, status, resolved_author,
+                state,
+                channel,
+                title,
+                labels,
+                assignee,
+                status,
+                resolved_author,
             )
             .await
         }
-        Request::ListCards { channel, labels, status, assignee } => {
+        Request::ListCards {
+            channel,
+            labels,
+            status,
+            assignee,
+        } => {
             crate::card_handlers::handle_list_cards(state, channel, labels, status, assignee).await
         }
         Request::ReadCard {
@@ -234,7 +268,12 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             crate::card_handlers::handle_send_card_message(
-                state, channel, card_id, body, reply_to, resolved_author,
+                state,
+                channel,
+                card_id,
+                body,
+                reply_to,
+                resolved_author,
             )
             .await
         }
@@ -251,16 +290,26 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             crate::card_handlers::handle_update_card(
-                state, channel, card_id, status, labels, assignee, resolved_author,
+                state,
+                channel,
+                card_id,
+                status,
+                labels,
+                assignee,
+                resolved_author,
             )
             .await
         }
-        Request::ArchiveCard { channel, card_id, author } => {
-            crate::card_handlers::handle_archive_card(state, channel, card_id, author).await
-        }
-        Request::UnarchiveCard { channel, card_id, author } => {
-            crate::card_handlers::handle_unarchive_card(state, channel, card_id, author).await
-        }
+        Request::ArchiveCard {
+            channel,
+            card_id,
+            author,
+        } => crate::card_handlers::handle_archive_card(state, channel, card_id, author).await,
+        Request::UnarchiveCard {
+            channel,
+            card_id,
+            author,
+        } => crate::card_handlers::handle_unarchive_card(state, channel, card_id, author).await,
         Request::ListArchivedCards { channel } => {
             crate::card_handlers::handle_list_archived_cards(state, channel).await
         }

@@ -44,11 +44,7 @@ fn setup_git_config(dir: &Path, name: &str, email: &str) {
 
 fn clone_empty_remote(bare: &Path, into: &Path) {
     let output = Command::new("git")
-        .args([
-            "clone",
-            bare.to_str().unwrap(),
-            into.to_str().unwrap(),
-        ])
+        .args(["clone", bare.to_str().unwrap(), into.to_str().unwrap()])
         .current_dir(into.parent().unwrap())
         .output()
         .expect("clone failed to spawn");
@@ -106,9 +102,11 @@ fn empty_remote_first_push_wires_upstream_and_unblocks_followups() {
 
     let initial_paths = write_initial_layout(clone_dir.path());
     let initial_refs: Vec<&str> = initial_paths.iter().map(String::as_str).collect();
-    repo.add_and_commit(&initial_refs, "init: repo structure").unwrap();
+    repo.add_and_commit(&initial_refs, "init: repo structure")
+        .unwrap();
 
-    repo.push().expect("first push should seed upstream + remote branch");
+    repo.push()
+        .expect("first push should seed upstream + remote branch");
 
     let upstream = Command::new("git")
         .args(["rev-parse", "--symbolic-full-name", "@{upstream}"])
@@ -128,14 +126,16 @@ fn empty_remote_first_push_wires_upstream_and_unblocks_followups() {
 
     let thread = clone_dir.path().join("channels/general.thread");
     std::fs::write(&thread, "[L1][P0][@alice][20260417T000100Z] hello\n").unwrap();
-    repo.add_and_commit(&["channels/general.thread"], "msg: @alice L1").unwrap();
+    repo.add_and_commit(&["channels/general.thread"], "msg: @alice L1")
+        .unwrap();
 
     assert!(
         repo.has_unpushed_commits().unwrap(),
         "second commit must be detected as unpushed (this is what regressed)"
     );
 
-    repo.push().expect("second push should succeed via existing upstream");
+    repo.push()
+        .expect("second push should succeed via existing upstream");
 
     let verify = fresh_clone(bare.path());
     let remote_thread =
@@ -170,7 +170,8 @@ fn push_with_upstream_already_set_is_idempotent() {
         "[L1][P0][@alice][20260417T000000Z] first\n",
     )
     .unwrap();
-    repo.add_and_commit(&["channels/general.thread"], "msg 1").unwrap();
+    repo.add_and_commit(&["channels/general.thread"], "msg 1")
+        .unwrap();
     repo.push().unwrap();
 
     std::fs::write(
@@ -178,8 +179,10 @@ fn push_with_upstream_already_set_is_idempotent() {
         "[L1][P0][@alice][20260417T000000Z] first\n[L2][P0][@alice][20260417T000100Z] second\n",
     )
     .unwrap();
-    repo.add_and_commit(&["channels/general.thread"], "msg 2").unwrap();
-    repo.push().expect("repeated push with existing upstream should succeed");
+    repo.add_and_commit(&["channels/general.thread"], "msg 2")
+        .unwrap();
+    repo.push()
+        .expect("repeated push with existing upstream should succeed");
 
     assert!(!repo.has_unpushed_commits().unwrap());
 }

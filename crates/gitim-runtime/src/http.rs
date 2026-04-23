@@ -1,6 +1,10 @@
 use async_trait::async_trait;
-use axum::{extract::State, routing::{get, post}, Json, Router};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,14 +14,18 @@ use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
-use crate::agent::{detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig};
-use crate::gitignore::ensure_env_gitignored;
+use crate::agent::{
+    detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig,
+};
 use crate::agent_loop::AgentLoop;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
     WorkspaceConfig,
 };
-use crate::github::{check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError};
+use crate::github::{
+    check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
+};
+use crate::gitignore::ensure_env_gitignored;
 use gitim_client::GitimClient;
 use gitim_sync::url_redact::redacted_url;
 
@@ -461,7 +469,12 @@ async fn im_create(
     };
     api_response_to_json(
         client
-            .create_channel(&req.name, req.display_name.as_deref(), req.introduction.as_deref(), &req.invitees)
+            .create_channel(
+                &req.name,
+                req.display_name.as_deref(),
+                req.introduction.as_deref(),
+                &req.invitees,
+            )
             .await,
     )
 }
@@ -505,7 +518,11 @@ async fn im_send(
         Ok(c) => c,
         Err(e) => return e,
     };
-    api_response_to_json(client.send(&req.channel, &req.body, None, req.reply_to).await)
+    api_response_to_json(
+        client
+            .send(&req.channel, &req.body, None, req.reply_to)
+            .await,
+    )
 }
 
 // -- /im/read --
@@ -664,10 +681,19 @@ async fn im_list_cards(
         Ok(c) => c,
         Err(j) => return j,
     };
-    let labels_slice: Option<&[String]> = if q.label.is_empty() { None } else { Some(&q.label) };
+    let labels_slice: Option<&[String]> = if q.label.is_empty() {
+        None
+    } else {
+        Some(&q.label)
+    };
     api_response_to_json(
         client
-            .list_cards(q.channel.as_deref(), labels_slice, q.status.as_deref(), q.assignee.as_deref())
+            .list_cards(
+                q.channel.as_deref(),
+                labels_slice,
+                q.status.as_deref(),
+                q.assignee.as_deref(),
+            )
             .await,
     )
 }
@@ -697,9 +723,7 @@ async fn im_read_card(
         Ok(c) => c,
         Err(j) => return j,
     };
-    api_response_to_json(
-        client.read_card(&channel, &card_id, q.limit, q.since).await,
-    )
+    api_response_to_json(client.read_card(&channel, &card_id, q.limit, q.since).await)
 }
 
 #[derive(Deserialize)]
@@ -1026,14 +1050,16 @@ async fn agents_add(
     // registration of the same handler is visible before we decide to reject.
     // Best-effort: network flakes degrade to the local file check rather than
     // blocking new agent creation.
-    let human_dir = human_repo
-        .unwrap_or_else(|| workspace.join(".gitim-runtime").join("human"));
+    let human_dir = human_repo.unwrap_or_else(|| workspace.join(".gitim-runtime").join("human"));
     if git_provider == GitProvider::Github && human_dir.exists() {
         let fetch = std::process::Command::new("git")
             .args([
-                "-c", "http.lowSpeedLimit=1000",
-                "-c", "http.lowSpeedTime=10",
-                "fetch", "origin",
+                "-c",
+                "http.lowSpeedLimit=1000",
+                "-c",
+                "http.lowSpeedTime=10",
+                "fetch",
+                "origin",
             ])
             .current_dir(&human_dir)
             .output();
@@ -1278,11 +1304,7 @@ struct AgentIdRequest {
 }
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
-fn start_agent_loop(
-    state: &SharedRuntimeState,
-    slug: &str,
-    agent_id: &str,
-) -> Result<(), String> {
+fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
     let (repo_root, handler, provider, model, system_prompt, env, activity_tx) = {
         let s = state.lock().unwrap();
         let ctx = s
@@ -1348,8 +1370,7 @@ fn start_agent_loop(
                         if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                             if let Some(info) = ctx.agents.get_mut(&owned_id) {
                                 info.messages_processed += 1;
-                                info.last_activity =
-                                    Some(chrono::Utc::now().to_rfc3339());
+                                info.last_activity = Some(chrono::Utc::now().to_rfc3339());
                             }
                         }
                     }
@@ -1361,8 +1382,7 @@ fn start_agent_loop(
                 Err(e) => {
                     consecutive_errors += 1;
                     let backoff = std::time::Duration::from_secs(
-                        (2u64.saturating_pow(consecutive_errors))
-                            .min(MAX_BACKOFF_SECS),
+                        (2u64.saturating_pow(consecutive_errors)).min(MAX_BACKOFF_SECS),
                     );
                     tracing::error!(
                         error = %e,
@@ -1424,7 +1444,9 @@ async fn agents_get(
     };
     match ctx.agents.get(&id) {
         Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
-        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response(),
+        None => {
+            Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response()
+        }
     }
 }
 
@@ -1720,12 +1742,16 @@ async fn agents_remove(
             let pid_file = PathBuf::from(&info.repo_path).join(".gitim/run/gitim.pid");
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(pid) = content.trim().parse::<u32>() {
-                    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                    let _ = std::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .output();
                 }
             }
             Json(serde_json::json!({ "ok": true })).into_response()
         }
-        None => Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response(),
+        None => {
+            Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response()
+        }
     }
 }
 
@@ -1899,23 +1925,25 @@ async fn recover_single_workspace(
 /// daemon startup + loop auto-start — so broken configs don't stall the
 /// recovery loop. The workspace context must already exist in state (the
 /// caller inserts it before calling us).
-pub async fn recover_agents_for_workspace(
-    state: SharedRuntimeState,
-    slug: &str,
-    workspace: &Path,
-) {
+pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str, workspace: &Path) {
     let entries = match std::fs::read_dir(workspace) {
         Ok(e) => e,
         Err(_) => return,
     };
     for entry in entries.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() { continue; }
+        if !dir.is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == "repo.git" || name.starts_with('.') { continue; }
+        if name == "repo.git" || name.starts_with('.') {
+            continue;
+        }
 
         let me_path = dir.join(".gitim/me.json");
-        if !me_path.exists() { continue; }
+        if !me_path.exists() {
+            continue;
+        }
 
         let me_content = match std::fs::read_to_string(&me_path) {
             Ok(c) => c,
@@ -1929,14 +1957,12 @@ pub async fn recover_agents_for_workspace(
             Some(h) => h.to_string(),
             None => continue,
         };
-        let display_name = me["display_name"]
-            .as_str()
-            .unwrap_or(&handler)
-            .to_string();
+        let display_name = me["display_name"].as_str().unwrap_or(&handler).to_string();
 
         let model = me["model"].as_str().map(|s| s.to_string());
         let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
-        let env: HashMap<String, String> = me.get("env")
+        let env: HashMap<String, String> = me
+            .get("env")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
@@ -1958,7 +1984,11 @@ pub async fn recover_agents_for_workspace(
             tracing::warn!("agent @{handler} recovered in error state: {msg}");
             let activity_tx = {
                 let s = state.lock().unwrap();
-                s.workspaces.get(slug).expect("ws exists").activity_tx.clone()
+                s.workspaces
+                    .get(slug)
+                    .expect("ws exists")
+                    .activity_tx
+                    .clone()
             };
             let _ = activity_tx.send(AgentActivityEvent {
                 agent_id: handler.clone(),
@@ -1968,24 +1998,31 @@ pub async fn recover_agents_for_workspace(
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
             let mut s = state.lock().unwrap();
-            s.workspaces.get_mut(slug).expect("ws exists").agents.insert(handler.clone(), AgentInfo {
-                id: handler.clone(),
-                handler: handler.clone(),
-                display_name,
-                status: "error".to_string(),
-                last_activity: None,
-                messages_processed: 0,
-                repo_path: dir.display().to_string(),
-                provider: provider_raw.map(|s| s.to_string()),
-                model,
-                system_prompt: custom_system_prompt,
-                env,
-                error_message: Some(msg),
-                session_usage: crate::state::AgentState::load(&dir)
-                    .ok()
-                    .and_then(|s| s.session_usage),
-                loop_handle: None,
-            });
+            s.workspaces
+                .get_mut(slug)
+                .expect("ws exists")
+                .agents
+                .insert(
+                    handler.clone(),
+                    AgentInfo {
+                        id: handler.clone(),
+                        handler: handler.clone(),
+                        display_name,
+                        status: "error".to_string(),
+                        last_activity: None,
+                        messages_processed: 0,
+                        repo_path: dir.display().to_string(),
+                        provider: provider_raw.map(|s| s.to_string()),
+                        model,
+                        system_prompt: custom_system_prompt,
+                        env,
+                        error_message: Some(msg),
+                        session_usage: crate::state::AgentState::load(&dir)
+                            .ok()
+                            .and_then(|s| s.session_usage),
+                        loop_handle: None,
+                    },
+                );
             continue;
         }
 
@@ -2009,24 +2046,31 @@ pub async fn recover_agents_for_workspace(
 
         {
             let mut s = state.lock().unwrap();
-            s.workspaces.get_mut(slug).expect("ws exists").agents.insert(handler.clone(), AgentInfo {
-                id: handler.clone(),
-                handler: handler.clone(),
-                display_name,
-                status: "idle".to_string(),
-                last_activity: None,
-                messages_processed: 0,
-                repo_path: dir.display().to_string(),
-                provider: provider_raw.map(|s| s.to_string()),
-                model,
-                system_prompt: custom_system_prompt,
-                env,
-                error_message: None,
-                session_usage: crate::state::AgentState::load(&dir)
-                    .ok()
-                    .and_then(|s| s.session_usage),
-                loop_handle: None,
-            });
+            s.workspaces
+                .get_mut(slug)
+                .expect("ws exists")
+                .agents
+                .insert(
+                    handler.clone(),
+                    AgentInfo {
+                        id: handler.clone(),
+                        handler: handler.clone(),
+                        display_name,
+                        status: "idle".to_string(),
+                        last_activity: None,
+                        messages_processed: 0,
+                        repo_path: dir.display().to_string(),
+                        provider: provider_raw.map(|s| s.to_string()),
+                        model,
+                        system_prompt: custom_system_prompt,
+                        env,
+                        error_message: None,
+                        session_usage: crate::state::AgentState::load(&dir)
+                            .ok()
+                            .and_then(|s| s.session_usage),
+                        loop_handle: None,
+                    },
+                );
         }
 
         match start_agent_loop(&state, slug, &handler) {
@@ -2260,7 +2304,12 @@ async fn provision_local_workspace(
         .args(["init", "--bare"])
         .current_dir(&repo_path)
         .output()
-        .map_err(|e| ("clone_failed", redacted_url(&format!("failed to run git: {e}"))))?;
+        .map_err(|e| {
+            (
+                "clone_failed",
+                redacted_url(&format!("failed to run git: {e}")),
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err((
@@ -2274,7 +2323,11 @@ async fn provision_local_workspace(
         detect_git_config("user.name", workspace).unwrap_or_else(|| "human".to_string());
     let handler = {
         let h = name_to_handler(&display_name);
-        if h.is_empty() { "human".to_string() } else { h }
+        if h.is_empty() {
+            "human".to_string()
+        } else {
+            h
+        }
     };
     let auth = serde_json::json!({
         "type": "git",
@@ -2377,7 +2430,10 @@ async fn provision_github_workspace(
             .output()
             .map_err(|e| {
                 cleanup_human_dir(workspace);
-                ("clone_failed", redacted_url(&format!("failed to run git: {e}")))
+                (
+                    "clone_failed",
+                    redacted_url(&format!("failed to run git: {e}")),
+                )
             })?;
         if !clone_output.status.success() {
             let stderr = String::from_utf8_lossy(&clone_output.stderr);
@@ -2719,8 +2775,14 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
             "/im/cards/{channel}/{card_id}/messages",
             post(im_send_card_message),
         )
-        .route("/im/cards/{channel}/{card_id}/archive", post(im_card_archive))
-        .route("/im/cards/{channel}/{card_id}/unarchive", post(im_card_unarchive))
+        .route(
+            "/im/cards/{channel}/{card_id}/archive",
+            post(im_card_archive),
+        )
+        .route(
+            "/im/cards/{channel}/{card_id}/unarchive",
+            post(im_card_unarchive),
+        )
         .route("/im/channels/archived", get(im_list_archived_channels))
         .route("/im/channels/{name}/archive", post(im_channel_archive))
         .route("/im/channels/{name}/unarchive", post(im_channel_unarchive))
@@ -2734,10 +2796,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
 
     let router = Router::new()
         .route("/health", get(health))
-        .route(
-            "/workspaces",
-            get(workspaces_list).post(workspaces_create),
-        )
+        .route("/workspaces", get(workspaces_list).post(workspaces_create))
         .route(
             "/workspaces/{slug}",
             get(workspaces_get).delete(workspaces_delete),
@@ -2785,9 +2844,13 @@ fn apply_dotenv_gitignore(human_clone: &Path) {
             }
             let commit = std::process::Command::new("git")
                 .args([
-                    "-c", "user.email=system@gitim",
-                    "-c", "user.name=system",
-                    "commit", "-m", "chore: gitignore .env (runtime init)",
+                    "-c",
+                    "user.email=system@gitim",
+                    "-c",
+                    "user.name=system",
+                    "commit",
+                    "-m",
+                    "chore: gitignore .env (runtime init)",
                 ])
                 .current_dir(human_clone)
                 .output();
@@ -2824,7 +2887,9 @@ fn is_valid_env_key(k: &str) -> bool {
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
     }
-    bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 #[cfg(test)]
@@ -2873,7 +2938,10 @@ mod tests {
         });
         let req: WorkspacesCreateRequest = serde_json::from_value(body).unwrap();
         assert_eq!(req.git.provider, "github");
-        assert_eq!(req.git.remote_url.as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(
+            req.git.remote_url.as_deref(),
+            Some("https://github.com/org/repo")
+        );
         assert_eq!(req.git.token.as_deref(), Some("ghp_x"));
     }
 

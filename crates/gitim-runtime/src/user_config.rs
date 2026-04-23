@@ -98,8 +98,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.json");
         let mut cfg = UserConfig::default();
-        cfg.workspaces.push(sample("frontend", "Frontend", "/ws/frontend"));
-        cfg.workspaces.push(sample("backend", "Backend", "/ws/backend"));
+        cfg.workspaces
+            .push(sample("frontend", "Frontend", "/ws/frontend"));
+        cfg.workspaces
+            .push(sample("backend", "Backend", "/ws/backend"));
         write_to(&cfg, &path).unwrap();
 
         let loaded = read_from(Some(&path));

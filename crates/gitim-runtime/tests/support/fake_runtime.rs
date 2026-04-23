@@ -37,8 +37,8 @@ fn main() {
         .expect("fake-gitim-runtime: --port <N> required when not --version");
 
     let addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&addr)
-        .unwrap_or_else(|e| panic!("fake-gitim-runtime: bind {addr}: {e}"));
+    let listener =
+        TcpListener::bind(&addr).unwrap_or_else(|e| panic!("fake-gitim-runtime: bind {addr}: {e}"));
 
     let version = fake_version();
     let body = format!("{{\"service\":\"gitim-runtime\",\"version\":\"{version}\"}}");
@@ -59,11 +59,7 @@ fn main() {
             Err(_) => continue,
         };
         let text = String::from_utf8_lossy(&buf[..n]);
-        let path = text
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("/")
-            .to_string();
+        let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
 
         let (status_line, response_body) = if path == "/health" {
             ("HTTP/1.1 200 OK", body.as_str())

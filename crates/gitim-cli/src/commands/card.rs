@@ -4,8 +4,8 @@ use std::process;
 
 use gitim_client::GitimClient;
 
-use crate::output::OutputMode;
 use super::{get_repo_root, read_my_handler};
+use crate::output::OutputMode;
 
 fn print_or_exit(
     resp: gitim_client::ApiResponse,
@@ -44,7 +44,10 @@ pub async fn cmd_create_card(
     assignee: Option<&str>,
     status: Option<&str>,
 ) {
-    match client.create_card(channel, title, labels, assignee, status).await {
+    match client
+        .create_card(channel, title, labels, assignee, status)
+        .await
+    {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             let id = d["card_id"].as_str().unwrap_or("?");
             let ch = d["channel"].as_str().unwrap_or("?");
@@ -82,7 +85,11 @@ pub async fn cmd_list_cards(
                             .unwrap_or_default();
                         println!(
                             "#{ch}/{id}  [{s}]  {t}  @{a}  {}",
-                            if ls.is_empty() { String::new() } else { format!("[{}]", ls.join(", ")) }
+                            if ls.is_empty() {
+                                String::new()
+                            } else {
+                                format!("[{}]", ls.join(", "))
+                            }
                         );
                     }
                 }
@@ -142,7 +149,10 @@ pub async fn cmd_send_card_message(
     body: &str,
     reply_to: Option<u64>,
 ) {
-    match client.send_card_message(channel, card_id, body, reply_to).await {
+    match client
+        .send_card_message(channel, card_id, body, reply_to)
+        .await
+    {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             println!(
                 "L{:06} -> #{}/{}",
@@ -167,7 +177,10 @@ pub async fn cmd_update_card(
     labels: Option<&[String]>,
     assignee: Option<&str>,
 ) {
-    match client.update_card(channel, card_id, status, labels, assignee).await {
+    match client
+        .update_card(channel, card_id, status, labels, assignee)
+        .await
+    {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             println!(
                 "更新 #{}/{}  status={}  assignee={}",
@@ -222,11 +235,7 @@ pub async fn cmd_unarchive_card(
     }
 }
 
-pub async fn cmd_archived_cards(
-    client: &GitimClient,
-    mode: &OutputMode,
-    channel: Option<&str>,
-) {
+pub async fn cmd_archived_cards(client: &GitimClient, mode: &OutputMode, channel: Option<&str>) {
     match client.list_archived_cards(channel).await {
         Ok(resp) => print_or_exit(resp, mode, |d| {
             let cards = d.get("cards").and_then(|v| v.as_array());
@@ -244,7 +253,11 @@ pub async fn cmd_archived_cards(
                             .unwrap_or_default();
                         println!(
                             "#{ch}/{id}  [{s}]  {t}  @{a}  {}",
-                            if ls.is_empty() { String::new() } else { format!("[{}]", ls.join(", ")) }
+                            if ls.is_empty() {
+                                String::new()
+                            } else {
+                                format!("[{}]", ls.join(", "))
+                            }
                         );
                     }
                 }

@@ -89,7 +89,10 @@ async fn test_agent_loop_end_to_end() {
     };
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);
-    eprintln!("[setup] agent provisioned at {}", handle.repo_root.display());
+    eprintln!(
+        "[setup] agent provisioned at {}",
+        handle.repo_root.display()
+    );
 
     let mut agent_loop = AgentLoop::with_defaults(&handle.repo_root).unwrap();
 
@@ -100,7 +103,12 @@ async fn test_agent_loop_end_to_end() {
 
     // Send trigger message
     let send_resp = client
-        .send("general", "This is a test. Please reply with: test-reply-ok", None, None)
+        .send(
+            "general",
+            "This is a test. Please reply with: test-reply-ok",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
@@ -154,7 +162,8 @@ fn snapshot_from_claude_provider_reported() {
         42_000,
         Some(200_000),
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
 
     assert_eq!(snap.session_id, "sess-abc");
     assert_eq!(snap.input_tokens, Some(160_000));
@@ -179,7 +188,8 @@ fn snapshot_from_claude_aggregates_cache_tokens() {
         0,
         Some(200_000),
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
 
     // 312 + 159_500 + 220 = 160_032  →  160_032 / 200_000 = 80.016%
     assert!(
@@ -205,7 +215,8 @@ fn snapshot_from_claude_without_cache_still_uses_input_tokens() {
         0,
         Some(200_000),
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
 
     assert!((snap.used_percent - 50.0).abs() < 0.01);
 }
@@ -223,7 +234,8 @@ fn snapshot_from_codex_used_percent() {
         0,
         None,
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
 
     assert!((snap.used_percent - 47.5).abs() < 0.01);
     assert!(matches!(snap.source, UsageSource::ProviderReported));
@@ -238,7 +250,8 @@ fn snapshot_falls_back_to_estimator() {
         80_000,
         Some(100_000),
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
 
     assert!((snap.used_percent - 80.0).abs() < 0.01);
     assert!(matches!(snap.source, UsageSource::RuntimeEstimated));
@@ -263,7 +276,8 @@ fn snapshot_clamps_above_100_with_warning_signal() {
         0,
         None,
         "2026-04-20T10:00:00Z",
-    ).expect("snapshot");
+    )
+    .expect("snapshot");
     assert!((snap.used_percent - 100.0).abs() < 0.01);
 }
 
@@ -332,8 +346,14 @@ fn preamble_frames_as_handoff_not_completion() {
     let p = build_usage_notice_preamble(85.0);
     assert!(p.contains("立即"), "must convey stop-now urgency: {p}");
     assert!(p.contains("交接"), "must frame as handoff: {p}");
-    assert!(p.contains("记忆文件"), "must name the persistence target: {p}");
-    assert!(p.contains("orientation"), "must name the handoff shape (not inventory): {p}");
+    assert!(
+        p.contains("记忆文件"),
+        "must name the persistence target: {p}"
+    );
+    assert!(
+        p.contains("orientation"),
+        "must name the handoff shape (not inventory): {p}"
+    );
     assert!(
         !p.contains("请在本轮完成手头任务后"),
         "must NOT tell the agent to finish its work first: {p}"

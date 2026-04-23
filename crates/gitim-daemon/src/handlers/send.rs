@@ -1,6 +1,6 @@
 use crate::api::{Event, Response};
-use crate::state::{PendingMessage, PushResult, SharedState};
 use crate::handlers::resolve_thread_path;
+use crate::state::{PendingMessage, PushResult, SharedState};
 
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
@@ -66,8 +66,7 @@ pub async fn handle_send(
 
     // Compute allowed_senders based on channel type
     let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
-        let participants: Vec<String> =
-            channel[3..].split(',').map(|s| s.to_string()).collect();
+        let participants: Vec<String> = channel[3..].split(',').map(|s| s.to_string()).collect();
         // Check both DM participants are registered users
         for p in &participants {
             if !user_list.contains(p) {
@@ -88,15 +87,10 @@ pub async fn handle_send(
                 Ok(content) => match serde_yaml::from_str::<ChannelMeta>(&content) {
                     Ok(meta) => meta.members,
                     Err(e) => {
-                        return Response::error(format!(
-                            "failed to parse channel meta: {}",
-                            e
-                        ))
+                        return Response::error(format!("failed to parse channel meta: {}", e))
                     }
                 },
-                Err(e) => {
-                    return Response::error(format!("failed to read channel meta: {}", e))
-                }
+                Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
             }
         } else {
             let archive_meta = state
@@ -138,10 +132,11 @@ pub async fn handle_send(
             let rel_str = rel.to_string_lossy().to_string();
             let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
             let (author_name, author_email) = state.author_for(&author);
-            match state
-                .git_storage
-                .add_and_commit_as(&[&rel_str], &commit_msg, Some((&author_name, &author_email)))
-            {
+            match state.git_storage.add_and_commit_as(
+                &[&rel_str],
+                &commit_msg,
+                Some((&author_name, &author_email)),
+            ) {
                 Ok(()) => "committed",
                 Err(e) => {
                     warn!(

@@ -11,7 +11,9 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -81,10 +83,25 @@ impl Provider for OpencodeProvider {
         let cancel_token_inner = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stderr, event_tx, result_tx, timeout, pid, cancel_token_inner).await;
+            drive_session(
+                child,
+                stdout,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                cancel_token_inner,
+            )
+            .await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            join_handle.abort_handle(),
+            cancel_token,
+        ))
     }
 }
 
@@ -223,9 +240,7 @@ async fn drive_session(
     stderr_handle.abort();
 
     // If failed with no error message, fall back to stderr tail
-    if final_status == ExecStatus::Failed
-        && final_error.as_ref().is_none_or(|e| e.is_empty())
-    {
+    if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
@@ -320,7 +335,13 @@ pub enum ParsedMessage {
     /// Text content from an assistant message.
     Text { content: String },
     /// Tool use event — combined: carries invocation + optional result when completed.
-    ToolUse { tool: String, call_id: String, input: Value, status: String, output: Option<String> },
+    ToolUse {
+        tool: String,
+        call_id: String,
+        input: Value,
+        status: String,
+        output: Option<String>,
+    },
     /// Error event.
     Error { message: String },
 }
@@ -362,7 +383,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
         }
         "error" => {
             let err = raw.error?;
-            let message = err.data
+            let message = err
+                .data
                 .and_then(|d| d.get("message").and_then(|v| v.as_str().map(String::from)))
                 .or(err.name)
                 .unwrap_or_default();

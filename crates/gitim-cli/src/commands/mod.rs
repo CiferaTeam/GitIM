@@ -6,9 +6,9 @@ pub mod messaging;
 pub mod onboard;
 pub mod update;
 
-use std::{env, fs, process};
-use std::path::Path;
 use gitim_client::find_repo_root;
+use std::path::Path;
+use std::{env, fs, process};
 
 pub(super) fn get_repo_root() -> std::path::PathBuf {
     let cwd = env::current_dir().unwrap_or_else(|e| {

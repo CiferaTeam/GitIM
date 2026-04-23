@@ -1,6 +1,6 @@
 use crate::api::Response;
-use crate::state::SharedState;
 use crate::handlers::{entry_to_json, resolve_thread_path};
+use crate::state::SharedState;
 
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry};
@@ -82,8 +82,6 @@ pub async fn handle_read(
         "archived": is_archived,
     }))
 }
-
-
 
 pub async fn handle_list_channels(state: SharedState) -> Response {
     let mut channels: Vec<serde_json::Value> = Vec::new();
@@ -203,11 +201,8 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
     // (the topmost ancestor whose point_to == 0). Without this, clicking a
     // reply mid-chain would show that reply as the thread's root and hide
     // every earlier ancestor.
-    let by_line: std::collections::HashMap<u64, &_> = file
-        .entries
-        .iter()
-        .map(|e| (e.line_number(), e))
-        .collect();
+    let by_line: std::collections::HashMap<u64, &_> =
+        file.entries.iter().map(|e| (e.line_number(), e)).collect();
     let mut root_line = line_number;
     let mut seen_up = std::collections::HashSet::new();
     while let Some(entry) = by_line.get(&root_line) {

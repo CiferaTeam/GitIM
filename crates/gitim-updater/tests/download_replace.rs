@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use gitim_updater::{BINARIES, UpdateError, replace_binaries};
+use gitim_updater::{replace_binaries, UpdateError, BINARIES};
 
 // -- helpers ----------------------------------------------------------------
 
@@ -94,11 +94,7 @@ fn replace_binaries_skips_missing() {
 
     // install_dir has all three "old" binaries.
     for name in BINARIES {
-        write_file(
-            install_dir.path(),
-            name,
-            format!("old {name}\n").as_bytes(),
-        );
+        write_file(install_dir.path(), name, format!("old {name}\n").as_bytes());
     }
 
     let installed = replace_binaries(src_dir.path(), install_dir.path(), false)
@@ -132,21 +128,12 @@ fn replace_binaries_rolls_back_on_failure() {
     let install_dir = tempfile::tempdir().expect("install tempdir");
 
     for name in BINARIES {
-        write_file(
-            src_dir.path(),
-            name,
-            format!("new {name}\n").as_bytes(),
-        );
-        write_file(
-            install_dir.path(),
-            name,
-            format!("old {name}\n").as_bytes(),
-        );
+        write_file(src_dir.path(), name, format!("new {name}\n").as_bytes());
+        write_file(install_dir.path(), name, format!("old {name}\n").as_bytes());
     }
 
     // Injection: a directory where the .old backup path needs to be a file.
-    fs::create_dir(install_dir.path().join("gitim-daemon.old"))
-        .expect("create blocking directory");
+    fs::create_dir(install_dir.path().join("gitim-daemon.old")).expect("create blocking directory");
 
     let result = replace_binaries(src_dir.path(), install_dir.path(), false);
     assert!(
@@ -197,17 +184,12 @@ fn replace_binaries_rolls_back_newly_created_on_failure() {
     }
 
     // install_dir initially only has the third binary (`gitim-runtime`).
-    write_file(
-        install_dir.path(),
-        "gitim-runtime",
-        b"old gitim-runtime\n",
-    );
+    write_file(install_dir.path(), "gitim-runtime", b"old gitim-runtime\n");
 
     // Inject a blocker for the third iteration's rename: `gitim-runtime.old`
     // pre-exists as a directory so `fs::rename(gitim-runtime, gitim-runtime.old)`
     // fails (EISDIR / ENOTDIR on Unix).
-    fs::create_dir(install_dir.path().join("gitim-runtime.old"))
-        .expect("pre-create blocker");
+    fs::create_dir(install_dir.path().join("gitim-runtime.old")).expect("pre-create blocker");
 
     let result = replace_binaries(src_dir.path(), install_dir.path(), false);
     assert!(
@@ -250,7 +232,7 @@ fn verify_sha256_matches_expected() {
 
 #[test]
 fn verify_sha256_rejects_mismatch() {
-    use gitim_updater::{UpdateError, verify_sha256};
+    use gitim_updater::{verify_sha256, UpdateError};
     let bytes = b"hello";
     let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
     let err = verify_sha256(bytes, wrong).expect_err("wrong SHA must fail");
@@ -284,8 +266,8 @@ fn verify_sha256_rejects_malformed_hex() {
 // ---------- extract_tarball ----------
 
 fn build_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
-    use flate2::Compression;
     use flate2::write::GzEncoder;
+    use flate2::Compression;
     use tar::{Builder, Header};
 
     let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
@@ -320,7 +302,7 @@ fn extract_tarball_happy_path() {
 
 #[test]
 fn extract_tarball_rejects_corrupt_bytes() {
-    use gitim_updater::{UpdateError, extract_tarball};
+    use gitim_updater::{extract_tarball, UpdateError};
     let garbage = vec![0xFFu8; 1024];
     let dest = tempfile::tempdir().unwrap();
     match extract_tarball(&garbage, dest.path()).expect_err("garbage must fail") {
@@ -351,7 +333,7 @@ async fn download_bytes_happy_path() {
 
 #[tokio::test]
 async fn download_bytes_http_404() {
-    use gitim_updater::{UpdateError, download_bytes};
+    use gitim_updater::{download_bytes, UpdateError};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -371,7 +353,7 @@ async fn download_bytes_http_404() {
 
 #[tokio::test]
 async fn download_bytes_http_500() {
-    use gitim_updater::{UpdateError, download_bytes};
+    use gitim_updater::{download_bytes, UpdateError};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -422,10 +404,7 @@ async fn install_update_happy_path() {
 
     let tag = "v9.9.9";
     let platform = "darwin-arm64";
-    let tarball = build_tar_gz(&[(
-        &format!("gitim-{tag}-{platform}/gitim"),
-        b"binary-contents",
-    )]);
+    let tarball = build_tar_gz(&[(&format!("gitim-{tag}-{platform}/gitim"), b"binary-contents")]);
     let expected_hex = sha256_hex(&tarball);
     let sha_body = sha256sums_body(&[(&expected_hex, &archive_name(tag, platform))]);
 
@@ -457,16 +436,14 @@ async fn install_update_happy_path() {
 async fn install_update_sha_mismatch_does_not_extract() {
     // REGRESSION GUARD: a poisoned tarball with a valid SHA file must NEVER
     // be extracted. This is the core self-update attack surface.
-    use gitim_updater::{UpdateError, install_update};
+    use gitim_updater::{install_update, UpdateError};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let tag = "v9.9.9";
     let platform = "darwin-arm64";
-    let real_tarball = build_tar_gz(&[(
-        &format!("gitim-{tag}-{platform}/gitim"),
-        b"original-bytes",
-    )]);
+    let real_tarball =
+        build_tar_gz(&[(&format!("gitim-{tag}-{platform}/gitim"), b"original-bytes")]);
     let poisoned_tarball = build_tar_gz(&[(
         &format!("gitim-{tag}-{platform}/gitim"),
         b"MALICIOUS_PAYLOAD",
@@ -500,10 +477,7 @@ async fn install_update_sha_mismatch_does_not_extract() {
         other => panic!("expected Sha256Mismatch, got {:?}", other),
     }
     // fail-closed: destination must be empty (no extracted files).
-    let entries: Vec<_> = std::fs::read_dir(dest.path())
-        .unwrap()
-        .flatten()
-        .collect();
+    let entries: Vec<_> = std::fs::read_dir(dest.path()).unwrap().flatten().collect();
     assert!(
         entries.is_empty(),
         "destination must stay empty on SHA mismatch, got {entries:?}"
@@ -512,7 +486,7 @@ async fn install_update_sha_mismatch_does_not_extract() {
 
 #[tokio::test]
 async fn install_update_sha_file_missing_fails_closed() {
-    use gitim_updater::{UpdateError, install_update};
+    use gitim_updater::{install_update, UpdateError};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -539,7 +513,7 @@ async fn install_update_sha_file_missing_fails_closed() {
 
 #[tokio::test]
 async fn install_update_sha_line_missing_fails_closed() {
-    use gitim_updater::{UpdateError, install_update};
+    use gitim_updater::{install_update, UpdateError};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -547,8 +521,7 @@ async fn install_update_sha_line_missing_fails_closed() {
     let platform = "darwin-arm64";
     // SHA file exists but lists a DIFFERENT platform only.
     let other_hex = sha256_hex(b"other");
-    let sha_body =
-        sha256sums_body(&[(&other_hex, &archive_name(tag, "linux-x86_64"))]);
+    let sha_body = sha256sums_body(&[(&other_hex, &archive_name(tag, "linux-x86_64"))]);
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))

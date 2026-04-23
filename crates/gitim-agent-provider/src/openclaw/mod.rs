@@ -10,7 +10,9 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -42,7 +44,8 @@ impl Provider for OpenclawProvider {
 
         let mut args = vec![
             "agent".to_string(),
-            "--output-format".to_string(), "stream-json".to_string(),
+            "--output-format".to_string(),
+            "stream-json".to_string(),
             "--yes".to_string(),
         ];
         if let Some(model) = &opts.model {
@@ -87,10 +90,25 @@ impl Provider for OpenclawProvider {
         let cancel_token_inner = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stderr, event_tx, result_tx, timeout, pid, cancel_token_inner).await;
+            drive_session(
+                child,
+                stdout,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                cancel_token_inner,
+            )
+            .await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            join_handle.abort_handle(),
+            cancel_token,
+        ))
     }
 }
 
@@ -245,9 +263,7 @@ async fn drive_session(
     stderr_handle.abort();
 
     // If failed with no error message, fall back to stderr tail
-    if final_status == ExecStatus::Failed
-        && final_error.as_ref().is_none_or(|e| e.is_empty())
-    {
+    if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
@@ -284,7 +300,13 @@ pub enum ParsedMessage {
     /// Thinking / reasoning content (not appended to output).
     Thinking { content: String },
     /// Tool call event — combined: carries invocation + optional result when completed.
-    ToolCall { name: String, call_id: String, input: Value, status: String, output: Option<String> },
+    ToolCall {
+        name: String,
+        call_id: String,
+        input: Value,
+        status: String,
+        output: Option<String>,
+    },
     /// Error event.
     Error { message: String },
     /// Final result.

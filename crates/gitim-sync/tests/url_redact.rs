@@ -42,10 +42,22 @@ also tried https://oauth2:zzz@gitlab.com/e/f.git
 plus clean https://github.com/g/h.git still works
 ";
     let out = redacted_url(input);
-    assert!(out.contains("https://user:<REDACTED>@github.com/a/b.git"), "user:pat: {out}");
-    assert!(out.contains("https://x-access-token:<REDACTED>@github.com/c/d.git"), "x-access-token: {out}");
-    assert!(out.contains("https://oauth2:<REDACTED>@gitlab.com/e/f.git"), "oauth2: {out}");
-    assert!(out.contains("https://github.com/g/h.git"), "clean url preserved: {out}");
+    assert!(
+        out.contains("https://user:<REDACTED>@github.com/a/b.git"),
+        "user:pat: {out}"
+    );
+    assert!(
+        out.contains("https://x-access-token:<REDACTED>@github.com/c/d.git"),
+        "x-access-token: {out}"
+    );
+    assert!(
+        out.contains("https://oauth2:<REDACTED>@gitlab.com/e/f.git"),
+        "oauth2: {out}"
+    );
+    assert!(
+        out.contains("https://github.com/g/h.git"),
+        "clean url preserved: {out}"
+    );
     assert!(!out.contains("secret1"), "leaked secret1: {out}");
     assert!(!out.contains("ghp_deadbeef"), "leaked ghp_deadbeef: {out}");
     assert!(!out.contains("oauth2:zzz"), "leaked oauth2:zzz: {out}");

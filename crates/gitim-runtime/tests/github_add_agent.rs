@@ -31,11 +31,7 @@ impl MockGithubApi {
 #[async_trait]
 impl GithubApiClient for MockGithubApi {
     async fn verify_token(&self, _token: &str) -> Result<(), GithubError> {
-        self.verify_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(()))
+        self.verify_result.lock().unwrap().take().unwrap_or(Ok(()))
     }
     async fn check_repo_access(
         &self,
@@ -43,18 +39,10 @@ impl GithubApiClient for MockGithubApi {
         _repo: &str,
         _token: &str,
     ) -> Result<(), GithubError> {
-        self.access_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(()))
+        self.access_result.lock().unwrap().take().unwrap_or(Ok(()))
     }
     async fn fetch_user_email(&self, _token: &str) -> Result<Option<String>, GithubError> {
-        self.email_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(None))
+        self.email_result.lock().unwrap().take().unwrap_or(Ok(None))
     }
 }
 
@@ -76,11 +64,7 @@ async fn spawn_server_with(
     (addr, handle, state)
 }
 
-async fn post_json(
-    addr: SocketAddr,
-    path: &str,
-    body: serde_json::Value,
-) -> serde_json::Value {
+async fn post_json(addr: SocketAddr, path: &str, body: serde_json::Value) -> serde_json::Value {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}{path}"))
@@ -171,7 +155,12 @@ fn seed_human_clone(workspace: &Path, existing_handlers: &[&str]) {
     }
 }
 
-fn write_workspace_config(workspace: &Path, provider: GitProvider, remote_url: Option<String>, token: Option<String>) {
+fn write_workspace_config(
+    workspace: &Path,
+    provider: GitProvider,
+    remote_url: Option<String>,
+    token: Option<String>,
+) {
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -218,7 +207,10 @@ async fn add_agent_rejects_existing_handler_in_github_mode() {
     )
     .await;
 
-    assert_eq!(resp["ok"], false, "should reject duplicate handler: {resp:?}");
+    assert_eq!(
+        resp["ok"], false,
+        "should reject duplicate handler: {resp:?}"
+    );
     assert_eq!(resp["error_code"], "handler_conflict");
     let raw = serde_json::to_string(&resp).unwrap();
     assert!(

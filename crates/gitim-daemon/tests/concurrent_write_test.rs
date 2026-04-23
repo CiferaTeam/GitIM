@@ -141,14 +141,9 @@ async fn concurrent_sends_assign_unique_line_numbers() {
     }
 
     // File must parse and contain exactly N entries with line numbers 1..=N.
-    let content =
-        std::fs::read_to_string(tmp.path().join("channels/general.thread")).unwrap();
+    let content = std::fs::read_to_string(tmp.path().join("channels/general.thread")).unwrap();
     let parsed = parse_thread(&content).expect("thread parsed");
-    let file_lines: Vec<u64> = parsed
-        .entries
-        .iter()
-        .map(|e| e.line_number())
-        .collect();
+    let file_lines: Vec<u64> = parsed.entries.iter().map(|e| e.line_number()).collect();
     assert_eq!(
         file_lines,
         (1..=N).collect::<Vec<_>>(),
@@ -170,8 +165,7 @@ async fn concurrent_sends_assign_unique_line_numbers() {
 /// events with the same line number.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_joins_assign_unique_line_numbers() {
-    let (tmp, state) =
-        setup_repo_with_users(&["codex-01", "lewis", "claude01"]).await;
+    let (tmp, state) = setup_repo_with_users(&["codex-01", "lewis", "claude01"]).await;
 
     let req_lewis = Request::JoinChannel {
         channel: "general".to_string(),
@@ -195,14 +189,9 @@ async fn concurrent_joins_assign_unique_line_numbers() {
     assert!(r1.ok, "join lewis failed: {:?}", r1.error);
     assert!(r2.ok, "join claude01 failed: {:?}", r2.error);
 
-    let content =
-        std::fs::read_to_string(tmp.path().join("channels/general.thread")).unwrap();
+    let content = std::fs::read_to_string(tmp.path().join("channels/general.thread")).unwrap();
     let parsed = parse_thread(&content).expect("thread parsed");
-    let file_lines: Vec<u64> = parsed
-        .entries
-        .iter()
-        .map(|e| e.line_number())
-        .collect();
+    let file_lines: Vec<u64> = parsed.entries.iter().map(|e| e.line_number()).collect();
 
     // Must be exactly 2 events at L1 and L2 — no duplicate line numbers.
     assert_eq!(

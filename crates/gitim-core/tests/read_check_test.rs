@@ -19,7 +19,9 @@ fn test_detect_gap() {
 ";
     let users = vec!["nexus", "lewis"];
     let issues = check_thread_integrity(input, &users);
-    assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::LineNumberGap { .. })));
+    assert!(issues
+        .iter()
+        .any(|i| matches!(i, IntegrityIssue::LineNumberGap { .. })));
 }
 
 #[test]
@@ -27,7 +29,9 @@ fn test_detect_unknown_author() {
     let input = "[L000001][P000000][@unknown][20250316T120000Z] who\n";
     let users = vec!["nexus"];
     let issues = check_thread_integrity(input, &users);
-    assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::UnknownAuthor(_))));
+    assert!(issues
+        .iter()
+        .any(|i| matches!(i, IntegrityIssue::UnknownAuthor(_))));
 }
 
 #[test]
@@ -35,7 +39,9 @@ fn test_detect_invalid_p_ref() {
     let input = "[L000001][P000099][@nexus][20250316T120000Z] bad ref\n";
     let users = vec!["nexus"];
     let issues = check_thread_integrity(input, &users);
-    assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::InvalidPointTo(_))));
+    assert!(issues
+        .iter()
+        .any(|i| matches!(i, IntegrityIssue::InvalidPointTo(_))));
 }
 
 #[test]
@@ -43,7 +49,9 @@ fn test_detect_unknown_mention() {
     let input = "[L000001][P000000][@nexus][20250316T120000Z] hey <@ghost>\n";
     let users = vec!["nexus"];
     let issues = check_thread_integrity(input, &users);
-    assert!(issues.iter().any(|i| matches!(i, IntegrityIssue::UnknownMention { handler, .. } if handler == "ghost")));
+    assert!(issues.iter().any(
+        |i| matches!(i, IntegrityIssue::UnknownMention { handler, .. } if handler == "ghost")
+    ));
 }
 
 #[test]

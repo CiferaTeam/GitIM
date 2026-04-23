@@ -7,9 +7,7 @@ use serial_test::serial;
 use common::{ensure_daemon_in_path, setup_bare_remote, short_tempdir, stop_daemon};
 
 /// Provision an agent and return (repo_root, client) for test use.
-async fn setup_agent(
-    tmp: &tempfile::TempDir,
-) -> (std::path::PathBuf, GitimClient) {
+async fn setup_agent(tmp: &tempfile::TempDir) -> (std::path::PathBuf, GitimClient) {
     let remote = setup_bare_remote(tmp);
     let agents_dir = tmp.path().join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -54,15 +52,19 @@ async fn test_poll_init_and_detect() {
         let result = poller.poll().await.unwrap();
         // Look for a real message change (kind=channel + non-empty entries),
         // not just onboard channel_meta diffs.
-        let msg_change = result.changes.iter().find(|c| {
-            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
-        });
+        let msg_change = result
+            .changes
+            .iter()
+            .find(|c| c.channel == "general" && c.kind == "channel" && !c.entries.is_empty());
         if msg_change.is_some() {
             detected = true;
             break;
         }
     }
-    assert!(detected, "should detect new message after send within 10 retries");
+    assert!(
+        detected,
+        "should detect new message after send within 10 retries"
+    );
 
     stop_daemon(&repo_root).await;
 }
@@ -90,9 +92,10 @@ async fn test_poll_no_duplicates() {
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let result = poller.poll().await.unwrap();
-        let msg_change = result.changes.iter().find(|c| {
-            c.channel == "general" && c.kind == "channel" && !c.entries.is_empty()
-        });
+        let msg_change = result
+            .changes
+            .iter()
+            .find(|c| c.channel == "general" && c.kind == "channel" && !c.entries.is_empty());
         if msg_change.is_some() {
             detected = true;
             break;
@@ -129,7 +132,10 @@ async fn test_poll_cursor_survives_empty() {
     let cursor2 = poller.cursor().unwrap().to_string();
 
     // Cursor should stay the same
-    assert_eq!(cursor1, cursor2, "cursor should not change when no new messages");
+    assert_eq!(
+        cursor1, cursor2,
+        "cursor should not change when no new messages"
+    );
 
     stop_daemon(&repo_root).await;
 }
@@ -155,7 +161,10 @@ async fn test_peek_does_not_advance_cursor() {
 
     // Peek: should see the message
     let peek_result = poller.peek().await.unwrap();
-    assert!(!peek_result.changes.is_empty(), "peek should detect new message");
+    assert!(
+        !peek_result.changes.is_empty(),
+        "peek should detect new message"
+    );
 
     // Cursor should NOT have advanced
     let cursor_after = poller.cursor().unwrap().to_string();
@@ -163,7 +172,10 @@ async fn test_peek_does_not_advance_cursor() {
 
     // Poll: should also see the same message (cursor didn't move)
     let poll_result = poller.poll().await.unwrap();
-    assert!(!poll_result.changes.is_empty(), "poll should still get the message");
+    assert!(
+        !poll_result.changes.is_empty(),
+        "poll should still get the message"
+    );
 
     // Now cursor has advanced
     let cursor_final = poller.cursor().unwrap().to_string();

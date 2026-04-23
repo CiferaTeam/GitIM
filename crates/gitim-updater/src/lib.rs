@@ -158,8 +158,7 @@ pub fn detect_platform() -> Result<String, UpdateError> {
 // Deliberately read inside the helper (not at `static` init) so a test setting
 // the env var takes effect in the current process without reloading.
 fn releases_api_base() -> String {
-    std::env::var("GITIM_RELEASES_API_URL")
-        .unwrap_or_else(|_| "https://api.github.com".to_string())
+    std::env::var("GITIM_RELEASES_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
 }
 
 fn releases_download_base() -> String {
@@ -251,7 +250,9 @@ pub fn parse_sha256sums_line(body: &str, archive_name: &str) -> Result<String, U
     for line in body.lines() {
         // Split on first whitespace run. First token = hex, rest = name.
         let mut parts = line.splitn(2, char::is_whitespace);
-        let Some(hex_tok) = parts.next() else { continue };
+        let Some(hex_tok) = parts.next() else {
+            continue;
+        };
         let Some(rest) = parts.next() else { continue };
         // BSD/GNU text mode prefixes filename with `*`; strip.
         let name = rest.trim_start().trim_start_matches('*').trim();
@@ -412,9 +413,7 @@ pub fn replace_binaries(
             // Pre-register the remove action BEFORE the copy: if the copy
             // partially wrote to disk and then failed, the next iteration's
             // rollback still needs to clean it up.
-            actions.push(RollbackAction::Remove {
-                dest: dest.clone(),
-            });
+            actions.push(RollbackAction::Remove { dest: dest.clone() });
         }
 
         // Step 2: copy the new binary into place.

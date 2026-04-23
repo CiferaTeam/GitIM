@@ -1,5 +1,5 @@
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ThreadEntry, LinkKind, Handler};
+use gitim_core::types::{Handler, LinkKind, ThreadEntry};
 
 #[test]
 fn test_parse_single_message() {
@@ -71,7 +71,10 @@ fn test_parse_escaped_continuation() {
 ";
     let result = parse_thread(input).unwrap();
     assert_eq!(result.messages().len(), 1);
-    assert_eq!(result.messages()[0].body, "see example:\n[L000001] this is escaped continuation");
+    assert_eq!(
+        result.messages()[0].body,
+        "see example:\n[L000001] this is escaped continuation"
+    );
 }
 
 #[test]
@@ -162,12 +165,24 @@ fn test_parse_event_multiline_json_body() {
 
 #[test]
 fn test_parse_message_with_links() {
-    let input = "[L000001][P000000][@nexus][20250316T120000Z] see <#general> and <!https://x.com>\n";
+    let input =
+        "[L000001][P000000][@nexus][20250316T120000Z] see <#general> and <!https://x.com>\n";
     let result = parse_thread(input).unwrap();
     let msg = &result.messages()[0];
     assert_eq!(msg.links.len(), 2);
-    assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "general".into() });
-    assert_eq!(msg.links[1].kind, LinkKind::Softlink { url: "https://x.com".into(), title: None });
+    assert_eq!(
+        msg.links[0].kind,
+        LinkKind::Channel {
+            name: "general".into()
+        }
+    );
+    assert_eq!(
+        msg.links[1].kind,
+        LinkKind::Softlink {
+            url: "https://x.com".into(),
+            title: None
+        }
+    );
 }
 
 #[test]
@@ -180,7 +195,12 @@ second line <~alice>
     let msg = &result.messages()[0];
     assert_eq!(msg.links.len(), 2);
     assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "dev".into() });
-    assert_eq!(msg.links[1].kind, LinkKind::UserProfile { handler: Handler::new("alice").unwrap() });
+    assert_eq!(
+        msg.links[1].kind,
+        LinkKind::UserProfile {
+            handler: Handler::new("alice").unwrap()
+        }
+    );
 }
 
 #[test]
@@ -198,5 +218,10 @@ fn test_parse_mentions_and_links_independent() {
     assert_eq!(msg.mentions.len(), 1);
     assert_eq!(msg.mentions[0].as_str(), "lewis");
     assert_eq!(msg.links.len(), 1);
-    assert_eq!(msg.links[0].kind, LinkKind::Channel { name: "general".into() });
+    assert_eq!(
+        msg.links[0].kind,
+        LinkKind::Channel {
+            name: "general".into()
+        }
+    );
 }

@@ -67,7 +67,10 @@ fn test_poll_workflow_no_cursor_returns_commit() {
 
     // diff_range from cursor to @{upstream} (same commit) should be empty
     let diff = repo.diff_range(&cursor, "@{upstream}").unwrap();
-    assert!(diff.is_empty(), "diff from cursor to itself should be empty");
+    assert!(
+        diff.is_empty(),
+        "diff from cursor to itself should be empty"
+    );
 }
 
 // ── Test 2: poll detects new message ──────────────────────────
@@ -105,7 +108,10 @@ fn test_poll_workflow_detects_new_message() {
         "diff key should be the thread file path"
     );
     let added = diff.values().next().unwrap();
-    assert!(added.contains("hello world"), "diff should contain the message text");
+    assert!(
+        added.contains("hello world"),
+        "diff should contain the message text"
+    );
 
     // New cursor should be different from old
     let new_cursor = repo.rev_parse("@{upstream}").unwrap();
@@ -113,7 +119,10 @@ fn test_poll_workflow_detects_new_message() {
 
     // Re-polling with new cursor should return empty diff
     let re_diff = repo.diff_range(&new_cursor, "@{upstream}").unwrap();
-    assert!(re_diff.is_empty(), "re-poll with new cursor should be empty");
+    assert!(
+        re_diff.is_empty(),
+        "re-poll with new cursor should be empty"
+    );
 }
 
 // ── Test 3: poll detects multiple channels ────────────────────
@@ -149,10 +158,17 @@ fn test_poll_workflow_multiple_channels() {
     repo.fetch().unwrap();
 
     let diff = repo.diff_range(&old_cursor, "@{upstream}").unwrap();
-    assert_eq!(diff.len(), 2, "diff should find both channel and dm thread files");
+    assert_eq!(
+        diff.len(),
+        2,
+        "diff should find both channel and dm thread files"
+    );
 
     // Verify both paths are present
-    let paths: Vec<String> = diff.keys().map(|p| p.to_str().unwrap().to_string()).collect();
+    let paths: Vec<String> = diff
+        .keys()
+        .map(|p| p.to_str().unwrap().to_string())
+        .collect();
     assert!(
         paths.iter().any(|p| p.contains("channels/")),
         "should contain channels/ path"
@@ -190,7 +206,10 @@ fn test_poll_no_remote_uses_head() {
     let repo = GitStorage::new(local_dir.path());
 
     // has_remote() should be false
-    assert!(!repo.has_remote(), "repo without origin should return false");
+    assert!(
+        !repo.has_remote(),
+        "repo without origin should return false"
+    );
 
     // rev_parse("HEAD") should still work and return valid hash
     let head = repo.rev_parse("HEAD").unwrap();

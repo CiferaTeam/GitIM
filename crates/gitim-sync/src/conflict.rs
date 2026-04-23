@@ -81,7 +81,12 @@ pub fn build_rebase_commit_msg(
         .iter()
         .map(|(author, channel, lines)| {
             let line_parts: Vec<String> = lines.iter().map(|l| format!("L{:06}", l)).collect();
-            format!("msg: @{} -> {} {}(rebased)", author, channel, line_parts.join(" "))
+            format!(
+                "msg: @{} -> {} {}(rebased)",
+                author,
+                channel,
+                line_parts.join(" ")
+            )
         })
         .collect();
 
@@ -117,16 +122,26 @@ pub fn resolve_content(
             0
         } else {
             let remote_file = parse_thread(&remote_content)?;
-            remote_file.entries.iter().map(|e| e.line_number()).max().unwrap_or(0)
+            remote_file
+                .entries
+                .iter()
+                .map(|e| e.line_number())
+                .max()
+                .unwrap_or(0)
         };
 
         let local_file = parse_thread(local_content)?;
-        let old_line_numbers: Vec<u64> = local_file.entries.iter().map(|e| e.line_number()).collect();
+        let old_line_numbers: Vec<u64> =
+            local_file.entries.iter().map(|e| e.line_number()).collect();
 
         let renumbered = renumber_batch(local_content, max_line)?;
 
         let renumbered_file = parse_thread(&renumbered)?;
-        let new_line_numbers: Vec<u64> = renumbered_file.entries.iter().map(|e| e.line_number()).collect();
+        let new_line_numbers: Vec<u64> = renumbered_file
+            .entries
+            .iter()
+            .map(|e| e.line_number())
+            .collect();
 
         for (old_ln, new_ln) in old_line_numbers.iter().zip(new_line_numbers.iter()) {
             all_mappings.push(RenumberMapping {
@@ -169,4 +184,3 @@ pub fn merge_channel_meta(local: &ChannelMeta, remote: &ChannelMeta) -> ChannelM
         members,
     }
 }
-

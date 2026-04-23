@@ -330,7 +330,9 @@ fn codex_home() -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".codex"))
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".codex"))
 }
 
 /// Walk `sessions/YYYY/MM/DD/` looking for `rollout-*-<thread_id>.jsonl`.
@@ -412,7 +414,8 @@ fn parse_used_percent(line: &str) -> Option<f64> {
     if payload_type != "token_count" {
         return None;
     }
-    v.pointer("/payload/rate_limits/primary/used_percent")?.as_f64()
+    v.pointer("/payload/rate_limits/primary/used_percent")?
+        .as_f64()
 }
 
 /// Weaker fallback: a `token_count` event reporting `credits.balance == "0"`
@@ -571,10 +574,10 @@ mod rollout_tests {
         let Ok(path) = std::env::var("CODEX_ROLLOUT_FIXTURE") else {
             return;
         };
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-        let msg = scan_rollout_content(&content)
-            .expect("fixture should contain a known failure signal");
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let msg =
+            scan_rollout_content(&content).expect("fixture should contain a known failure signal");
         eprintln!("extracted: {msg}");
     }
 

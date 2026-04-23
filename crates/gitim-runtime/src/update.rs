@@ -163,8 +163,7 @@ async fn sanity_check_new_runtime(
             detail: format!("failed to spawn new runtime for sanity check: {e}"),
         })?;
 
-    let output = match tokio::time::timeout(SANITY_CHECK_TIMEOUT, child.wait_with_output()).await
-    {
+    let output = match tokio::time::timeout(SANITY_CHECK_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             return Err(UpdateError {
@@ -190,10 +189,7 @@ async fn sanity_check_new_runtime(
     if !output.status.success() {
         return Err(UpdateError {
             error_code: error_codes::SANITY_CHECK_FAILED.into(),
-            detail: format!(
-                "sanity check exited with status {:?}",
-                output.status.code()
-            ),
+            detail: format!("sanity check exited with status {:?}", output.status.code()),
         });
     }
 
@@ -264,10 +260,12 @@ async fn run_sync_phase() -> Result<(UpdateJob, tempfile::TempDir, PathBuf), Upd
     })?;
 
     // 3. Fetch latest tag from GitHub releases.
-    let latest_tag = gitim_updater::fetch_latest_tag().await.map_err(|e| UpdateError {
-        error_code: error_codes::NETWORK.into(),
-        detail: format!("fetch latest tag failed: {e}"),
-    })?;
+    let latest_tag = gitim_updater::fetch_latest_tag()
+        .await
+        .map_err(|e| UpdateError {
+            error_code: error_codes::NETWORK.into(),
+            detail: format!("fetch latest tag failed: {e}"),
+        })?;
 
     // 4. Already-latest short-circuit. We compare strict semver via
     //    `is_newer`; anything else (equal, older, unparsable) is "no work to
@@ -422,11 +420,7 @@ pub enum AsyncPhaseOutcome {
 
 /// Full async phase. Runs install + fork-exec; on success calls
 /// `std::process::exit(0)` and never returns. On failure returns normally.
-async fn run_async_phase(
-    state: SharedRuntimeState,
-    job_id: String,
-    tmp: tempfile::TempDir,
-) {
+async fn run_async_phase(state: SharedRuntimeState, job_id: String, tmp: tempfile::TempDir) {
     let outcome = run_async_install_and_spawn(state, job_id.clone(), tmp).await;
     match outcome {
         AsyncPhaseOutcome::Done { child_pid } => {
@@ -499,7 +493,11 @@ pub async fn run_async_install_and_spawn(
     let src_dir = tmp.path().to_path_buf();
     let install_dir_for_replace = install_dir.clone();
     let replace_result = tokio::task::spawn_blocking(move || {
-        gitim_updater::replace_binaries(&src_dir, &install_dir_for_replace, /* keep_backup */ true)
+        gitim_updater::replace_binaries(
+            &src_dir,
+            &install_dir_for_replace,
+            /* keep_backup */ true,
+        )
     })
     .await;
 
@@ -681,7 +679,9 @@ mod tests {
         // `sleep` never prints a version, so we'll hit the timeout branch.
         // Available on macOS + Linux runners.
         let sleep_path = which_sleep();
-        let err = sanity_check_new_runtime(&sleep_path, "v9.9.9").await.unwrap_err();
+        let err = sanity_check_new_runtime(&sleep_path, "v9.9.9")
+            .await
+            .unwrap_err();
         assert_eq!(err.error_code, error_codes::SANITY_CHECK_FAILED);
     }
 
@@ -727,19 +727,22 @@ mod tests {
         assert_eq!(err.error_code, error_codes::SHA_MISMATCH);
         assert!(
             err.detail.contains("aabbcc") && err.detail.contains("112233"),
-            "detail should include both hashes: {}", err.detail
+            "detail should include both hashes: {}",
+            err.detail
         );
     }
 
     #[test]
     fn map_updater_error_sha_line_missing_gives_sha_line_missing_code() {
-        let updater_err =
-            gitim_updater::UpdateError::Sha256LineMissing("gitim-v1.2.3-x86_64-apple.tar.gz".to_string());
+        let updater_err = gitim_updater::UpdateError::Sha256LineMissing(
+            "gitim-v1.2.3-x86_64-apple.tar.gz".to_string(),
+        );
         let err = map_updater_error(updater_err);
         assert_eq!(err.error_code, error_codes::SHA_LINE_MISSING);
         assert!(
             err.detail.contains("gitim-v1.2.3-x86_64-apple.tar.gz"),
-            "detail should name the archive: {}", err.detail
+            "detail should name the archive: {}",
+            err.detail
         );
     }
 

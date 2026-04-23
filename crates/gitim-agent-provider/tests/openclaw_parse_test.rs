@@ -17,7 +17,8 @@ fn parse_text() {
 
 #[test]
 fn parse_thinking() {
-    let line = json!({"type": "thinking", "sessionId": "s-1", "data": {"text": "Hmm..."}}).to_string();
+    let line =
+        json!({"type": "thinking", "sessionId": "s-1", "data": {"text": "Hmm..."}}).to_string();
     let msg = parse_line(&line).unwrap();
     assert!(matches!(msg, ParsedMessage::Thinking { content } if content == "Hmm..."));
 }
@@ -27,10 +28,13 @@ fn parse_tool_call_pending() {
     let line = json!({
         "type": "tool_call", "sessionId": "s-1",
         "data": {"name": "Bash", "callId": "c-1", "input": {"command": "ls"}, "status": "pending"}
-    }).to_string();
+    })
+    .to_string();
     let msg = parse_line(&line).unwrap();
-    assert!(matches!(msg, ParsedMessage::ToolCall { ref name, ref call_id, ref status, .. }
-        if name == "Bash" && call_id == "c-1" && status == "pending"));
+    assert!(
+        matches!(msg, ParsedMessage::ToolCall { ref name, ref call_id, ref status, .. }
+        if name == "Bash" && call_id == "c-1" && status == "pending")
+    );
 }
 
 #[test]
@@ -51,21 +55,25 @@ fn parse_tool_call_completed_with_output() {
 
 #[test]
 fn parse_result_completed() {
-    let line = json!({"type": "result", "sessionId": "s-1", "data": {"status": "completed"}}).to_string();
+    let line =
+        json!({"type": "result", "sessionId": "s-1", "data": {"status": "completed"}}).to_string();
     let msg = parse_line(&line).unwrap();
     assert!(matches!(msg, ParsedMessage::Result { is_error } if !is_error));
 }
 
 #[test]
 fn parse_result_error() {
-    let line = json!({"type": "result", "sessionId": "s-1", "data": {"status": "error"}}).to_string();
+    let line =
+        json!({"type": "result", "sessionId": "s-1", "data": {"status": "error"}}).to_string();
     let msg = parse_line(&line).unwrap();
     assert!(matches!(msg, ParsedMessage::Result { is_error } if is_error));
 }
 
 #[test]
 fn parse_error_event() {
-    let line = json!({"type": "error", "sessionId": "s-1", "data": {"message": "boom", "code": "E001"}}).to_string();
+    let line =
+        json!({"type": "error", "sessionId": "s-1", "data": {"message": "boom", "code": "E001"}})
+            .to_string();
     let msg = parse_line(&line).unwrap();
     assert!(matches!(msg, ParsedMessage::Error { ref message } if message == "boom"));
 }

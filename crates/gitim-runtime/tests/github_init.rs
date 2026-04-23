@@ -46,11 +46,7 @@ impl MockGithubApi {
 #[async_trait]
 impl GithubApiClient for MockGithubApi {
     async fn verify_token(&self, _token: &str) -> Result<(), GithubError> {
-        self.verify_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(()))
+        self.verify_result.lock().unwrap().take().unwrap_or(Ok(()))
     }
     async fn check_repo_access(
         &self,
@@ -58,18 +54,10 @@ impl GithubApiClient for MockGithubApi {
         _repo: &str,
         _token: &str,
     ) -> Result<(), GithubError> {
-        self.access_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(()))
+        self.access_result.lock().unwrap().take().unwrap_or(Ok(()))
     }
     async fn fetch_user_email(&self, _token: &str) -> Result<Option<String>, GithubError> {
-        self.email_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok(None))
+        self.email_result.lock().unwrap().take().unwrap_or(Ok(None))
     }
 }
 
@@ -91,11 +79,7 @@ async fn spawn_server_with(
     (addr, handle, state)
 }
 
-async fn post_json(
-    addr: SocketAddr,
-    path: &str,
-    body: serde_json::Value,
-) -> serde_json::Value {
+async fn post_json(addr: SocketAddr, path: &str, body: serde_json::Value) -> serde_json::Value {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}{path}"))
@@ -106,11 +90,7 @@ async fn post_json(
     resp.json().await.unwrap()
 }
 
-async fn post_raw(
-    addr: SocketAddr,
-    path: &str,
-    body: serde_json::Value,
-) -> String {
+async fn post_raw(addr: SocketAddr, path: &str, body: serde_json::Value) -> String {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}{path}"))
@@ -209,8 +189,7 @@ async fn github_init_rejects_missing_token() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), None).await;
+    let resp = post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), None).await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "missing_token");
@@ -240,9 +219,13 @@ async fn github_init_rejects_non_github_host() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://gitlab.com/owner/repo"), Some("ghp_x"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://gitlab.com/owner/repo"),
+        Some("ghp_x"),
+    )
+    .await;
 
     assert_eq!(resp["ok"], false);
     // parse_github_url returns ParseError which maps to clone_failed.
@@ -267,9 +250,13 @@ async fn github_init_rejects_cloud_sync_workspace_path() {
     let api = Arc::new(MockGithubApi::all_ok());
     let (addr, server, _state) = spawn_server_with(api, None).await;
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://github.com/owner/repo"),
+        Some("ghp_x"),
+    )
+    .await;
 
     if let Some(p) = prev_home {
         std::env::set_var("HOME", p);
@@ -292,9 +279,13 @@ async fn github_init_fails_on_invalid_token() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_bad"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://github.com/owner/repo"),
+        Some("ghp_bad"),
+    )
+    .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "invalid_token");
@@ -311,9 +302,13 @@ async fn github_init_fails_on_token_lacks_repo_access() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://github.com/owner/repo"),
+        Some("ghp_x"),
+    )
+    .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "token_lacks_repo_access");
@@ -330,9 +325,13 @@ async fn github_init_fails_on_network_error() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/owner/repo"), Some("ghp_x"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://github.com/owner/repo"),
+        Some("ghp_x"),
+    )
+    .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "network_error");
@@ -369,7 +368,10 @@ async fn github_init_full_flow_with_mock_api() {
     .await;
 
     assert_eq!(resp["ok"], true, "happy path failed: {resp:?}");
-    assert!(ws.join(".gitim-runtime/human/.git").exists(), "should be a clone");
+    assert!(
+        ws.join(".gitim-runtime/human/.git").exists(),
+        "should be a clone"
+    );
 
     let cfg = WorkspaceConfig::read(&ws).expect("config readable");
     assert_eq!(cfg.git.provider, GitProvider::Github);
@@ -395,9 +397,13 @@ async fn github_init_fails_on_clone_error_cleans_up() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    let resp =
-        post_workspaces_github(addr, &ws, Some("https://github.com/fake/fake"), Some("ghp_x"))
-            .await;
+    let resp = post_workspaces_github(
+        addr,
+        &ws,
+        Some("https://github.com/fake/fake"),
+        Some("ghp_x"),
+    )
+    .await;
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "clone_failed");
@@ -496,7 +502,10 @@ fn expected_token_url(owner: &str, repo: &str, token: &str) -> String {
 #[test]
 fn token_url_shape_standard() {
     let got = expected_token_url("owner", "repo", "ghp_abc");
-    assert_eq!(got, "https://x-access-token:ghp_abc@github.com/owner/repo.git");
+    assert_eq!(
+        got,
+        "https://x-access-token:ghp_abc@github.com/owner/repo.git"
+    );
 }
 
 #[test]
@@ -520,7 +529,11 @@ fn token_url_shape_hyphens() {
 #[test]
 #[ignore]
 fn github_init_token_url_syntax_is_git_parseable() {
-    let url = expected_token_url("nonexistent-org-zzz", "nonexistent-repo-zzz", "invalid-token");
+    let url = expected_token_url(
+        "nonexistent-org-zzz",
+        "nonexistent-repo-zzz",
+        "invalid-token",
+    );
     let out = Command::new("git")
         .args(["ls-remote", &url])
         .output()

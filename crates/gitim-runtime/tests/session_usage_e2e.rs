@@ -64,8 +64,10 @@ async fn usage_snapshot_surfaces_via_agent_state() {
     // are what prove the estimator path ran — tiktoken returns non-zero for
     // non-empty text, so we can assert > 0 post-call.
     let mut state = AgentState::load(repo_root).expect("load state");
-    state.estimated_tokens +=
-        gitim_runtime::context_window::tokenize_for_provider("mock", "hello, world — pretend prompt");
+    state.estimated_tokens += gitim_runtime::context_window::tokenize_for_provider(
+        "mock",
+        "hello, world — pretend prompt",
+    );
     state.estimated_tokens += gitim_runtime::context_window::tokenize_for_provider(
         "mock",
         "pretend assistant response text",

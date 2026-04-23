@@ -10,7 +10,9 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -41,9 +43,11 @@ impl Provider for GeminiProvider {
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
         let mut args = vec![
-            "-p".to_string(), prompt.to_string(),
+            "-p".to_string(),
+            prompt.to_string(),
             "--yolo".to_string(),
-            "-o".to_string(), "stream-json".to_string(),
+            "-o".to_string(),
+            "stream-json".to_string(),
         ];
         if let Some(model) = &opts.model {
             args.extend(["-m".to_string(), model.clone()]);
@@ -80,10 +84,25 @@ impl Provider for GeminiProvider {
         let cancel_token_inner = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stderr, event_tx, result_tx, timeout, pid, cancel_token_inner).await;
+            drive_session(
+                child,
+                stdout,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                cancel_token_inner,
+            )
+            .await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            join_handle.abort_handle(),
+            cancel_token,
+        ))
     }
 }
 
@@ -227,9 +246,7 @@ async fn drive_session(
     stderr_handle.abort();
 
     // If failed with no error message, fall back to stderr tail
-    if final_status == ExecStatus::Failed
-        && final_error.as_ref().is_none_or(|e| e.is_empty())
-    {
+    if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
@@ -264,7 +281,11 @@ pub enum ParsedMessage {
     /// Text content from an assistant message.
     Text { content: String },
     /// Tool use request.
-    ToolUse { tool: String, call_id: String, input: Value },
+    ToolUse {
+        tool: String,
+        call_id: String,
+        input: Value,
+    },
     /// Tool result.
     ToolResult { call_id: String, output: String },
     /// Error event.

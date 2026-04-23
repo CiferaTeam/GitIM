@@ -1,7 +1,7 @@
 //! Unit tests for gitim-updater pure helpers.
 
 use gitim_updater::{
-    BINARIES, detect_platform, download_url, is_newer, latest_release_api_url, parse_version,
+    detect_platform, download_url, is_newer, latest_release_api_url, parse_version, BINARIES,
 };
 
 #[test]

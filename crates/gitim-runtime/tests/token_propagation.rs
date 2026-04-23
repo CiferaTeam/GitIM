@@ -15,22 +15,18 @@ fn write_config(workspace: &Path, cfg: WorkspaceConfig) {
 // by propagation itself — only `git config` runs against `.git/config`.
 fn fake_clone(dir: &Path, remote_url: &str) {
     std::fs::create_dir_all(dir).unwrap();
-    assert!(
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        Command::new("git")
-            .args(["remote", "add", "origin", remote_url])
-            .current_dir(dir)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["remote", "add", "origin", remote_url])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success());
 }
 
 fn read_remote_url(dir: &Path) -> String {

@@ -1,4 +1,4 @@
-use notify::{Watcher, RecursiveMode, Event, EventKind};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::info;

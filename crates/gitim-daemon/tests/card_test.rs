@@ -40,9 +40,7 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
     };
     run_git(&["init"]);
     run_git(&["add", "."]);
-    run_git(&[
-        "commit", "-m", "init",
-    ]);
+    run_git(&["commit", "-m", "init"]);
     let (tx, _) = broadcast::channel(100);
     let state = Arc::new(AppState::new(
         root,
@@ -126,8 +124,16 @@ async fn test_create_card_invalid_status() {
     let resp = handle_request(req, state).await;
     assert!(!resp.ok);
     let err = resp.error.unwrap();
-    assert!(err.contains("invalid status"), "expected 'invalid status' in: {}", err);
-    assert!(err.contains("review"), "expected 'review' in error: {}", err);
+    assert!(
+        err.contains("invalid status"),
+        "expected 'invalid status' in: {}",
+        err
+    );
+    assert!(
+        err.contains("review"),
+        "expected 'review' in error: {}",
+        err
+    );
 }
 
 #[tokio::test]
@@ -143,13 +149,23 @@ async fn test_create_card_with_labels() {
     .unwrap();
     let resp = handle_request(req, state.clone()).await;
     assert!(resp.ok);
-    let card_id = resp.data.as_ref().unwrap()["card_id"].as_str().unwrap().to_string();
+    let card_id = resp.data.as_ref().unwrap()["card_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let content = std::fs::read_to_string(
-        state.repo_root.join("channels/dev/cards").join(&card_id).join("card.meta.yaml"),
+        state
+            .repo_root
+            .join("channels/dev/cards")
+            .join(&card_id)
+            .join("card.meta.yaml"),
     )
     .unwrap();
     let meta: gitim_core::types::CardMeta = serde_yaml::from_str(&content).unwrap();
-    assert_eq!(meta.labels, vec!["v2".to_string(), "agent-task".to_string()]);
+    assert_eq!(
+        meta.labels,
+        vec!["v2".to_string(), "agent-task".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -244,7 +260,11 @@ async fn test_update_card_status_and_emit_event() {
 
     let ev = rx.recv().await.unwrap();
     match ev {
-        gitim_daemon::api::Event::CardStatusChanged { old_status, new_status, .. } => {
+        gitim_daemon::api::Event::CardStatusChanged {
+            old_status,
+            new_status,
+            ..
+        } => {
             assert_eq!(old_status, "todo");
             assert_eq!(new_status, "done");
         }

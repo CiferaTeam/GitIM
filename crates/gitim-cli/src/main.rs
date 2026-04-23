@@ -398,9 +398,7 @@ async fn main() {
             channel,
             limit,
             since,
-        } => {
-            commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await
-        }
+        } => commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await,
         Commands::Channels => commands::channels::cmd_channels(&client, &mode).await,
         Commands::CreateChannel {
             name,
@@ -475,15 +473,8 @@ async fn main() {
                 limit,
                 since,
             } => {
-                commands::dm::cmd_dm_read(
-                    &client,
-                    &mode,
-                    &handler,
-                    author.as_deref(),
-                    limit,
-                    since,
-                )
-                .await
+                commands::dm::cmd_dm_read(&client, &mode, &handler, author.as_deref(), limit, since)
+                    .await
             }
             DmCommands::List => commands::dm::cmd_dm_list(&mode),
         },
@@ -496,7 +487,10 @@ async fn main() {
                 status,
             } => {
                 commands::card::cmd_create_card(
-                    &client, &mode, &channel, &title,
+                    &client,
+                    &mode,
+                    &channel,
+                    &title,
                     if label.is_empty() { None } else { Some(&label) },
                     assignee.as_deref(),
                     status.as_deref(),
@@ -510,7 +504,8 @@ async fn main() {
                 assignee,
             } => {
                 commands::card::cmd_list_cards(
-                    &client, &mode,
+                    &client,
+                    &mode,
                     channel.as_deref(),
                     if label.is_empty() { None } else { Some(&label) },
                     status.as_deref(),
@@ -524,7 +519,8 @@ async fn main() {
                 limit,
                 since,
             } => {
-                commands::card::cmd_read_card(&client, &mode, &channel, &card_id, limit, since).await
+                commands::card::cmd_read_card(&client, &mode, &channel, &card_id, limit, since)
+                    .await
             }
             CardCommands::Comment {
                 channel,
@@ -553,7 +549,10 @@ async fn main() {
                     None
                 };
                 commands::card::cmd_update_card(
-                    &client, &mode, &channel, &card_id,
+                    &client,
+                    &mode,
+                    &channel,
+                    &card_id,
                     status.as_deref(),
                     labels_param.as_deref(),
                     assignee.as_deref(),

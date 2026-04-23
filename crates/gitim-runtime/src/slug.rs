@@ -21,7 +21,13 @@ pub fn normalize(raw: &str) -> String {
     let lower = raw.to_lowercase();
     let replaced: String = lower
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let mut collapsed = String::with_capacity(replaced.len());
     let mut prev_dash = false;

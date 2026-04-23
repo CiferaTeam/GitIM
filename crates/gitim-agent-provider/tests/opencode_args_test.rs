@@ -15,7 +15,9 @@ fn no_system_prompt_no_agent_flag() {
     assert!(inv.args.contains(&"run".to_string()));
     assert!(inv.args.contains(&"--format".to_string()));
     assert!(inv.args.contains(&"json".to_string()));
-    assert!(inv.args.contains(&"--dangerously-skip-permissions".to_string()));
+    assert!(inv
+        .args
+        .contains(&"--dangerously-skip-permissions".to_string()));
     assert!(!inv.args.iter().any(|a| a == "--agent"));
     assert!(!inv.args.iter().any(|a| a == "--model"));
     assert!(!inv.env.contains_key("OPENCODE_CONFIG_CONTENT"));

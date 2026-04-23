@@ -22,8 +22,10 @@ fn parse_tool_use_pending() {
         "part": {"tool": "Bash", "callID": "c-1", "state": {"status": "pending", "input": {"command": "ls"}}}
     }).to_string();
     let msg = parse_line(&line).unwrap();
-    assert!(matches!(msg, ParsedMessage::ToolUse { ref tool, ref call_id, ref status, .. }
-        if tool == "Bash" && call_id == "c-1" && status == "pending"));
+    assert!(
+        matches!(msg, ParsedMessage::ToolUse { ref tool, ref call_id, ref status, .. }
+        if tool == "Bash" && call_id == "c-1" && status == "pending")
+    );
 }
 
 #[test]
@@ -47,7 +49,8 @@ fn parse_error() {
     let line = json!({
         "type": "error", "sessionID": "s-1",
         "error": {"name": "InvalidModel", "data": {"message": "not found"}}
-    }).to_string();
+    })
+    .to_string();
     let msg = parse_line(&line).unwrap();
     assert!(matches!(msg, ParsedMessage::Error { ref message } if message == "not found"));
 }

@@ -44,9 +44,7 @@ pub async fn backfill_github_email(
     };
 
     config.git.github_email = Some(email.clone());
-    config
-        .write(workspace)
-        .map_err(PropagationError::Config)?;
+    config.write(workspace).map_err(PropagationError::Config)?;
 
     merge_email_into_clone(&workspace.join(".gitim-runtime").join("human"), &email);
     if let Ok(entries) = std::fs::read_dir(workspace) {

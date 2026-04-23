@@ -72,8 +72,7 @@ fn write_runtime_json(home: &Path, cfg: &UserConfig) {
     let dir = home.join(".gitim");
     std::fs::create_dir_all(&dir).expect("create ~/.gitim");
     let path = dir.join("runtime.json");
-    std::fs::write(&path, serde_json::to_string_pretty(cfg).unwrap())
-        .expect("write runtime.json");
+    std::fs::write(&path, serde_json::to_string_pretty(cfg).unwrap()).expect("write runtime.json");
 }
 
 fn entry(slug: &str, name: &str, path: &Path) -> WorkspaceEntry {
@@ -359,7 +358,11 @@ async fn delete_workspace_closes_broadcast() {
 
     let mut rx = {
         let s = state.lock().unwrap();
-        s.workspaces.get("dying-ws").unwrap().activity_tx.subscribe()
+        s.workspaces
+            .get("dying-ws")
+            .unwrap()
+            .activity_tx
+            .subscribe()
     };
 
     let resp = router

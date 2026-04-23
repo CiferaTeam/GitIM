@@ -142,7 +142,11 @@ fn inject_workspace(
     });
     // `human_repo: None` keeps `initialized` false, matching a placeholder
     // that hasn't been fully onboarded yet. Tests 10/12/13 use this path.
-    state.lock().unwrap().workspaces.insert(slug_str.to_string(), ctx);
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert(slug_str.to_string(), ctx);
 }
 
 // -- 1. list empty ----------------------------------------------------------
@@ -620,7 +624,13 @@ async fn delete_workspace_aborts_agent_loop_handles() {
     let parent = TempDir::new().unwrap();
     let ws_path = parent.path().join("loop-test");
     std::fs::create_dir(&ws_path).unwrap();
-    inject_workspace(&state, "loop-test", "loop-test", &ws_path, GitProvider::Local);
+    inject_workspace(
+        &state,
+        "loop-test",
+        "loop-test",
+        &ws_path,
+        GitProvider::Local,
+    );
 
     // Spawn a tokio task that runs until aborted, and hand its AbortHandle to
     // the injected agent's `loop_handle`. This stands in for a real

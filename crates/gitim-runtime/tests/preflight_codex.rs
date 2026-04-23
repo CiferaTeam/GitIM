@@ -33,11 +33,8 @@ fn resolve_stdbin(name: &str) -> String {
 
 #[tokio::test]
 async fn test_preflight_codex_not_installed() {
-    let result = preflight_codex_with(
-        "/usr/bin/definitely-not-codex-xyz",
-        Duration::from_secs(5),
-    )
-    .await;
+    let result =
+        preflight_codex_with("/usr/bin/definitely-not-codex-xyz", Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::NotInstalled));
@@ -48,8 +45,7 @@ async fn test_preflight_codex_not_installed() {
 #[tokio::test]
 async fn test_preflight_codex_exit_nonzero() {
     // `false` exits 1 immediately — should land in Other (non-zero exit).
-    let result =
-        preflight_codex_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
+    let result = preflight_codex_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -59,8 +55,7 @@ async fn test_preflight_codex_exit_nonzero() {
 #[tokio::test]
 async fn test_preflight_codex_empty_output() {
     // `true` exits 0 with empty stdout — no `turn.completed`, so Other.
-    let result =
-        preflight_codex_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
+    let result = preflight_codex_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -76,11 +71,7 @@ async fn test_preflight_codex_timeout() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let result = preflight_codex_with(
-        script.to_str().unwrap(),
-        Duration::from_millis(500),
-    )
-    .await;
+    let result = preflight_codex_with(script.to_str().unwrap(), Duration::from_millis(500)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));

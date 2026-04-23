@@ -4,8 +4,8 @@ use std::{fs, process};
 
 use gitim_client::GitimClient;
 
-use crate::output::OutputMode;
 use super::{get_repo_root, read_my_handler};
+use crate::output::OutputMode;
 
 /// Build the DM channel name from two handlers: `dm:{sorted[0]},{sorted[1]}`.
 fn dm_channel(h1: &str, h2: &str) -> String {
@@ -27,7 +27,10 @@ pub async fn cmd_dm_send(
         .unwrap_or_else(|| read_my_handler(&repo_root));
     let channel = dm_channel(&my_handler, target);
 
-    match client.send(&channel, body, Some(&my_handler), reply_to).await {
+    match client
+        .send(&channel, body, Some(&my_handler), reply_to)
+        .await
+    {
         Ok(resp) => {
             if !resp.ok {
                 let msg = resp.error.as_deref().unwrap_or("unknown error");

@@ -47,7 +47,10 @@ impl PathGuard {
         let tmp = tempfile::tempdir().expect("tempdir for empty PATH");
         let original = std::env::var_os("PATH");
         std::env::set_var("PATH", tmp.path());
-        Self { original, _tmp: tmp }
+        Self {
+            original,
+            _tmp: tmp,
+        }
     }
 }
 
@@ -77,7 +80,10 @@ async fn test_preflight_unknown_provider_returns_400() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = body_to_json(response).await;
     assert_eq!(body["ok"], serde_json::Value::Bool(false));
-    assert_eq!(body["error"], serde_json::Value::String("unknown provider".into()));
+    assert_eq!(
+        body["error"],
+        serde_json::Value::String("unknown provider".into())
+    );
 }
 
 #[tokio::test]
@@ -99,11 +105,18 @@ async fn test_preflight_claude_returns_result_shape() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_to_json(response).await;
     assert_eq!(body["provider"], serde_json::Value::String("claude".into()));
-    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
+    assert!(
+        body.get("duration_ms").is_some(),
+        "duration_ms missing: {body}"
+    );
     // With PATH stripped, spawn must fail with NotFound → NotInstalled. This
     // is the same JSON shape the WebUI sees when a user hasn't installed the
     // CLI, so asserting on it gives us the stable contract for that branch.
-    assert_eq!(body["available"], serde_json::Value::Bool(false), "body: {body}");
+    assert_eq!(
+        body["available"],
+        serde_json::Value::Bool(false),
+        "body: {body}"
+    );
     assert_eq!(
         body["error_kind"],
         serde_json::Value::String("not_installed".into()),
@@ -130,8 +143,15 @@ async fn test_preflight_codex_returns_result_shape() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_to_json(response).await;
     assert_eq!(body["provider"], serde_json::Value::String("codex".into()));
-    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
-    assert_eq!(body["available"], serde_json::Value::Bool(false), "body: {body}");
+    assert!(
+        body.get("duration_ms").is_some(),
+        "duration_ms missing: {body}"
+    );
+    assert_eq!(
+        body["available"],
+        serde_json::Value::Bool(false),
+        "body: {body}"
+    );
     assert_eq!(
         body["error_kind"],
         serde_json::Value::String("not_installed".into()),

@@ -3,7 +3,10 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, ProviderUsage, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsage, Session,
+};
 
 /// MockProvider returns a fixed response without calling an LLM.
 /// Used by E2E tests to exercise the full agent message loop.
@@ -117,7 +120,12 @@ impl Provider for MockProvider {
             });
         });
 
-        Ok(Session::new(event_rx, result_rx, task.abort_handle(), CancellationToken::new()))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            task.abort_handle(),
+            CancellationToken::new(),
+        ))
     }
 }
 
@@ -127,13 +135,12 @@ mod usage_tests {
 
     #[tokio::test]
     async fn mock_provider_emits_configured_usage() {
-        let provider = MockProvider::with_response("ok".to_string())
-            .with_usage(ProviderUsage {
-                input_tokens: Some(42_000),
-                output_tokens: Some(800),
-                used_percent: None,
-                ..Default::default()
-            });
+        let provider = MockProvider::with_response("ok".to_string()).with_usage(ProviderUsage {
+            input_tokens: Some(42_000),
+            output_tokens: Some(800),
+            used_percent: None,
+            ..Default::default()
+        });
 
         let session = provider
             .execute("hi", ExecOptions::default())

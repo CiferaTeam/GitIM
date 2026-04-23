@@ -1,15 +1,11 @@
-use regex::Regex;
-use std::sync::LazyLock;
 use crate::types::{Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
+use regex::Regex;
+use std::sync::LazyLock;
 
-static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([#~!])([^>\n]+)>").unwrap()
-});
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([#~!])([^>\n]+)>").unwrap());
 
-static MSG_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+):L(\d{6,})$").unwrap()
-});
+static MSG_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.+):L(\d{6,})$").unwrap());
 
 /// 从消息 body 中提取所有协议级链接，按出现顺序返回，不去重。
 pub fn extract_links(body: &str) -> Vec<Link> {
@@ -36,10 +32,15 @@ fn parse_channel_or_message(content: &str) -> Option<LinkKind> {
         let channel = &caps[1];
         let line_number: u64 = caps[2].parse().ok()?;
         validate_channel_name(channel).ok()?;
-        Some(LinkKind::Message { channel: channel.to_string(), line_number })
+        Some(LinkKind::Message {
+            channel: channel.to_string(),
+            line_number,
+        })
     } else {
         validate_channel_name(content).ok()?;
-        Some(LinkKind::Channel { name: content.to_string() })
+        Some(LinkKind::Channel {
+            name: content.to_string(),
+        })
     }
 }
 
@@ -56,9 +57,15 @@ fn parse_softlink(content: &str) -> Option<LinkKind> {
         }
         // Safe: '|' is ASCII (0x7C), so pos + 1 is always a valid UTF-8 boundary
         let title = &content[pos + 1..];
-        Some(LinkKind::Softlink { url: url.to_string(), title: Some(title.to_string()) })
+        Some(LinkKind::Softlink {
+            url: url.to_string(),
+            title: Some(title.to_string()),
+        })
     } else {
-        Some(LinkKind::Softlink { url: content.to_string(), title: None })
+        Some(LinkKind::Softlink {
+            url: content.to_string(),
+            title: None,
+        })
     }
 }
 
@@ -70,7 +77,12 @@ mod tests {
     fn test_channel_link() {
         let links = extract_links("see <#general>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Channel { name: "general".into() });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Channel {
+                name: "general".into()
+            }
+        );
         assert_eq!(links[0].raw, "<#general>");
     }
 
@@ -78,7 +90,13 @@ mod tests {
     fn test_message_link() {
         let links = extract_links("refer to <#dev:L000042>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Message { channel: "dev".into(), line_number: 42 });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Message {
+                channel: "dev".into(),
+                line_number: 42
+            }
+        );
         assert_eq!(links[0].raw, "<#dev:L000042>");
     }
 
@@ -86,7 +104,12 @@ mod tests {
     fn test_user_profile_link() {
         let links = extract_links("check <~alice>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::UserProfile { handler: Handler::new("alice").unwrap() });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::UserProfile {
+                handler: Handler::new("alice").unwrap()
+            }
+        );
         assert_eq!(links[0].raw, "<~alice>");
     }
 
@@ -94,7 +117,13 @@ mod tests {
     fn test_softlink_bare() {
         let links = extract_links("visit <!https://example.com>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Softlink { url: "https://example.com".into(), title: None });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Softlink {
+                url: "https://example.com".into(),
+                title: None
+            }
+        );
         assert_eq!(links[0].raw, "<!https://example.com>");
     }
 
@@ -102,29 +131,51 @@ mod tests {
     fn test_softlink_with_title() {
         let links = extract_links("see <!https://example.com|Example Site>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Softlink {
-            url: "https://example.com".into(),
-            title: Some("Example Site".into()),
-        });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Softlink {
+                url: "https://example.com".into(),
+                title: Some("Example Site".into()),
+            }
+        );
     }
 
     #[test]
     fn test_softlink_empty_title() {
         let links = extract_links("see <!https://example.com|>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Softlink {
-            url: "https://example.com".into(),
-            title: Some("".into()),
-        });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Softlink {
+                url: "https://example.com".into(),
+                title: Some("".into()),
+            }
+        );
     }
 
     #[test]
     fn test_multiple_links() {
         let links = extract_links("<#general> and <~bob> and <!https://x.com>");
         assert_eq!(links.len(), 3);
-        assert_eq!(links[0].kind, LinkKind::Channel { name: "general".into() });
-        assert_eq!(links[1].kind, LinkKind::UserProfile { handler: Handler::new("bob").unwrap() });
-        assert_eq!(links[2].kind, LinkKind::Softlink { url: "https://x.com".into(), title: None });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Channel {
+                name: "general".into()
+            }
+        );
+        assert_eq!(
+            links[1].kind,
+            LinkKind::UserProfile {
+                handler: Handler::new("bob").unwrap()
+            }
+        );
+        assert_eq!(
+            links[2].kind,
+            LinkKind::Softlink {
+                url: "https://x.com".into(),
+                title: None
+            }
+        );
     }
 
     #[test]
@@ -188,24 +239,38 @@ mod tests {
         // The first | splits url from title
         let links = extract_links("<!https://x.com/a%7Cb|my title>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Softlink {
-            url: "https://x.com/a%7Cb".into(),
-            title: Some("my title".into()),
-        });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Softlink {
+                url: "https://x.com/a%7Cb".into(),
+                title: Some("my title".into()),
+            }
+        );
     }
 
     #[test]
     fn test_message_link_long_line_number() {
         let links = extract_links("<#logs:L00000000099>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Message { channel: "logs".into(), line_number: 99 });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Message {
+                channel: "logs".into(),
+                line_number: 99
+            }
+        );
     }
 
     #[test]
     fn test_mention_and_link_coexist() {
         let links = extract_links("<@alice> see <#general>");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::Channel { name: "general".into() });
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Channel {
+                name: "general".into()
+            }
+        );
     }
 
     #[test]

@@ -106,7 +106,10 @@ async fn poll_surfaces_archived_channel_as_channel_meta() {
     .await;
     assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
 
-    let changes = poll_resp.data.unwrap()["changes"].as_array().cloned().unwrap();
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
     let archived_meta_hit = changes
         .iter()
         .any(|c| c["kind"] == "channel_meta" && c["channel"] == "ephemeral");
@@ -148,10 +151,15 @@ async fn archived_channel_meta_uses_bare_channel_name() {
     .unwrap();
     let _ = handle_request(archive_req, state.clone()).await;
 
-    let changes = handle_request(Request::Poll { since: Some(cursor) }, state.clone())
-        .await
-        .data
-        .unwrap()["changes"]
+    let changes = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await
+    .data
+    .unwrap()["changes"]
         .as_array()
         .cloned()
         .unwrap();

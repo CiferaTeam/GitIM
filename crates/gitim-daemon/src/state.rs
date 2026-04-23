@@ -294,7 +294,10 @@ impl AppState {
                         fresh.sort();
                         if let Ok(mut users) = synced_state.users.try_write() {
                             if *users != fresh {
-                                tracing::info!("on_synced: users list refreshed ({} users)", fresh.len());
+                                tracing::info!(
+                                    "on_synced: users list refreshed ({} users)",
+                                    fresh.len()
+                                );
                                 *users = fresh;
                             }
                         }

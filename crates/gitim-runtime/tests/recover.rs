@@ -30,11 +30,7 @@ fn fresh_state_with_ws(slug: &str, path: &Path) -> SharedRuntimeState {
         let mut s = state.lock().unwrap();
         s.workspaces.insert(
             slug.to_string(),
-            WorkspaceContext::new(
-                slug.to_string(),
-                slug.to_string(),
-                path.to_path_buf(),
-            ),
+            WorkspaceContext::new(slug.to_string(), slug.to_string(), path.to_path_buf()),
         );
     }
     state
@@ -63,9 +59,18 @@ async fn test_recover_missing_provider_marks_error() {
         .expect("agent should be registered even when provider is missing");
     assert_eq!(info.status, "error");
     let msg = info.error_message.as_deref().unwrap_or_default();
-    assert!(msg.contains("Missing"), "error_message should mention Missing: {msg}");
-    assert!(msg.contains("provider"), "error_message should mention provider: {msg}");
-    assert!(info.loop_handle.is_none(), "loop_handle must be None on error");
+    assert!(
+        msg.contains("Missing"),
+        "error_message should mention Missing: {msg}"
+    );
+    assert!(
+        msg.contains("provider"),
+        "error_message should mention provider: {msg}"
+    );
+    assert!(
+        info.loop_handle.is_none(),
+        "loop_handle must be None on error"
+    );
 }
 
 #[tokio::test]
@@ -119,7 +124,11 @@ async fn test_recover_missing_provider_broadcasts_error_event() {
     let state = fresh_state_with_ws("test-ws", tmp.path());
     let mut rx = {
         let s = state.lock().unwrap();
-        s.workspaces.get("test-ws").expect("ws present").activity_tx.subscribe()
+        s.workspaces
+            .get("test-ws")
+            .expect("ws present")
+            .activity_tx
+            .subscribe()
     };
 
     recover_agents_for_workspace(state.clone(), "test-ws", tmp.path()).await;

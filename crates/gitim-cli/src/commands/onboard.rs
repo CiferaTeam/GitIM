@@ -164,7 +164,12 @@ fn clone_or_create_repo(
 
             // Try gh CLI first (uses gh's own auth)
             let clone_ok = Command::new("gh")
-                .args(["repo", "clone", &gh_target, target_dir.to_str().unwrap_or(repo_name)])
+                .args([
+                    "repo",
+                    "clone",
+                    &gh_target,
+                    target_dir.to_str().unwrap_or(repo_name),
+                ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -206,7 +211,11 @@ fn clone_or_create_repo(
             };
 
             let git_clone_ok = Command::new("git")
-                .args(["clone", &clone_url, target_dir.to_str().unwrap_or(repo_name)])
+                .args([
+                    "clone",
+                    &clone_url,
+                    target_dir.to_str().unwrap_or(repo_name),
+                ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -287,8 +296,8 @@ fn clone_or_create_repo(
                 // Gitea: create via API then clone
                 let token = args.token.as_deref().unwrap();
                 let create_url = format!("{base_url}/api/v1/orgs/{org}/repos");
-                let body = serde_json::to_string(&json!({"name": repo_name, "private": true}))
-                    .unwrap();
+                let body =
+                    serde_json::to_string(&json!({"name": repo_name, "private": true})).unwrap();
 
                 let api_ok = Command::new("curl")
                     .args([
@@ -344,7 +353,9 @@ fn ensure_config_debug_http(repo_dir: &Path, enabled: bool) {
         if content.contains("debug_http:") {
             // Replace existing value using regex to handle variable whitespace
             let re = Regex::new(r"debug_http:\s*(true|false)").unwrap();
-            content = re.replace(&content, format!("debug_http: {value}")).to_string();
+            content = re
+                .replace(&content, format!("debug_http: {value}"))
+                .to_string();
         } else if content.contains("daemon:") {
             // Replace only the first occurrence of "daemon:"
             content = content.replacen("daemon:", &format!("daemon:\n  debug_http: {value}"), 1);
@@ -510,7 +521,11 @@ pub async fn cmd_onboard(args: OnboardArgs) {
                     .and_then(|d| d.get("created"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let created_label = if created { "（新建）" } else { "（已加入）" };
+                let created_label = if created {
+                    "（新建）"
+                } else {
+                    "（已加入）"
+                };
                 let admin_tag = if args.admin { " [ADMIN]" } else { "" };
                 println!("成功 {created_label}：@{handler}{admin_tag} @ {repo_name}");
             }

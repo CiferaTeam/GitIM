@@ -28,11 +28,8 @@ fn resolve_stdbin(name: &str) -> String {
 
 #[tokio::test]
 async fn test_preflight_claude_not_installed() {
-    let result = preflight_claude_with(
-        "/usr/bin/definitely-not-claude-xyz",
-        Duration::from_secs(5),
-    )
-    .await;
+    let result =
+        preflight_claude_with("/usr/bin/definitely-not-claude-xyz", Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::NotInstalled));
@@ -44,8 +41,7 @@ async fn test_preflight_claude_not_installed() {
 async fn test_preflight_claude_exit_nonzero() {
     // `false` exits 1 immediately — should land in Other (either via
     // non-zero exit or parse failure, both are Other).
-    let result =
-        preflight_claude_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
+    let result = preflight_claude_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -56,8 +52,7 @@ async fn test_preflight_claude_exit_nonzero() {
 async fn test_preflight_claude_empty_output() {
     // `true` exits 0 with empty stdout — should land in Other via
     // parse/empty branch.
-    let result =
-        preflight_claude_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
+    let result = preflight_claude_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -72,11 +67,7 @@ async fn test_preflight_claude_timeout() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let result = preflight_claude_with(
-        script.to_str().unwrap(),
-        Duration::from_millis(500),
-    )
-    .await;
+    let result = preflight_claude_with(script.to_str().unwrap(), Duration::from_millis(500)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));

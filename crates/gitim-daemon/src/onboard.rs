@@ -206,13 +206,25 @@ fn write_me_json(
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let obj = me.as_object_mut().unwrap();
-    obj.insert("handler".to_string(), serde_json::Value::String(handler.to_string()));
-    obj.insert("git_server".to_string(), serde_json::Value::String(git_server.to_string()));
-    obj.insert("display_name".to_string(), serde_json::Value::String(display_name.to_string()));
+    obj.insert(
+        "handler".to_string(),
+        serde_json::Value::String(handler.to_string()),
+    );
+    obj.insert(
+        "git_server".to_string(),
+        serde_json::Value::String(git_server.to_string()),
+    );
+    obj.insert(
+        "display_name".to_string(),
+        serde_json::Value::String(display_name.to_string()),
+    );
     obj.insert("onboarded_at".to_string(), serde_json::Value::String(now));
     // Caller-provided email overrides; absent → preserve whatever was there.
     if let Some(email) = github_email {
-        obj.insert("github_email".to_string(), serde_json::Value::String(email.to_string()));
+        obj.insert(
+            "github_email".to_string(),
+            serde_json::Value::String(email.to_string()),
+        );
     }
     // Guest flag is mutually exclusive with a real handler — clear stale value.
     obj.remove("guest");
@@ -573,7 +585,14 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
 
-        write_me_json(&state, "alice", "Alice W", "github", Some("alice@example.com")).unwrap();
+        write_me_json(
+            &state,
+            "alice",
+            "Alice W",
+            "github",
+            Some("alice@example.com"),
+        )
+        .unwrap();
 
         let me_path = repo.join(".gitim").join("me.json");
         assert!(me_path.exists());
@@ -599,8 +618,10 @@ mod tests {
         let me_path = repo.join(".gitim").join("me.json");
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
-        assert!(content.get("github_email").is_none(),
-            "github_email should be absent when no email inferred");
+        assert!(
+            content.get("github_email").is_none(),
+            "github_email should be absent when no email inferred"
+        );
     }
 
     #[tokio::test]

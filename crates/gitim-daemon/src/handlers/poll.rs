@@ -1,6 +1,6 @@
 use crate::api::Response;
-use crate::state::SharedState;
 use crate::handlers::entry_to_json;
+use crate::state::SharedState;
 
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::parser::parse_thread;
@@ -10,13 +10,12 @@ use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
     // Use @{upstream} (current branch's tracking ref) when available, else HEAD.
-    let ref_name = if state.git_storage.has_remote()
-        && state.git_storage.rev_parse("@{upstream}").is_ok()
-    {
-        "@{upstream}"
-    } else {
-        "HEAD"
-    };
+    let ref_name =
+        if state.git_storage.has_remote() && state.git_storage.rev_parse("@{upstream}").is_ok() {
+            "@{upstream}"
+        } else {
+            "HEAD"
+        };
 
     // Get current commit hash
     let current_commit = match state.git_storage.rev_parse(ref_name) {

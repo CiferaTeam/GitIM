@@ -78,10 +78,7 @@ impl PreflightResult {
 }
 
 /// Binary names to check alongside runtime itself.
-const PEERS: &[(&str, &str)] = &[
-    ("gitim", "gitim"),
-    ("gitim-daemon", "gitim-daemon"),
-];
+const PEERS: &[(&str, &str)] = &[("gitim", "gitim"), ("gitim-daemon", "gitim-daemon")];
 
 #[derive(Debug)]
 pub struct VersionMismatch {
@@ -140,10 +137,7 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 /// Run `<binary> --version`, parse the version string.
 /// Expected format: `<name> <version>` (e.g. "gitim 0.3.1").
 pub fn query_version(binary_path: &Path) -> Option<String> {
-    let output = Command::new(binary_path)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = Command::new(binary_path).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -179,7 +173,10 @@ pub fn check_env() -> Result<(), PreflightError> {
     if missing.is_empty() && mismatches.is_empty() {
         Ok(())
     } else {
-        Err(PreflightError { missing, mismatches })
+        Err(PreflightError {
+            missing,
+            mismatches,
+        })
     }
 }
 
@@ -235,8 +232,7 @@ fn parse_claude_result(stdout: &str) -> Result<String, String> {
         .and_then(|r| r.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            "claude JSON output did not contain a result entry with a `result` field"
-                .to_string()
+            "claude JSON output did not contain a result entry with a `result` field".to_string()
         })
 }
 
@@ -271,10 +267,7 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
         .args(["--output-format", "json"])
         .args(["--setting-sources", ""])
         .args(["--tools", ""])
-        .args([
-            "--system-prompt",
-            "Reply with exactly what the user asks.",
-        ])
+        .args(["--system-prompt", "Reply with exactly what the user asks."])
         .arg("Reply with exactly: GITIM_OK")
         // Pipe stdin so we can close the write end immediately — some
         // Claude CLI versions block on stdin readiness when it's `null`.
@@ -505,15 +498,10 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
             Some("turn.completed") => saw_turn_completed = true,
             Some("item.completed") => {
                 let item = obj.get("item");
-                let is_agent_message = item
-                    .and_then(|i| i.get("type"))
-                    .and_then(|t| t.as_str())
+                let is_agent_message = item.and_then(|i| i.get("type")).and_then(|t| t.as_str())
                     == Some("agent_message");
                 if is_agent_message {
-                    if let Some(text) = item
-                        .and_then(|i| i.get("text"))
-                        .and_then(|t| t.as_str())
-                    {
+                    if let Some(text) = item.and_then(|i| i.get("text")).and_then(|t| t.as_str()) {
                         agent_message = Some(text.to_string());
                     }
                 }

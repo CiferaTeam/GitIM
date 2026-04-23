@@ -110,7 +110,10 @@ fn circuit_ignores_non_auth_errors() {
     circuit.record(&Err(auth_err()));
     circuit.record(&Err(GitError::RateLimited));
     circuit.record(&Err(auth_err()));
-    assert!(!flag.load(Ordering::SeqCst), "two auth failures still below threshold");
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "two auth failures still below threshold"
+    );
 
     circuit.record(&Err(auth_err()));
     assert!(flag.load(Ordering::SeqCst));
@@ -161,7 +164,10 @@ fn setup_clone_with_dead_remote() -> (TempDir, TempDir, GitStorage) {
         "file://{}/nonexistent-bare.git",
         bare_dir.path().parent().unwrap().display()
     );
-    run_git(clone_dir.path(), &["remote", "set-url", "origin", &dead_path]);
+    run_git(
+        clone_dir.path(),
+        &["remote", "set-url", "origin", &dead_path],
+    );
 
     // Create an unpushed commit so sync_with_push gets exercised.
     std::fs::write(clone_dir.path().join("local.txt"), "data").unwrap();
@@ -194,7 +200,10 @@ fn run_sync_cycle_does_not_trip_circuit_on_non_auth_errors() {
         );
     }
 
-    assert!(!flag.load(Ordering::SeqCst), "non-auth errors must not trip circuit");
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "non-auth errors must not trip circuit"
+    );
     let _ = circuit; // suppress unused warning (state inspected only via flag)
 }
 

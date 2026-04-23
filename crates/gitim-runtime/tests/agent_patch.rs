@@ -202,9 +202,17 @@ async fn patch_system_prompt_writes_me_json() {
     let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
     let me: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
-    assert_eq!(me["system_prompt"], json!("new prompt"), "disk must reflect new value");
+    assert_eq!(
+        me["system_prompt"],
+        json!("new prompt"),
+        "disk must reflect new value"
+    );
     // Merge semantics: provider field must be preserved.
-    assert_eq!(me["provider"], json!("claude"), "provider must be preserved");
+    assert_eq!(
+        me["provider"],
+        json!("claude"),
+        "provider must be preserved"
+    );
 }
 
 // -- 3. PATCH system_prompt null clears the field ------------------------------
@@ -335,10 +343,22 @@ async fn patch_env_replaces_full_map() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["ok"], json!(true));
     // Response env should contain only C.
-    let resp_env = body["agent"]["env"].as_object().expect("env should be object");
-    assert_eq!(resp_env.get("C").and_then(|v| v.as_str()), Some("3"), "C must be present");
-    assert!(resp_env.get("A").is_none(), "A must be gone — replacement, not merge");
-    assert!(resp_env.get("B").is_none(), "B must be gone — replacement, not merge");
+    let resp_env = body["agent"]["env"]
+        .as_object()
+        .expect("env should be object");
+    assert_eq!(
+        resp_env.get("C").and_then(|v| v.as_str()),
+        Some("3"),
+        "C must be present"
+    );
+    assert!(
+        resp_env.get("A").is_none(),
+        "A must be gone — replacement, not merge"
+    );
+    assert!(
+        resp_env.get("B").is_none(),
+        "B must be gone — replacement, not merge"
+    );
 
     // On-disk me.json must also reflect replacement.
     let me_path = std::path::PathBuf::from(&agent_dir).join(".gitim/me.json");
@@ -346,8 +366,14 @@ async fn patch_env_replaces_full_map() {
         serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
     let disk_env = me["env"].as_object().expect("env should be object on disk");
     assert_eq!(disk_env.get("C").and_then(|v| v.as_str()), Some("3"));
-    assert!(disk_env.get("A").is_none(), "A must be absent from me.json after replacement");
-    assert!(disk_env.get("B").is_none(), "B must be absent from me.json after replacement");
+    assert!(
+        disk_env.get("A").is_none(),
+        "A must be absent from me.json after replacement"
+    );
+    assert!(
+        disk_env.get("B").is_none(),
+        "B must be absent from me.json after replacement"
+    );
     // Other fields survive (merge semantics for non-env fields).
     assert_eq!(me["provider"], json!("claude"));
 }
@@ -400,19 +426,18 @@ async fn patch_env_empty_clears_all() {
 async fn patch_env_rejects_illegal_key() {
     let (router, state) = create_router();
     inject_workspace(&state, "ws7");
-    let _dir = seed_agent_in_workspace(
-        &state,
-        "ws7",
-        "alice",
-        json!({ "provider": "claude" }),
-    );
+    let _dir = seed_agent_in_workspace(&state, "ws7", "alice", json!({ "provider": "claude" }));
 
-    let (status, body) = send_patch(&router, "ws7", "alice", json!({ "env": { "1bad": "x" } })).await;
+    let (status, body) =
+        send_patch(&router, "ws7", "alice", json!({ "env": { "1bad": "x" } })).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     assert_eq!(body["ok"], json!(false));
     assert!(
-        body["error"].as_str().unwrap_or("").contains("invalid env var"),
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("invalid env var"),
         "error should mention 'invalid env var'; got: {body}"
     );
 }
@@ -447,7 +472,10 @@ async fn patch_dotenv_writes_file_with_mode_600() {
 
     let env_path = std::path::PathBuf::from(&repo_root).join(".env");
     let contents = std::fs::read_to_string(&env_path).unwrap();
-    assert!(contents.contains("OPENAI_KEY=sk-xxx"), "file must contain written value");
+    assert!(
+        contents.contains("OPENAI_KEY=sk-xxx"),
+        "file must contain written value"
+    );
 
     #[cfg(unix)]
     {
@@ -477,13 +505,8 @@ async fn patch_dotenv_empty_deletes_file() {
         .clone();
 
     // First: write a non-empty dotenv.
-    let (status, body) = send_patch(
-        &router,
-        "ws9",
-        "alice",
-        json!({ "dotenv": "SECRET=abc" }),
-    )
-    .await;
+    let (status, body) =
+        send_patch(&router, "ws9", "alice", json!({ "dotenv": "SECRET=abc" })).await;
     assert_eq!(status, StatusCode::OK, "setup write failed: {body}");
     let env_path = std::path::PathBuf::from(&repo_root).join(".env");
     assert!(env_path.exists(), ".env should exist after initial write");
@@ -491,11 +514,18 @@ async fn patch_dotenv_empty_deletes_file() {
     // Then: send empty string → file must be deleted.
     let (status, body) = send_patch(&router, "ws9", "alice", json!({ "dotenv": "" })).await;
     assert_eq!(status, StatusCode::OK, "delete failed: {body}");
-    assert!(!env_path.exists(), ".env should be deleted after empty-string patch");
+    assert!(
+        !env_path.exists(),
+        ".env should be deleted after empty-string patch"
+    );
 
     // Also verify: empty-string patch when .env was never created is a no-op 200.
     let (status, body) = send_patch(&router, "ws9", "alice", json!({ "dotenv": "" })).await;
-    assert_eq!(status, StatusCode::OK, "second empty patch (no-op) failed: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "second empty patch (no-op) failed: {body}"
+    );
 }
 
 // -- 10. PATCH dotenv > 64KB is rejected with 400 -----------------------------

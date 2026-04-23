@@ -10,7 +10,9 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session};
+use crate::{
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -73,19 +75,36 @@ impl Provider for HermesProvider {
 
         let prompt = prompt.to_string();
         let resume_token = opts.resume_token.clone();
-        let cwd_str = opts.cwd.as_ref()
+        let cwd_str = opts
+            .cwd
+            .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
 
         let join_handle = tokio::spawn(async move {
             drive_session(
-                child, stdin, stdout, stderr,
-                event_tx, result_tx, timeout, pid, cancel_token_inner,
-                prompt, resume_token, cwd_str,
-            ).await;
+                child,
+                stdin,
+                stdout,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                cancel_token_inner,
+                prompt,
+                resume_token,
+                cwd_str,
+            )
+            .await;
         });
 
-        Ok(Session::new(event_rx, result_rx, join_handle.abort_handle(), cancel_token))
+        Ok(Session::new(
+            event_rx,
+            result_rx,
+            join_handle.abort_handle(),
+            cancel_token,
+        ))
     }
 }
 
@@ -99,7 +118,11 @@ pub enum ParsedNotification {
     /// Thinking / reasoning content.
     Thinking { content: String },
     /// Tool invocation.
-    ToolCall { tool: String, call_id: String, input: Value },
+    ToolCall {
+        tool: String,
+        call_id: String,
+        input: Value,
+    },
     /// Tool result (completed or failed).
     ToolResult { call_id: String, output: String },
 }
@@ -113,26 +136,49 @@ pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
     match update_type {
         "agent_message_chunk" => {
             let text = update.get("content")?.get("text")?.as_str()?;
-            if text.is_empty() { return None; }
-            Some(ParsedNotification::Text { content: text.to_string() })
+            if text.is_empty() {
+                return None;
+            }
+            Some(ParsedNotification::Text {
+                content: text.to_string(),
+            })
         }
         "agent_thought_chunk" => {
             let text = update.get("content")?.get("text")?.as_str()?;
-            if text.is_empty() { return None; }
-            Some(ParsedNotification::Thinking { content: text.to_string() })
+            if text.is_empty() {
+                return None;
+            }
+            Some(ParsedNotification::Thinking {
+                content: text.to_string(),
+            })
         }
         "tool_call" => {
             let call_id = update.get("toolCallId")?.as_str()?.to_string();
             let title = update.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = title.split(':').next().unwrap_or("unknown").trim().to_string();
-            let input = update.get("rawInput").cloned().unwrap_or(Value::Object(Default::default()));
-            Some(ParsedNotification::ToolCall { tool, call_id, input })
+            let tool = title
+                .split(':')
+                .next()
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
+            let input = update
+                .get("rawInput")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            Some(ParsedNotification::ToolCall {
+                tool,
+                call_id,
+                input,
+            })
         }
         "tool_call_update" => {
             let status = update.get("status")?.as_str()?;
-            if status != "completed" && status != "failed" { return None; }
+            if status != "completed" && status != "failed" {
+                return None;
+            }
             let call_id = update.get("toolCallId")?.as_str()?.to_string();
-            let output = update.get("rawOutput")
+            let output = update
+                .get("rawOutput")
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
@@ -209,20 +255,29 @@ async fn drive_session(
         let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let mut buf = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         buf.push(b'\n');
-        stdin.write_all(&buf).await.map_err(|e| format!("stdin write: {e}"))?;
+        stdin
+            .write_all(&buf)
+            .await
+            .map_err(|e| format!("stdin write: {e}"))?;
 
         // Read lines until we get response with matching id
         loop {
             match reader.next_line().await {
                 Ok(Some(line)) => {
                     let line = line.trim().to_string();
-                    if line.is_empty() { continue; }
+                    if line.is_empty() {
+                        continue;
+                    }
                     if let Ok(resp) = serde_json::from_str::<RpcResponse>(&line) {
                         if resp.id == Some(id) {
                             if let Some(err) = resp.error {
-                                return Err(format!("{method}: {} (code={})",
-                                    err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                                    err.get("code").and_then(|v| v.as_i64()).unwrap_or(0)));
+                                return Err(format!(
+                                    "{method}: {} (code={})",
+                                    err.get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown"),
+                                    err.get("code").and_then(|v| v.as_i64()).unwrap_or(0)
+                                ));
                             }
                             return Ok(resp.result.unwrap_or(Value::Null));
                         }
@@ -248,7 +303,11 @@ async fn drive_session(
             output,
             error,
             duration_ms: start.elapsed().as_millis() as u64,
-            session_token: if session_id.is_empty() { None } else { Some(session_id.to_string()) },
+            session_token: if session_id.is_empty() {
+                None
+            } else {
+                Some(session_id.to_string())
+            },
             usage: None,
         });
     }
@@ -261,20 +320,31 @@ async fn drive_session(
 
     let handshake = async {
         // Step 1: initialize
-        rpc_call(&mut stdin, &mut reader, 0, "initialize", json!({
-            "protocolVersion": 1,
-            "clientInfo": {"name": "gitim-agent-sdk", "version": "0.1.0"},
-            "clientCapabilities": {},
-        })).await?;
+        rpc_call(
+            &mut stdin,
+            &mut reader,
+            0,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientInfo": {"name": "gitim-agent-sdk", "version": "0.1.0"},
+                "clientCapabilities": {},
+            }),
+        )
+        .await?;
 
         // Step 2: session/new or session/resume
         let (method, params) = if let Some(ref token) = resume_token {
-            ("session/resume", json!({"cwd": cwd_str, "sessionId": token}))
+            (
+                "session/resume",
+                json!({"cwd": cwd_str, "sessionId": token}),
+            )
         } else {
             ("session/new", json!({"cwd": cwd_str, "mcpServers": []}))
         };
         let result = rpc_call(&mut stdin, &mut reader, 1, method, params).await?;
-        let sid = result.get("sessionId")
+        let sid = result
+            .get("sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -286,7 +356,10 @@ async fn drive_session(
         });
         let mut buf = serde_json::to_vec(&prompt_req).map_err(|e| e.to_string())?;
         buf.push(b'\n');
-        stdin.write_all(&buf).await.map_err(|e| format!("stdin write: {e}"))?;
+        stdin
+            .write_all(&buf)
+            .await
+            .map_err(|e| format!("stdin write: {e}"))?;
 
         Ok::<String, String>(sid)
     };
@@ -299,21 +372,44 @@ async fn drive_session(
         Ok(Err(e)) => {
             warn!(pid, error = %e, "hermes handshake failed");
             let _ = child.start_kill();
-            send_result(result_tx, ExecStatus::Failed, output, Some(e), start, &session_id);
+            send_result(
+                result_tx,
+                ExecStatus::Failed,
+                output,
+                Some(e),
+                start,
+                &session_id,
+            );
             stderr_handle.abort();
             return;
         }
         Err(_) => {
-            warn!(pid, "hermes handshake timed out after {handshake_timeout:?}");
+            warn!(
+                pid,
+                "hermes handshake timed out after {handshake_timeout:?}"
+            );
             let _ = child.start_kill();
-            send_result(result_tx, ExecStatus::Timeout, output,
-                Some(format!("hermes handshake timed out after {handshake_timeout:?}")), start, &session_id);
+            send_result(
+                result_tx,
+                ExecStatus::Timeout,
+                output,
+                Some(format!(
+                    "hermes handshake timed out after {handshake_timeout:?}"
+                )),
+                start,
+                &session_id,
+            );
             stderr_handle.abort();
             return;
         }
     }
 
-    try_send_event(&event_tx, Event::Status { status: "running".to_string() });
+    try_send_event(
+        &event_tx,
+        Event::Status {
+            status: "running".to_string(),
+        },
+    );
 
     // ── Event loop: read notifications + final prompt response ──
 
@@ -422,9 +518,7 @@ async fn drive_session(
     stderr_handle.abort();
 
     // If failed with no error message, fall back to stderr tail
-    if final_status == ExecStatus::Failed
-        && final_error.as_ref().is_none_or(|e| e.is_empty())
-    {
+    if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));

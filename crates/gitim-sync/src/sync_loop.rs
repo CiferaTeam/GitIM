@@ -1,9 +1,9 @@
+use rand::Rng;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use rand::Rng;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
@@ -33,7 +33,10 @@ pub struct AuthCircuit {
 
 impl AuthCircuit {
     pub fn new(tripped: Arc<AtomicBool>) -> Self {
-        Self { tripped, consecutive_failures: 0 }
+        Self {
+            tripped,
+            consecutive_failures: 0,
+        }
     }
 
     pub fn is_tripped(&self) -> bool {
@@ -124,7 +127,10 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let mut consecutive_rate_limits: u32 = 0;
     let mut circuit = AuthCircuit::new(auth_failed);
 
-    info!("sync loop started, interval={}s (jitter +0..{}ms)", interval_secs, jitter_range);
+    info!(
+        "sync loop started, interval={}s (jitter +0..{}ms)",
+        interval_secs, jitter_range
+    );
 
     // Initial delay before first cycle (skip immediate fire)
     let mut next_delay = Duration::from_millis(base_ms);
@@ -171,7 +177,8 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
                 let backoff_jitter = rand::rng().random_range(0..capped_ms / 3 + 1);
                 warn!(
                     "sync: rate limited, backing off {}ms (consecutive: {})",
-                    capped_ms + backoff_jitter, consecutive_rate_limits
+                    capped_ms + backoff_jitter,
+                    consecutive_rate_limits
                 );
                 Duration::from_millis(capped_ms + backoff_jitter)
             }
@@ -219,7 +226,14 @@ where
     };
 
     let outcome = if has_unpushed {
-        sync_with_push(repo, circuit, commit_lock, on_pushed, on_renumbered, rebase_author)
+        sync_with_push(
+            repo,
+            circuit,
+            commit_lock,
+            on_pushed,
+            on_renumbered,
+            rebase_author,
+        )
     } else {
         sync_pull_only(repo, circuit, commit_lock)
     };
@@ -324,7 +338,9 @@ where
         };
 
         // Capture changed meta files BEFORE attempting rebase
-        let changed_meta_files = repo.changed_files_unpushed("*.meta.yaml").unwrap_or_default();
+        let changed_meta_files = repo
+            .changed_files_unpushed("*.meta.yaml")
+            .unwrap_or_default();
         let mut local_metas: HashMap<PathBuf, String> = HashMap::new();
         for rel_path in &changed_meta_files {
             let abs_path = repo.root().join(rel_path);
@@ -363,7 +379,10 @@ where
                         return SyncOutcome::Normal;
                     }
                     Err(_) => {
-                        warn!("sync: push failed after rebase (attempt {}), retrying", attempt);
+                        warn!(
+                            "sync: push failed after rebase (attempt {}), retrying",
+                            attempt
+                        );
                         // Blocking sleep OK: run_sync_cycle is already synchronous (git commands)
                         std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
@@ -396,7 +415,8 @@ where
                                     warn!("sync: failed to write resolved file: {}", e);
                                     return SyncOutcome::Normal;
                                 }
-                                modified_paths.push(resolved.path.to_str().unwrap_or("").to_string());
+                                modified_paths
+                                    .push(resolved.path.to_str().unwrap_or("").to_string());
                             }
                             mappings
                         }
@@ -417,24 +437,38 @@ where
                         let remote_content = match std::fs::read_to_string(&abs_path) {
                             Ok(c) => c,
                             Err(e) => {
-                                warn!("sync: failed to read remote meta {}: {}", rel_path.display(), e);
+                                warn!(
+                                    "sync: failed to read remote meta {}: {}",
+                                    rel_path.display(),
+                                    e
+                                );
                                 continue;
                             }
                         };
-                        let local_meta: gitim_core::types::ChannelMeta = match serde_yaml::from_str(local_content) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!("sync: failed to parse local meta {}: {}", rel_path.display(), e);
-                                continue;
-                            }
-                        };
-                        let remote_meta: gitim_core::types::ChannelMeta = match serde_yaml::from_str(&remote_content) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!("sync: failed to parse remote meta {}: {}", rel_path.display(), e);
-                                continue;
-                            }
-                        };
+                        let local_meta: gitim_core::types::ChannelMeta =
+                            match serde_yaml::from_str(local_content) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    warn!(
+                                        "sync: failed to parse local meta {}: {}",
+                                        rel_path.display(),
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
+                        let remote_meta: gitim_core::types::ChannelMeta =
+                            match serde_yaml::from_str(&remote_content) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    warn!(
+                                        "sync: failed to parse remote meta {}: {}",
+                                        rel_path.display(),
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
                         let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
                         match serde_yaml::to_string(&merged) {
                             Ok(yaml) => {
@@ -498,22 +532,34 @@ where
                 match push_after_resolve {
                     Ok(()) => {
                         on_pushed();
-                        info!("sync: push complete after conflict resolution (attempt {})", attempt);
+                        info!(
+                            "sync: push complete after conflict resolution (attempt {})",
+                            attempt
+                        );
                         return SyncOutcome::Normal;
                     }
                     Err(GitError::RateLimited) => {
-                        warn!("sync: push rate limited after conflict resolution (attempt {})", attempt);
+                        warn!(
+                            "sync: push rate limited after conflict resolution (attempt {})",
+                            attempt
+                        );
                         return SyncOutcome::RateLimited;
                     }
                     Err(GitError::AuthFailed(_)) => {
-                        warn!("sync: push auth failed after conflict resolution (attempt {})", attempt);
+                        warn!(
+                            "sync: push auth failed after conflict resolution (attempt {})",
+                            attempt
+                        );
                         if circuit.is_tripped() {
                             return SyncOutcome::AuthCircuitOpen;
                         }
                         return SyncOutcome::Normal;
                     }
                     Err(_) => {
-                        warn!("sync: push failed after conflict resolution (attempt {}), retrying", attempt);
+                        warn!(
+                            "sync: push failed after conflict resolution (attempt {}), retrying",
+                            attempt
+                        );
                         // Blocking sleep OK: run_sync_cycle is already synchronous (git commands)
                         std::thread::sleep(Duration::from_millis(200 * 2u64.pow(attempt as u32)));
                         continue;
@@ -523,7 +569,10 @@ where
         }
     }
 
-    warn!("sync: push failed after {} retries, giving up", MAX_SYNC_RETRIES);
+    warn!(
+        "sync: push failed after {} retries, giving up",
+        MAX_SYNC_RETRIES
+    );
     SyncOutcome::Normal
 }
 

@@ -62,7 +62,10 @@ pub fn check_thread_integrity(input: &str, registered_users: &[&str]) -> Vec<Int
             }
             ThreadEntry::Event(ev) => {
                 if ev.point_to != 0 {
-                    issues.push(IntegrityIssue::LineNumberGap { expected: 0, got: ev.point_to });
+                    issues.push(IntegrityIssue::LineNumberGap {
+                        expected: 0,
+                        got: ev.point_to,
+                    });
                 }
                 if !ev.meta.is_object() {
                     issues.push(IntegrityIssue::EmptyBody(ln));

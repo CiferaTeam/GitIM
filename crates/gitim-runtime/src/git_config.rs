@@ -74,7 +74,9 @@ pub fn validate_workspace_path(path: &Path, home: &Path) -> Result<(), Workspace
             .canonicalize()
             .unwrap_or_else(|_| blacklisted.clone());
         if canon_path.starts_with(&canon_blacklisted) {
-            return Err(WorkspacePathError::CloudSyncDetected((*service).to_string()));
+            return Err(WorkspacePathError::CloudSyncDetected(
+                (*service).to_string(),
+            ));
         }
     }
     Ok(())

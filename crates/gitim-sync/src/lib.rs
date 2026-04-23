@@ -1,8 +1,8 @@
 #![deny(warnings)]
 
-pub mod git;
-pub mod watcher;
-pub mod sync_loop;
-pub mod renumber;
 pub mod conflict;
+pub mod git;
+pub mod renumber;
+pub mod sync_loop;
 pub mod url_redact;
+pub mod watcher;

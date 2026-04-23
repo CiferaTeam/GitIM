@@ -1,5 +1,5 @@
+use gitim_core::formatter::{format_event, format_message};
 use gitim_core::parser::parse_thread;
-use gitim_core::formatter::{format_message, format_event};
 use gitim_core::types::ThreadEntry;
 use std::collections::HashMap;
 use thiserror::Error;

@@ -56,35 +56,53 @@ mod default_max_tests {
 
     #[test]
     fn claude_sonnet_4_6_is_200k() {
-        assert_eq!(default_max_tokens("claude", "claude-sonnet-4-6"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "claude-sonnet-4-6"),
+            Some(200_000)
+        );
     }
 
     #[test]
     fn claude_opus_1m_variant_is_still_200k() {
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-7[1m]"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "claude-opus-4-7[1m]"),
+            Some(200_000)
+        );
     }
 
     #[test]
     fn claude_opus_4_7_is_200k() {
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-7"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "claude-opus-4-7"),
+            Some(200_000)
+        );
     }
 
     #[test]
     fn claude_opus_older_generations_stay_at_200k() {
         // Opus 3 / 4 (pre-4.7) never got the 1M upgrade; they still need the
         // conservative denominator so the threshold preamble fires in time.
-        assert_eq!(default_max_tokens("claude", "claude-opus-4-1"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "claude-opus-4-1"),
+            Some(200_000)
+        );
         assert_eq!(default_max_tokens("claude", "claude-3-opus"), Some(200_000));
     }
 
     #[test]
     fn claude_haiku_is_200k() {
-        assert_eq!(default_max_tokens("claude", "claude-haiku-4-5"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "claude-haiku-4-5"),
+            Some(200_000)
+        );
     }
 
     #[test]
     fn claude_case_insensitive() {
-        assert_eq!(default_max_tokens("claude", "Claude-Sonnet-4-6"), Some(200_000));
+        assert_eq!(
+            default_max_tokens("claude", "Claude-Sonnet-4-6"),
+            Some(200_000)
+        );
     }
 
     #[test]

@@ -59,13 +59,19 @@ async fn local_git_init_adds_env_to_gitignore_and_commits() {
         }),
     )
     .await;
-    assert_eq!(init_resp["ok"], true, "workspace create failed: {init_resp:?}");
+    assert_eq!(
+        init_resp["ok"], true,
+        "workspace create failed: {init_resp:?}"
+    );
 
     let human_root = workspace_path.join(".gitim-runtime/human");
     let gi = human_root.join(".gitignore");
     assert!(gi.exists(), ".gitignore missing at {gi:?}");
     let content = std::fs::read_to_string(&gi).unwrap();
-    assert!(content.contains(".env"), ".gitignore should contain .env, got: {content}");
+    assert!(
+        content.contains(".env"),
+        ".gitignore should contain .env, got: {content}"
+    );
 
     let out = std::process::Command::new("git")
         .args(["log", "--oneline", "--", ".gitignore"])
@@ -78,7 +84,10 @@ async fn local_git_init_adds_env_to_gitignore_and_commits() {
         String::from_utf8_lossy(&out.stderr)
     );
     let log = String::from_utf8_lossy(&out.stdout);
-    assert!(!log.trim().is_empty(), ".gitignore was never committed; log: {log}");
+    assert!(
+        !log.trim().is_empty(),
+        ".gitignore was never committed; log: {log}"
+    );
 
     kill_daemon_in(&workspace_path);
     server.abort();
@@ -103,7 +112,10 @@ async fn local_git_init_commits_env_gitignore_exactly_once() {
         }),
     )
     .await;
-    assert_eq!(init_resp["ok"], true, "workspace create failed: {init_resp:?}");
+    assert_eq!(
+        init_resp["ok"], true,
+        "workspace create failed: {init_resp:?}"
+    );
 
     let human_root = workspace_path.join(".gitim-runtime/human");
     let out = std::process::Command::new("git")
@@ -119,13 +131,9 @@ async fn local_git_init_commits_env_gitignore_exactly_once() {
     let log = String::from_utf8_lossy(&out.stdout);
     // Count only our specific commit — ensure_repo also touches .gitignore (adds .gitim/ rule),
     // so the total commit count may be > 1. Idempotence means our rule was added exactly once.
-    let our_commits = log
-        .lines()
-        .filter(|l| l.contains("gitignore .env"))
-        .count();
+    let our_commits = log.lines().filter(|l| l.contains("gitignore .env")).count();
     assert_eq!(
-        our_commits,
-        1,
+        our_commits, 1,
         "expected exactly one 'chore: gitignore .env' commit, got {our_commits}: {log}"
     );
 

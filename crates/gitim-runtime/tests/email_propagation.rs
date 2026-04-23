@@ -96,8 +96,7 @@ async fn backfill_writes_public_email_into_config_and_clones() {
 #[tokio::test]
 async fn backfill_derives_noreply_when_user_email_null() {
     let mut server = Server::new_async().await;
-    let mock =
-        mock_user_endpoint(&mut server, r#"{"id":42,"login":"octo","email":null}"#).await;
+    let mock = mock_user_endpoint(&mut server, r#"{"id":42,"login":"octo","email":null}"#).await;
 
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path();
@@ -208,10 +207,7 @@ async fn backfill_preserves_existing_me_json_fields() {
         me.get("display_name").and_then(|v| v.as_str()),
         Some("Owner")
     );
-    assert_eq!(
-        me.get("provider").and_then(|v| v.as_str()),
-        Some("github")
-    );
+    assert_eq!(me.get("provider").and_then(|v| v.as_str()), Some("github"));
     assert_eq!(
         me.get("github_email").and_then(|v| v.as_str()),
         Some("octo@example.com")
@@ -276,7 +272,10 @@ async fn backfill_second_run_is_noop_after_success() {
     let second = backfill_github_email(workspace, &server.url())
         .await
         .unwrap();
-    assert!(!second, "second run should short-circuit before the API call");
+    assert!(
+        !second,
+        "second run should short-circuit before the API call"
+    );
 
     mock.assert_async().await;
 }

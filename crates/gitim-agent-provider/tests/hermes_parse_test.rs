@@ -18,7 +18,9 @@ fn parse_thinking_chunk() {
         "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Let me think..."}}
     });
     let msg = parse_notification(&params).unwrap();
-    assert!(matches!(msg, ParsedNotification::Thinking { content } if content == "Let me think..."));
+    assert!(
+        matches!(msg, ParsedNotification::Thinking { content } if content == "Let me think...")
+    );
 }
 
 #[test]
