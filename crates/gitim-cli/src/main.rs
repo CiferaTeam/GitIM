@@ -77,6 +77,12 @@ enum Commands {
         targets: Vec<String>,
     },
 
+    /// Leave a channel (stop receiving events from it)
+    LeaveChannel {
+        /// Channel name
+        channel: String,
+    },
+
     /// Archive a channel
     ArchiveChannel {
         /// Channel name
@@ -416,6 +422,9 @@ async fn main() {
         }
         Commands::JoinChannel { channel, targets } => {
             commands::channels::cmd_join_channel(&client, &mode, &channel, &targets).await
+        }
+        Commands::LeaveChannel { channel } => {
+            commands::channels::cmd_leave_channel(&client, &mode, &channel).await
         }
         Commands::ArchiveChannel { name } => {
             commands::channels::cmd_archive_channel(&client, &mode, &name).await

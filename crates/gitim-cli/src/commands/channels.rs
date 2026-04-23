@@ -100,6 +100,35 @@ pub async fn cmd_join_channel(
     }
 }
 
+pub async fn cmd_leave_channel(client: &GitimClient, mode: &OutputMode, channel: &str) {
+    match client.leave_channel(channel, &[]).await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("退出失败: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => println!("已退出 #{channel}"),
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("退出失败: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_archive_channel(client: &GitimClient, mode: &OutputMode, name: &str) {
     match client.archive_channel(name).await {
         Ok(resp) => {
