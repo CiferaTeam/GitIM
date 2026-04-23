@@ -67,6 +67,18 @@
 
 如果 `docs/specs/cli.md` 有 join-channel 的条目就同步加一条 leave-channel;没有则跳过。(Phase 5 实施时现场判断)
 
+## Codex P1 响应:last-member 防护
+
+Codex review 发现一个真实 P1:`handle_poll` 的 legacy 语义把**空 `meta.members`** 当**全员可见**(`poll.rs:109-114`),导致最后一个成员 self-leave 后,channel 从"私密"变成"公开发现即可加入"。本次不修根本(empty-members 语义属于 daemon pre-existing 决策,独立 task 处理),但加一个防护层:
+
+**扩展 scope**:
+- `crates/gitim-core/src/validator/im_rules.rs`:`validate_leave` self-leave 分支加 `members.len() == 1` 拒绝规则;`ImRuleError` 加 `LastMember(String)` 变体
+- `crates/gitim-daemon/tests/handlers_test.rs`:原 `test_leave_channel_self` 场景改为 2 人(alice + bob)才 leave alice;新增 `test_leave_channel_last_member_rejected` 覆盖拒绝路径
+- `crates/gitim-core/src/validator/im_rules.rs` 单测:加 `leave_last_member_rejected` + `leave_two_members_self_ok`
+- prompt `default_reset_protocol` 的 leave 段加"限制"段:告诉 agent 最后一人会被拒,改用 `archive-channel`
+
+**独立 task**(已 spawn):daemon 层修复"empty-members = public" 根本语义。应该让 legacy channel 与新建 channel 分开处理,避免靠 archive 绕过的权宜方案。
+
 ## 风险与回滚
 
 - **风险 1**:agent 误 leave 关键 channel → 靠 join event 邀请回来即可,meta.members 会再加回,物理可逆

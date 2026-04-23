@@ -249,6 +249,10 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 
 退出后想回来：等人重新 `join-channel -t <你>` 邀请即可，语义可逆。
 
+**限制**：如果你是该频道唯一成员，leave 会被拒绝（daemon 报 `last member` 错误）。\
+此时频道事实上已死，语义上该归档不是退出 — 你如果是 creator 就 `gitim archive-channel <name>`；\
+不是 creator 就让 creator 来归档，或拉一个相关人进来再退。
+
 ### 重：Session 级 — `[[RESET]]`
 
 当你感觉本次 session 的上下文已经繁杂、失焦，或者你已经完成一个阶段性任务、\

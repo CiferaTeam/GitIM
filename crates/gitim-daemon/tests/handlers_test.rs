@@ -192,6 +192,7 @@ async fn test_leave_channel_self() {
     let tmp = tempfile::tempdir().unwrap();
     let state = setup_test_state(tmp.path());
     register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
     create_test_channel(&state, "general", "alice");
 
     // Alice joins
@@ -206,6 +207,18 @@ async fn test_leave_channel_self() {
     .await;
     assert!(resp1.ok, "join failed: {:?}", resp1.error);
 
+    // Alice pulls bob in so leaving her won't empty the member list.
+    let resp_bob = handle_request(
+        Request::JoinChannel {
+            channel: "general".to_string(),
+            targets: vec!["bob".to_string()],
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp_bob.ok, "bob join failed: {:?}", resp_bob.error);
+
     // Alice leaves
     let resp2 = handle_request(
         Request::LeaveChannel {
@@ -218,13 +231,14 @@ async fn test_leave_channel_self() {
     .await;
     assert!(resp2.ok, "leave failed: {:?}", resp2.error);
 
-    // Verify meta.yaml members is empty
+    // Verify meta.yaml members now contains only bob
     let meta_str =
         std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
     let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
-    assert!(
-        meta.members.is_empty(),
-        "members should be empty, got: {:?}",
+    assert_eq!(
+        meta.members,
+        vec!["bob".to_string()],
+        "members should be [bob], got: {:?}",
         meta.members
     );
 
@@ -232,6 +246,53 @@ async fn test_leave_channel_self() {
     let thread = std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
     assert!(thread.contains("[E:join]"), "thread missing join event");
     assert!(thread.contains("[E:leave]"), "thread missing leave event");
+}
+
+#[tokio::test]
+async fn test_leave_channel_last_member_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    create_test_channel(&state, "general", "alice");
+
+    // Alice joins as the only member.
+    let resp_join = handle_request(
+        Request::JoinChannel {
+            channel: "general".to_string(),
+            targets: vec![],
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp_join.ok, "join failed: {:?}", resp_join.error);
+
+    // Alice tries to leave — should be rejected because it would empty members.
+    let resp_leave = handle_request(
+        Request::LeaveChannel {
+            channel: "general".to_string(),
+            targets: vec![],
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(
+        !resp_leave.ok,
+        "last-member self-leave should fail, got ok response"
+    );
+    let err = resp_leave.error.unwrap_or_default();
+    assert!(
+        err.contains("last member"),
+        "error should mention last-member constraint, got: {}",
+        err
+    );
+
+    // meta.members still contains alice (the leave was rejected before any write)
+    let meta_str =
+        std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+    let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+    assert_eq!(meta.members, vec!["alice".to_string()]);
 }
 
 #[tokio::test]
