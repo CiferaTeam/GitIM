@@ -2104,6 +2104,10 @@ async fn preflight_handler(
             let result = crate::preflight::preflight_opencode().await;
             (StatusCode::OK, Json(result)).into_response()
         }
+        "hermes" => {
+            let result = crate::preflight::preflight_hermes().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
