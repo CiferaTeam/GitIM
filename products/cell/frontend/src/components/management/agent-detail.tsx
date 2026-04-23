@@ -267,6 +267,10 @@ export function AgentDetail() {
             <span className="text-text-muted italic text-sm">
               Default (from opencode auth login)
             </span>
+          ) : agent.provider === "hermes" ? (
+            <span className="text-text-muted italic text-sm">
+              Default (from hermes config)
+            </span>
           ) : (
             <span className="text-text-muted">—</span>
           )}
