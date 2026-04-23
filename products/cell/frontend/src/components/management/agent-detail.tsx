@@ -324,6 +324,10 @@ export function AgentDetail() {
             <span className="text-text-muted italic text-sm">
               Default (from opencode auth login)
             </span>
+          ) : agent.provider === "pi" ? (
+            <span className="text-text-muted italic text-sm">
+              Default (from pi config)
+            </span>
           ) : (
             <span className="text-text-muted">—</span>
           )}

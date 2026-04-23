@@ -120,7 +120,7 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <span className="text-xs text-text-muted truncate block">
                   {agent.provider ?? "—"} ·{" "}
                   {agent.model ??
-                    (agent.provider === "opencode" ? "default" : "—")}
+                    (agent.provider === "opencode" || agent.provider === "pi" ? "default" : "—")}
                 </span>
                 {agent.status === "error" && (
                   <p className="text-xs text-destructive truncate">
