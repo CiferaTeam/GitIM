@@ -1005,7 +1005,7 @@ async fn agents_add(
     // provision an agent with provider=mock; the UI still only offers
     // claude/codex per Q1 scope.
     match req.provider.as_str() {
-        "claude" | "codex" | "opencode" | "mock" => {}
+        "claude" | "codex" | "opencode" | "pi" | "mock" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -2052,11 +2052,13 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 "Missing \"provider\" in {}. Add \"provider\": \"claude\", \"codex\", or \"opencode\" to the file and restart the runtime.",
                 me_path.display()
             )),
-            Some(p) if p != "claude" && p != "codex" && p != "opencode" => Some(format!(
-                "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", or \"opencode\".",
-                p,
-                me_path.display()
-            )),
+            Some(p) if p != "claude" && p != "codex" && p != "opencode" && p != "pi" => {
+                Some(format!(
+                    "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", \"opencode\", or \"pi\".",
+                    p,
+                    me_path.display()
+                ))
+            }
             Some(_) => None,
         };
 
@@ -2182,6 +2184,10 @@ async fn preflight_handler(
         }
         "opencode" => {
             let result = crate::preflight::preflight_opencode().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        "pi" => {
+            let result = crate::preflight::preflight_pi().await;
             (StatusCode::OK, Json(result)).into_response()
         }
         _ => (

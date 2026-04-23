@@ -22,6 +22,7 @@ pub fn default_max_tokens(provider: &str, model: &str) -> Option<u64> {
         "claude" => Some(claude_max_tokens(&m)),
         "codex" => Some(codex_max_tokens(&m)),
         "mock" => Some(10_000),
+        "pi" => Some(200_000),
         _ => Some(200_000),
     }
 }

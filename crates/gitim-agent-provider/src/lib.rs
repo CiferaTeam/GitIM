@@ -6,6 +6,7 @@ pub mod hermes;
 pub mod mock;
 pub mod openclaw;
 pub mod opencode;
+pub mod pi;
 pub(crate) mod prompts;
 mod provider;
 mod stubs;

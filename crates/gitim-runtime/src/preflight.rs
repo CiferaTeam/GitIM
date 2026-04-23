@@ -685,6 +685,139 @@ pub async fn preflight_opencode() -> PreflightResult {
     preflight_opencode_with("opencode", Duration::from_secs(60)).await
 }
 
+/// Run a real-hello ping against the Pi CLI at `bin` using `--mode rpc`.
+///
+/// Protocol:
+/// 1. Spawn `pi --mode rpc --no-session --no-tools`
+/// 2. Write `{"type":"prompt","message":"Reply with exactly: GITIM_OK"}` to stdin
+/// 3. Stream stdout events until `agent_end`; collect text from `message_update` deltas
+/// 4. Explicitly kill the process — in `--no-session` mode Pi may exit naturally,
+///    but we kill unconditionally to guarantee cleanup in both session/no-session modes
+/// 5. Classify the result using the standard `NotInstalled`/`Timeout`/`Other` taxonomy
+pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let started = Instant::now();
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(["--mode", "rpc", "--no-session", "--no-tools"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("pi CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn pi: {e}")
+            };
+            return PreflightResult::failure(
+                "pi",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+
+    // Send the prompt.
+    let prompt_msg = b"{\"type\":\"prompt\",\"message\":\"Reply with exactly: GITIM_OK\"}\n";
+    if let Err(e) = stdin.write_all(prompt_msg).await {
+        let _ = child.start_kill();
+        return PreflightResult::failure(
+            "pi",
+            ErrorKind::Other,
+            format!("failed to write prompt to pi: {e}"),
+            started.elapsed().as_millis() as u64,
+        );
+    }
+
+    // Keep stdin open so pi doesn't get SIGPIPE; we'll drop it after reading.
+    let mut reader = BufReader::new(stdout).lines();
+    let mut collected_text = String::new();
+    let mut saw_agent_end = false;
+
+    let read_result = tokio::time::timeout(timeout, async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                let t = v.get("type").and_then(|t| t.as_str());
+                match t {
+                    Some("message_update") => {
+                        if let Some(delta) = v
+                            .get("assistantMessageEvent")
+                            .and_then(|ae| ae.get("delta"))
+                            .and_then(|d| d.as_str())
+                        {
+                            collected_text.push_str(delta);
+                        }
+                    }
+                    Some("agent_end") => {
+                        saw_agent_end = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await;
+
+    drop(stdin);
+    let _ = child.start_kill();
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if read_result.is_err() {
+        return PreflightResult::failure(
+            "pi",
+            ErrorKind::Timeout,
+            format!("pi preflight exceeded {}ms", timeout.as_millis()),
+            duration_ms,
+        );
+    }
+
+    if !saw_agent_end {
+        return PreflightResult::failure(
+            "pi",
+            ErrorKind::Other,
+            "pi stream ended without agent_end",
+            duration_ms,
+        );
+    }
+
+    if collected_text.contains("GITIM_OK") {
+        PreflightResult::success(
+            "pi",
+            None,
+            None, // model_used — Pi uses its configured default; unknown at preflight time
+            duration_ms,
+            Some(truncate(&collected_text, PREVIEW_TRUNCATE)),
+        )
+    } else {
+        PreflightResult::failure(
+            "pi",
+            ErrorKind::Other,
+            "response did not contain GITIM_OK",
+            duration_ms,
+        )
+    }
+}
+
+/// Run a real-hello preflight against the default `pi` binary.
+pub async fn preflight_pi() -> PreflightResult {
+    preflight_pi_with("pi", Duration::from_secs(60)).await
+}
+
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.
 fn extract_opencode_text(stdout: &str) -> String {
     let mut out = String::new();
