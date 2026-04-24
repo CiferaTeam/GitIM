@@ -316,7 +316,10 @@ export default function App() {
           next.some((u, i) => u !== current[i]);
         if (changed) setUsers(next);
       }
-    } catch {
+    } catch (err) {
+      // AbortError is our own timeout — not a real transport failure.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+
       // Connectivity-level failure (fetch threw). Race guard: a poll that
       // started for slug A shouldn't flip slug B's state if the user
       // switched workspaces mid-request.
@@ -362,7 +365,7 @@ export default function App() {
     // ran before init() resolved, skip the setInterval so we don't leak an
     // orphan poll loop that keeps firing alongside the real mount's loop.
     let cancelled = false;
-    let pollHandle: ReturnType<typeof setInterval> | undefined;
+    let pollHandle: ReturnType<typeof setTimeout> | undefined;
 
     async function init(slug: string) {
       const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
