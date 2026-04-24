@@ -1,6 +1,6 @@
 // Detect pings a fixed cheap model in the runtime (claude-haiku-4-5 / gpt-5.4-mini),
 // not the user's selected model — so a green check verifies CLI availability, not model availability.
-export type ProviderId = "claude" | "codex" | "opencode" | "pi";
+export type ProviderId = "claude" | "codex" | "opencode" | "pi" | "hermes";
 
 export type PreflightErrorKind = "not_installed" | "timeout" | "other";
 
@@ -62,6 +62,11 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     models: [],
     modelOptional: true,
   },
+  hermes: {
+    label: "Hermes",
+    models: [],
+    modelOptional: true,
+  },
 };
 
-export const PROVIDER_IDS: ProviderId[] = ["claude", "codex", "opencode", "pi"];
+export const PROVIDER_IDS: ProviderId[] = ["claude", "codex", "opencode", "pi", "hermes"];
