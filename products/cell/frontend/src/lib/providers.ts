@@ -47,6 +47,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   codex: {
     label: "Codex",
     models: [
+      { id: "gpt-5.5", label: "GPT-5.5" },
       { id: "gpt-5.4", label: "GPT-5.4" },
       { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
     ],

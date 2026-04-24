@@ -579,6 +579,7 @@ export async function updateAgent(
   agentId: string,
   patch: {
     system_prompt?: string | null;
+    model?: string | null;
     env?: Record<string, string>;
     dotenv?: string;
   },

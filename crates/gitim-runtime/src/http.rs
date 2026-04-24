@@ -1476,6 +1476,8 @@ where
 struct AgentUpdateRequest {
     #[serde(default, deserialize_with = "deser_triple_option")]
     system_prompt: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deser_triple_option")]
+    model: Option<Option<String>>,
     #[serde(default)]
     env: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -1510,7 +1512,19 @@ async fn agents_patch(
             None => return not_found_workspace(),
         };
         match ctx.agents.get(&agent_id) {
-            Some(info) => PathBuf::from(&info.repo_path),
+            Some(info) => {
+                if req.model.is_some() && info.status == "running" {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error": "stop the agent before changing model"
+                        })),
+                    )
+                        .into_response();
+                }
+                PathBuf::from(&info.repo_path)
+            }
             None => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -1568,6 +1582,35 @@ async fn agents_patch(
         }
     }
 
+    let old_model = me
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut model_changed = false;
+
+    // Three-state semantics for model mirror system_prompt:
+    //   absent (None)       → no-op
+    //   Some(None)          → remove field and use provider default
+    //   Some(Some(""))      → remove field and use provider default
+    //   Some(Some(s))       → set to s
+    if let Some(model_opt) = &req.model {
+        let new_model = match model_opt {
+            Some(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        model_changed = old_model != new_model;
+        match new_model {
+            Some(model) => {
+                me["model"] = serde_json::Value::String(model);
+            }
+            None => {
+                if let Some(obj) = me.as_object_mut() {
+                    obj.remove("model");
+                }
+            }
+        }
+    }
+
     // Env validation + whole-map replacement.
     // absent (None)       → no-op
     // Some({})            → remove "env" field entirely
@@ -1616,6 +1659,34 @@ async fn agents_patch(
             })),
         )
             .into_response();
+    }
+
+    if model_changed {
+        let state_path = crate::state::AgentState::state_path(&repo_root);
+        if state_path.exists() {
+            let mut agent_state = match crate::state::AgentState::load(&repo_root) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "ok": false, "error": format!("read agent state failed: {e}")
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            agent_state.clear_session();
+            if let Err(e) = agent_state.save(&repo_root) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false, "error": format!("write agent state failed: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Write or delete <repo_root>/.env based on dotenv field.
@@ -1696,6 +1767,15 @@ async fn agents_patch(
                         Some(s) if !s.is_empty() => Some(s.clone()),
                         _ => None,
                     };
+                }
+                if let Some(model_opt) = &req.model {
+                    info.model = match model_opt {
+                        Some(s) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    };
+                    if model_changed {
+                        info.session_usage = None;
+                    }
                 }
                 if let Some(env_map) = &req.env {
                     info.env = env_map.clone();

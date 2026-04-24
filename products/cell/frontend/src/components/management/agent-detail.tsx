@@ -5,6 +5,7 @@ import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import { PROVIDERS } from "@/lib/providers";
 import type { Agent } from "@/lib/types";
 import { ArrowLeft, Play, Pause, Trash2, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
@@ -54,6 +55,7 @@ export function AgentDetail() {
 
   type Mode = "view" | "edit" | "saving";
   const [mode, setMode] = useState<Mode>("view");
+  const [draftModel, setDraftModel] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
@@ -65,6 +67,7 @@ export function AgentDetail() {
 
   function enterEditMode() {
     if (!agent) return;
+    setDraftModel(agent.model ?? "");
     setDraftPrompt(agent.systemPrompt ?? "");
     setDraftEnv(
       Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
@@ -77,6 +80,7 @@ export function AgentDetail() {
     mode === "edit" &&
     agent !== undefined &&
     (() => {
+      if (draftModel.trim() !== (agent.model ?? "")) return true;
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
       // Env
@@ -115,8 +119,22 @@ export function AgentDetail() {
     // Build patch with only changed fields so backend merge is minimal.
     const patch: {
       system_prompt?: string | null;
+      model?: string | null;
       env?: Record<string, string>;
     } = {};
+
+    const providerInfo = agent.provider ? PROVIDERS[agent.provider] : null;
+    const modelEditable =
+      agent.status === "offline" &&
+      providerInfo !== null &&
+      !providerInfo.modelOptional &&
+      providerInfo.models.length > 0;
+    const newModel = draftModel.trim();
+    const oldModel = agent.model ?? "";
+    const modelChanged = modelEditable && newModel !== oldModel;
+    if (modelChanged) {
+      patch.model = newModel === "" ? null : newModel;
+    }
 
     const newPrompt = draftPrompt.trim();
     const oldPrompt = (agent.systemPrompt ?? "").trim();
@@ -146,12 +164,23 @@ export function AgentDetail() {
     const res = await client.updateAgent(activeSlug, agent.id, patch);
     if (res.ok && res.data?.agent) {
       updateAgent(agent.id, res.data.agent as Partial<Agent>);
+      if (modelChanged && (res.data.agent.model ?? "") !== newModel) {
+        setEditError(
+          "Runtime did not apply the model change. Restart or update the runtime, then try again.",
+        );
+        setMode("edit");
+        toast.error("Model was not updated");
+        return;
+      }
       setMode("view");
 
       // Generation-aware toast lines.
       const lines: string[] = [];
       if (envChanged) {
         lines.push("Environment → takes effect on next message");
+      }
+      if (modelChanged) {
+        lines.push("Model → starts a fresh provider session on next start");
       }
       if (promptChanged) {
         lines.push(
@@ -178,6 +207,13 @@ export function AgentDetail() {
   }
 
   const isRunning = agent.status !== "offline";
+  const providerInfo = agent.provider ? PROVIDERS[agent.provider] : null;
+  const modelOptions = providerInfo?.models ?? [];
+  const showModelEditor =
+    mode !== "view" &&
+    providerInfo !== null &&
+    !providerInfo.modelOptional &&
+    modelOptions.length > 0;
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -259,7 +295,28 @@ export function AgentDetail() {
         </Field>
 
         <Field label="Model">
-          {agent.model ? (
+          {showModelEditor ? (
+            <div className="space-y-1.5">
+              <select
+                value={draftModel}
+                onChange={(e) => setDraftModel(e.target.value)}
+                disabled={isRunning || mode === "saving"}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="">— Provider default —</option>
+                {modelOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              {isRunning && (
+                <p className="text-xs text-text-muted">
+                  Stop the agent before changing model.
+                </p>
+              )}
+            </div>
+          ) : agent.model ? (
             <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
               {agent.model}
             </span>

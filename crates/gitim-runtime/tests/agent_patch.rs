@@ -102,8 +102,14 @@ fn seed_agent_in_workspace(
         last_activity: None,
         messages_processed: 0,
         repo_path: dir.path().display().to_string(),
-        provider: Some("claude".to_string()),
-        model: None,
+        provider: me_json
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        model: me_json
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         system_prompt: me_json
             .get("system_prompt")
             .and_then(|v| v.as_str())
@@ -543,4 +549,108 @@ async fn patch_dotenv_rejects_oversize() {
         body["error"].as_str().unwrap_or("").contains("64 KB"),
         "error should mention '64 KB'; got: {body}"
     );
+}
+
+// -- 11. PATCH model updates me.json and clears model-bound session state -----
+
+#[tokio::test]
+async fn patch_model_writes_me_json_and_clears_session_state() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws11");
+    let dir = seed_agent_in_workspace(
+        &state,
+        "ws11",
+        "alice",
+        json!({ "provider": "codex", "model": "gpt-5.4" }),
+    );
+
+    let state_path = dir.path().join(".gitim/agent-state.json");
+    std::fs::write(
+        &state_path,
+        r#"{
+          "cursor": "000123",
+          "session_token": "old-session",
+          "session_usage": {
+            "session_id": "old-session",
+            "max_tokens": 272000,
+            "used_percent": 70.0,
+            "source": "runtime_estimated",
+            "updated_at": "2026-04-24T00:00:00Z"
+          },
+          "estimated_tokens": 190400,
+          "usage_notice_pending": true
+        }"#,
+    )
+    .unwrap();
+
+    let (status, body) = send_patch(&router, "ws11", "alice", json!({ "model": "gpt-5.5" })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["agent"]["model"], json!("gpt-5.5"));
+
+    let me_path = dir.path().join(".gitim/me.json");
+    let me: Value = serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert_eq!(me["model"], json!("gpt-5.5"));
+
+    let agent_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(agent_state["cursor"], json!("000123"));
+    assert!(agent_state.get("session_token").is_none());
+    assert!(agent_state.get("session_usage").is_none());
+    assert!(agent_state.get("estimated_tokens").is_none());
+    assert!(
+        body["agent"].get("session_usage").is_none() || body["agent"]["session_usage"].is_null()
+    );
+}
+
+#[tokio::test]
+async fn patch_model_null_clears_me_json_field() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws12");
+    let dir = seed_agent_in_workspace(
+        &state,
+        "ws12",
+        "alice",
+        json!({ "provider": "codex", "model": "gpt-5.4" }),
+    );
+
+    let (status, body) = send_patch(&router, "ws12", "alice", json!({ "model": null })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["agent"].get("model").is_none() || body["agent"]["model"].is_null());
+
+    let me_path = dir.path().join(".gitim/me.json");
+    let me: Value = serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert!(me.get("model").is_none());
+}
+
+#[tokio::test]
+async fn patch_model_rejects_running_agent() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws13");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws13",
+        "alice",
+        json!({ "provider": "codex", "model": "gpt-5.4" }),
+    );
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get_mut("ws13")
+        .unwrap()
+        .agents
+        .get_mut("alice")
+        .unwrap()
+        .status = "running".to_string();
+
+    let (status, body) = send_patch(&router, "ws13", "alice", json!({ "model": "gpt-5.5" })).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["ok"], json!(false));
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("stop the agent before changing model"));
 }
