@@ -154,11 +154,12 @@ export async function me(slug: string): Promise<ApiResponse> {
   return await res.json();
 }
 
-export async function poll(slug: string, since?: string): Promise<ApiResponse> {
+export async function poll(slug: string, since?: string, signal?: AbortSignal): Promise<ApiResponse> {
   const res = await fetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ since }),
+    signal,
   });
   return await res.json();
 }
