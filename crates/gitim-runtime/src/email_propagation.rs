@@ -32,21 +32,25 @@ pub async fn backfill_github_email(
     if config.git.provider != GitProvider::Github {
         return Ok(false);
     }
-    if config.git.github_email.is_some() {
-        return Ok(false);
-    }
-    let Some(token) = config.git.token.clone().filter(|t| !t.is_empty()) else {
-        return Ok(false);
-    };
-    let email = match fetch_user_email(&token, api_base).await? {
-        Some(e) => e,
-        None => return Ok(false),
+    let mut changed = false;
+    let email = match config.git.github_email.clone() {
+        Some(email) => email,
+        None => {
+            let Some(token) = config.git.token.clone().filter(|t| !t.is_empty()) else {
+                return Ok(false);
+            };
+            let email = match fetch_user_email(&token, api_base).await? {
+                Some(e) => e,
+                None => return Ok(false),
+            };
+            config.git.github_email = Some(email.clone());
+            config.write(workspace).map_err(PropagationError::Config)?;
+            changed = true;
+            email
+        }
     };
 
-    config.git.github_email = Some(email.clone());
-    config.write(workspace).map_err(PropagationError::Config)?;
-
-    merge_email_into_clone(&workspace.join(".gitim-runtime").join("human"), &email);
+    changed |= merge_email_into_clone(&workspace.join(".gitim-runtime").join("human"), &email);
     if let Ok(entries) = std::fs::read_dir(workspace) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -58,20 +62,22 @@ pub async fn backfill_github_email(
             if name.starts_with('.') || name == ".gitim-runtime" {
                 continue;
             }
-            merge_email_into_clone(&path, &email);
+            changed |= merge_email_into_clone(&path, &email);
         }
     }
-    tracing::info!(
-        workspace = %workspace.display(),
-        "email_propagation: backfilled github_email (agent daemons need a restart to pick it up)",
-    );
-    Ok(true)
+    if changed {
+        tracing::info!(
+            workspace = %workspace.display(),
+            "email_propagation: backfilled github_email (agent daemons need a restart to pick it up)",
+        );
+    }
+    Ok(changed)
 }
 
-fn merge_email_into_clone(clone_dir: &Path, email: &str) {
+fn merge_email_into_clone(clone_dir: &Path, email: &str) -> bool {
     let me_path = clone_dir.join(".gitim").join("me.json");
     if !me_path.exists() {
-        return;
+        return false;
     }
     let content = match std::fs::read_to_string(&me_path) {
         Ok(c) => c,
@@ -81,7 +87,7 @@ fn merge_email_into_clone(clone_dir: &Path, email: &str) {
                 error = %e,
                 "email_propagation: read me.json failed",
             );
-            return;
+            return false;
         }
     };
     let mut value: Value = match serde_json::from_str(&content) {
@@ -92,16 +98,16 @@ fn merge_email_into_clone(clone_dir: &Path, email: &str) {
                 error = %e,
                 "email_propagation: parse me.json failed",
             );
-            return;
+            return false;
         }
     };
     // Idempotent: skip the write if nothing changes. Keeps this cheap to
     // re-run on every runtime boot.
     if value.get("github_email").and_then(|v| v.as_str()) == Some(email) {
-        return;
+        return false;
     }
     let Some(obj) = value.as_object_mut() else {
-        return;
+        return false;
     };
     obj.insert("github_email".to_string(), Value::String(email.to_string()));
     let serialized = match serde_json::to_string_pretty(&value) {
@@ -112,7 +118,7 @@ fn merge_email_into_clone(clone_dir: &Path, email: &str) {
                 error = %e,
                 "email_propagation: serialize me.json failed",
             );
-            return;
+            return false;
         }
     };
     if let Err(e) = std::fs::write(&me_path, serialized) {
@@ -121,5 +127,7 @@ fn merge_email_into_clone(clone_dir: &Path, email: &str) {
             error = %e,
             "email_propagation: write me.json failed",
         );
+        return false;
     }
+    true
 }

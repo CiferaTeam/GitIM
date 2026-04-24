@@ -141,6 +141,42 @@ async fn backfill_is_idempotent_when_email_already_set() {
 }
 
 #[tokio::test]
+async fn backfill_uses_existing_config_email_for_missing_clone_fields() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path();
+    write_config(
+        workspace,
+        github_config(Some("tok"), Some("already@example.com")),
+    );
+
+    let human = workspace.join(".gitim-runtime").join("human");
+    let agent = workspace.join("agent-a");
+    write_me_json(&human, &json!({"handler": "owner"}));
+    write_me_json(&agent, &json!({"handler": "agent-a"}));
+
+    let changed = backfill_github_email(workspace, "http://127.0.0.1:1")
+        .await
+        .unwrap();
+    assert!(
+        changed,
+        "config email should still be propagated into clone me.json files"
+    );
+
+    assert_eq!(
+        read_me_json(&human)
+            .get("github_email")
+            .and_then(|v| v.as_str()),
+        Some("already@example.com")
+    );
+    assert_eq!(
+        read_me_json(&agent)
+            .get("github_email")
+            .and_then(|v| v.as_str()),
+        Some("already@example.com")
+    );
+}
+
+#[tokio::test]
 async fn backfill_skips_local_provider() {
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path();

@@ -80,6 +80,26 @@ fn run_curl(args: &[&str]) -> Result<String, IdentityError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn github_email_from_user_json(v: &serde_json::Value) -> Option<String> {
+    if let Some(email) = v
+        .get("email")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(email.to_string());
+    }
+
+    let id = v.get("id").and_then(|x| x.as_u64());
+    let login = v
+        .get("login")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty());
+    match (id, login) {
+        (Some(id), Some(login)) => Some(format!("{id}+{login}@users.noreply.github.com")),
+        _ => None,
+    }
+}
+
 /// Infer identity from the given git server and auth data.
 ///
 /// For `Git` variant the caller provides handler + display_name directly.
@@ -127,13 +147,7 @@ pub fn infer_identity(
                 .unwrap_or(&login)
                 .to_string();
 
-            // Public email from /user; null when the user has chosen to
-            // keep their address private. Filter out empty strings too.
-            let email = v
-                .get("email")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
+            let email = github_email_from_user_json(&v);
 
             let handler = Handler::new(&login)?;
             Ok(InferredIdentity {
@@ -205,6 +219,9 @@ pub fn infer_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn git_mode_returns_passed_values() {
@@ -277,6 +294,45 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(IdentityError::InvalidHandler(_))));
+    }
+
+    fn serve_github_user_once(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn github_private_email_derives_noreply() {
+        let api_base = serve_github_user_once(
+            r#"{"id":12345,"login":"octocat","name":"Octocat","email":null}"#,
+        );
+        std::env::set_var("GITIM_TEST_GITHUB_API_BASE", api_base);
+
+        let result = infer_identity(
+            GitServer::GitHub,
+            AuthData::GitHub {
+                token: "fake-token".to_string(),
+            },
+        )
+        .unwrap();
+
+        std::env::remove_var("GITIM_TEST_GITHUB_API_BASE");
+        assert_eq!(
+            result.email.as_deref(),
+            Some("12345+octocat@users.noreply.github.com")
+        );
     }
 
     #[test]
