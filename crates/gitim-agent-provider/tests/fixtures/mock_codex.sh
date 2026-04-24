@@ -4,6 +4,17 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--version" ]]; then
+    echo "codex-cli mock"
+    exit 0
+fi
+
+if [[ "${MOCK_CODEX_FAIL_WITH_STDERR:-}" == "1" ]]; then
+    echo '{"type":"thread.started","thread_id":"mock-codex-thread"}'
+    echo "mock codex stderr diagnostic" >&2
+    exit 1
+fi
+
 MODE="exec"
 THREAD_ID="mock-codex-thread"
 PROMPT=""

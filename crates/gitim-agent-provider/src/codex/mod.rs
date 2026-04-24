@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -18,6 +20,10 @@ use crate::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
+const STDERR_TAIL_LINES: usize = 20;
+const STDERR_TAIL_CHARS: usize = 4000;
+
+type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
 
 pub struct CodexProvider {
     config: ProviderConfig,
@@ -46,9 +52,15 @@ impl Provider for CodexProvider {
             .clone()
             .unwrap_or_else(|| "codex".to_string());
 
-        crate::util::which(&exec_path).map_err(|_| ProviderError::ExecutableNotFound {
-            path: exec_path.clone(),
-        })?;
+        let resolved_path =
+            crate::util::which(&exec_path).map_err(|_| ProviderError::ExecutableNotFound {
+                path: exec_path.clone(),
+            })?;
+        let resolved_display = resolved_path.display().to_string();
+        let canonical_display = std::fs::canonicalize(&resolved_path)
+            .ok()
+            .map(|p| p.display().to_string());
+        let version = query_cli_version(&resolved_path);
 
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
         let prompt = build_prompt(prompt, opts.system_prompt.as_deref());
@@ -65,7 +77,7 @@ impl Provider for CodexProvider {
         }
         args.push(prompt);
 
-        let mut cmd = Command::new(&exec_path);
+        let mut cmd = Command::new(&resolved_path);
         cmd.args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -81,7 +93,17 @@ impl Provider for CodexProvider {
 
         let mut child = cmd.spawn()?;
         let pid = child.id().unwrap_or(0);
-        info!(pid, cwd = ?opts.cwd, model = ?opts.model, "codex started");
+        info!(
+            pid,
+            cwd = ?opts.cwd,
+            model = ?opts.model,
+            exec = %resolved_display,
+            canonical_exec = ?canonical_display,
+            version = ?version,
+            resume = opts.resume_token.is_some(),
+            prompt_len = args.last().map(|p| p.len()).unwrap_or(0),
+            "codex started"
+        );
 
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -89,8 +111,19 @@ impl Provider for CodexProvider {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
 
+        let stderr_tail = stderr_tail();
         let join_handle = tokio::spawn(async move {
-            drive_session(child, stdout, stderr, event_tx, result_tx, timeout, pid).await;
+            drive_session(
+                child,
+                stdout,
+                stderr,
+                event_tx,
+                result_tx,
+                timeout,
+                pid,
+                stderr_tail,
+            )
+            .await;
         });
 
         Ok(Session::new(
@@ -110,6 +143,7 @@ async fn drive_session(
     result_tx: oneshot::Sender<ExecResult>,
     timeout: Duration,
     pid: u32,
+    stderr_tail: SharedStderrTail,
 ) {
     let start = Instant::now();
     let mut output = String::new();
@@ -121,10 +155,12 @@ async fn drive_session(
 
     let mut reader = BufReader::new(stdout).lines();
 
+    let stderr_tail_inner = Arc::clone(&stderr_tail);
     let stderr_handle = tokio::spawn(async move {
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "codex:stderr", "{}", line);
+            push_stderr_tail(&stderr_tail_inner, line);
         }
     });
 
@@ -212,10 +248,7 @@ async fn drive_session(
     if final_status == ExecStatus::Failed {
         if let Some(tid) = thread_id.as_deref() {
             if let Some(reason) = diagnose_rollout_failure(tid) {
-                final_error = Some(match final_error {
-                    Some(prev) => format!("{prev} — {reason}"),
-                    None => reason,
-                });
+                final_error = append_failure_detail(final_error, reason);
             }
         }
     }
@@ -223,7 +256,13 @@ async fn drive_session(
     let duration = start.elapsed();
     info!(pid, ?final_status, ?duration, "codex finished");
 
-    stderr_handle.abort();
+    let _ = stderr_handle.await;
+
+    if final_status != ExecStatus::Completed {
+        if let Some(stderr) = format_stderr_tail(&stderr_tail) {
+            final_error = append_failure_detail(final_error, stderr);
+        }
+    }
 
     let _ = result_tx.send(ExecResult {
         status: final_status,
@@ -262,6 +301,68 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("event channel full, dropping event");
     }
+}
+
+fn query_cli_version(path: &Path) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().next().map(|line| line.trim().to_string())
+}
+
+fn stderr_tail() -> SharedStderrTail {
+    Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)))
+}
+
+fn push_stderr_tail(tail: &SharedStderrTail, line: String) {
+    let Ok(mut guard) = tail.lock() else {
+        return;
+    };
+    if guard.len() == STDERR_TAIL_LINES {
+        guard.pop_front();
+    }
+    guard.push_back(line);
+}
+
+fn format_stderr_tail(tail: &SharedStderrTail) -> Option<String> {
+    let Ok(guard) = tail.lock() else {
+        return None;
+    };
+    let joined = guard
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "codex stderr tail: {}",
+            truncate_chars(&joined, STDERR_TAIL_CHARS)
+        ))
+    }
+}
+
+fn append_failure_detail(current: Option<String>, detail: String) -> Option<String> {
+    Some(match current {
+        Some(prev) if !prev.is_empty() => format!("{prev}; {detail}"),
+        _ => detail,
+    })
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
 }
 
 #[derive(Debug)]
@@ -376,6 +477,7 @@ fn scan_rollout_content(content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(500);
     let mut credits_exhausted: Option<String> = None;
+    let mut missing_final_message: Option<String> = None;
     for line in lines[start..].iter().rev() {
         if let Some(msg) = parse_rollout_line(line) {
             return Some(msg);
@@ -383,8 +485,11 @@ fn scan_rollout_content(content: &str) -> Option<String> {
         if credits_exhausted.is_none() {
             credits_exhausted = parse_credits_exhausted(line);
         }
+        if missing_final_message.is_none() {
+            missing_final_message = parse_missing_final_message(line);
+        }
     }
-    credits_exhausted
+    credits_exhausted.or(missing_final_message)
 }
 
 /// Strong signal: a `response_item.message` with an embedded
@@ -442,6 +547,20 @@ fn parse_credits_exhausted(line: &str) -> Option<String> {
     None
 }
 
+fn parse_missing_final_message(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let payload_type = v.pointer("/payload/type")?.as_str()?;
+    if payload_type != "task_complete" {
+        return None;
+    }
+    match v.pointer("/payload/last_agent_message") {
+        Some(Value::Null) => {
+            Some("codex task completed without final assistant message".to_string())
+        }
+        _ => None,
+    }
+}
+
 fn extract_subagent_error(text: &str) -> Option<String> {
     const OPEN: &str = "<subagent_notification>";
     const CLOSE: &str = "</subagent_notification>";
@@ -484,6 +603,7 @@ mod rollout_tests {
     const SUBAGENT_ERRORED_LINE: &str = r#"{"timestamp":"2026-04-19T15:21:30.483Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<subagent_notification>\n{\"agent_path\":\"019da651-72b3-72a3-9646-f14eb02e3258\",\"status\":{\"errored\":\"You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Apr 20th, 2026 3:51 AM.\"}}\n</subagent_notification>"}]}}"#;
 
     const CREDITS_EXHAUSTED_LINE: &str = r#"{"timestamp":"2026-04-19T15:21:31.459Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"model_context_window":258400},"rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"plan_type":"plus"}}}"#;
+    const TASK_COMPLETE_NO_MESSAGE_LINE: &str = r#"{"timestamp":"2026-04-24T04:23:43.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
 
     #[test]
     fn parse_rollout_line_extracts_subagent_errored_status() {
@@ -526,6 +646,13 @@ mod rollout_tests {
     }
 
     #[test]
+    fn parse_missing_final_message_detects_null_last_agent_message() {
+        let msg = parse_missing_final_message(TASK_COMPLETE_NO_MESSAGE_LINE)
+            .expect("should detect missing final message");
+        assert!(msg.contains("without final assistant message"));
+    }
+
+    #[test]
     fn scan_rollout_content_prefers_subagent_error_over_credits() {
         let content = format!(
             "{}\n{}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}",
@@ -543,6 +670,13 @@ mod rollout_tests {
         );
         let msg = scan_rollout_content(&content).expect("should find credits signal");
         assert!(msg.contains("credits exhausted"));
+    }
+
+    #[test]
+    fn scan_rollout_content_reports_missing_final_message() {
+        let msg =
+            scan_rollout_content(TASK_COMPLETE_NO_MESSAGE_LINE).expect("should find task_complete");
+        assert!(msg.contains("without final assistant message"));
     }
 
     #[test]
