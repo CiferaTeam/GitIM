@@ -320,7 +320,7 @@ async fn drive_session(
 
     let handshake = async {
         // Step 1: initialize
-        rpc_call(
+        let init_result = rpc_call(
             &mut stdin,
             &mut reader,
             0,
@@ -333,25 +333,56 @@ async fn drive_session(
         )
         .await?;
 
-        // Step 2: session/new or session/resume
-        let (method, params) = if let Some(ref token) = resume_token {
-            (
+        // Step 2: authenticate using first available auth method (if any)
+        if let Some(method_id) = init_result
+            .get("authMethods")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|m| m.get("id"))
+            .and_then(|id| id.as_str())
+        {
+            rpc_call(
+                &mut stdin,
+                &mut reader,
+                1,
+                "authenticate",
+                json!({"methodId": method_id}),
+            )
+            .await?;
+        }
+
+        // Step 3: session/new or session/resume
+        // session/resume returns only {models} — session_id stays the same as the token passed in.
+        // session/new returns {sessionId, models}.
+        let sid = if let Some(ref token) = resume_token {
+            rpc_call(
+                &mut stdin,
+                &mut reader,
+                2,
                 "session/resume",
                 json!({"cwd": cwd_str, "sessionId": token}),
             )
+            .await?;
+            token.clone()
         } else {
-            ("session/new", json!({"cwd": cwd_str, "mcpServers": []}))
+            let result = rpc_call(
+                &mut stdin,
+                &mut reader,
+                2,
+                "session/new",
+                json!({"cwd": cwd_str, "mcpServers": []}),
+            )
+            .await?;
+            result
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
         };
-        let result = rpc_call(&mut stdin, &mut reader, 1, method, params).await?;
-        let sid = result
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
 
-        // Step 3: send session/prompt (fire and forget — response arrives in event loop)
+        // Step 4: send session/prompt (fire and forget — response arrives in event loop)
         let prompt_req = json!({
-            "jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
             "params": {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]}
         });
         let mut buf = serde_json::to_vec(&prompt_req).map_err(|e| e.to_string())?;
@@ -430,8 +461,8 @@ async fn drive_session(
                                 }
                             };
 
-                            // Prompt response (id=2) — final result
-                            if raw.get("id").and_then(|v| v.as_u64()) == Some(2) {
+                            // Prompt response (id=3) — final result
+                            if raw.get("id").and_then(|v| v.as_u64()) == Some(3) {
                                 if raw.get("error").is_some() {
                                     final_status = ExecStatus::Failed;
                                     final_error = Some(

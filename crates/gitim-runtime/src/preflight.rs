@@ -818,6 +818,139 @@ pub async fn preflight_pi() -> PreflightResult {
     preflight_pi_with("pi", Duration::from_secs(60)).await
 }
 
+/// Preflight for the Hermes ACP provider.
+///
+/// Spawns `hermes acp` and performs the ACP initialize handshake. A valid
+/// response containing `authMethods` is treated as "available". This proves
+/// both CLI existence and ACP server responsiveness without sending a full
+/// prompt (avoiding token spend during preflight).
+pub async fn preflight_hermes_with(bin: &str, timeout: Duration) -> PreflightResult {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let started = Instant::now();
+
+    // Version check via `hermes --version` (sync, fast).
+    let version = Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // "Hermes Agent v0.10.0 …" → extract the version token after 'v'
+            s.split_whitespace()
+                .find(|t| t.starts_with('v'))
+                .map(|t| t.trim_start_matches('v').to_string())
+        });
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("acp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("hermes CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn hermes acp: {e}")
+            };
+            return PreflightResult::failure(
+                "hermes",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut reader = BufReader::new(stdout).lines();
+
+    // Send ACP initialize and wait for a valid response.
+    let handshake = async {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientInfo": {"name": "gitim-preflight", "version": "0.1.0"},
+                "clientCapabilities": {},
+            }
+        });
+        let mut buf = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+        buf.push(b'\n');
+        stdin
+            .write_all(&buf)
+            .await
+            .map_err(|e| format!("stdin write: {e}"))?;
+
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let v: serde_json::Value =
+                        serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))?;
+                    if v.get("id").and_then(|id| id.as_u64()) == Some(0) {
+                        if v.get("error").is_some() {
+                            return Err(format!(
+                                "initialize error: {}",
+                                v["error"]["message"].as_str().unwrap_or("unknown")
+                            ));
+                        }
+                        // Verify authMethods is present — proves ACP server is ready.
+                        let _ = v["result"]["authMethods"]
+                            .as_array()
+                            .ok_or("authMethods missing from initialize response")?;
+                        return Ok(());
+                    }
+                }
+                Ok(None) => return Err("ACP stream ended before initialize response".to_string()),
+                Err(e) => return Err(format!("stdout read: {e}")),
+            }
+        }
+    };
+
+    let result = tokio::time::timeout(timeout, handshake).await;
+    let _ = child.start_kill();
+
+    match result {
+        Ok(Ok(())) => PreflightResult::success(
+            "hermes",
+            version,
+            None,
+            started.elapsed().as_millis() as u64,
+            Some("ACP initialize OK".to_string()),
+        ),
+        Ok(Err(e)) => PreflightResult::failure(
+            "hermes",
+            ErrorKind::Other,
+            format!("ACP handshake failed: {e}"),
+            started.elapsed().as_millis() as u64,
+        ),
+        Err(_) => PreflightResult::failure(
+            "hermes",
+            ErrorKind::Timeout,
+            format!("hermes preflight exceeded {}ms", timeout.as_millis()),
+            started.elapsed().as_millis() as u64,
+        ),
+    }
+}
+
+/// Run preflight against the default `hermes` binary.
+pub async fn preflight_hermes() -> PreflightResult {
+    preflight_hermes_with("hermes", Duration::from_secs(30)).await
+}
+
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.
 fn extract_opencode_text(stdout: &str) -> String {
     let mut out = String::new();
