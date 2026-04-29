@@ -22,6 +22,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
 const STDERR_TAIL_LINES: usize = 20;
 const STDERR_TAIL_CHARS: usize = 4000;
+const DEFAULT_REASONING_EFFORT: &str = "xhigh";
 
 type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
 
@@ -72,6 +73,10 @@ impl Provider for CodexProvider {
         args.push("--json".to_string());
         // bypass sandbox — agents need to run gitim commands without approval prompts
         args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        args.extend([
+            "-c".to_string(),
+            format!("model_reasoning_effort=\"{DEFAULT_REASONING_EFFORT}\""),
+        ]);
         if let Some(model) = &opts.model {
             args.extend(["--model".to_string(), model.clone()]);
         }
