@@ -70,7 +70,8 @@ impl AgentLoop {
             None => Poller::new(GitimClient::new(repo_root)),
         };
 
-        let provider = create(provider_type, ProviderConfig::default())
+        let provider_config = build_provider_config(provider_type, handler, HashMap::new())?;
+        let provider = create(provider_type, provider_config)
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
         if state.session_token.is_some() {
@@ -948,6 +949,15 @@ mod tests {
     fn build_provider_config_for_claude_does_not_inject_home() {
         let cfg = build_provider_config("claude", "alice", HashMap::new()).unwrap();
         assert!(!cfg.env.contains_key("HERMES_HOME"));
+    }
+
+    #[test]
+    fn with_provider_for_hermes_constructs_successfully() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let loop_ = AgentLoop::with_provider(tmp.path(), "hermes", "alice")
+            .expect("hermes AgentLoop should construct without spawning hermes");
+        assert_eq!(loop_.handler, "alice");
+        assert_eq!(loop_.provider_type, "hermes");
     }
 
     #[test]
