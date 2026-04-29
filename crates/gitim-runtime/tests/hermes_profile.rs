@@ -14,7 +14,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitim_runtime::hermes_profile::{
-    ensure_profile, profile_dir, EnsureOutcome,
+    delete_profile, ensure_profile, profile_dir, EnsureOutcome,
 };
 
 /// Random suffix derived from monotonic clock — fits hermes's profile name
@@ -27,8 +27,10 @@ fn unique_handler() -> String {
     format!("rstest-{nanos}")
 }
 
-/// Removes a profile directory if it exists. Used as test cleanup until
-/// `delete_profile` lands in Task 2.2.
+/// Drop-safe sync cleanup — uses fs::remove_dir_all rather than the async
+/// `delete_profile` so it can run from a Drop impl. The
+/// `delete_profile_*` tests exercise the production deletion path
+/// independently.
 fn cleanup_profile(handler: &str) {
     if let Ok(dir) = profile_dir(handler) {
         let _ = std::fs::remove_dir_all(&dir);
@@ -65,6 +67,30 @@ async fn ensure_profile_idempotent() {
 
     let second = ensure_profile(&handler).await.expect("second create");
     assert_eq!(second, EnsureOutcome::AlreadyExists);
+}
+
+#[tokio::test]
+#[ignore = "requires hermes CLI in PATH"]
+async fn delete_profile_removes_existing() {
+    let handler = unique_handler();
+    let _guard = scopeguard_cleanup(&handler);
+
+    ensure_profile(&handler).await.expect("create");
+    let dir = profile_dir(&handler).unwrap();
+    assert!(dir.is_dir(), "profile should exist before delete");
+
+    delete_profile(&handler).await.expect("delete");
+    assert!(!dir.exists(), "profile should be gone after delete");
+}
+
+#[tokio::test]
+#[ignore = "requires hermes CLI in PATH"]
+async fn delete_profile_missing_is_noop() {
+    let handler = unique_handler();
+    // No ensure_profile — directly delete a profile that never existed.
+    delete_profile(&handler)
+        .await
+        .expect("delete-missing should not error");
 }
 
 // Lightweight scope-guard so cleanup runs even on test panic.

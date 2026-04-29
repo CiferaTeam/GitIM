@@ -92,6 +92,55 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
     s
 }
 
+/// Best-effort delete of the agent's hermes profile.
+///
+/// Calls `hermes profile delete gitim-<handler> -y`. Idempotent: returns
+/// `Ok(())` when the profile is already gone. When the hermes CLI itself is
+/// missing (user uninstalled hermes but agents remain), logs a warning and
+/// returns `Ok(())` so this never blocks `hard_delete_agent` callers.
+pub async fn delete_profile(handler: &str) -> Result<(), HermesProfileError> {
+    delete_profile_with(handler, "hermes").await
+}
+
+/// Same as [`delete_profile`] but with a configurable hermes binary path.
+pub async fn delete_profile_with(
+    handler: &str,
+    bin: &str,
+) -> Result<(), HermesProfileError> {
+    let name = profile_name(handler);
+    let output = match tokio::process::Command::new(bin)
+        .args(["profile", "delete", &name, "-y"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                "hermes CLI not found while deleting profile {name}; \
+                 leaving profile dir on disk"
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(HermesProfileError::Other(format!("spawn {bin}: {e}")));
+        }
+    };
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let combined = combined_output(&output.stdout, &output.stderr);
+    if combined.contains("does not exist") {
+        Ok(())
+    } else {
+        Err(HermesProfileError::Other(format!(
+            "hermes profile delete failed: {}",
+            combined.trim()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +165,14 @@ mod tests {
             .await
             .expect_err("expected CliNotFound");
         assert!(matches!(err, HermesProfileError::CliNotFound));
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_nonexistent_binary_is_ok() {
+        // Best-effort: if hermes is gone (uninstalled mid-life), hard_delete
+        // must still succeed instead of leaving the agent half-deleted.
+        delete_profile_with("alice", "/nonexistent/binary/xyz")
+            .await
+            .expect("delete should be best-effort when CLI is missing");
     }
 }
