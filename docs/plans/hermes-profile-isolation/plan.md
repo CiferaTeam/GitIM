@@ -94,15 +94,19 @@
 - [ ] **Step 5: Commit**
   `git add -p crates/gitim-runtime/src/agent_loop.rs && git commit -m "feat(runtime): inject HERMES_HOME for hermes agents"`
 
-### Task 1.3: 老的 `new()` 入口对齐
+### Task 1.3: `with_defaults` / `with_provider` 入口也注入 HERMES_HOME
+
+**背景:** baseline 检查发现 `agent_loop.rs` 实际有三个入口 — `with_defaults` (生产: `bin/runtime.rs`)、`with_provider`(被 `with_defaults` 内部调,以及 test)、`with_config`(生产: `http.rs` add_agent 路径)。Task 1.2 只改了 `with_config`,前两个入口的 hermes provider 仍然不会注入 HERMES_HOME。三处都要 cover,且应该走同一个 helper(单点来源,避免后续分叉)。
 
 **Files:**
-- Modify: `crates/gitim-runtime/src/agent_loop.rs:60-92`(`new` 方法)
+- Modify: `crates/gitim-runtime/src/agent_loop.rs:50-92`(`with_defaults`、`with_provider`)
 
-- [ ] **Step 1:** 检查 `new` 是否还有调用方(`rg "AgentLoop::new\b" crates/`)。如果只剩测试用,在测试代码里改用 `with_config` + `AgentLoopConfig::default()`,删 `new`。如果有生产调用方,继续 step 2。
-- [ ] **Step 2:** `new` 内部也按 Task 1.2 的方式注入 HERMES_HOME — 复用同一段逻辑(避免分叉)。建议在 `agent_loop.rs` 内提取一个 `fn build_provider_config(provider_type, handler, env) -> Result<ProviderConfig>` private 函数,`new` 和 `with_config` 都调它。
-- [ ] **Step 3:** 跑 `cargo test -p gitim-runtime --lib`,确认通过。
-- [ ] **Step 4: Commit**
+- [ ] **Step 1:** 在 `agent_loop.rs` 内提取一个 private helper(建议名 `build_provider_config(provider_type: &str, handler: &str, extra_env: HashMap<String, String>) -> Result<ProviderConfig, RuntimeError>`),封装 Task 1.2 的注入逻辑:克隆 extra_env,hermes provider 时插入 HERMES_HOME(若用户 env 没显式传)。
+- [ ] **Step 2:** 把 Task 1.2 在 `with_config` 内的内联逻辑改为调用这个 helper(确保行为不变,Task 1.2 的测试仍通过)。
+- [ ] **Step 3:** `with_provider` 的 `ProviderConfig::default()` 替换为调 helper(extra_env 传 `HashMap::new()`)。`with_defaults` 已经委托 `with_provider`,自动受益,不用改。
+- [ ] **Step 4:** 加一个 unit test `with_provider_for_hermes_injects_home`,直接调 `AgentLoop::with_provider(&tmp, "hermes", "alice")`,assert provider 能被构造(成功创建即说明 ProviderConfig 路径走通)。手动验证:用 `tracing` 在 helper 里打 debug 日志,跑测试看 HERMES_HOME 注入。或更简单:让 helper 暴露成 `pub(crate)` 测试直接断言其返回值。
+- [ ] **Step 5:** 跑 `cargo test -p gitim-runtime --lib`,确认所有现有 + 新增测试通过。
+- [ ] **Step 6: Commit**
   `git commit -am "refactor(runtime): centralize ProviderConfig construction with profile injection"`
 
 ---
