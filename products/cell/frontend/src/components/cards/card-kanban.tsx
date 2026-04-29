@@ -11,8 +11,11 @@ import {
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { useIsMobile } from "@/hooks/use-media-query";
 import * as client from "@/lib/client";
 import type { Card, CardFilter, CardStatus } from "@/lib/types";
+import { MobileCardList } from "@/components/mobile/mobile-card-list";
+import { MobileTabBar } from "@/components/mobile/mobile-tab-bar";
 import { CardFilterBar, EMPTY_CARD_FILTER, type CardFilterState } from "./card-filter-bar";
 import { CardKanbanColumn } from "./card-kanban-column";
 import { CardCreateDialog } from "./card-create-dialog";
@@ -152,6 +155,8 @@ export function CardKanban() {
     !!filter.assignee ||
     filter.mineOnly;
 
+  const isMobile = useIsMobile();
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -162,11 +167,13 @@ export function CardKanban() {
         </Button>
       </div>
 
-      <CardFilterBar
-        value={filter}
-        onChange={handleFilterChange}
-        labelSuggestions={allLabels}
-      />
+      <div className="hidden md:block">
+        <CardFilterBar
+          value={filter}
+          onChange={handleFilterChange}
+          labelSuggestions={allLabels}
+        />
+      </div>
 
       {cards.length === 0 && filteredArchivedCards.length === 0 ? (
         <EmptyState
@@ -180,30 +187,39 @@ export function CardKanban() {
           onClear={hasFilter ? () => handleFilterChange(EMPTY_CARD_FILTER) : undefined}
         />
       ) : (
-        <div className="flex-1 overflow-hidden p-4 flex gap-4">
-          <CardKanbanColumn
-            status="todo"
-            cards={byStatus.todo}
-            archivedCards={archivedByStatus.todo}
-            onStatusChange={handleStatusChange}
-            onCardDropped={handleCardDropped}
-          />
-          <CardKanbanColumn
-            status="doing"
-            cards={byStatus.doing}
-            archivedCards={archivedByStatus.doing}
-            onStatusChange={handleStatusChange}
-            onCardDropped={handleCardDropped}
-          />
-          <CardKanbanColumn
-            status="done"
-            cards={byStatus.done}
-            archivedCards={archivedByStatus.done}
-            onStatusChange={handleStatusChange}
-            onCardDropped={handleCardDropped}
-          />
-        </div>
+        <>
+          {/* Desktop Kanban */}
+          <div className="hidden md:flex flex-1 overflow-hidden p-4 gap-4">
+            <CardKanbanColumn
+              status="todo"
+              cards={byStatus.todo}
+              archivedCards={archivedByStatus.todo}
+              onStatusChange={handleStatusChange}
+              onCardDropped={handleCardDropped}
+            />
+            <CardKanbanColumn
+              status="doing"
+              cards={byStatus.doing}
+              archivedCards={archivedByStatus.doing}
+              onStatusChange={handleStatusChange}
+              onCardDropped={handleCardDropped}
+            />
+            <CardKanbanColumn
+              status="done"
+              cards={byStatus.done}
+              archivedCards={archivedByStatus.done}
+              onStatusChange={handleStatusChange}
+              onCardDropped={handleCardDropped}
+            />
+          </div>
+          {/* Mobile list */}
+          <div className="md:hidden flex-1 overflow-hidden">
+            <MobileCardList cards={filteredCards} />
+          </div>
+        </>
       )}
+
+      {isMobile && <MobileTabBar />}
 
       <CardCreateDialog
         open={createOpen}

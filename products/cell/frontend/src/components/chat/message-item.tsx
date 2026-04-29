@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { MessageSquare, GitBranch, Copy, Check } from "lucide-react";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
@@ -19,6 +19,7 @@ interface MessageItemProps {
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
+  onActionSheet?: (msg: Message) => void;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -53,13 +54,18 @@ export function MessageItem({
   onChannelClick,
   onMessageLinkClick,
   onUserProfileClick,
+  onActionSheet,
 }: MessageItemProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [isPressed, setIsPressed] = useState(false);
   const isPending = !!message._pendingId && message._status === "sending";
 
   useEffect(() => {
     return () => {
       if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+      if (longPressTimer.current !== null) clearTimeout(longPressTimer.current);
     };
   }, []);
   const isFailed = message._status === "failed";
@@ -84,19 +90,63 @@ export function MessageItem({
     onShowThread(message);
   }
 
+  // Mobile long-press
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (isPending || !onActionSheet) return;
+    const touch = e.touches[0];
+    touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+    setIsPressed(true);
+    longPressTimer.current = setTimeout(() => {
+      onActionSheet(message);
+      setIsPressed(false);
+    }, 500);
+  }, [isPending, onActionSheet, message]);
+
+  const handleTouchEnd = useCallback(() => {
+    setIsPressed(false);
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }, []);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!touchStartRef.current) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartRef.current.x);
+    const dy = Math.abs(touch.clientY - touchStartRef.current.y);
+    if (dx > 10 || dy > 10) {
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+      setIsPressed(false);
+    }
+  }, []);
+
   const statusLabel = message._status ? STATUS_LABELS[message._status] : null;
 
   return (
     <div
       data-line={message.line_number}
       className={cn(
-        "group relative rounded-lg px-3 py-2.5 transition-all duration-150",
+        "group relative rounded-lg px-3 py-2.5 transition-all duration-150 select-none",
         "hover:bg-surface/40",
+        isPressed && "bg-surface/60 scale-[0.99]",
         isPending && "opacity-40",
         isFailed && "border border-destructive/50 bg-destructive/5",
         isReplying && "border-l-2 border-ring/60 bg-muted/20",
         highlight && "bg-primary/10 ring-1 ring-primary/30"
       )}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      onTouchMove={handleTouchMove}
+      onContextMenu={(e) => {
+        if (onActionSheet) {
+          e.preventDefault();
+          onActionSheet(message);
+        }
+      }}
     >
       {/* Hover actions bar */}
       {!isPending && (

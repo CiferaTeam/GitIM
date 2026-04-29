@@ -24,6 +24,7 @@ interface MessageListProps {
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
+  onActionSheet?: (msg: Message) => void;
 }
 
 export function MessageList({
@@ -42,6 +43,7 @@ export function MessageList({
   onChannelClick,
   onMessageLinkClick,
   onUserProfileClick,
+  onActionSheet,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(messages.length);
@@ -195,6 +197,7 @@ export function MessageList({
             onChannelClick={onChannelClick}
             onMessageLinkClick={onMessageLinkClick}
             onUserProfileClick={onUserProfileClick}
+            onActionSheet={onActionSheet}
           />
         );
       })}
