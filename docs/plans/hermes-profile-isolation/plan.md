@@ -240,16 +240,17 @@
 - [ ] **Step 5: Commit**
   `git commit -am "feat(runtime): preflight_hermes_with accepts custom HERMES_HOME"`
 
-### Task 4.2: agent loop 启动前 per-profile preflight (可选,看 baseline)
+### Task 4.2: agent loop 启动前 per-profile preflight — **跳过**
 
-**Files:**
-- Modify: `crates/gitim-runtime/src/agent_loop.rs`(spawn 时增加 pre-handshake check)
+**决策(2026-04-29):跳过本 task**。
 
-- [ ] **Step 1:** 决策点 — 跟 user 确认:agent loop 启动失败时,失败现状是怎么暴露的?如果已经会通过 ACP handshake 失败 → 错误回到 webui,**这个 task 可以跳过**,本计划不做。如果是静默死循环 → 必须做。先 grep `agent_loop` 错误传播路径再决定。
-- [ ] **Step 2:** 如果决定做:在 `with_config` 之后、第一次 `run_iteration` 之前,调 `preflight_hermes_with("hermes", 5s, Some(profile_dir))`,失败 → emit activity event "preflight_failed" 含 stderr,agent 状态置 `error`,不进 poll loop。
-- [ ] **Step 3:** 加一个 unit test(mock provider 不需要,直接测错误传播)。
-- [ ] **Step 4: Commit** (if 做了)
-  `git commit -am "feat(runtime): per-profile preflight before agent loop start"`
+**调研发现:**
+- `start_agent_loop` 里 `agent_loop.init()` 失败已经把 `status` 置 `"error"`(`http.rs:1389`),WebUI 能看到。这是好的失败暴露路径。
+- 真正的"静默死循环"是 `run_once` 持续失败后的指数 backoff(`http.rs:1416-1429`),但这是**所有 provider 共有**的设计,不是 hermes-profile 引入的问题。修它属于 agent_loop 鲁棒性增强(类似 sync_loop 的 auth 熔断),不属于 hermes-profile-isolation 的 scope。
+- 加 per-profile preflight 会让 add_agent 体感多等 ~10s(ACP handshake 时长),用户感知差。
+- `default_profile_ready`(Task 2.3)已经在 add_agent 阶段阻断"完全没 setup"这种最常见配置错误,剩下的 ACP 失败属于 hermes 自身配置问题(过期 token、模型不可达等),preflight 也救不了。
+
+**未来触发条件:** 如果 user 真的反馈"加完 agent 看着 idle 半天才发现没回话",再回头加这个 preflight 或上"backoff 上限熔断"。短期内不优先。
 
 ---
 
