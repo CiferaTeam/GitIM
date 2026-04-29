@@ -4,6 +4,7 @@ mod commands;
 mod output;
 
 use std::env;
+use std::io::Read;
 use std::process;
 
 use clap::{Parser, Subcommand};
@@ -32,7 +33,11 @@ enum Commands {
         /// Channel name
         channel: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
@@ -195,7 +200,11 @@ enum DmCommands {
         /// Target handler
         handler: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
@@ -279,7 +288,11 @@ enum CardCommands {
         /// Card ID
         card_id: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Line number to reply to
         #[arg(short, long)]
         reply_to: Option<u64>,
@@ -387,9 +400,11 @@ async fn main() {
         Commands::Send {
             channel,
             body,
+            stdin,
             author,
             reply_to,
         } => {
+            let body = read_body_or_exit(body, stdin);
             commands::messaging::cmd_send(
                 &client,
                 &mode,
@@ -463,9 +478,11 @@ async fn main() {
             DmCommands::Send {
                 handler,
                 body,
+                stdin,
                 author,
                 reply_to,
             } => {
+                let body = read_body_or_exit(body, stdin);
                 commands::dm::cmd_dm_send(
                     &client,
                     &mode,
@@ -535,8 +552,10 @@ async fn main() {
                 channel,
                 card_id,
                 body,
+                stdin,
                 reply_to,
             } => {
+                let body = read_body_or_exit(body, stdin);
                 commands::card::cmd_send_card_message(
                     &client, &mode, &channel, &card_id, &body, reply_to,
                 )
@@ -603,6 +622,28 @@ fn init_client() -> GitimClient {
     GitimClient::new(&repo_root)
 }
 
+fn read_body_or_exit(body: Option<String>, stdin: bool) -> String {
+    match (body, stdin) {
+        (Some(body), false) => body,
+        (None, true) => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("Error: failed to read stdin: {e}");
+                process::exit(1);
+            }
+            buf
+        }
+        (Some(_), true) => {
+            eprintln!("Error: cannot pass both a message body and --stdin");
+            process::exit(1);
+        }
+        (None, false) => {
+            eprintln!("Error: message body is required unless --stdin is set");
+            process::exit(1);
+        }
+    }
+}
+
 async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
     match client.status().await {
         Ok(resp) => {
@@ -615,5 +656,51 @@ async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
             eprintln!("Error: {e}");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn send_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from(["gitim", "send", "general", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "send should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn dm_send_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from(["gitim", "dm", "send", "alice", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "dm send should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn card_comment_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from([
+            "gitim",
+            "card",
+            "comment",
+            "dev",
+            "20260424-stdin",
+            "--stdin",
+        ]);
+
+        assert!(
+            parsed.is_ok(),
+            "card comment should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
     }
 }

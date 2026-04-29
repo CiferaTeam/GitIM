@@ -105,6 +105,12 @@ fn gitim_api_exposes_card_and_archive_commands() {
     assert!(api.contains("gitim card unarchive"));
     assert!(api.contains("gitim card archived"));
 
+    // Safe multi-line message input
+    assert!(api.contains("gitim send <channel> --stdin"));
+    assert!(api.contains("gitim dm send <handler> --stdin"));
+    assert!(api.contains("gitim card comment <channel> <card_id> --stdin"));
+    assert!(api.contains("heredoc + `--stdin`"));
+
     // Channel archive triplet
     assert!(api.contains("gitim archive-channel"));
     assert!(api.contains("gitim unarchive-channel"));
