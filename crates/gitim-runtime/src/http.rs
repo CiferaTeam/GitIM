@@ -1845,7 +1845,7 @@ async fn agents_remove(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let (workspace_path, repo_path, loop_handle) = {
+    let (workspace_path, repo_path, loop_handle, provider) = {
         let mut s = state.lock().unwrap();
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
@@ -1859,6 +1859,7 @@ async fn agents_remove(
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
                     loop_handle,
+                    info.provider.clone(),
                 )
             }
             None => {
@@ -1880,6 +1881,17 @@ async fn agents_remove(
                 Json(serde_json::json!({ "ok": false, "error": e })),
             )
                 .into_response();
+        }
+        // Best-effort hermes profile cleanup: failures only warn so a
+        // missing/broken hermes CLI never blocks the user-facing delete.
+        if provider.as_deref() == Some("hermes") {
+            if let Err(e) = crate::hermes_profile::delete_profile(&req.id).await {
+                tracing::warn!(
+                    agent = %req.id,
+                    error = %e,
+                    "failed to delete hermes profile during hard_delete"
+                );
+            }
         }
     }
 
