@@ -23,9 +23,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serial_test::serial;
+use std::collections::HashMap;
 use tower::ServiceExt;
 
-use gitim_runtime::http::create_router;
+use gitim_runtime::http::{create_router, AgentInfo};
 
 async fn body_to_json(resp: axum::response::Response) -> serde_json::Value {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -180,13 +181,54 @@ fn agents_add_request(body: serde_json::Value) -> Request<Body> {
 /// tests exercise the validation branch alone.
 fn inject_ws(state: &gitim_runtime::http::SharedRuntimeState) {
     use std::path::PathBuf;
+    inject_ws_at(state, PathBuf::from("/tmp/test-ws"));
+}
+
+fn inject_ws_at(state: &gitim_runtime::http::SharedRuntimeState, path: std::path::PathBuf) {
     let mut s = state.lock().unwrap();
     let ctx = gitim_runtime::workspace::WorkspaceContext::new(
         "test-ws".to_string(),
         "test-ws".to_string(),
-        PathBuf::from("/tmp/test-ws"),
+        path,
     );
     s.workspaces.insert("test-ws".to_string(), ctx);
+}
+
+fn insert_agent(
+    state: &gitim_runtime::http::SharedRuntimeState,
+    id: &str,
+    repo_path: &std::path::Path,
+) {
+    let mut s = state.lock().unwrap();
+    let ctx = s.workspaces.get_mut("test-ws").expect("workspace exists");
+    ctx.agents.insert(
+        id.to_string(),
+        AgentInfo {
+            id: id.to_string(),
+            handler: id.to_string(),
+            display_name: id.to_string(),
+            status: "idle".to_string(),
+            last_activity: None,
+            messages_processed: 0,
+            repo_path: repo_path.display().to_string(),
+            provider: Some("mock".to_string()),
+            model: None,
+            system_prompt: None,
+            env: HashMap::new(),
+            error_message: None,
+            session_usage: None,
+            loop_handle: None,
+        },
+    );
+}
+
+fn agents_remove_request(body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .uri("/workspaces/test-ws/agents/remove")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 #[tokio::test]
@@ -237,6 +279,68 @@ async fn test_agents_add_unsupported_provider_returns_400() {
     assert!(
         error.contains("unknown_xyz"),
         "error should echo the rejected provider name, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_agents_remove_soft_delete_keeps_agent_directory() {
+    let tmp = tempfile::tempdir().expect("workspace tempdir");
+    let agent_dir = tmp.path().join("soft-bot");
+    std::fs::create_dir_all(agent_dir.join(".gitim/run")).expect("agent dir");
+    let (router, state) = create_router();
+    inject_ws_at(&state, tmp.path().to_path_buf());
+    insert_agent(&state, "soft-bot", &agent_dir);
+
+    let response = router
+        .oneshot(agents_remove_request(serde_json::json!({
+            "id": "soft-bot",
+        })))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body["ok"], serde_json::Value::Bool(true));
+    assert!(
+        agent_dir.exists(),
+        "soft delete should leave the local agent directory"
+    );
+    let s = state.lock().unwrap();
+    assert!(
+        !s.workspaces["test-ws"].agents.contains_key("soft-bot"),
+        "soft delete should remove the agent from runtime state"
+    );
+}
+
+#[tokio::test]
+async fn test_agents_remove_hard_delete_removes_agent_directory() {
+    let tmp = tempfile::tempdir().expect("workspace tempdir");
+    let agent_dir = tmp.path().join("hard-bot");
+    std::fs::create_dir_all(agent_dir.join(".gitim/run")).expect("agent dir");
+    std::fs::write(agent_dir.join("state.txt"), "local state").expect("agent file");
+    let (router, state) = create_router();
+    inject_ws_at(&state, tmp.path().to_path_buf());
+    insert_agent(&state, "hard-bot", &agent_dir);
+
+    let response = router
+        .oneshot(agents_remove_request(serde_json::json!({
+            "id": "hard-bot",
+            "hard_delete": true,
+        })))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body["ok"], serde_json::Value::Bool(true));
+    assert!(
+        !agent_dir.exists(),
+        "hard delete should remove the local agent directory"
+    );
+    let s = state.lock().unwrap();
+    assert!(
+        !s.workspaces["test-ws"].agents.contains_key("hard-bot"),
+        "hard delete should remove the agent from runtime state"
     );
 }
 

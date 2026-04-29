@@ -599,12 +599,16 @@ export async function updateAgent(
   }
 }
 
-export async function removeAgent(slug: string, id: string): Promise<ApiResponse> {
+export async function removeAgent(
+  slug: string,
+  id: string,
+  options: { hardDelete?: boolean } = {},
+): Promise<ApiResponse> {
   try {
     const res = await fetch(`${wsBase(slug)}/agents/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id, hard_delete: options.hardDelete === true }),
     });
     return await res.json();
   } catch {

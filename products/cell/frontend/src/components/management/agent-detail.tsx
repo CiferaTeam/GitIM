@@ -480,6 +480,7 @@ export function AgentDetail() {
       <RemoveAgentDialog
         agentId={agent.id}
         agentName={agent.name}
+        agentPath={agent.repoPath}
         open={removeOpen}
         onOpenChange={setRemoveOpen}
         onRemoved={() => navigate("/management")}

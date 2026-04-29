@@ -1303,6 +1303,13 @@ struct AgentIdRequest {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct AgentRemoveRequest {
+    id: String,
+    #[serde(default)]
+    hard_delete: bool,
+}
+
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
     let (repo_root, handler, provider, model, system_prompt, env, activity_tx) = {
@@ -1806,33 +1813,108 @@ async fn agents_patch(
 async fn agents_remove(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
-    Json(req): Json<AgentIdRequest>,
+    Json(req): Json<AgentRemoveRequest>,
 ) -> axum::response::Response {
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    let (workspace_path, repo_path, loop_handle) = {
+        let mut s = state.lock().unwrap();
+        let ctx = match s.workspaces.get_mut(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get_mut(&req.id) {
+            Some(info) => {
+                let loop_handle = info.loop_handle.take();
+                info.status = "idle".to_string();
+                (
+                    ctx.path.clone(),
+                    PathBuf::from(&info.repo_path),
+                    loop_handle,
+                )
+            }
+            None => {
+                return Json(serde_json::json!({ "ok": false, "error": "agent not found" }))
+                    .into_response();
+            }
+        }
+    };
+
+    if let Some(handle) = loop_handle {
+        handle.abort();
+    }
+    kill_agent_daemon(&repo_path);
+
+    if req.hard_delete {
+        if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    }
+
     let mut s = state.lock().unwrap();
     let ctx = match s.workspaces.get_mut(&slug) {
         Some(c) => c,
         None => return not_found_workspace(),
     };
-    match ctx.agents.remove(&req.id) {
-        Some(info) => {
-            if let Some(handle) = &info.loop_handle {
-                handle.abort();
-            }
-            let pid_file = PathBuf::from(&info.repo_path).join(".gitim/run/gitim.pid");
-            if let Ok(content) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = content.trim().parse::<u32>() {
-                    let _ = std::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .output();
-                }
-            }
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
-        None => {
-            Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response()
+    ctx.agents.remove(&req.id);
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+fn kill_agent_daemon(repo_path: &Path) {
+    let pid_file = repo_path.join(".gitim/run/gitim.pid");
+    if let Ok(content) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
         }
     }
+}
+
+fn hard_delete_agent_dir(workspace: &Path, agent_id: &str, repo_path: &Path) -> Result<(), String> {
+    if !repo_path.is_absolute() {
+        return Err("agent repo path is not absolute".to_string());
+    }
+
+    let workspace = std::fs::canonicalize(workspace)
+        .map_err(|e| format!("failed to resolve workspace path: {e}"))?;
+    let parent = repo_path
+        .parent()
+        .ok_or_else(|| "agent repo path has no parent".to_string())?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("failed to resolve agent parent path: {e}"))?;
+    if parent != workspace {
+        return Err("agent repo path is outside the workspace".to_string());
+    }
+
+    let Some(name) = repo_path.file_name().and_then(|s| s.to_str()) else {
+        return Err("agent repo path has no valid directory name".to_string());
+    };
+    if name != agent_id {
+        return Err("agent repo path does not match the agent id".to_string());
+    }
+
+    if !repo_path.exists() {
+        return Ok(());
+    }
+
+    let target = std::fs::canonicalize(repo_path)
+        .map_err(|e| format!("failed to resolve agent repo path: {e}"))?;
+    if target == workspace || !target.starts_with(&workspace) {
+        return Err("agent repo path is outside the workspace".to_string());
+    }
+    if !target.is_dir() {
+        return Err("agent repo path is not a directory".to_string());
+    }
+
+    std::fs::remove_dir_all(&target)
+        .map_err(|e| format!("failed to delete agent directory: {e}"))?;
+    Ok(())
 }
 
 // -- /agents/stop --

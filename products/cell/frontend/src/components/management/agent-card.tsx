@@ -184,6 +184,7 @@ export function AgentCard({ agent }: AgentCardProps) {
       <RemoveAgentDialog
         agentId={agent.id}
         agentName={agent.name}
+        agentPath={agent.repoPath}
         open={removeOpen}
         onOpenChange={setRemoveOpen}
       />
