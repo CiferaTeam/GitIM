@@ -20,9 +20,40 @@ function agents(count: number) {
 
 async function stubRuntime(page: Page) {
   await page.addInitScript(({ port, activeSlug }) => {
+    const activities = {
+      "agent-01": [
+        {
+          agent_id: "agent-01",
+          event_type: "done",
+          detail: "finished setup",
+          timestamp: "2026-04-29T10:01:00Z",
+        },
+      ],
+      "agent-04": [
+        {
+          agent_id: "agent-04",
+          event_type: "thinking",
+          detail: "reviewing changes",
+          timestamp: "2026-04-29T10:03:00Z",
+        },
+      ],
+      "agent-20": [
+        {
+          agent_id: "agent-20",
+          event_type: "tool_use",
+          detail: "running tests",
+          timestamp: "2026-04-29T10:05:00Z",
+        },
+      ],
+    };
+
     localStorage.clear();
     localStorage.setItem("gitim-runtime-port", String(port));
     localStorage.setItem("gitim-active-workspace", activeSlug);
+    localStorage.setItem(
+      "gitim/agent-activity",
+      JSON.stringify({ state: { activities, lastSlug: activeSlug }, version: 0 }),
+    );
   }, { port: runtimePort, activeSlug: slug });
 
   await page.route("**/*", async (route) => {
@@ -118,8 +149,12 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
 
   const sidebar = page.locator(".w-64").first();
   const channelsHeading = page.getByText("Channels", { exact: true });
+  const previewRows = page.getByTestId("agent-preview-row");
 
   await expect(channelsHeading).toBeVisible();
+  await expect(previewRows).toHaveCount(3);
+  await expect(previewRows.nth(0)).toContainText("agent-20");
+  await expect(previewRows.nth(0)).toContainText("running tests");
 
   const [sidebarBox, channelsBox] = await Promise.all([
     sidebar.boundingBox(),
@@ -133,4 +168,8 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
     sidebarBox!.y + sidebarBox!.height,
   );
   await expect(page.getByRole("button", { name: "general" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Show all agents" }).click();
+  await expect(page.getByTestId("agent-full-row")).toHaveCount(24);
+  await expect(page.getByTestId("agent-full-row").nth(0)).toContainText("agent-20");
 });

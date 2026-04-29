@@ -1,13 +1,61 @@
+import { List } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
-import type { AgentActivityEvent } from "../../lib/types";
+import type { Agent, AgentActivityEvent } from "../../lib/types";
+import { Button } from "../ui/button";
 import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
 } from "../ui/hover-card";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../ui/popover";
 
 const EMPTY_ACTIVITIES: AgentActivityEvent[] = [];
+const PREVIEW_AGENT_LIMIT = 3;
+const STATUS_RANK: Record<string, number> = {
+  running: 3,
+  error: 2,
+  idle: 1,
+  offline: 0,
+};
+
+function latestActivity(
+  agentId: string,
+  activities: Record<string, AgentActivityEvent[]>,
+): AgentActivityEvent | undefined {
+  return activities[agentId]?.[0];
+}
+
+function activityTime(event: AgentActivityEvent | undefined): number {
+  if (!event) return 0;
+  const ts = Date.parse(event.timestamp);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function agentLabel(agent: Agent): string {
+  return agent.name || agent.id;
+}
+
+function compareAgentsByActivity(
+  activities: Record<string, AgentActivityEvent[]>,
+): (a: Agent, b: Agent) => number {
+  return (a, b) => {
+    const byActivity =
+      activityTime(latestActivity(b.id, activities)) -
+      activityTime(latestActivity(a.id, activities));
+    if (byActivity !== 0) return byActivity;
+
+    const byStatus =
+      (STATUS_RANK[b.status] ?? 0) - (STATUS_RANK[a.status] ?? 0);
+    if (byStatus !== 0) return byStatus;
+
+    return agentLabel(a).localeCompare(agentLabel(b));
+  };
+}
 
 function StatusDot({ status }: { status: string }) {
   const color =
@@ -47,16 +95,14 @@ function ActivityLine({ event }: { event: AgentActivityEvent }) {
   );
 }
 
-function UsageBadge({ agentId }: { agentId: string }) {
-  const usage = useAgentStore(
-    (s) => s.agents.find((a) => a.id === agentId)?.sessionUsage,
-  );
+function UsageBadge({ agent }: { agent: Agent }) {
+  const usage = agent.sessionUsage;
   if (!usage) return null;
 
   const warning = usage.usedPercent >= 80;
   const pctColor = warning ? "text-warning" : "text-text-faint";
   // One decimal so sub-1% sessions don't flatten to "0%" in the UI, but keep
-  // it short enough to fit on its own line. ≥10% displays as integer for
+  // it short enough to fit on its own line. >=10% displays as integer for
   // density.
   const pctText =
     usage.usedPercent >= 10
@@ -75,34 +121,37 @@ function UsageBadge({ agentId }: { agentId: string }) {
   );
 }
 
-function AgentRow({ agentId, name }: { agentId: string; name: string }) {
-  const activities = useAgentActivityStore(
-    (s) => s.activities[agentId] ?? EMPTY_ACTIVITIES,
-  );
-  const status =
-    useAgentStore((s) => s.agents.find((a) => a.id === agentId)?.status) ??
-    "offline";
-  const errorMessage = useAgentStore(
-    (s) => s.agents.find((a) => a.id === agentId)?.errorMessage,
-  );
+function AgentRow({
+  agent,
+  activities,
+  testId,
+}: {
+  agent: Agent;
+  activities: AgentActivityEvent[];
+  testId?: string;
+}) {
+  const name = agentLabel(agent);
   const latest = activities[0];
-  const showError = status === "error";
+  const showError = agent.status === "error";
   const hasDetail = activities.length > 0;
 
   const row = (
-    <div className="relative rounded-md border border-border/60 bg-background/40">
+    <div
+      className="relative rounded-md border border-border/60 bg-background/40 animate-[agent-row-enter_180ms_ease-out]"
+      data-testid={testId}
+    >
       <div
         className={`flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors ${
           hasDetail ? "cursor-default hover:bg-surface-hover" : ""
         }`}
       >
-        <StatusDot status={status} />
+        <StatusDot status={agent.status} />
         <span className="text-xs font-medium text-text-secondary shrink-0">
           {name}
         </span>
         {showError ? (
-          <span className="text-[11px] font-mono text-error truncate whitespace-pre-line">
-            {errorMessage ?? "unknown error"}
+          <span className="text-[11px] font-mono text-error truncate">
+            {agent.errorMessage ?? "unknown error"}
           </span>
         ) : latest ? (
           <span className="text-[11px] font-mono text-text-muted truncate">
@@ -130,7 +179,7 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
           <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
             {name} — Recent Activity
           </p>
-          <UsageBadge agentId={agentId} />
+          <UsageBadge agent={agent} />
         </div>
         {activities.map((evt, i) => (
           <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} />
@@ -142,20 +191,69 @@ function AgentRow({ agentId, name }: { agentId: string; name: string }) {
 
 export function AgentStatusPanel() {
   const agents = useAgentStore((s) => s.agents);
+  const activities = useAgentActivityStore((s) => s.activities);
 
   if (agents.length === 0) return null;
 
+  const sortedAgents = [...agents].sort(compareAgentsByActivity(activities));
+  const previewAgents = sortedAgents.slice(0, PREVIEW_AGENT_LIMIT);
+  const hiddenCount = Math.max(0, sortedAgents.length - previewAgents.length);
+
   return (
-    <div className="px-3 pt-3 pb-2 max-h-[32%] min-h-0 shrink-0 flex flex-col overflow-hidden">
-      <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider mb-2 px-2 shrink-0">
-        Agents
-      </p>
-      <div className="-mx-1 px-1 space-y-1.5 overflow-y-auto min-h-0 flex-1">
-        {agents.map((agent) => (
+    <div className="px-3 pt-3 pb-2 shrink-0">
+      <div className="flex items-center justify-between mb-2 px-2">
+        <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
+          Agents
+        </p>
+        {hiddenCount > 0 && (
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label="Show all agents"
+                title="Show all agents"
+                className="h-6 gap-1 px-1.5 text-[11px] text-text-muted hover:text-foreground"
+              >
+                <List className="size-3.5" />
+                <span className="font-mono">+{hiddenCount}</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              side="right"
+              align="start"
+              sideOffset={8}
+              className="w-80 max-h-[min(70vh,32rem)] p-3"
+            >
+              <div className="flex items-baseline justify-between gap-3 px-1 pb-2">
+                <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
+                  Agents
+                </p>
+                <span className="text-[11px] font-mono text-text-faint">
+                  {sortedAgents.length}
+                </span>
+              </div>
+              <div className="max-h-[calc(min(70vh,32rem)-3rem)] overflow-y-auto space-y-1.5 pr-1">
+                {sortedAgents.map((agent) => (
+                  <AgentRow
+                    key={`${agent.id}-${latestActivity(agent.id, activities)?.timestamp ?? "idle"}`}
+                    agent={agent}
+                    activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
+                    testId="agent-full-row"
+                  />
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        {previewAgents.map((agent) => (
           <AgentRow
-            key={agent.id}
-            agentId={agent.id}
-            name={agent.name || agent.id}
+            key={`${agent.id}-${latestActivity(agent.id, activities)?.timestamp ?? "idle"}`}
+            agent={agent}
+            activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
+            testId="agent-preview-row"
           />
         ))}
       </div>
