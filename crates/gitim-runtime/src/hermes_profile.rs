@@ -1,19 +1,95 @@
-use crate::error::RuntimeError;
+//! Per-agent hermes profile management.
+//!
+//! Each gitim agent is paired 1:1 with a hermes profile at
+//! `~/.hermes/profiles/gitim-<handler>/`. This module owns the naming
+//! convention, path resolution, and shell-out wrappers around the
+//! `hermes profile create / delete` CLI.
+
 use std::path::PathBuf;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HermesProfileError {
+    #[error("home directory not found")]
+    HomeDirNotFound,
+
+    #[error("hermes CLI not found in PATH; install hermes or run `hermes setup` first")]
+    CliNotFound,
+
+    #[error("{0}")]
+    Other(String),
+}
 
 /// Returns the hermes profile name for a given agent handler.
 /// Profile name format is `gitim-<handler>`.
 pub fn profile_name(handler: &str) -> String {
-    format!("gitim-{}", handler)
+    format!("gitim-{handler}")
 }
 
 /// Returns the hermes profile directory path for a given agent handler.
 /// Returns `<home>/.hermes/profiles/gitim-<handler>`.
-pub fn profile_dir(handler: &str) -> Result<PathBuf, RuntimeError> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        RuntimeError::OnboardFailed("home directory not found".to_string())
-    })?;
+pub fn profile_dir(handler: &str) -> Result<PathBuf, HermesProfileError> {
+    let home = dirs::home_dir().ok_or(HermesProfileError::HomeDirNotFound)?;
     Ok(home.join(".hermes/profiles").join(profile_name(handler)))
+}
+
+/// Outcome of an `ensure_profile` call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnsureOutcome {
+    /// A new profile was created (and bundled skills synced).
+    Created,
+    /// The profile already existed; nothing was changed.
+    AlreadyExists,
+}
+
+/// Idempotently create a hermes profile for `handler` by clone-from-active.
+///
+/// Calls `hermes profile create gitim-<handler> --clone --no-alias`. The
+/// `--clone` flag copies `config.yaml` / `.env` / `SOUL.md` / `memories/`
+/// from the user's currently active profile (typically `~/.hermes`) so the
+/// new agent inherits LLM provider configuration without manual setup.
+/// `--no-alias` skips wrapper-script creation under `~/.local/bin/`.
+pub async fn ensure_profile(handler: &str) -> Result<EnsureOutcome, HermesProfileError> {
+    ensure_profile_with(handler, "hermes").await
+}
+
+/// Same as [`ensure_profile`] but with a configurable hermes binary path
+/// (used by tests to inject a non-existent path and verify `CliNotFound`).
+pub async fn ensure_profile_with(
+    handler: &str,
+    bin: &str,
+) -> Result<EnsureOutcome, HermesProfileError> {
+    let name = profile_name(handler);
+    let output = tokio::process::Command::new(bin)
+        .args(["profile", "create", &name, "--clone", "--no-alias"])
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HermesProfileError::CliNotFound
+            } else {
+                HermesProfileError::Other(format!("spawn {bin}: {e}"))
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(EnsureOutcome::Created);
+    }
+
+    let combined = combined_output(&output.stdout, &output.stderr);
+    if combined.contains("already exists") {
+        Ok(EnsureOutcome::AlreadyExists)
+    } else {
+        Err(HermesProfileError::Other(format!(
+            "hermes profile create failed: {}",
+            combined.trim()
+        )))
+    }
+}
+
+fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut s = String::from_utf8_lossy(stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(stderr));
+    s
 }
 
 #[cfg(test)]
@@ -32,5 +108,13 @@ mod tests {
             .unwrap()
             .join(".hermes/profiles/gitim-alice");
         assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn ensure_profile_with_nonexistent_binary_returns_cli_not_found() {
+        let err = ensure_profile_with("alice", "/nonexistent/binary/xyz")
+            .await
+            .expect_err("expected CliNotFound");
+        assert!(matches!(err, HermesProfileError::CliNotFound));
     }
 }
