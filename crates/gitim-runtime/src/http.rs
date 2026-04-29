@@ -1210,6 +1210,33 @@ async fn agents_add(
                 }
             }
 
+            // Hermes profile bootstrap: each agent gets its own
+            // ~/.hermes/profiles/gitim-<handler> cloned from the user's
+            // active profile so LLM config / auth / sessions stay isolated.
+            // No-op for other providers.
+            if req.provider == "hermes" {
+                if !crate::hermes_profile::default_profile_ready() {
+                    cleanup_agent_dir(&workspace, &req.handler);
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": "Hermes default profile is not configured. \
+                            Run `hermes setup` in a terminal first to set up \
+                            an LLM provider, then add the agent again.",
+                        "error_code": "hermes_not_setup",
+                    }))
+                    .into_response();
+                }
+                if let Err(e) = crate::hermes_profile::ensure_profile(&req.handler).await {
+                    cleanup_agent_dir(&workspace, &req.handler);
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("hermes profile create failed: {e}"),
+                        "error_code": "hermes_profile_create_failed",
+                    }))
+                    .into_response();
+                }
+            }
+
             let info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),
