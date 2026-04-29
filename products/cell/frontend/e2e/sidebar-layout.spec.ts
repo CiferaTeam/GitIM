@@ -54,6 +54,10 @@ async function stubRuntime(page: Page) {
       "gitim/agent-activity",
       JSON.stringify({ state: { activities, lastSlug: activeSlug }, version: 0 }),
     );
+    localStorage.setItem(
+      `gitim-known-agents:${activeSlug}`,
+      JSON.stringify(["agent-01", "agent-04", "agent-20", "agent-30"]),
+    );
   }, { port: runtimePort, activeSlug: slug });
 
   await page.route("**/*", async (route) => {
@@ -112,6 +116,21 @@ async function stubRuntime(page: Page) {
                 kind: "dm",
                 members: ["agent-01", "lewis"],
               },
+              {
+                name: "agent-30--lewis",
+                kind: "dm",
+                members: ["agent-30", "lewis"],
+              },
+              {
+                name: "alice--lewis",
+                kind: "dm",
+                members: ["alice", "lewis"],
+              },
+              {
+                name: "agent-04--agent-30",
+                kind: "dm",
+                members: ["agent-04", "agent-30"],
+              },
             ],
           },
         },
@@ -119,7 +138,12 @@ async function stubRuntime(page: Page) {
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/users`) {
-      await route.fulfill({ json: { ok: true, data: { users: ["lewis", "agent-01"] } } });
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: { users: ["lewis", "alice", "agent-01", "agent-30"] },
+        },
+      });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/agents`) {
@@ -168,6 +192,10 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
     sidebarBox!.y + sidebarBox!.height,
   );
   await expect(page.getByRole("button", { name: "general" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "agent-01" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "alice" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "agent-30" })).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "agent-04 ↔ agent-30" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Show all agents" }).click();
   await expect(page.getByTestId("agent-full-row")).toHaveCount(24);

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Hash, AtSign, ArchiveRestore, ChevronRight, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
+import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
@@ -24,6 +25,27 @@ interface SidebarProps {
   onStartDm: (targetUser: string) => void;
 }
 
+const KNOWN_AGENT_STORAGE_PREFIX = "gitim-known-agents:";
+
+function knownAgentStorageKey(slug: string): string {
+  return `${KNOWN_AGENT_STORAGE_PREFIX}${slug}`;
+}
+
+function readKnownAgentIds(slug: string | null): Set<string> {
+  if (!slug) return new Set();
+  try {
+    const raw = localStorage.getItem(knownAgentStorageKey(slug));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeKnownAgentIds(slug: string, ids: Set<string>) {
+  localStorage.setItem(knownAgentStorageKey(slug), JSON.stringify([...ids].sort()));
+}
+
 function dmDisplayName(channel: Channel, currentUser: string): string {
   const parts = channel.name.split("--");
   if (parts.length !== 2) return channel.name;
@@ -41,8 +63,26 @@ function isMyDm(channel: Channel, currentUser: string): boolean {
   return parts.length === 2 && (parts[0] === currentUser || parts[1] === currentUser);
 }
 
+function shouldHideDmChannel(
+  channel: Channel,
+  currentUser: string,
+  liveAgentIds: Set<string>,
+  knownAgentIds: Set<string>,
+): boolean {
+  if (channel.kind !== "dm") return false;
+  const parts = channel.name.split("--");
+  if (parts.length !== 2) return false;
+  return parts.some(
+    (handler) =>
+      handler !== currentUser &&
+      knownAgentIds.has(handler) &&
+      !liveAgentIds.has(handler),
+  );
+}
+
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const agents = useAgentStore((s) => s.agents);
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
@@ -54,6 +94,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [archivedLoading, setArchivedLoading] = useState(false);
+  const [knownAgentIds, setKnownAgentIds] = useState<Set<string>>(
+    () => readKnownAgentIds(activeSlug),
+  );
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -76,6 +119,19 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     setCreateError("");
     setCreating(false);
   }
+
+  useEffect(() => {
+    if (!activeSlug) {
+      setKnownAgentIds(new Set());
+      return;
+    }
+    const next = readKnownAgentIds(activeSlug);
+    for (const agent of agents) {
+      next.add(agent.id);
+    }
+    writeKnownAgentIds(activeSlug, next);
+    setKnownAgentIds(next);
+  }, [activeSlug, agents]);
 
   async function handleCreateChannel() {
     if (!activeSlug) {
@@ -128,8 +184,13 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }, [dmSearchOpen]);
 
   const regularChannels = channels.filter((c) => c.kind === "channel");
+  const liveAgentIds = useMemo(
+    () => new Set(agents.map((agent) => agent.id)),
+    [agents],
+  );
   const dmChannels = channels
     .filter((c) => c.kind === "dm")
+    .filter((c) => !shouldHideDmChannel(c, currentUser, liveAgentIds, knownAgentIds))
     .sort((a, b) => {
       const aMy = isMyDm(a, currentUser);
       const bMy = isMyDm(b, currentUser);
@@ -153,6 +214,28 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           u.toLowerCase().includes(dmQuery.toLowerCase()) && u !== currentUser
       )
     : users.filter((u) => u !== currentUser);
+
+  useEffect(() => {
+    if (!currentChannel) return;
+    const activeChannel = channels.find((c) => c.name === currentChannel);
+    if (
+      !activeChannel ||
+      !shouldHideDmChannel(activeChannel, currentUser, liveAgentIds, knownAgentIds)
+    ) {
+      return;
+    }
+    const fallback =
+      channels.find((c) => c.kind === "channel" && c.name === "general") ??
+      channels.find((c) => c.kind === "channel") ??
+      channels.find(
+        (c) =>
+          c.kind === "dm" &&
+          !shouldHideDmChannel(c, currentUser, liveAgentIds, knownAgentIds),
+      );
+    if (fallback) {
+      onChannelSelect(fallback.name);
+    }
+  }, [currentChannel, channels, currentUser, liveAgentIds, knownAgentIds, onChannelSelect]);
 
   function handleUserSelect(user: string) {
     setDmSearchOpen(false);
