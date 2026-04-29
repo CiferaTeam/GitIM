@@ -1210,6 +1210,33 @@ async fn agents_add(
                 }
             }
 
+            // Hermes profile bootstrap: each agent gets its own
+            // ~/.hermes/profiles/gitim-<handler> cloned from the user's
+            // active profile so LLM config / auth / sessions stay isolated.
+            // No-op for other providers.
+            if req.provider == "hermes" {
+                if !crate::hermes_profile::default_profile_ready() {
+                    cleanup_agent_dir(&workspace, &req.handler);
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": "Hermes default profile is not configured. \
+                            Run `hermes setup` in a terminal first to set up \
+                            an LLM provider, then add the agent again.",
+                        "error_code": "hermes_not_setup",
+                    }))
+                    .into_response();
+                }
+                if let Err(e) = crate::hermes_profile::ensure_profile(&req.handler).await {
+                    cleanup_agent_dir(&workspace, &req.handler);
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("hermes profile create failed: {e}"),
+                        "error_code": "hermes_profile_create_failed",
+                    }))
+                    .into_response();
+                }
+            }
+
             let info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),
@@ -1818,7 +1845,7 @@ async fn agents_remove(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let (workspace_path, repo_path, loop_handle) = {
+    let (workspace_path, repo_path, loop_handle, provider) = {
         let mut s = state.lock().unwrap();
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
@@ -1832,6 +1859,7 @@ async fn agents_remove(
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
                     loop_handle,
+                    info.provider.clone(),
                 )
             }
             None => {
@@ -1853,6 +1881,17 @@ async fn agents_remove(
                 Json(serde_json::json!({ "ok": false, "error": e })),
             )
                 .into_response();
+        }
+        // Best-effort hermes profile cleanup: failures only warn so a
+        // missing/broken hermes CLI never blocks the user-facing delete.
+        if provider.as_deref() == Some("hermes") {
+            if let Err(e) = crate::hermes_profile::delete_profile(&req.id).await {
+                tracing::warn!(
+                    agent = %req.id,
+                    error = %e,
+                    "failed to delete hermes profile during hard_delete"
+                );
+            }
         }
     }
 

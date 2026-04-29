@@ -127,6 +127,34 @@ pub enum ParsedNotification {
     ToolResult { call_id: String, output: String },
 }
 
+/// Detect a hermes-internal API failure that's been streamed as plain
+/// assistant text rather than a JSON-RPC error. Hermes catches LLM API
+/// exceptions in its agent loop and turns them into a `final_response`
+/// string, so the ACP `session/prompt` reply still looks successful
+/// (`stop_reason=end_turn`, no `error` field) — but the agent never
+/// actually runs any tools. We have to fall back to substring matching
+/// against the stable error prefixes hermes emits, otherwise the
+/// runtime reports "done" while the user sees no IM reply.
+///
+/// Returns the first line of the output (trimmed) when it starts with a
+/// known failure prefix; `None` otherwise.
+pub fn detect_api_failure(output: &str) -> Option<String> {
+    const KNOWN_PREFIXES: &[&str] = &[
+        // Botocore retry wrapper around AWS Bedrock / Anthropic / OpenAI
+        "API call failed after",
+        // Botocore validation
+        "Parameter validation failed",
+    ];
+    let trimmed = output.trim_start();
+    for prefix in KNOWN_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            let line = trimmed.lines().next()?.trim();
+            return Some(line.to_string());
+        }
+    }
+    None
+}
+
 /// Parse the `params` object from a `session/update` JSON-RPC notification.
 /// Returns None for unrecognized or ignorable update types.
 pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
@@ -527,6 +555,12 @@ async fn drive_session(
         let _ = child.start_kill();
     } else if final_status == ExecStatus::Aborted {
         let _ = child.start_kill();
+    } else if final_status == ExecStatus::Completed {
+        if let Some(api_err) = detect_api_failure(&output) {
+            warn!(pid, error = %api_err, "hermes returned API failure as text");
+            final_status = ExecStatus::Failed;
+            final_error = Some(api_err);
+        }
     }
 
     if final_status != ExecStatus::Timeout {

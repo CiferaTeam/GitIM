@@ -11,6 +11,7 @@ use tracing::info;
 
 use crate::context_window::WARN_AT_PERCENT;
 use crate::error::RuntimeError;
+use crate::hermes_profile;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
 use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
@@ -69,7 +70,8 @@ impl AgentLoop {
             None => Poller::new(GitimClient::new(repo_root)),
         };
 
-        let provider = create(provider_type, ProviderConfig::default())
+        let provider_config = build_provider_config(provider_type, handler, HashMap::new())?;
+        let provider = create(provider_type, provider_config)
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
         if state.session_token.is_some() {
@@ -104,10 +106,8 @@ impl AgentLoop {
             None => Poller::new(GitimClient::new(repo_root)),
         };
 
-        let provider_config = ProviderConfig {
-            executable_path: None,
-            env: config.env.clone(),
-        };
+        let provider_config =
+            build_provider_config(&config.provider_type, &config.handler, config.env.clone())?;
         let provider = create(&config.provider_type, provider_config)
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
@@ -907,10 +907,69 @@ pub fn build_usage_notice_preamble(used_percent: f64) -> String {
     )
 }
 
+/// Construct a `ProviderConfig` with provider-specific env defaults.
+///
+/// For the `hermes` provider, injects `HERMES_HOME=<profile_dir>` so the agent
+/// runs against its isolated profile (`~/.hermes/profiles/gitim-<handler>`).
+/// An explicit `HERMES_HOME` already in `extra_env` wins — callers can override
+/// the default via `me.json.env`.
+fn build_provider_config(
+    provider_type: &str,
+    handler: &str,
+    extra_env: HashMap<String, String>,
+) -> Result<ProviderConfig, RuntimeError> {
+    let mut env = extra_env;
+    if provider_type == "hermes" && !env.contains_key("HERMES_HOME") {
+        let path = hermes_profile::profile_dir(handler)
+            .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
+        env.insert("HERMES_HOME".to_string(), path.display().to_string());
+    }
+    Ok(ProviderConfig {
+        executable_path: None,
+        env,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::http::RuntimeState;
+
+    #[test]
+    fn build_provider_config_for_hermes_injects_home() {
+        let cfg = build_provider_config("hermes", "alice", HashMap::new()).unwrap();
+        let expected = hermes_profile::profile_dir("alice")
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(cfg.env.get("HERMES_HOME"), Some(&expected));
+    }
+
+    #[test]
+    fn build_provider_config_for_claude_does_not_inject_home() {
+        let cfg = build_provider_config("claude", "alice", HashMap::new()).unwrap();
+        assert!(!cfg.env.contains_key("HERMES_HOME"));
+    }
+
+    #[test]
+    fn with_provider_for_hermes_constructs_successfully() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let loop_ = AgentLoop::with_provider(tmp.path(), "hermes", "alice")
+            .expect("hermes AgentLoop should construct without spawning hermes");
+        assert_eq!(loop_.handler, "alice");
+        assert_eq!(loop_.provider_type, "hermes");
+    }
+
+    #[test]
+    fn build_provider_config_explicit_env_overrides_home() {
+        let mut env = HashMap::new();
+        env.insert("HERMES_HOME".to_string(), "/custom/path".to_string());
+        let cfg = build_provider_config("hermes", "alice", env).unwrap();
+        assert_eq!(
+            cfg.env.get("HERMES_HOME").map(|s| s.as_str()),
+            Some("/custom/path"),
+        );
+    }
 
     #[test]
     fn agent_activity_event_includes_workspace_id() {

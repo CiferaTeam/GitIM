@@ -209,7 +209,30 @@ Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
 ## Current Orientation
-**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。**Agent 配置可编辑**已落地：detail 页 Edit 模式可改 `system_prompt` / `env` / `.env` 文件（via `PATCH /workspaces/{slug}/agents/{id}`）；`.env` 文件落 `<agent-clone>/.env`（chmod 0600、64KB 上限），workspace `/git/init` 自动把 `.env` 加到仓库 `.gitignore`（幂等，用 `system@gitim` 作者 commit）；provider/model 仍 immutable。
+**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。**Agent 配置可编辑**已落地：detail 页 Edit 模式可改 `system_prompt` / `env` / `.env` 文件（via `PATCH /workspaces/{slug}/agents/{id}`）；`.env` 文件落 `<agent-clone>/.env`（chmod 0600、64KB 上限），workspace `/git/init` 自动把 `.env` 加到仓库 `.gitignore`（幂等，用 `system@gitim` 作者 commit）；provider/model 仍 immutable。**Hermes provider per-agent profile 隔离**已落地：每个 hermes agent 自动获得独立的 `~/.hermes/profiles/gitim-<handler>/` 目录,LLM 配置 / auth.json / sessions / cron / gateway PID 完全隔离;user 一次性跑 `hermes setup` 配 default profile,新 agent 通过 `hermes profile create --clone --no-alias` 自动继承,WebUI 零额外步骤。
 **Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制、provider/model 修改（需 session 迁移方案）
 **Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。Serde 的 `Option<Option<T>>` + `#[serde(default)]` 不能天然区分"字段缺省"和"字段 = null"—— 两者都解析成 `None`，三态语义需要自定义 deserializer 用 `Value` 中转（见 http.rs `deser_triple_option`）。
-**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk；PATCH agent 的 me.json 写 + `.env` 写是**顺序而非事务**（无 WAL），`.env` 写失败时 me.json 已更新，客户端收到 500，靠幂等重试恢复。
+**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk；PATCH agent 的 me.json 写 + `.env` 写是**顺序而非事务**（无 WAL），`.env` 写失败时 me.json 已更新，客户端收到 500，靠幂等重试恢复。Hermes profile 集成依赖 shell out `hermes profile create/delete`,如果 hermes major 版本改了 profile 内部结构,我们的 `--clone` 会自动跟进(它是 hermes 的承诺),但 `default_profile_ready` 的 `.env`/`auth.json` 探测路径假设可能 drift,每个 hermes 大版本回归一次。
+
+## Hermes profile 隔离机制
+
+每个 gitim agent 1:1 对应一个 hermes profile,profile 名为 `gitim-<handler>`,放 `~/.hermes/profiles/gitim-<handler>/`。
+
+**Provision 路径**(`http.rs` add_agent flow):
+1. 写 `me.json` 后,如果 `provider == "hermes"` 才走下面
+2. `hermes_profile::default_profile_ready()` — 检查 `HERMES_HOME` 或 `~/.hermes/` 下 `.env` 或 `auth.json` 是否存在;不存在则拒绝 add(`error_code: hermes_not_setup`)
+3. `hermes_profile::ensure_profile(handler)` — shell out `hermes profile create gitim-<handler> --clone --no-alias`,从 user 的 active profile 拷 `config.yaml` + `.env` + `SOUL.md` + `memories/`,自带 70 bundled skills sync(几秒钟);失败 → `cleanup_agent_dir` + `error_code: hermes_profile_create_failed`
+4. agent_loop 启动时 `build_provider_config` 自动注入 `HERMES_HOME=<profile_dir>` 到 `ProviderConfig.env`(me.json 显式 env 优先)
+
+**Hard delete 路径**:`hard_delete_agent_dir` 后,如果 `provider == "hermes"`,best-effort `delete_profile`(失败仅 warn,不阻塞 user 响应)。soft delete 不动 profile。
+
+**User 切换某个 agent 的 LLM**:用 hermes 原生 CLI,如 `hermes -p gitim-alice setup model` / `hermes -p gitim-alice login`。WebUI v1 不暴露,user 直接终端操作。
+
+**已知 non-goals(v1)**:
+- WebUI 暴露 hermes profile 概念(profile 名由后端推导,前端零感知)
+- 多 source profile 选择(永远从 active profile clone)
+- profile 重命名 / 跨 agent 迁移(handler immutable,profile 跟随 handler)
+- soft delete 时清理 profile(soft delete 保留所有 agent 数据)
+- 已有 agent 的 retroactive profile 创建(只对新加 agent 生效,迁移见 `docs/plans/hermes-profile-isolation/migration.md`)
+
+**实现位置**:`crates/gitim-runtime/src/hermes_profile.rs`(模块) + `agent_loop.rs::build_provider_config`(env 注入) + `http.rs` add_agent / agents_remove(provision / cleanup wiring) + `preflight.rs::preflight_hermes_with`(可选 `hermes_home` 参数)。

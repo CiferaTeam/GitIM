@@ -819,7 +819,16 @@ pub async fn preflight_pi() -> PreflightResult {
 /// response containing `authMethods` is treated as "available". This proves
 /// both CLI existence and ACP server responsiveness without sending a full
 /// prompt (avoiding token spend during preflight).
-pub async fn preflight_hermes_with(bin: &str, timeout: Duration) -> PreflightResult {
+///
+/// `hermes_home`, when set, is injected as `HERMES_HOME` into the spawned
+/// process so the handshake exercises a specific profile (e.g.
+/// `~/.hermes/profiles/gitim-<handler>/`) rather than the default profile.
+/// `None` preserves the inherited environment.
+pub async fn preflight_hermes_with(
+    bin: &str,
+    timeout: Duration,
+    hermes_home: Option<&Path>,
+) -> PreflightResult {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let started = Instant::now();
@@ -844,6 +853,9 @@ pub async fn preflight_hermes_with(bin: &str, timeout: Duration) -> PreflightRes
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    if let Some(home) = hermes_home {
+        cmd.env("HERMES_HOME", home);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -941,9 +953,10 @@ pub async fn preflight_hermes_with(bin: &str, timeout: Duration) -> PreflightRes
     }
 }
 
-/// Run preflight against the default `hermes` binary.
+/// Run preflight against the default `hermes` binary against the user's
+/// active profile (no `HERMES_HOME` override).
 pub async fn preflight_hermes() -> PreflightResult {
-    preflight_hermes_with("hermes", Duration::from_secs(30)).await
+    preflight_hermes_with("hermes", Duration::from_secs(30), None).await
 }
 
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.
