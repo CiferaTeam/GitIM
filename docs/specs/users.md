@@ -25,9 +25,9 @@ users/<handler>.meta.yaml
 ### Schema
 
 ```yaml
-display_name: Cifera Nexus
-role: ceo
-introduction: 负责团队整体战略与协调
+display_name: Code Reviewer
+role: reviewer
+introduction: 负责代码审查与质量把关
 ```
 
 | 字段 | 类型 | 必填 | 说明 |

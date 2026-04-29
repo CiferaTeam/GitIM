@@ -4,7 +4,7 @@ use gitim_core::types::Handler;
 fn test_valid_handlers() {
     assert!(Handler::new("nexus").is_ok());
     assert!(Handler::new("lewis").is_ok());
-    assert!(Handler::new("cifera-nexus").is_ok());
+    assert!(Handler::new("code-reviewer").is_ok());
     assert!(Handler::new("a1").is_ok());
     assert!(Handler::new("x").is_ok());
     assert!(Handler::new("a2b").is_ok());

@@ -61,7 +61,7 @@ dm/<handler1>--<handler2>.thread
 | handler A | handler B | 文件名 |
 |-----------|-----------|--------|
 | `lewis` | `nexus` | `dm/lewis--nexus.thread` |
-| `cifera-nexus` | `lewis` | `dm/cifera-nexus--lewis.thread` |
+| `code-reviewer` | `lewis` | `dm/code-reviewer--lewis.thread` |
 | `alice` | `alice2` | `dm/alice--alice2.thread` |
 
 ### API 表示

@@ -102,9 +102,9 @@ users/<handler>.meta.yaml
 
 ```json
 {
-  "display_name": "Cifera Nexus",
-  "role": "ceo",
-  "introduction": "负责团队整体战略与协调"
+  "display_name": "Code Reviewer",
+  "role": "reviewer",
+  "introduction": "负责代码审查与质量把关"
 }
 ```
 
@@ -145,13 +145,13 @@ channels/<channel_name>.meta.yaml
 dm/<handler1>--<handler2>.meta.yaml
 ```
 
-两个 handler 按字典序（lexicographic order）排列，以 `--`（双连字符）连接。使用双连字符是因为 handler 本身可以包含单连字符（如 `cifera-nexus`），但 MUST NOT 包含连续连字符，因此 `--` 作为分隔符不会产生歧义。
+两个 handler 按字典序（lexicographic order）排列，以 `--`（双连字符）连接。使用双连字符是因为 handler 本身可以包含单连字符（如 `code-reviewer`），但 MUST NOT 包含连续连字符，因此 `--` 作为分隔符不会产生歧义。
 
 排序规则：对两个 handler 做逐字符 ASCII 值比较，较小者在前。
 
 示例：
 - `lewis` vs `nexus` → `l` < `n` → `dm/lewis--nexus.meta.yaml`
-- `cifera-nexus` vs `lewis` → `c` < `l` → `dm/cifera-nexus--lewis.meta.yaml`
+- `code-reviewer` vs `lewis` → `c` < `l` → `dm/code-reviewer--lewis.meta.yaml`
 - `alice` vs `alice2` → 前 5 字符相同，`alice` 更短 → `dm/alice--alice2.meta.yaml`
 
 ### 4.3 Schema

@@ -112,8 +112,8 @@ fn test_parse_dm_filename_valid() {
 
 #[test]
 fn test_parse_dm_filename_with_hyphens() {
-    let (first, second) = parse_dm_filename("cifera-nexus--lewis").unwrap();
-    assert_eq!(first, "cifera-nexus");
+    let (first, second) = parse_dm_filename("code-reviewer--lewis").unwrap();
+    assert_eq!(first, "code-reviewer");
     assert_eq!(second, "lewis");
 }
 
