@@ -47,9 +47,18 @@ async function stubRuntime(page: Page) {
       ],
     };
 
+    const pinnedConversations = localStorage.getItem(
+      `gitim-pinned-conversations:${activeSlug}`,
+    );
     localStorage.clear();
     localStorage.setItem("gitim-runtime-port", String(port));
     localStorage.setItem("gitim-active-workspace", activeSlug);
+    if (pinnedConversations) {
+      localStorage.setItem(
+        `gitim-pinned-conversations:${activeSlug}`,
+        pinnedConversations,
+      );
+    }
     localStorage.setItem(
       "gitim/agent-activity",
       JSON.stringify({ state: { activities, lastSlug: activeSlug }, version: 0 }),
@@ -191,13 +200,67 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
   expect(channelsBox!.y + channelsBox!.height).toBeLessThanOrEqual(
     sidebarBox!.y + sidebarBox!.height,
   );
-  await expect(page.getByRole("button", { name: "general" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "agent-01" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "alice" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "agent-30" })).toHaveCount(0);
-  await expect(sidebar.getByRole("button", { name: "agent-04 ↔ agent-30" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "agent-01", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "agent-30", exact: true })).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "agent-04 ↔ agent-30", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Show all agents" }).click();
   await expect(page.getByTestId("agent-full-row")).toHaveCount(24);
   await expect(page.getByTestId("agent-full-row").nth(0)).toContainText("agent-20");
+});
+
+test("chat sidebar pins channels and direct messages per workspace", async ({ page }) => {
+  await stubRuntime(page);
+  await page.goto("/chat");
+
+  await expect(page.getByTestId("sidebar-channel-item")).toHaveText([
+    "general",
+    "ops",
+  ]);
+  await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
+    "agent-01",
+    "alice",
+  ]);
+
+  await page
+    .getByTestId("sidebar-channel-item")
+    .filter({ hasText: "ops" })
+    .hover();
+  await page.getByRole("button", { name: "Pin #ops" }).click();
+
+  await page
+    .getByTestId("sidebar-dm-item")
+    .filter({ hasText: "alice" })
+    .hover();
+  await page.getByRole("button", { name: "Pin DM alice" }).click();
+
+  await expect(page.getByTestId("sidebar-channel-item")).toHaveText([
+    "ops",
+    "general",
+  ]);
+  await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
+    "alice",
+    "agent-01",
+  ]);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem("gitim-pinned-conversations:layout"),
+      ),
+    )
+    .toBe(JSON.stringify({ channels: ["ops"], dms: ["alice--lewis"] }));
+
+  await page.reload();
+
+  await expect(page.getByTestId("sidebar-channel-item")).toHaveText([
+    "ops",
+    "general",
+  ]);
+  await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
+    "alice",
+    "agent-01",
+  ]);
 });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, ArchiveRestore, ChevronRight, Plus, Search } from "lucide-react";
+import { Hash, AtSign, ArchiveRestore, ChevronRight, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
@@ -26,9 +26,19 @@ interface SidebarProps {
 }
 
 const KNOWN_AGENT_STORAGE_PREFIX = "gitim-known-agents:";
+const PINNED_CONVERSATIONS_STORAGE_PREFIX = "gitim-pinned-conversations:";
+
+interface PinnedConversations {
+  channels: Set<string>;
+  dms: Set<string>;
+}
 
 function knownAgentStorageKey(slug: string): string {
   return `${KNOWN_AGENT_STORAGE_PREFIX}${slug}`;
+}
+
+function pinnedConversationsStorageKey(slug: string): string {
+  return `${PINNED_CONVERSATIONS_STORAGE_PREFIX}${slug}`;
 }
 
 function readKnownAgentIds(slug: string | null): Set<string> {
@@ -44,6 +54,56 @@ function readKnownAgentIds(slug: string | null): Set<string> {
 
 function writeKnownAgentIds(slug: string, ids: Set<string>) {
   localStorage.setItem(knownAgentStorageKey(slug), JSON.stringify([...ids].sort()));
+}
+
+function emptyPinnedConversations(): PinnedConversations {
+  return { channels: new Set(), dms: new Set() };
+}
+
+function readPinnedConversations(slug: string | null): PinnedConversations {
+  if (!slug) return emptyPinnedConversations();
+  try {
+    const raw = localStorage.getItem(pinnedConversationsStorageKey(slug));
+    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+    const record =
+      parsed && typeof parsed === "object"
+        ? (parsed as { channels?: unknown; dms?: unknown })
+        : {};
+    const channels = Array.isArray(record.channels) ? record.channels : [];
+    const dms = Array.isArray(record.dms) ? record.dms : [];
+    return {
+      channels: new Set(channels.filter((v): v is string => typeof v === "string")),
+      dms: new Set(dms.filter((v): v is string => typeof v === "string")),
+    };
+  } catch {
+    return emptyPinnedConversations();
+  }
+}
+
+function writePinnedConversations(slug: string, pins: PinnedConversations) {
+  localStorage.setItem(
+    pinnedConversationsStorageKey(slug),
+    JSON.stringify({
+      channels: [...pins.channels].sort(),
+      dms: [...pins.dms].sort(),
+    }),
+  );
+}
+
+function clonePinnedConversations(pins: PinnedConversations): PinnedConversations {
+  return {
+    channels: new Set(pins.channels),
+    dms: new Set(pins.dms),
+  };
+}
+
+function sortPinnedFirst(items: Channel[], pinnedNames: Set<string>): Channel[] {
+  return [...items].sort((a, b) => {
+    const aPinned = pinnedNames.has(a.name);
+    const bPinned = pinnedNames.has(b.name);
+    if (aPinned === bPinned) return 0;
+    return aPinned ? -1 : 1;
+  });
 }
 
 function dmDisplayName(channel: Channel, currentUser: string): string {
@@ -97,6 +157,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [knownAgentIds, setKnownAgentIds] = useState<Set<string>>(
     () => readKnownAgentIds(activeSlug),
   );
+  const [pinnedConversations, setPinnedConversations] = useState<PinnedConversations>(
+    () => readPinnedConversations(activeSlug),
+  );
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -132,6 +195,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     writeKnownAgentIds(activeSlug, next);
     setKnownAgentIds(next);
   }, [activeSlug, agents]);
+
+  useEffect(() => {
+    setPinnedConversations(readPinnedConversations(activeSlug));
+  }, [activeSlug]);
 
   async function handleCreateChannel() {
     if (!activeSlug) {
@@ -183,21 +250,27 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
   }, [dmSearchOpen]);
 
-  const regularChannels = channels.filter((c) => c.kind === "channel");
+  const regularChannels = sortPinnedFirst(
+    channels.filter((c) => c.kind === "channel"),
+    pinnedConversations.channels,
+  );
   const liveAgentIds = useMemo(
     () => new Set(agents.map((agent) => agent.id)),
     [agents],
   );
-  const dmChannels = channels
-    .filter((c) => c.kind === "dm")
-    .filter((c) => !shouldHideDmChannel(c, currentUser, liveAgentIds, knownAgentIds))
-    .sort((a, b) => {
-      const aMy = isMyDm(a, currentUser);
-      const bMy = isMyDm(b, currentUser);
-      if (aMy && !bMy) return -1;
-      if (!aMy && bMy) return 1;
-      return a.name.localeCompare(b.name);
-    });
+  const dmChannels = sortPinnedFirst(
+    channels
+      .filter((c) => c.kind === "dm")
+      .filter((c) => !shouldHideDmChannel(c, currentUser, liveAgentIds, knownAgentIds))
+      .sort((a, b) => {
+        const aMy = isMyDm(a, currentUser);
+        const bMy = isMyDm(b, currentUser);
+        if (aMy && !bMy) return -1;
+        if (!aMy && bMy) return 1;
+        return a.name.localeCompare(b.name);
+      }),
+    pinnedConversations.dms,
+  );
 
   const myDmChannels = dmChannels.filter((c) => isMyDm(c, currentUser));
   const otherDmChannels = dmChannels.filter((c) => !isMyDm(c, currentUser));
@@ -240,6 +313,21 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   function handleUserSelect(user: string) {
     setDmSearchOpen(false);
     onStartDm(user);
+  }
+
+  function handleTogglePinnedConversation(channel: Channel) {
+    if (!activeSlug) return;
+    setPinnedConversations((prev) => {
+      const next = clonePinnedConversations(prev);
+      const ids = channel.kind === "dm" ? next.dms : next.channels;
+      if (ids.has(channel.name)) {
+        ids.delete(channel.name);
+      } else {
+        ids.add(channel.name);
+      }
+      writePinnedConversations(activeSlug, next);
+      return next;
+    });
   }
 
   async function handleToggleArchivedSection() {
@@ -331,7 +419,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               unread={ch.unreadCount}
               hasMention={ch.hasMention}
               active={currentChannel === ch.name}
+              pinned={pinnedConversations.channels.has(ch.name)}
+              pinLabel={`Pin #${ch.name}`}
+              unpinLabel={`Unpin #${ch.name}`}
+              testId="sidebar-channel-item"
               onClick={() => onChannelSelect(ch.name)}
+              onTogglePin={() => handleTogglePinnedConversation(ch)}
             />
           ))}
           {filteredRegularChannels.length === 0 && channelQuery.trim() && (
@@ -521,7 +614,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
+                pinned={pinnedConversations.dms.has(ch.name)}
+                pinLabel={`Pin DM ${label}`}
+                unpinLabel={`Unpin DM ${label}`}
+                testId="sidebar-dm-item"
                 onClick={() => onChannelSelect(ch.name)}
+                onTogglePin={() => handleTogglePinnedConversation(ch)}
               />
             );
           })}
@@ -542,7 +640,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
+                pinned={pinnedConversations.dms.has(ch.name)}
+                pinLabel={`Pin DM ${label}`}
+                unpinLabel={`Unpin DM ${label}`}
+                testId="sidebar-dm-item"
                 onClick={() => onChannelSelect(ch.name)}
+                onTogglePin={() => handleTogglePinnedConversation(ch)}
               />
             );
           })}
@@ -558,22 +661,43 @@ interface ChannelItemProps {
   unread: number;
   hasMention: boolean;
   active: boolean;
+  pinned: boolean;
+  pinLabel: string;
+  unpinLabel: string;
+  testId: string;
   onClick: () => void;
+  onTogglePin: () => void;
 }
 
-function ChannelItem({ icon, label, unread, hasMention, active, onClick }: ChannelItemProps) {
+function ChannelItem({
+  icon,
+  label,
+  unread,
+  hasMention,
+  active,
+  pinned,
+  pinLabel,
+  unpinLabel,
+  testId,
+  onClick,
+  onTogglePin,
+}: ChannelItemProps) {
+  const pinButtonLabel = pinned ? unpinLabel : pinLabel;
   return (
-    <li>
+    <li
+      data-testid={testId}
+      className={[
+        "group flex items-center rounded-md border-l-2 transition-all duration-150",
+        active
+          ? "bg-primary/15 text-primary font-medium border-primary"
+          : "hover:bg-surface/60 text-text-secondary hover:text-foreground border-transparent",
+        unread > 0 && !active ? "text-foreground font-medium" : "",
+      ].join(" ")}
+    >
       <button
         type="button"
         onClick={onClick}
-        className={[
-          "w-full flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left transition-all duration-150",
-          active
-            ? "bg-primary/15 text-primary font-medium border-l-2 border-primary"
-            : "hover:bg-surface/60 text-text-secondary hover:text-foreground border-l-2 border-transparent",
-          unread > 0 && !active ? "text-foreground font-medium" : "",
-        ].join(" ")}
+        className="min-w-0 flex-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left"
       >
         {icon}
         <span className="truncate flex-1">{label}</span>
@@ -589,6 +713,24 @@ function ChannelItem({ icon, label, unread, hasMention, active, onClick }: Chann
           </Badge>
         )}
       </button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        aria-label={pinButtonLabel}
+        aria-pressed={pinned}
+        title={pinButtonLabel}
+        onClick={(e) => {
+          e.stopPropagation();
+          onTogglePin();
+        }}
+        className={[
+          "mr-1 text-text-faint transition-opacity hover:text-primary focus-visible:opacity-100",
+          pinned ? "opacity-100 text-primary" : "opacity-0 group-hover:opacity-100",
+        ].join(" ")}
+      >
+        <Pin className={["size-3", pinned ? "fill-current" : ""].join(" ")} />
+      </Button>
     </li>
   );
 }
