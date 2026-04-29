@@ -26,8 +26,7 @@ fn resolve_stdbin(name: &str) -> String {
 
 #[tokio::test]
 async fn test_preflight_pi_not_installed() {
-    let result =
-        preflight_pi_with("/usr/bin/definitely-not-pi-xyz", Duration::from_secs(5)).await;
+    let result = preflight_pi_with("/usr/bin/definitely-not-pi-xyz", Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::NotInstalled));
@@ -66,6 +65,19 @@ async fn test_preflight_pi_timeout() {
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));
     assert_eq!(result.provider, "pi");
+}
+
+#[tokio::test]
+async fn test_preflight_pi_uses_text_rpc_field() {
+    let script = fixture("pi-rpc-echo.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let result = preflight_pi_with(script.to_str().unwrap(), Duration::from_secs(5)).await;
+
+    assert!(result.available, "expected available, got {result:?}");
+    assert_eq!(result.provider, "pi");
+    let preview = result.output_preview.expect("output_preview should be set");
+    assert!(preview.contains("GITIM_OK"), "preview: {preview}");
 }
 
 #[tokio::test]

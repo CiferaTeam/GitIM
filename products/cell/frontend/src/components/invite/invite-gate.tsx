@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { verifyInviteCode } from "../../lib/cell-api";
 import { getUUID } from "../../lib/device";
 import { GuidePage } from "./guide-page";
@@ -9,25 +9,23 @@ const SETUP_COMPLETED_KEY = "gitim:setup_completed";
 
 type GateStatus = "checking" | "need_code" | "need_setup" | "verified";
 
+function initialGateStatus(): GateStatus {
+  if (import.meta.env.DEV) {
+    return "verified";
+  }
+  const verified = localStorage.getItem(INVITE_VERIFIED_KEY);
+  if (!verified) {
+    return "need_code";
+  }
+  const setupDone = localStorage.getItem(SETUP_COMPLETED_KEY);
+  return setupDone ? "verified" : "need_setup";
+}
+
 export function InviteGate({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<GateStatus>("checking");
+  const [status, setStatus] = useState<GateStatus>(initialGateStatus);
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (import.meta.env.DEV) {
-      setStatus("verified");
-      return;
-    }
-    const verified = localStorage.getItem(INVITE_VERIFIED_KEY);
-    if (!verified) {
-      setStatus("need_code");
-      return;
-    }
-    const setupDone = localStorage.getItem(SETUP_COMPLETED_KEY);
-    setStatus(setupDone ? "verified" : "need_setup");
-  }, []);
 
   if (status === "checking") {
     return (

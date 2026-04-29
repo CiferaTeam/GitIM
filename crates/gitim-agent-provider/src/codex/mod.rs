@@ -117,6 +117,8 @@ impl Provider for CodexProvider {
         let (result_tx, result_rx) = oneshot::channel();
 
         let stderr_tail = stderr_tail();
+        let cancel_token = CancellationToken::new();
+        let cancel_token_inner = cancel_token.clone();
         let join_handle = tokio::spawn(async move {
             drive_session(
                 child,
@@ -127,6 +129,7 @@ impl Provider for CodexProvider {
                 timeout,
                 pid,
                 stderr_tail,
+                cancel_token_inner,
             )
             .await;
         });
@@ -135,7 +138,7 @@ impl Provider for CodexProvider {
             event_rx,
             result_rx,
             join_handle.abort_handle(),
-            CancellationToken::new(),
+            cancel_token,
         ))
     }
 }
@@ -149,6 +152,7 @@ async fn drive_session(
     timeout: Duration,
     pid: u32,
     stderr_tail: SharedStderrTail,
+    cancel_token: CancellationToken,
 ) {
     let start = Instant::now();
     let mut output = String::new();
@@ -170,53 +174,70 @@ async fn drive_session(
     });
 
     let read_result = tokio::time::timeout(timeout, async {
-        while let Ok(Some(line)) = reader.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
+        loop {
+            tokio::select! {
+                line = reader.next_line() => {
+                    let line = match line {
+                        Ok(Some(line)) => line.trim().to_string(),
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!(pid, error = %e, "stdout read error");
+                            break;
+                        }
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
 
-            // Codex streams token_count events mid-session; capture the
-            // latest used_percent seen. Runs alongside parse_line since
-            // token_count is an event_msg type parse_line doesn't handle.
-            if let Some(pct) = parse_used_percent(&line) {
-                latest_used_percent = Some(pct);
-            }
+                    // Codex streams token_count events mid-session; capture the
+                    // latest used_percent seen. Runs alongside parse_line since
+                    // token_count is an event_msg type parse_line doesn't handle.
+                    if let Some(pct) = parse_used_percent(&line) {
+                        latest_used_percent = Some(pct);
+                    }
 
-            let parsed = match parse_line(&line) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
+                    let parsed = match parse_line(&line) {
+                        Some(parsed) => parsed,
+                        None => continue,
+                    };
 
-            match parsed {
-                ParsedMessage::ThreadStarted { id } => {
-                    thread_id = Some(id);
-                    try_send_event(
-                        &event_tx,
-                        Event::Status {
-                            status: "running".to_string(),
-                        },
-                    );
+                    match parsed {
+                        ParsedMessage::ThreadStarted { id } => {
+                            thread_id = Some(id);
+                            try_send_event(
+                                &event_tx,
+                                Event::Status {
+                                    status: "running".to_string(),
+                                },
+                            );
+                        }
+                        ParsedMessage::Text { content } => {
+                            append_output(&mut output, &content);
+                            try_send_event(&event_tx, Event::Text { content });
+                        }
+                        ParsedMessage::ToolUse { call_id, command } => {
+                            try_send_event(
+                                &event_tx,
+                                Event::ToolUse {
+                                    tool: "Bash".to_string(),
+                                    call_id,
+                                    input: json!({ "command": command }),
+                                },
+                            );
+                        }
+                        ParsedMessage::ToolResult { call_id, output } => {
+                            try_send_event(&event_tx, Event::ToolResult { call_id, output });
+                        }
+                        ParsedMessage::TurnCompleted => {
+                            saw_turn_completed = true;
+                        }
+                    }
                 }
-                ParsedMessage::Text { content } => {
-                    append_output(&mut output, &content);
-                    try_send_event(&event_tx, Event::Text { content });
-                }
-                ParsedMessage::ToolUse { call_id, command } => {
-                    try_send_event(
-                        &event_tx,
-                        Event::ToolUse {
-                            tool: "Bash".to_string(),
-                            call_id,
-                            input: json!({ "command": command }),
-                        },
-                    );
-                }
-                ParsedMessage::ToolResult { call_id, output } => {
-                    try_send_event(&event_tx, Event::ToolResult { call_id, output });
-                }
-                ParsedMessage::TurnCompleted => {
-                    saw_turn_completed = true;
+                _ = cancel_token.cancelled() => {
+                    info!(pid, "cancelled by steering");
+                    final_status = ExecStatus::Aborted;
+                    final_error = Some("cancelled by steering".to_string());
+                    break;
                 }
             }
         }
@@ -226,6 +247,8 @@ async fn drive_session(
     if read_result.is_err() {
         final_status = ExecStatus::Timeout;
         final_error = Some(format!("codex timed out after {timeout:?}"));
+        let _ = child.start_kill();
+    } else if final_status == ExecStatus::Aborted {
         let _ = child.start_kill();
     }
 
@@ -261,7 +284,11 @@ async fn drive_session(
     let duration = start.elapsed();
     info!(pid, ?final_status, ?duration, "codex finished");
 
-    let _ = stderr_handle.await;
+    if matches!(final_status, ExecStatus::Aborted | ExecStatus::Timeout) {
+        stderr_handle.abort();
+    } else {
+        let _ = stderr_handle.await;
+    }
 
     if final_status != ExecStatus::Completed {
         if let Some(stderr) = format_stderr_tail(&stderr_tail) {

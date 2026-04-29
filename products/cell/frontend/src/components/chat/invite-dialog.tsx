@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import {
@@ -33,14 +33,18 @@ export function InviteDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset local state whenever dialog closes
-  useEffect(() => {
-    if (!open) {
-      setSelected([]);
-      setSubmitting(false);
-      setError(null);
+  function resetLocalState() {
+    setSelected([]);
+    setSubmitting(false);
+    setError(null);
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (!nextOpen) {
+      resetLocalState();
     }
-  }, [open]);
+    onOpenChange(nextOpen);
+  }
 
   async function handleInvite() {
     if (!activeSlug) {
@@ -64,13 +68,12 @@ export function InviteDialog({
     try {
       await onInvited?.();
     } catch { /* refresh failure is non-fatal — invite已成功 */ }
-    setSelected([]);
+    resetLocalState();
     onOpenChange(false);
-    setSubmitting(false);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Invite members to #{channel}</DialogTitle>
@@ -92,7 +95,7 @@ export function InviteDialog({
           <DialogFooter>
             <Button
               variant="ghost"
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
               disabled={submitting}
             >
               Cancel

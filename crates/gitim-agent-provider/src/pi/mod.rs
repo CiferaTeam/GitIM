@@ -42,30 +42,10 @@ impl Provider for PiProvider {
 
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-        let mut args = vec!["--mode".to_string(), "rpc".to_string()];
-
-        if let Some(model) = &opts.model {
-            args.extend(["--model".to_string(), model.clone()]);
-        }
-
-        // Only inject system prompt on cold start — resuming a session carries
-        // its own history; re-sending the system prompt would duplicate it.
-        if let Some(system_prompt) = &opts.system_prompt {
-            if opts.resume_token.is_none() {
-                args.extend([
-                    "--append-system-prompt".to_string(),
-                    system_prompt.clone(),
-                ]);
-            }
-        }
-
-        match &opts.resume_token {
-            Some(token) => args.extend(["--session".to_string(), token.clone()]),
-            None => {}
-        }
+        let inv = build_invocation(&opts);
 
         let mut cmd = Command::new(&exec_path);
-        cmd.args(&args)
+        cmd.args(&inv.args)
             .stdout(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -159,11 +139,8 @@ async fn drive_session(
     });
 
     // Send the prompt.
-    let prompt_msg = format!(
-        "{}\n",
-        serde_json::json!({"type": "prompt", "message": prompt})
-    );
-    if let Err(e) = stdin.write_all(prompt_msg.as_bytes()).await {
+    let prompt_msg = build_prompt_command(&prompt);
+    if let Err(e) = stdin.write_all(&prompt_msg).await {
         warn!(pid, error = %e, "failed to write prompt to pi stdin");
         let _ = result_tx.send(ExecResult {
             status: ExecStatus::Failed,
@@ -218,12 +195,11 @@ async fn drive_session(
                                     }
                                 }
                                 Some(PiEvent::AgentEnd) => {
-                                    // Execution complete. Send get_state to capture full sessionId.
-                                    let gs = b"{\"type\":\"get_state\"}\n";
-                                    if let Err(e) = stdin.write_all(gs).await {
-                                        warn!(pid, error = %e, "failed to send get_state");
+                                    // Execution complete. Send getState to capture full sessionId.
+                                    if let Err(e) = stdin.write_all(build_get_state_command()).await {
+                                        warn!(pid, error = %e, "failed to send getState");
                                     }
-                                    // Continue reading for the get_state response.
+                                    // Continue reading for the getState response.
                                 }
                                 Some(PiEvent::GetStateResponse { session_id: sid }) => {
                                     session_id = sid;
@@ -309,17 +285,90 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     }
 }
 
+/// Plan of record for invoking `pi` in RPC mode.
+#[derive(Debug)]
+pub struct Invocation {
+    pub args: Vec<String>,
+}
+
+/// Build argv for Pi RPC mode.
+///
+/// Pi documents provider/model as separate CLI flags. For GitIM config values
+/// written as `provider/model`, split only the first `/` and leave the rest as
+/// the model id.
+pub fn build_invocation(opts: &ExecOptions) -> Invocation {
+    let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+
+    if let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+        if let Some((provider, model_id)) = split_provider_model(model) {
+            args.extend(["--provider".to_string(), provider.to_string()]);
+            args.extend(["--model".to_string(), model_id.to_string()]);
+        } else {
+            args.extend(["--model".to_string(), model.to_string()]);
+        }
+    }
+
+    if opts.resume_token.is_none() {
+        if let Some(system_prompt) = opts.system_prompt.as_ref().filter(|s| !s.is_empty()) {
+            args.extend(["--append-system-prompt".to_string(), system_prompt.clone()]);
+        }
+    }
+
+    if let Some(token) = opts.resume_token.as_ref().filter(|s| !s.is_empty()) {
+        args.extend(["--session".to_string(), token.clone()]);
+    }
+
+    Invocation { args }
+}
+
+fn split_provider_model(model: &str) -> Option<(&str, &str)> {
+    let (provider, model_id) = model.split_once('/')?;
+    if provider.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some((provider, model_id))
+}
+
+fn build_prompt_command(prompt: &str) -> Vec<u8> {
+    let mut buf = serde_json::to_vec(&serde_json::json!({
+        "type": "prompt",
+        "text": prompt,
+    }))
+    .expect("prompt command serializes");
+    buf.push(b'\n');
+    buf
+}
+
+fn build_get_state_command() -> &'static [u8] {
+    b"{\"type\":\"getState\"}\n"
+}
+
 /// Parsed event from a single Pi RPC stdout line.
 #[derive(Debug)]
 enum PiEvent {
     AgentStart,
-    TextDelta { content: String },
-    ToolUse { name: String, call_id: String, input: Value },
-    ToolResult { call_id: String, output: String },
-    TurnEnd { stop_reason: Option<String> },
+    TextDelta {
+        content: String,
+    },
+    ToolUse {
+        name: String,
+        call_id: String,
+        input: Value,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
+    TurnEnd {
+        stop_reason: Option<String>,
+    },
     AgentEnd,
-    GetStateResponse { session_id: String },
-    AbortResponse { success: bool },
+    GetStateResponse {
+        session_id: String,
+    },
+    AbortResponse {
+        success: bool,
+    },
 }
 
 fn parse_event(line: &str) -> Option<PiEvent> {
@@ -360,7 +409,11 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                         .and_then(|t| t.get("input"))
                         .cloned()
                         .unwrap_or(Value::Object(Default::default()));
-                    Some(PiEvent::ToolUse { name, call_id, input })
+                    Some(PiEvent::ToolUse {
+                        name,
+                        call_id,
+                        input,
+                    })
                 }
                 "tool_end" => {
                     let call_id = ae
@@ -395,7 +448,7 @@ fn parse_event(line: &str) -> Option<PiEvent> {
         "response" => {
             let command = v.get("command")?.as_str()?;
             match command {
-                "get_state" => {
+                "getState" | "get_state" => {
                     let session_id = v
                         .get("data")
                         .and_then(|d| d.get("sessionId"))
@@ -405,10 +458,7 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                     Some(PiEvent::GetStateResponse { session_id })
                 }
                 "abort" => {
-                    let success = v
-                        .get("success")
-                        .and_then(|s| s.as_bool())
-                        .unwrap_or(false);
+                    let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
                     Some(PiEvent::AbortResponse { success })
                 }
                 _ => None,
@@ -457,7 +507,7 @@ mod tests {
 
     #[test]
     fn parse_get_state_response() {
-        let line = r#"{"type":"response","command":"get_state","success":true,"data":{"sessionId":"019db56e-1c53-7280-b2eb-886215c9a5e6","messageCount":2}}"#;
+        let line = r#"{"type":"response","command":"getState","success":true,"data":{"sessionId":"019db56e-1c53-7280-b2eb-886215c9a5e6","messageCount":2}}"#;
         let event = parse_event(line).expect("should parse");
         let PiEvent::GetStateResponse { session_id } = event else {
             panic!("expected GetStateResponse");
@@ -477,7 +527,11 @@ mod tests {
         let PiEvent::GetStateResponse { session_id } = event else {
             panic!("expected GetStateResponse");
         };
-        assert_eq!(session_id.len(), 36, "sessionId must be full UUID, not truncated");
+        assert_eq!(
+            session_id.len(),
+            36,
+            "sessionId must be full UUID, not truncated"
+        );
         assert_eq!(session_id, full_uuid);
     }
 
@@ -521,5 +575,76 @@ mod tests {
     fn unrecognized_event_type_returns_none() {
         let line = r#"{"type":"message_start","message":{}}"#;
         assert!(parse_event(line).is_none());
+    }
+
+    #[test]
+    fn build_invocation_splits_provider_model() {
+        let opts = ExecOptions {
+            model: Some("openai/gpt-4o-mini".to_string()),
+            system_prompt: Some("sys".to_string()),
+            ..Default::default()
+        };
+        let inv = build_invocation(&opts);
+
+        assert_eq!(inv.args[0], "--mode");
+        assert_eq!(inv.args[1], "rpc");
+
+        let provider_idx = inv
+            .args
+            .iter()
+            .position(|a| a == "--provider")
+            .expect("--provider flag");
+        assert_eq!(inv.args[provider_idx + 1], "openai");
+
+        let model_idx = inv
+            .args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model flag");
+        assert_eq!(inv.args[model_idx + 1], "gpt-4o-mini");
+
+        let prompt_idx = inv
+            .args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("--append-system-prompt flag");
+        assert_eq!(inv.args[prompt_idx + 1], "sys");
+    }
+
+    #[test]
+    fn build_invocation_omits_system_prompt_on_resume() {
+        let opts = ExecOptions {
+            system_prompt: Some("sys".to_string()),
+            resume_token: Some("session-1".to_string()),
+            ..Default::default()
+        };
+        let inv = build_invocation(&opts);
+
+        assert!(!inv.args.iter().any(|a| a == "--append-system-prompt"));
+
+        let session_idx = inv
+            .args
+            .iter()
+            .position(|a| a == "--session")
+            .expect("--session flag");
+        assert_eq!(inv.args[session_idx + 1], "session-1");
+    }
+
+    #[test]
+    fn prompt_command_uses_text_field() {
+        let command = build_prompt_command("hello");
+        let parsed: Value = serde_json::from_slice(&command).expect("json command");
+
+        assert_eq!(parsed["type"], "prompt");
+        assert_eq!(parsed["text"], "hello");
+        assert!(parsed.get("message").is_none());
+    }
+
+    #[test]
+    fn get_state_command_uses_documented_name() {
+        let command = build_get_state_command();
+        let parsed: Value = serde_json::from_slice(command).expect("json command");
+
+        assert_eq!(parsed["type"], "getState");
     }
 }

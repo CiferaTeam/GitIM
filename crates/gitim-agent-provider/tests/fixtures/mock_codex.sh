@@ -65,6 +65,12 @@ fi
 echo '{"type":"thread.started","thread_id":"'"$THREAD_ID"'"}'
 echo '{"type":"turn.started"}'
 
+if [[ "${MOCK_CODEX_WAIT_AFTER_THREAD_STARTED:-}" == "1" ]]; then
+    while true; do
+        sleep 1
+    done
+fi
+
 if [[ "$MODE" == "resume" ]]; then
     if [[ "$SAW_CD_FLAG" == "true" ]]; then
         echo "resume does not accept -C/--cd" >&2
