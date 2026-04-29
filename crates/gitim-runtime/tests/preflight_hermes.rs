@@ -24,8 +24,12 @@ fn resolve_stdbin(name: &str) -> String {
 
 #[tokio::test]
 async fn test_preflight_hermes_not_installed() {
-    let result =
-        preflight_hermes_with("/usr/bin/definitely-not-hermes-xyz", Duration::from_secs(5)).await;
+    let result = preflight_hermes_with(
+        "/usr/bin/definitely-not-hermes-xyz",
+        Duration::from_secs(5),
+        None,
+    )
+    .await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::NotInstalled));
@@ -36,7 +40,8 @@ async fn test_preflight_hermes_not_installed() {
 #[tokio::test]
 async fn test_preflight_hermes_exit_nonzero() {
     // `false` exits 1 immediately — spawn succeeds but process fails.
-    let result = preflight_hermes_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
+    let result =
+        preflight_hermes_with(&resolve_stdbin("false"), Duration::from_secs(5), None).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -46,7 +51,8 @@ async fn test_preflight_hermes_exit_nonzero() {
 #[tokio::test]
 async fn test_preflight_hermes_empty_output() {
     // `true` exits 0 but writes nothing to stdout — ACP stream ends immediately.
-    let result = preflight_hermes_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
+    let result =
+        preflight_hermes_with(&resolve_stdbin("true"), Duration::from_secs(5), None).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.provider, "hermes");
@@ -60,8 +66,12 @@ async fn test_preflight_hermes_timeout() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let result =
-        preflight_hermes_with(script.to_str().unwrap(), Duration::from_millis(300)).await;
+    let result = preflight_hermes_with(
+        script.to_str().unwrap(),
+        Duration::from_millis(300),
+        None,
+    )
+    .await;
 
     assert!(!result.available, "expected unavailable on timeout, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));
