@@ -32,6 +32,24 @@ pub fn profile_dir(handler: &str) -> Result<PathBuf, HermesProfileError> {
     Ok(home.join(".hermes/profiles").join(profile_name(handler)))
 }
 
+/// Returns true when the user's default hermes profile (the source of
+/// `--clone` for new agent profiles) appears to have been set up — i.e.
+/// at least one of `.env` (API keys) or `auth.json` (OAuth state) is
+/// present. False when the user has installed hermes but never run
+/// `hermes setup`, in which case cloning would yield an unusable agent.
+///
+/// Respects `HERMES_HOME` env override; falls back to `~/.hermes`.
+pub fn default_profile_ready() -> bool {
+    let home = std::env::var_os("HERMES_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")));
+
+    match home {
+        Some(h) => h.join(".env").is_file() || h.join("auth.json").is_file(),
+        None => false,
+    }
+}
+
 /// Outcome of an `ensure_profile` call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnsureOutcome {
@@ -174,5 +192,43 @@ mod tests {
         delete_profile_with("alice", "/nonexistent/binary/xyz")
             .await
             .expect("delete should be best-effort when CLI is missing");
+    }
+
+    // `default_profile_ready` reads HERMES_HOME, a process-global env var.
+    // serial_test prevents these from running concurrently with each other
+    // or with other tests that touch HERMES_HOME.
+    mod default_profile_ready_tests {
+        use super::super::default_profile_ready;
+        use serial_test::serial;
+        use tempfile::TempDir;
+
+        #[test]
+        #[serial(hermes_home_env)]
+        fn ready_when_env_file_exists() {
+            let tmp = TempDir::new().unwrap();
+            std::fs::write(tmp.path().join(".env"), "FOO=bar").unwrap();
+            std::env::set_var("HERMES_HOME", tmp.path());
+            assert!(default_profile_ready());
+            std::env::remove_var("HERMES_HOME");
+        }
+
+        #[test]
+        #[serial(hermes_home_env)]
+        fn ready_when_authjson_exists() {
+            let tmp = TempDir::new().unwrap();
+            std::fs::write(tmp.path().join("auth.json"), "{}").unwrap();
+            std::env::set_var("HERMES_HOME", tmp.path());
+            assert!(default_profile_ready());
+            std::env::remove_var("HERMES_HOME");
+        }
+
+        #[test]
+        #[serial(hermes_home_env)]
+        fn not_ready_when_empty() {
+            let tmp = TempDir::new().unwrap();
+            std::env::set_var("HERMES_HOME", tmp.path());
+            assert!(!default_profile_ready());
+            std::env::remove_var("HERMES_HOME");
+        }
     }
 }
