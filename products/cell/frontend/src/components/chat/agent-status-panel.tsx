@@ -146,11 +146,11 @@ export function AgentStatusPanel() {
   if (agents.length === 0) return null;
 
   return (
-    <div className="px-3 pt-3 pb-1">
-      <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider mb-2 px-2">
+    <div className="px-3 pt-3 pb-2 max-h-[32%] min-h-0 shrink-0 flex flex-col overflow-hidden">
+      <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider mb-2 px-2 shrink-0">
         Agents
       </p>
-      <div className="space-y-1.5">
+      <div className="-mx-1 px-1 space-y-1.5 overflow-y-auto min-h-0 flex-1">
         {agents.map((agent) => (
           <AgentRow
             key={agent.id}

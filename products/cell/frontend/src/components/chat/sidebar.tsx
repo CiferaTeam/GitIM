@@ -239,7 +239,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           />
         </div>
 
-        <div className="overflow-y-auto -mx-1 px-1 space-y-0.5">
+        <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
           {filteredRegularChannels.map((ch) => (
             <ChannelItem
               key={ch.name}
@@ -383,7 +383,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       </div>
 
       {/* DMs section */}
-      <div className="px-3 pt-3 pb-4 border-t border-border/60 flex flex-col min-h-0 max-h-[45%]">
+      <div className="px-3 pt-3 pb-4 border-t border-border/60 flex flex-col min-h-0 max-h-[45%] overflow-hidden">
         <div className="flex items-center justify-between mb-2 px-2">
           <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
             Direct Messages
@@ -427,7 +427,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           </Popover>
         </div>
 
-        <div className="overflow-y-auto -mx-1 px-1 space-y-0.5">
+        <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
           {myDmChannels.map((ch) => {
             const label = dmDisplayName(ch, currentUser);
             return (

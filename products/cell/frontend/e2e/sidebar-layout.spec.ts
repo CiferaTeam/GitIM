@@ -1,0 +1,136 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const runtimePort = 49321;
+const slug = "layout";
+
+function agents(count: number) {
+  return Array.from({ length: count }, (_, i) => {
+    const n = String(i + 1).padStart(2, "0");
+    return {
+      id: `agent-${n}`,
+      handler: `agent-${n}`,
+      display_name: `agent-${n}`,
+      status: i % 3 === 0 ? "running" : "idle",
+      repo_path: "",
+      messages_processed: i,
+      last_activity: "2026-04-29T10:00:00Z",
+    };
+  });
+}
+
+async function stubRuntime(page: Page) {
+  await page.addInitScript(({ port, activeSlug }) => {
+    localStorage.clear();
+    localStorage.setItem("gitim-runtime-port", String(port));
+    localStorage.setItem("gitim-active-workspace", activeSlug);
+  }, { port: runtimePort, activeSlug: slug });
+
+  await page.route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/check-version") {
+      await route.fulfill({ json: { ok: true, latest_version: "0.0.0" } });
+      return;
+    }
+    if (url.hostname !== "127.0.0.1" || url.port !== String(runtimePort)) {
+      await route.continue();
+      return;
+    }
+
+    if (url.pathname === "/health") {
+      await route.fulfill({ json: { service: "gitim-runtime", version: "0.0.0" } });
+      return;
+    }
+    if (url.pathname === "/workspaces") {
+      await route.fulfill({
+        json: {
+          workspaces: [
+            {
+              slug,
+              workspace_name: "Layout",
+              path: "/tmp/layout",
+              provider: "local",
+              initialized: true,
+            },
+          ],
+        },
+      });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/me`) {
+      await route.fulfill({ json: { ok: true, data: { handler: "lewis" } } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/channels`) {
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            channels: [
+              {
+                name: "general",
+                kind: "channel",
+                members: ["lewis"],
+              },
+              {
+                name: "ops",
+                kind: "channel",
+                members: ["lewis"],
+              },
+              {
+                name: "agent-01--lewis",
+                kind: "dm",
+                members: ["agent-01", "lewis"],
+              },
+            ],
+          },
+        },
+      });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/users`) {
+      await route.fulfill({ json: { ok: true, data: { users: ["lewis", "agent-01"] } } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/agents`) {
+      await route.fulfill({ json: { ok: true, agents: agents(24) } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/cards`) {
+      await route.fulfill({ json: { ok: true, data: { cards: [] } } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/read`) {
+      await route.fulfill({ json: { ok: true, data: { entries: [] } } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/poll`) {
+      await route.fulfill({ json: { ok: true, data: { commit_id: "1", changes: [] } } });
+      return;
+    }
+
+    await route.fulfill({ status: 404, json: { ok: false, error: url.pathname } });
+  });
+}
+
+test("chat sidebar keeps channels visible when many agents are active", async ({ page }) => {
+  await stubRuntime(page);
+  await page.goto("/chat");
+
+  const sidebar = page.locator(".w-64").first();
+  const channelsHeading = page.getByText("Channels", { exact: true });
+
+  await expect(channelsHeading).toBeVisible();
+
+  const [sidebarBox, channelsBox] = await Promise.all([
+    sidebar.boundingBox(),
+    channelsHeading.boundingBox(),
+  ]);
+
+  expect(sidebarBox).not.toBeNull();
+  expect(channelsBox).not.toBeNull();
+  expect(channelsBox!.y).toBeGreaterThanOrEqual(sidebarBox!.y);
+  expect(channelsBox!.y + channelsBox!.height).toBeLessThanOrEqual(
+    sidebarBox!.y + sidebarBox!.height,
+  );
+  await expect(page.getByRole("button", { name: "general" })).toBeVisible();
+});
