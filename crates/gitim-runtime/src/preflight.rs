@@ -689,7 +689,7 @@ pub async fn preflight_opencode() -> PreflightResult {
 ///
 /// Protocol:
 /// 1. Spawn `pi --mode rpc --no-session --no-tools`
-/// 2. Write `{"type":"prompt","message":"Reply with exactly: GITIM_OK"}` to stdin
+/// 2. Write `{"type":"prompt","text":"Reply with exactly: GITIM_OK"}` to stdin
 /// 3. Stream stdout events until `agent_end`; collect text from `message_update` deltas
 /// 4. Explicitly kill the process — in `--no-session` mode Pi may exit naturally,
 ///    but we kill unconditionally to guarantee cleanup in both session/no-session modes
@@ -723,7 +723,7 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
     let stdout = child.stdout.take().expect("stdout piped");
 
     // Send the prompt.
-    let prompt_msg = b"{\"type\":\"prompt\",\"message\":\"Reply with exactly: GITIM_OK\"}\n";
+    let prompt_msg = b"{\"type\":\"prompt\",\"text\":\"Reply with exactly: GITIM_OK\"}\n";
     if let Err(e) = stdin.write_all(prompt_msg).await {
         let _ = child.start_kill();
         return PreflightResult::failure(

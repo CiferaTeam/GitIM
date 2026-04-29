@@ -68,6 +68,19 @@ async fn test_preflight_pi_timeout() {
 }
 
 #[tokio::test]
+async fn test_preflight_pi_uses_text_rpc_field() {
+    let script = fixture("pi-rpc-echo.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let result = preflight_pi_with(script.to_str().unwrap(), Duration::from_secs(5)).await;
+
+    assert!(result.available, "expected available, got {result:?}");
+    assert_eq!(result.provider, "pi");
+    let preview = result.output_preview.expect("output_preview should be set");
+    assert!(preview.contains("GITIM_OK"), "preview: {preview}");
+}
+
+#[tokio::test]
 #[ignore = "requires real pi CLI; run manually with --ignored"]
 async fn test_preflight_pi_real_hello() {
     let result = preflight_pi().await;
