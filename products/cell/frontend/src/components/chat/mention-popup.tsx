@@ -14,11 +14,8 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
   );
 
   const [activeIndex, setActiveIndex] = useState(0);
-
-  // Reset activeIndex when filter changes
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [filter]);
+  const selectedIndex =
+    filtered.length === 0 ? 0 : Math.min(activeIndex, filtered.length - 1);
 
   // Use refs to avoid stale closures in the keydown listener
   const filteredRef = useRef(filtered);
@@ -26,14 +23,19 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
   const onSelectRef = useRef(onSelect);
   const onCloseRef = useRef(onClose);
 
-  filteredRef.current = filtered;
-  activeIndexRef.current = activeIndex;
-  onSelectRef.current = onSelect;
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    filteredRef.current = filtered;
+    activeIndexRef.current = selectedIndex;
+    onSelectRef.current = onSelect;
+    onCloseRef.current = onClose;
+  }, [filtered, selectedIndex, onSelect, onClose]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       const list = filteredRef.current;
+      if (list.length === 0) {
+        return;
+      }
       const idx = activeIndexRef.current;
 
       if (e.key === "ArrowDown") {
@@ -71,7 +73,7 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
             key={user}
             className={cn(
               "w-full text-left px-3 py-1.5 text-sm transition-colors",
-              i === activeIndex
+              i === selectedIndex
                 ? "bg-accent text-accent-foreground"
                 : "hover:bg-muted"
             )}

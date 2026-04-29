@@ -52,10 +52,7 @@ impl Provider for PiProvider {
         // its own history; re-sending the system prompt would duplicate it.
         if let Some(system_prompt) = &opts.system_prompt {
             if opts.resume_token.is_none() {
-                args.extend([
-                    "--append-system-prompt".to_string(),
-                    system_prompt.clone(),
-                ]);
+                args.extend(["--append-system-prompt".to_string(), system_prompt.clone()]);
             }
         }
 
@@ -313,13 +310,28 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
 #[derive(Debug)]
 enum PiEvent {
     AgentStart,
-    TextDelta { content: String },
-    ToolUse { name: String, call_id: String, input: Value },
-    ToolResult { call_id: String, output: String },
-    TurnEnd { stop_reason: Option<String> },
+    TextDelta {
+        content: String,
+    },
+    ToolUse {
+        name: String,
+        call_id: String,
+        input: Value,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
+    TurnEnd {
+        stop_reason: Option<String>,
+    },
     AgentEnd,
-    GetStateResponse { session_id: String },
-    AbortResponse { success: bool },
+    GetStateResponse {
+        session_id: String,
+    },
+    AbortResponse {
+        success: bool,
+    },
 }
 
 fn parse_event(line: &str) -> Option<PiEvent> {
@@ -360,7 +372,11 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                         .and_then(|t| t.get("input"))
                         .cloned()
                         .unwrap_or(Value::Object(Default::default()));
-                    Some(PiEvent::ToolUse { name, call_id, input })
+                    Some(PiEvent::ToolUse {
+                        name,
+                        call_id,
+                        input,
+                    })
                 }
                 "tool_end" => {
                     let call_id = ae
@@ -405,10 +421,7 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                     Some(PiEvent::GetStateResponse { session_id })
                 }
                 "abort" => {
-                    let success = v
-                        .get("success")
-                        .and_then(|s| s.as_bool())
-                        .unwrap_or(false);
+                    let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
                     Some(PiEvent::AbortResponse { success })
                 }
                 _ => None,
@@ -477,7 +490,11 @@ mod tests {
         let PiEvent::GetStateResponse { session_id } = event else {
             panic!("expected GetStateResponse");
         };
-        assert_eq!(session_id.len(), 36, "sessionId must be full UUID, not truncated");
+        assert_eq!(
+            session_id.len(),
+            36,
+            "sessionId must be full UUID, not truncated"
+        );
         assert_eq!(session_id, full_uuid);
     }
 

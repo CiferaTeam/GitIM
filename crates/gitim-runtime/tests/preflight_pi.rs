@@ -26,8 +26,7 @@ fn resolve_stdbin(name: &str) -> String {
 
 #[tokio::test]
 async fn test_preflight_pi_not_installed() {
-    let result =
-        preflight_pi_with("/usr/bin/definitely-not-pi-xyz", Duration::from_secs(5)).await;
+    let result = preflight_pi_with("/usr/bin/definitely-not-pi-xyz", Duration::from_secs(5)).await;
 
     assert!(!result.available, "expected unavailable, got {result:?}");
     assert_eq!(result.error_kind, Some(ErrorKind::NotInstalled));

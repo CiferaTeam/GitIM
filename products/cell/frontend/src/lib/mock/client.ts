@@ -100,6 +100,8 @@ export async function createChannel(
   _introduction?: string,
 ): Promise<ApiResponse> {
   await delay();
+  void _displayName;
+  void _introduction;
   if (!name || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) || name.length > 32 || name.includes("--")) {
     return { ok: false, error: "invalid channel name" };
   }

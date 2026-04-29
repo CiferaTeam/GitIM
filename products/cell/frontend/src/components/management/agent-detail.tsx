@@ -9,7 +9,7 @@ import { PROVIDERS } from "@/lib/providers";
 import type { Agent } from "@/lib/types";
 import { ArrowLeft, Play, Pause, Trash2, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
-import { relativeTime, statusBadge } from "./agent-card";
+import { relativeTime, statusBadge } from "./agent-status";
 import { ProviderBadge } from "./provider-badge";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";

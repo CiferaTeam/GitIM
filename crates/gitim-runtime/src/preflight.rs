@@ -715,12 +715,7 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
             } else {
                 format!("failed to spawn pi: {e}")
             };
-            return PreflightResult::failure(
-                "pi",
-                kind,
-                msg,
-                started.elapsed().as_millis() as u64,
-            );
+            return PreflightResult::failure("pi", kind, msg, started.elapsed().as_millis() as u64);
         }
     };
 

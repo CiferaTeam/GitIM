@@ -4,27 +4,7 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-
-// Builds an SVG `<path d="">` string for a polyline sparkline.
-// Exported for isolated testing.
-export function sparklinePath(values: number[], w: number, h: number): string {
-  if (values.length === 0) return "";
-  if (values.length === 1) {
-    const y = h / 2;
-    return `M0,${y.toFixed(1)} L${w.toFixed(1)},${y.toFixed(1)}`;
-  }
-  // max(1, ...) avoids div-by-zero when every day is still 0 — we just draw
-  // a flat line along the bottom instead of NaN coords.
-  const max = Math.max(1, ...values);
-  const step = w / (values.length - 1);
-  return values
-    .map((v, i) => {
-      const x = i * step;
-      const y = h - (v / max) * h;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-}
+import { sparklinePath } from "@/lib/sparkline";
 
 interface SparklineProps {
   values: number[];

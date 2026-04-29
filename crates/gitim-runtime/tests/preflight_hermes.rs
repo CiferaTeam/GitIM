@@ -60,10 +60,12 @@ async fn test_preflight_hermes_timeout() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let result =
-        preflight_hermes_with(script.to_str().unwrap(), Duration::from_millis(300)).await;
+    let result = preflight_hermes_with(script.to_str().unwrap(), Duration::from_millis(300)).await;
 
-    assert!(!result.available, "expected unavailable on timeout, got {result:?}");
+    assert!(
+        !result.available,
+        "expected unavailable on timeout, got {result:?}"
+    );
     assert_eq!(result.error_kind, Some(ErrorKind::Timeout));
     assert_eq!(result.provider, "hermes");
 }
