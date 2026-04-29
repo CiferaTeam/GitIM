@@ -23,7 +23,11 @@ test.describe("UI agent CRUD (real backend)", () => {
   }) => {
     // 1. Go through full UI startup flow
     await page.goto(`http://127.0.0.1:${env.vitePort}`);
-    await page.evaluate(() => localStorage.clear());
+    await page.evaluate(() => {
+      localStorage.clear();
+      localStorage.setItem("gitim:invite_verified", "true");
+      localStorage.setItem("gitim:setup_completed", "true");
+    });
     await page.reload();
 
     // Connect

@@ -113,9 +113,6 @@ function updateAgentStatus(): void {
   const agents = getMockAgents();
   if (agents.length === 0) return;
 
-  const messages = getMockMessages();
-  const channelKeys = Object.keys(messages);
-
   const agent = pick(agents);
 
   if (agent.status === "running") {

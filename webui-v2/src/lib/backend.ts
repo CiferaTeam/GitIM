@@ -134,6 +134,9 @@ export class LocalBackend implements Backend {
       // Unsolicited events from sync loop
       if ("type" in data && data.type === "sync_reset") {
         this.onSyncReset?.();
+        const reset = (globalThis as unknown as Record<string, unknown>)
+          .__gitimSyncReset;
+        if (typeof reset === "function") reset();
         return;
       }
 

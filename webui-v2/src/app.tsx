@@ -36,6 +36,8 @@ function ChatPage() {
 
 export default function App() {
   const mode = useConnectionStore((s) => s.mode);
+  const status = useConnectionStore((s) => s.status);
+  const localReady = useConnectionStore((s) => s.localReady);
   const setCurrentUser = useChatStore((s) => s.setCurrentUser);
   const setChannels = useChatStore((s) => s.setChannels);
   const setUsers = useChatStore((s) => s.setUsers);
@@ -125,6 +127,10 @@ export default function App() {
 
   // Init + poll loop
   useEffect(() => {
+    const backendReady =
+      mode === "local" ? localReady : status === "ready";
+    if (!backendReady) return;
+
     async function init() {
       const isLocal = mode === "local";
       const pollInterval = isLocal ? LOCAL_POLL_MS : REMOTE_POLL_MS;
@@ -189,7 +195,17 @@ export default function App() {
     return () => {
       clearInterval(pollHandle);
     };
-  }, [mode, setCurrentUser, setChannels, setUsers, setAgents, setConnected, runPoll]);
+  }, [
+    mode,
+    status,
+    localReady,
+    setCurrentUser,
+    setChannels,
+    setUsers,
+    setAgents,
+    setConnected,
+    runPoll,
+  ]);
 
   // Listen for sync_reset from LocalBackend — trigger full message reload
   useEffect(() => {
@@ -202,7 +218,7 @@ export default function App() {
       if (currentChannelRef.current) {
         const res = await client.read(currentChannelRef.current);
         if (res.ok && res.data) {
-          setMessages(res.data.messages as Message[]);
+          setMessages(res.data.entries as Message[]);
         }
       }
       // Refresh channels

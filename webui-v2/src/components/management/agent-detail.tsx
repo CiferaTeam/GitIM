@@ -6,7 +6,8 @@ import * as client from "@/lib/client";
 import type { Agent } from "@/lib/types";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
-import { relativeTime, statusBadge } from "./agent-card";
+import { AgentStatusBadge } from "./agent-status-badge";
+import { relativeTime } from "./agent-time";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -87,7 +88,7 @@ export function AgentDetail() {
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <h1 className="text-2xl font-semibold">{agent.name}</h1>
-        {statusBadge(agent.status)}
+        <AgentStatusBadge status={agent.status} />
       </div>
 
       {/* Fields */}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/utils";
 
 interface MentionPopupProps {
@@ -9,16 +9,14 @@ interface MentionPopupProps {
 }
 
 export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupProps) {
-  const filtered = users.filter((u) =>
-    u.toLowerCase().includes(filter.toLowerCase())
+  const filtered = useMemo(
+    () => users.filter((u) => u.toLowerCase().includes(filter.toLowerCase())),
+    [users, filter],
   );
 
   const [activeIndex, setActiveIndex] = useState(0);
-
-  // Reset activeIndex when filter changes
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [filter]);
+  const boundedActiveIndex =
+    filtered.length > 0 ? Math.min(activeIndex, filtered.length - 1) : 0;
 
   // Use refs to avoid stale closures in the keydown listener
   const filteredRef = useRef(filtered);
@@ -26,10 +24,12 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
   const onSelectRef = useRef(onSelect);
   const onCloseRef = useRef(onClose);
 
-  filteredRef.current = filtered;
-  activeIndexRef.current = activeIndex;
-  onSelectRef.current = onSelect;
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    filteredRef.current = filtered;
+    activeIndexRef.current = boundedActiveIndex;
+    onSelectRef.current = onSelect;
+    onCloseRef.current = onClose;
+  }, [filtered, boundedActiveIndex, onSelect, onClose]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -71,7 +71,7 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
             key={user}
             className={cn(
               "w-full text-left px-3 py-1.5 text-sm transition-colors",
-              i === activeIndex
+              i === boundedActiveIndex
                 ? "bg-accent text-accent-foreground"
                 : "hover:bg-muted"
             )}

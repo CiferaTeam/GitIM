@@ -1,4 +1,3 @@
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -8,40 +7,13 @@ import {
 } from "@/components/ui/card";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import * as client from "@/lib/client";
-import type { Agent, AgentStatus } from "@/lib/types";
+import type { Agent } from "@/lib/types";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
+import { AgentStatusBadge } from "./agent-status-badge";
+import { relativeTime } from "./agent-time";
 import { RemoveAgentDialog } from "./remove-agent-dialog";
-
-export function relativeTime(isoString: string): string {
-  const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} hours ago`;
-  return `${Math.floor(diff / 86400)} days ago`;
-}
-
-export function statusBadge(status: AgentStatus) {
-  switch (status) {
-    case "running":
-      return (
-        <Badge className="bg-success text-white hover:bg-success">
-          Running
-        </Badge>
-      );
-    case "idle":
-      return (
-        <Badge className="bg-warning text-white hover:bg-warning">
-          Idle
-        </Badge>
-      );
-    case "error":
-      return <Badge variant="destructive">Error</Badge>;
-    case "offline":
-      return <Badge variant="secondary">Offline</Badge>;
-  }
-}
 
 interface AgentCardProps {
   agent: Agent;
@@ -81,7 +53,7 @@ export function AgentCard({ agent }: AgentCardProps) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-2">
             <span className="font-semibold text-lg truncate">{agent.name}</span>
-            {statusBadge(agent.status)}
+            <AgentStatusBadge status={agent.status} />
           </div>
         </CardHeader>
 

@@ -368,8 +368,20 @@ fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
     if raw.len() <= MAX {
         raw
     } else {
-        format!("{}…", &raw[..raw.floor_char_boundary(MAX)])
+        format!("{}…", truncate_at_char_boundary(&raw, MAX))
     }
+}
+
+fn truncate_at_char_boundary(raw: &str, max: usize) -> &str {
+    if raw.len() <= max {
+        return raw;
+    }
+
+    let mut end = max;
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    &raw[..end]
 }
 
 /// Format channel changes into a prompt, filtering out self-authored messages.

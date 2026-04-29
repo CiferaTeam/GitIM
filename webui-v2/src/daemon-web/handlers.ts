@@ -7,6 +7,13 @@ import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
 import { runSync } from "./sync";
+import {
+  channelMetaPath,
+  channelNameFromMetaFile,
+  dmApiNameFromThreadPath,
+  resolveThreadTarget,
+  validateChannelName,
+} from "./paths";
 
 type ApiResponse = {
   ok: boolean;
@@ -150,9 +157,10 @@ export async function poll(since?: string): Promise<ApiResponse> {
           .replace(".thread", "");
         const entries = await readChannelEntries(channelName);
         changes.push({ channel: channelName, kind: "new_messages", entries });
-      } else if (fp.startsWith("dms/") && fp.endsWith(".thread")) {
-        const dmName = fp.replace("dms/", "").replace(".thread", "");
-        const entries = await readChannelEntries(dmName, true);
+      } else if (fp.startsWith("dm/") && fp.endsWith(".thread")) {
+        const dmName = dmApiNameFromThreadPath(fp);
+        if (!dmName) continue;
+        const entries = await readChannelEntries(dmName);
         changes.push({ channel: dmName, kind: "new_messages", entries });
       } else if (fp.includes("meta.yaml")) {
         metaChanged = true;
@@ -190,7 +198,9 @@ export async function channels(): Promise<ApiResponse> {
       if (!parts.includes(s.me.handler)) continue;
     }
     // For channels, only show if current user is a member
-    if (!isDm && !meta.members.includes(s.me.handler)) continue;
+    if (!isDm && meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
+      continue;
+    }
 
     channelList.push({
       name,
@@ -209,10 +219,10 @@ export async function read(
 ): Promise<ApiResponse> {
   try {
     const entries = await readChannelEntries(channel);
-    const messages = limit ? entries.slice(-limit) : entries;
-    return ok({ messages });
-  } catch {
-    return ok({ messages: [] });
+    const limited = limit ? entries.slice(-limit) : entries;
+    return ok({ channel, entries: limited, archived: false });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
   }
 }
 
@@ -222,19 +232,38 @@ export async function send(
   _author?: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
-  const s = getState();
-  const isDm = channel.includes("--");
-  const dir = isDm ? "dms" : "channels";
-  const filePath = `${dir}/${channel}.thread`;
-  const absPath = `${s.repoDir}/${filePath}`;
-
   try {
+    const s = getState();
+    const target = resolveThreadTarget(channel);
+    const filePath = target.threadPath;
+    const absPath = `${s.repoDir}/${filePath}`;
+
+    if (target.kind === "channel") {
+      const metaPath = `${s.repoDir}/${channelMetaPath(target.name)}`;
+      if (!(await exists(metaPath))) {
+        return err(`channel '${target.name}' not found`);
+      }
+      const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
+      if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
+        return err("not_member");
+      }
+    } else {
+      if (!target.members.includes(s.me.handler)) {
+        return err("not_dm_participant");
+      }
+      for (const member of target.members) {
+        if (!(await exists(`${s.repoDir}/users/${member}.meta.yaml`))) {
+          return err(`unknown DM participant: ${member}`);
+        }
+      }
+    }
+
     // Read existing content
     let existing = "";
     if (await exists(absPath)) {
       existing = await readFile(absPath);
     } else {
-      await mkdir(`${s.repoDir}/${dir}`);
+      await mkdir(`${s.repoDir}/${target.kind === "dm" ? "dm" : "channels"}`);
     }
 
     // Find next line number
@@ -270,7 +299,7 @@ export async function send(
     await gitOps.addAndCommit(
       s.repoDir,
       [filePath],
-      `msg: @${s.me.handler} -> ${channel} L${String(nextLine).padStart(6, "0")}`,
+      `msg: @${s.me.handler} -> ${target.name} L${String(nextLine).padStart(6, "0")}`,
       s.me.handler,
     );
 
@@ -304,9 +333,9 @@ export async function thread(
     };
     collectReplies(line);
 
-    return ok({ messages: threadMessages });
-  } catch {
-    return ok({ messages: [] });
+    return ok({ entries: threadMessages });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
   }
 }
 
@@ -319,7 +348,9 @@ export async function users(): Promise<ApiResponse> {
 
 export async function joinChannel(channel: string): Promise<ApiResponse> {
   const s = getState();
-  const metaPath = `${s.repoDir}/channels/${channel}/meta.yaml`;
+  const invalidChannel = validateChannelName(channel);
+  if (invalidChannel) return err(invalidChannel);
+  const metaPath = `${s.repoDir}/${channelMetaPath(channel)}`;
 
   try {
     if (!(await exists(metaPath))) {
@@ -371,7 +402,7 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
     // Commit both files
     await gitOps.addAndCommit(
       s.repoDir,
-      [`channels/${channel}/meta.yaml`, threadPath],
+      [channelMetaPath(channel), threadPath],
       `join: @${s.me.handler} -> ${channel}`,
       s.me.handler,
     );
@@ -389,12 +420,10 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
 
 async function readChannelEntries(
   channel: string,
-  isDm?: boolean,
 ): Promise<ThreadEntry[]> {
   const s = getState();
-  const autoDetectDm = isDm ?? channel.includes("--");
-  const dir = autoDetectDm ? "dms" : "channels";
-  const absPath = `${s.repoDir}/${dir}/${channel}.thread`;
+  const target = resolveThreadTarget(channel);
+  const absPath = `${s.repoDir}/${target.threadPath}`;
 
   if (!(await exists(absPath))) return [];
 
@@ -412,28 +441,37 @@ async function refreshChannelsCache(): Promise<void> {
   if (await exists(channelsDir)) {
     const items = await readdir(channelsDir);
     for (const item of items) {
-      const metaPath = `${channelsDir}/${item}/meta.yaml`;
+      const channelName = channelNameFromMetaFile(item);
+      if (!channelName) continue;
+      const metaPath = `${channelsDir}/${item}`;
       if (await exists(metaPath)) {
         const content = await readFile(metaPath);
         const meta = parseYaml(content) as unknown as ChannelMeta;
-        channelsMap.set(item, meta);
+        channelsMap.set(channelName, meta);
       }
     }
   }
 
-  // Scan dms/
-  const dmsDir = `${s.repoDir}/dms`;
-  if (await exists(dmsDir)) {
-    const items = await readdir(dmsDir);
+  // Scan dm/
+  const dmDir = `${s.repoDir}/dm`;
+  if (await exists(dmDir)) {
+    const items = await readdir(dmDir);
     for (const item of items) {
       if (!item.endsWith(".thread")) continue;
       const dmName = item.replace(".thread", "");
+      let target: ReturnType<typeof resolveThreadTarget>;
+      try {
+        target = resolveThreadTarget(dmName);
+      } catch {
+        continue;
+      }
+      if (target.kind !== "dm") continue;
       channelsMap.set(dmName, {
         display_name: dmName,
         created_by: "",
         created_at: "",
         introduction: "",
-        members: dmName.split("--"),
+        members: [...target.members],
       });
     }
   }
