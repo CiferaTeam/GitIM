@@ -2,7 +2,7 @@
 IFS= read -r line
 
 case "$line" in
-  *'"type":"prompt"'*'"text":"Reply with exactly: GITIM_OK"'*)
+  *'"type":"prompt"'*'"message":"Reply with exactly: GITIM_OK"'*)
     printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"GITIM_OK"}}'
     printf '%s\n' '{"type":"agent_end"}'
     exit 0

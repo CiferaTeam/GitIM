@@ -501,72 +501,77 @@ impl AgentLoop {
         }
 
         let duration_s = exec_result.duration_ms as f64 / 1000.0;
-        match exec_result.status {
-            ExecStatus::Failed => {
-                tracing::error!(
-                    duration_ms = exec_result.duration_ms,
-                    error = ?exec_result.error,
-                    output = %exec_result.output.chars().take(300).collect::<String>(),
-                    "provider failed"
-                );
-                self.emit_activity("error", "execution failed");
-                // Clear session_token to avoid resuming a broken session
-                self.session_token = None;
-                let mut state = AgentState::load(&self.repo_root)?;
-                state.clear_session();
-                state.save(&self.repo_root)?;
-                // Mirror the on-disk clear into the runtime's shared state
-                // so the HUD stops showing a stale percentage.
-                self.clear_runtime_session_usage();
-            }
-            ExecStatus::Aborted => {
-                info!(
-                    duration_ms = exec_result.duration_ms,
-                    "provider aborted by steering"
-                );
-                self.emit_activity("steered", &format!("interrupted ({duration_s:.1}s)"));
-                // Extract session_id from the just-completed turn. For Claude the
-                // session_token and session_id are the same opaque string; for Codex
-                // it's the thread_id. In either case it's exec_result.session_token.
-                if let Some(sid) = exec_result.session_token.as_deref() {
-                    let mut state = AgentState::load(&self.repo_root)?;
-                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
-                        &self.provider_type,
-                        &assistant_text_buf,
+        let provider_completed = if is_provider_failure_status(&exec_result.status) {
+            tracing::error!(
+                status = ?exec_result.status,
+                duration_ms = exec_result.duration_ms,
+                error = ?exec_result.error,
+                output = %exec_result.output.chars().take(300).collect::<String>(),
+                "provider failed"
+            );
+            self.emit_activity("error", "execution failed");
+            // Clear session_token to avoid resuming a broken session
+            self.session_token = None;
+            let mut state = AgentState::load(&self.repo_root)?;
+            state.clear_session();
+            state.save(&self.repo_root)?;
+            // Mirror the on-disk clear into the runtime's shared state
+            // so the HUD stops showing a stale percentage.
+            self.clear_runtime_session_usage();
+            false
+        } else {
+            match exec_result.status {
+                ExecStatus::Aborted => {
+                    info!(
+                        duration_ms = exec_result.duration_ms,
+                        "provider aborted by steering"
                     );
-                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                    self.emit_activity("steered", &format!("interrupted ({duration_s:.1}s)"));
+                    // Extract session_id from the just-completed turn. For Claude the
+                    // session_token and session_id are the same opaque string; for Codex
+                    // it's the thread_id. In either case it's exec_result.session_token.
+                    if let Some(sid) = exec_result.session_token.as_deref() {
+                        let mut state = AgentState::load(&self.repo_root)?;
+                        state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                            &self.provider_type,
+                            &assistant_text_buf,
+                        );
+                        self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                    }
+                    // Keep session_token for resume in next cycle
+                    if let Some(token) = exec_result.session_token {
+                        self.session_token = Some(token);
+                    }
+                    true
                 }
-                // Keep session_token for resume in next cycle
-                if let Some(token) = exec_result.session_token {
-                    self.session_token = Some(token);
-                }
-            }
-            _ => {
-                info!(
-                    duration_ms = exec_result.duration_ms,
-                    output = %exec_result.output.chars().take(100).collect::<String>(),
-                    "provider ok"
-                );
-                self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
-                // Extract session_id from the just-completed turn. For Claude the
-                // session_token and session_id are the same opaque string; for Codex
-                // it's the thread_id. In either case it's exec_result.session_token.
-                if let Some(sid) = exec_result.session_token.as_deref() {
-                    let mut state = AgentState::load(&self.repo_root)?;
-                    state.estimated_tokens += crate::context_window::tokenize_for_provider(
-                        &self.provider_type,
-                        &assistant_text_buf,
+                _ => {
+                    info!(
+                        duration_ms = exec_result.duration_ms,
+                        output = %exec_result.output.chars().take(100).collect::<String>(),
+                        "provider ok"
                     );
-                    self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
-                }
-                if let Some(token) = exec_result.session_token {
-                    self.session_token = Some(token);
+                    self.emit_activity("done", &format!("done ({duration_s:.1}s)"));
+                    // Extract session_id from the just-completed turn. For Claude the
+                    // session_token and session_id are the same opaque string; for Codex
+                    // it's the thread_id. In either case it's exec_result.session_token.
+                    if let Some(sid) = exec_result.session_token.as_deref() {
+                        let mut state = AgentState::load(&self.repo_root)?;
+                        state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                            &self.provider_type,
+                            &assistant_text_buf,
+                        );
+                        self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                    }
+                    if let Some(token) = exec_result.session_token {
+                        self.session_token = Some(token);
+                    }
+                    true
                 }
             }
-        }
+        };
 
         self.save_state()?;
-        Ok(true)
+        Ok(provider_completed)
     }
 
     /// Run the agent loop indefinitely with exponential backoff on errors.
@@ -610,6 +615,10 @@ impl AgentLoop {
             tokio::time::sleep(self.poll_interval).await;
         }
     }
+}
+
+fn is_provider_failure_status(status: &ExecStatus) -> bool {
+    matches!(status, ExecStatus::Failed | ExecStatus::Timeout)
 }
 
 /// Extract a short snippet from tool input for logging.
@@ -982,6 +991,14 @@ mod tests {
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws1\""));
+    }
+
+    #[test]
+    fn timeout_status_is_provider_failure() {
+        assert!(is_provider_failure_status(&ExecStatus::Timeout));
+        assert!(is_provider_failure_status(&ExecStatus::Failed));
+        assert!(!is_provider_failure_status(&ExecStatus::Completed));
+        assert!(!is_provider_failure_status(&ExecStatus::Aborted));
     }
 
     /// Build a minimal AgentLoop + SharedRuntimeState + workspace with one

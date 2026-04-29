@@ -68,7 +68,7 @@ async fn test_preflight_pi_timeout() {
 }
 
 #[tokio::test]
-async fn test_preflight_pi_uses_text_rpc_field() {
+async fn test_preflight_pi_uses_message_rpc_field() {
     let script = fixture("pi-rpc-echo.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
 
@@ -78,6 +78,20 @@ async fn test_preflight_pi_uses_text_rpc_field() {
     assert_eq!(result.provider, "pi");
     let preview = result.output_preview.expect("output_preview should be set");
     assert!(preview.contains("GITIM_OK"), "preview: {preview}");
+}
+
+#[tokio::test]
+async fn test_preflight_pi_surfaces_rpc_error_response() {
+    let script = fixture("pi-rpc-error.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let result = preflight_pi_with(script.to_str().unwrap(), Duration::from_millis(500)).await;
+
+    assert!(!result.available, "expected unavailable, got {result:?}");
+    assert_eq!(result.provider, "pi");
+    assert_eq!(result.error_kind, Some(ErrorKind::Other));
+    let error = result.error.expect("error should be set");
+    assert!(error.contains("startsWith"), "error: {error}");
 }
 
 #[tokio::test]

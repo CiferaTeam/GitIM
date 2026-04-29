@@ -20,6 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    gitim_runtime::tool_path::ensure_common_tool_paths();
+
     tracing_subscriber::fmt::init();
 
     // Environment preflight: all three binaries must be version-aligned

@@ -195,9 +195,9 @@ async fn drive_session(
                                     }
                                 }
                                 Some(PiEvent::AgentEnd) => {
-                                    // Execution complete. Send getState to capture full sessionId.
+                                    // Execution complete. Send get_state to capture full sessionId.
                                     if let Err(e) = stdin.write_all(build_get_state_command()).await {
-                                        warn!(pid, error = %e, "failed to send getState");
+                                        warn!(pid, error = %e, "failed to send get_state");
                                     }
                                     // Continue reading for the getState response.
                                 }
@@ -210,6 +210,14 @@ async fn drive_session(
                                     info!(pid, success, "pi abort response");
                                     // After abort confirmation we still wait for agent_end,
                                     // which was already processed above.
+                                }
+                                Some(PiEvent::RpcError { command, error }) => {
+                                    let message = format!("pi RPC {command} failed: {error}");
+                                    warn!(pid, %message);
+                                    final_status = ExecStatus::Failed;
+                                    final_error = Some(message.clone());
+                                    try_send_event(&event_tx, Event::Error { content: message });
+                                    break;
                                 }
                                 None => {
                                     debug!(pid, "unrecognized pi event line");
@@ -332,7 +340,7 @@ fn split_provider_model(model: &str) -> Option<(&str, &str)> {
 fn build_prompt_command(prompt: &str) -> Vec<u8> {
     let mut buf = serde_json::to_vec(&serde_json::json!({
         "type": "prompt",
-        "text": prompt,
+        "message": prompt,
     }))
     .expect("prompt command serializes");
     buf.push(b'\n');
@@ -340,7 +348,7 @@ fn build_prompt_command(prompt: &str) -> Vec<u8> {
 }
 
 fn build_get_state_command() -> &'static [u8] {
-    b"{\"type\":\"getState\"}\n"
+    b"{\"type\":\"get_state\"}\n"
 }
 
 /// Parsed event from a single Pi RPC stdout line.
@@ -368,6 +376,10 @@ enum PiEvent {
     },
     AbortResponse {
         success: bool,
+    },
+    RpcError {
+        command: String,
+        error: String,
     },
 }
 
@@ -447,6 +459,17 @@ fn parse_event(line: &str) -> Option<PiEvent> {
 
         "response" => {
             let command = v.get("command")?.as_str()?;
+            if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+                let error = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("RPC command failed")
+                    .to_string();
+                return Some(PiEvent::RpcError {
+                    command: command.to_string(),
+                    error,
+                });
+            }
             match command {
                 "getState" | "get_state" => {
                     let session_id = v
@@ -631,20 +654,31 @@ mod tests {
     }
 
     #[test]
-    fn prompt_command_uses_text_field() {
+    fn prompt_command_uses_message_field() {
         let command = build_prompt_command("hello");
         let parsed: Value = serde_json::from_slice(&command).expect("json command");
 
         assert_eq!(parsed["type"], "prompt");
-        assert_eq!(parsed["text"], "hello");
-        assert!(parsed.get("message").is_none());
+        assert_eq!(parsed["message"], "hello");
+        assert!(parsed.get("text").is_none());
     }
 
     #[test]
-    fn get_state_command_uses_documented_name() {
+    fn get_state_command_uses_snake_case_name() {
         let command = build_get_state_command();
         let parsed: Value = serde_json::from_slice(command).expect("json command");
 
-        assert_eq!(parsed["type"], "getState");
+        assert_eq!(parsed["type"], "get_state");
+    }
+
+    #[test]
+    fn parse_rpc_error_response() {
+        let line = r#"{"type":"response","command":"prompt","success":false,"error":"Cannot read properties of undefined (reading 'startsWith')"}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::RpcError { command, error } = event else {
+            panic!("expected RpcError");
+        };
+        assert_eq!(command, "prompt");
+        assert!(error.contains("startsWith"));
     }
 }

@@ -689,7 +689,7 @@ pub async fn preflight_opencode() -> PreflightResult {
 ///
 /// Protocol:
 /// 1. Spawn `pi --mode rpc --no-session --no-tools`
-/// 2. Write `{"type":"prompt","text":"Reply with exactly: GITIM_OK"}` to stdin
+/// 2. Write `{"type":"prompt","message":"Reply with exactly: GITIM_OK"}` to stdin
 /// 3. Stream stdout events until `agent_end`; collect text from `message_update` deltas
 /// 4. Explicitly kill the process — in `--no-session` mode Pi may exit naturally,
 ///    but we kill unconditionally to guarantee cleanup in both session/no-session modes
@@ -723,7 +723,7 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
     let stdout = child.stdout.take().expect("stdout piped");
 
     // Send the prompt.
-    let prompt_msg = b"{\"type\":\"prompt\",\"text\":\"Reply with exactly: GITIM_OK\"}\n";
+    let prompt_msg = b"{\"type\":\"prompt\",\"message\":\"Reply with exactly: GITIM_OK\"}\n";
     if let Err(e) = stdin.write_all(prompt_msg).await {
         let _ = child.start_kill();
         return PreflightResult::failure(
@@ -738,6 +738,7 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
     let mut reader = BufReader::new(stdout).lines();
     let mut collected_text = String::new();
     let mut saw_agent_end = false;
+    let mut rpc_error: Option<String> = None;
 
     let read_result = tokio::time::timeout(timeout, async {
         while let Ok(Some(line)) = reader.next_line().await {
@@ -748,6 +749,17 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                 let t = v.get("type").and_then(|t| t.as_str());
                 match t {
+                    Some("response")
+                        if v.get("success").and_then(|s| s.as_bool()) == Some(false) =>
+                    {
+                        rpc_error = Some(
+                            v.get("error")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("pi RPC command failed")
+                                .to_string(),
+                        );
+                        break;
+                    }
                     Some("message_update") => {
                         if let Some(delta) = v
                             .get("assistantMessageEvent")
@@ -779,6 +791,10 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
             format!("pi preflight exceeded {}ms", timeout.as_millis()),
             duration_ms,
         );
+    }
+
+    if let Some(error) = rpc_error {
+        return PreflightResult::failure("pi", ErrorKind::Other, error, duration_ms);
     }
 
     if !saw_agent_end {
