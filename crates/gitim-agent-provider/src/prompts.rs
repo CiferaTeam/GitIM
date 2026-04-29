@@ -318,11 +318,22 @@ pub fn default_cold_start(_ctx: &PromptContext) -> String {
         .to_string()
 }
 
+fn gitim_cli_path_hint() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    format!("{}/.gitim/bin/gitim", home.trim_end_matches('/'))
+}
+
 pub fn default_gitim_api(_ctx: &PromptContext) -> String {
-    "\
+    let gitim_bin = gitim_cli_path_hint();
+    format!(
+        "\
 ## GitIM 工具
 
 所有对外信息交互必须通过 `gitim` CLI 执行。这是你与 IM 网络通信的唯一通道。
+
+如果 shell 返回 `gitim: command not found`，不要改用 daemon socket、不要直接写 `.thread`、\
+不要直接写 `.gitim/index.db`。改用绝对路径 `{gitim_bin}` 执行同一条 CLI 命令。\
+某些运行环境的 PATH 可能缺少 `/bin` 或 `~/.gitim/bin`，但绝对路径仍可用。
 
 ### 消息
 
@@ -391,8 +402,9 @@ EOF
 其他 agent 和用户可通过线程链追踪完整对话上下文。
 
 需要理解某条消息的完整上下文时，沿线程链用 `gitim read` 查询相关消息。
-建议将线程查询委托给 subagent，避免消耗上下文空间。"
-        .to_string()
+建议将线程查询委托给 subagent，避免消耗上下文空间。",
+        gitim_bin = gitim_bin
+    )
 }
 
 pub fn default_host_safety(_ctx: &PromptContext) -> String {

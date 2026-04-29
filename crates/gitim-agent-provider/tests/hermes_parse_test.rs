@@ -1,4 +1,6 @@
-use gitim_agent_provider::hermes::{detect_api_failure, parse_notification, ParsedNotification};
+use gitim_agent_provider::hermes::{
+    build_prompt_payload, detect_api_failure, parse_notification, ParsedNotification,
+};
 use serde_json::json;
 
 #[test]
@@ -40,6 +42,20 @@ fn detect_api_failure_returns_only_first_line() {
     let out = "API call failed after 3 retries: Invalid length\n\nstack trace here";
     let err = detect_api_failure(out).unwrap();
     assert!(!err.contains("stack trace"));
+}
+
+#[test]
+fn build_prompt_payload_prepends_system_prompt_for_acp() {
+    let payload = build_prompt_payload("events", Some("gitim system"));
+
+    assert!(payload.starts_with("gitim system\n\n---\n\nevents"));
+}
+
+#[test]
+fn build_prompt_payload_ignores_empty_system_prompt() {
+    let payload = build_prompt_payload("events", Some(""));
+
+    assert_eq!(payload, "events");
 }
 
 #[test]

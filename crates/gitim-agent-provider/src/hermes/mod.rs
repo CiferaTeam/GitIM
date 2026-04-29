@@ -73,7 +73,7 @@ impl Provider for HermesProvider {
         let cancel_token = CancellationToken::new();
         let cancel_token_inner = cancel_token.clone();
 
-        let prompt = prompt.to_string();
+        let prompt = build_prompt_payload(prompt, opts.system_prompt.as_deref());
         let resume_token = opts.resume_token.clone();
         let cwd_str = opts
             .cwd
@@ -153,6 +153,18 @@ pub fn detect_api_failure(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Build the text sent to `session/prompt`.
+///
+/// Hermes ACP does not expose a per-request system prompt parameter. The
+/// runtime only supplies `system_prompt` on cold start, so prepend it to the
+/// first user payload to seed the ACP session with GitIM operating rules.
+pub fn build_prompt_payload(prompt: &str, system_prompt: Option<&str>) -> String {
+    match system_prompt.filter(|s| !s.is_empty()) {
+        Some(system_prompt) => format!("{system_prompt}\n\n---\n\n{prompt}"),
+        None => prompt.to_string(),
+    }
 }
 
 /// Parse the `params` object from a `session/update` JSON-RPC notification.

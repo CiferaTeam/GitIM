@@ -111,6 +111,11 @@ fn gitim_api_exposes_card_and_archive_commands() {
     assert!(api.contains("gitim card comment <channel> <card_id> --stdin"));
     assert!(api.contains("heredoc + `--stdin`"));
 
+    // CLI fallback must stay on the supported surface even when shell PATH is broken.
+    assert!(api.contains(".gitim/bin/gitim"));
+    assert!(api.contains("不要直接写 `.thread`"));
+    assert!(api.contains("不要直接写 `.gitim/index.db`"));
+
     // Channel archive triplet
     assert!(api.contains("gitim archive-channel"));
     assert!(api.contains("gitim unarchive-channel"));
