@@ -475,6 +475,17 @@ pub async fn run_async_install_and_spawn(
         )
     };
 
+    match persist_workspace_snapshot(&state) {
+        Ok(count) => {
+            tracing::info!(%job_id, %count, "update_and_restart: workspace registry snapshot persisted");
+        }
+        Err(e) => {
+            let detail = format!("persist workspace registry failed: {e}");
+            record_async_error(&state, &guard, &job_id, detail.clone());
+            return AsyncPhaseOutcome::Failed { detail };
+        }
+    }
+
     // Step 1: kill managed daemons.
     //
     // `kill_managed_daemons` uses `std::thread::sleep` (500ms grace); wrap in
@@ -570,6 +581,49 @@ pub async fn run_async_install_and_spawn(
     drop(tmp);
 
     AsyncPhaseOutcome::Done { child_pid }
+}
+
+fn persist_workspace_snapshot(state: &SharedRuntimeState) -> std::io::Result<usize> {
+    let entries = workspace_snapshot_entries(state);
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    match crate::user_config::config_path() {
+        Some(path) => persist_workspace_snapshot_to(entries, &path),
+        None => Ok(0),
+    }
+}
+
+fn persist_workspace_snapshot_to(
+    entries: Vec<crate::user_config::WorkspaceEntry>,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let count = entries.len();
+    let mut cfg = crate::user_config::read_from(Some(path));
+    for entry in entries {
+        cfg.upsert(entry);
+    }
+    crate::user_config::write_to(&cfg, path)?;
+    Ok(count)
+}
+
+fn workspace_snapshot_entries(
+    state: &SharedRuntimeState,
+) -> Vec<crate::user_config::WorkspaceEntry> {
+    let s = state.lock().unwrap();
+    s.workspaces
+        .values()
+        .filter(|ctx| {
+            ctx.path.exists()
+                && (ctx.human_repo.is_some()
+                    || ctx.path.join(".gitim-runtime/config.json").exists())
+        })
+        .map(|ctx| crate::user_config::WorkspaceEntry {
+            slug: ctx.slug.clone(),
+            workspace_name: ctx.workspace_name.clone(),
+            path: ctx.path.to_string_lossy().into_owned(),
+        })
+        .collect()
 }
 
 /// Append `.old` to `path` in the same way `gitim-updater` does. Kept here
@@ -695,6 +749,71 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.error_code, error_codes::SANITY_CHECK_FAILED);
         assert!(err.detail.contains("did not contain"));
+    }
+
+    #[test]
+    fn workspace_snapshot_persists_current_valid_workspaces() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join(".gitim/runtime.json");
+        let ws = tmp.path().join("valley4");
+        std::fs::create_dir_all(ws.join(".gitim-runtime/human")).unwrap();
+
+        let mut ctx = crate::workspace::WorkspaceContext::new(
+            "valley4".to_string(),
+            "Valley 4".to_string(),
+            ws.clone(),
+        );
+        ctx.human_repo = Some(ws.join(".gitim-runtime/human"));
+
+        let stale = crate::user_config::UserConfig {
+            workspaces: vec![crate::user_config::WorkspaceEntry {
+                slug: "ws".to_string(),
+                workspace_name: "ws".to_string(),
+                path: "/tmp/missing-ws".to_string(),
+            }],
+        };
+        crate::user_config::write_to(&stale, &config_path).unwrap();
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new(crate::http::RuntimeState {
+            workspaces: std::collections::HashMap::from([("valley4".to_string(), ctx)]),
+            ..crate::http::RuntimeState::default()
+        }));
+
+        let entries = workspace_snapshot_entries(&state);
+        let count = persist_workspace_snapshot_to(entries, &config_path).unwrap();
+
+        assert_eq!(count, 1);
+        let loaded = crate::user_config::read_from(Some(&config_path));
+        assert_eq!(loaded.workspaces.len(), 2);
+        assert!(loaded.workspaces.iter().any(|entry| entry.slug == "ws"));
+        let valley = loaded
+            .workspaces
+            .iter()
+            .find(|entry| entry.slug == "valley4")
+            .unwrap();
+        assert_eq!(valley.workspace_name, "Valley 4");
+        assert_eq!(valley.path, ws.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn workspace_snapshot_skips_incomplete_placeholders() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("placeholder");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let ctx = crate::workspace::WorkspaceContext::new(
+            "placeholder".to_string(),
+            "Placeholder".to_string(),
+            ws,
+        );
+        let state = std::sync::Arc::new(std::sync::Mutex::new(crate::http::RuntimeState {
+            workspaces: std::collections::HashMap::from([("placeholder".to_string(), ctx)]),
+            ..crate::http::RuntimeState::default()
+        }));
+
+        let entries = workspace_snapshot_entries(&state);
+
+        assert!(entries.is_empty());
     }
 
     fn which_sleep() -> PathBuf {
