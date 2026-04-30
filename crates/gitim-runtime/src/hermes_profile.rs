@@ -121,10 +121,7 @@ pub async fn delete_profile(handler: &str) -> Result<(), HermesProfileError> {
 }
 
 /// Same as [`delete_profile`] but with a configurable hermes binary path.
-pub async fn delete_profile_with(
-    handler: &str,
-    bin: &str,
-) -> Result<(), HermesProfileError> {
+pub async fn delete_profile_with(handler: &str, bin: &str) -> Result<(), HermesProfileError> {
     let name = profile_name(handler);
     let output = match tokio::process::Command::new(bin)
         .args(["profile", "delete", &name, "-y"])

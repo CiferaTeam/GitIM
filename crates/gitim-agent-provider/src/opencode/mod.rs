@@ -12,7 +12,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsage, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -121,6 +122,7 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
+    let mut captured_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -169,6 +171,9 @@ async fn drive_session(
                                     try_send_event(&event_tx, Event::Status {
                                         status: "running".to_string(),
                                     });
+                                }
+                                ParsedMessage::StepFinish { usage } => {
+                                    captured_usage = Some(usage);
                                 }
                                 ParsedMessage::Text { content } => {
                                     output.push_str(&content);
@@ -257,7 +262,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: None,
+        usage: captured_usage,
     });
 }
 
@@ -332,6 +337,8 @@ pub fn build_invocation(prompt: &str, opts: &ExecOptions) -> Invocation {
 pub enum ParsedMessage {
     /// Step start with session ID.
     StepStart { session_id: String },
+    /// Step finish with token usage.
+    StepFinish { usage: ProviderUsage },
     /// Text content from an assistant message.
     Text { content: String },
     /// Tool use event — combined: carries invocation + optional result when completed.
@@ -347,7 +354,7 @@ pub enum ParsedMessage {
 }
 
 /// Parse a single line of OpenCode JSON output.
-/// Returns None for empty lines, malformed JSON, unrecognized types, or known-ignorable types (step_finish).
+/// Returns None for empty lines, malformed JSON, unrecognized types, or step_finish without tokens.
 pub fn parse_line(line: &str) -> Option<ParsedMessage> {
     let line = line.trim();
     if line.is_empty() {
@@ -360,6 +367,18 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
         "step_start" => Some(ParsedMessage::StepStart {
             session_id: raw.session_id.unwrap_or_default(),
         }),
+        "step_finish" => {
+            let tokens = raw.part?.tokens?;
+            Some(ParsedMessage::StepFinish {
+                usage: ProviderUsage {
+                    input_tokens: Some(tokens.input),
+                    output_tokens: Some(tokens.output.saturating_add(tokens.reasoning)),
+                    used_percent: None,
+                    cache_read_tokens: Some(tokens.cache.read),
+                    cache_creation_tokens: Some(tokens.cache.write),
+                },
+            })
+        }
         "text" => {
             let part = raw.part.unwrap_or_default();
             Some(ParsedMessage::Text {
@@ -390,7 +409,6 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 .unwrap_or_default();
             Some(ParsedMessage::Error { message })
         }
-        // step_finish and anything else are intentionally ignored
         _ => None,
     }
 }
@@ -418,6 +436,8 @@ struct RawPart {
     call_id: Option<String>,
     #[serde(default)]
     state: Option<RawToolState>,
+    #[serde(default)]
+    tokens: Option<RawTokens>,
 }
 
 #[derive(Deserialize, Default)]
@@ -428,6 +448,26 @@ struct RawToolState {
     input: Option<Value>,
     #[serde(default)]
     output: Option<Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawTokens {
+    #[serde(default)]
+    input: u64,
+    #[serde(default)]
+    output: u64,
+    #[serde(default)]
+    reasoning: u64,
+    #[serde(default)]
+    cache: RawTokenCache,
+}
+
+#[derive(Deserialize, Default)]
+struct RawTokenCache {
+    #[serde(default)]
+    read: u64,
+    #[serde(default)]
+    write: u64,
 }
 
 #[derive(Deserialize)]

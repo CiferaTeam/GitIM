@@ -13,9 +13,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitim_runtime::hermes_profile::{
-    delete_profile, ensure_profile, profile_dir, EnsureOutcome,
-};
+use gitim_runtime::hermes_profile::{delete_profile, ensure_profile, profile_dir, EnsureOutcome};
 
 /// Random suffix derived from monotonic clock — fits hermes's profile name
 /// regex `[a-z0-9][a-z0-9_-]{0,63}` and is unique across parallel runs.

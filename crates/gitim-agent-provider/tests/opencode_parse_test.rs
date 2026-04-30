@@ -61,7 +61,36 @@ fn parse_empty_returns_none() {
 }
 
 #[test]
-fn parse_step_finish_returns_none() {
+fn parse_step_finish_with_tokens() {
+    let line = json!({
+        "type": "step_finish",
+        "sessionID": "s-1",
+        "part": {
+            "tokens": {
+                "total": 77244,
+                "input": 315,
+                "output": 45,
+                "reasoning": 7,
+                "cache": {"read": 76884, "write": 12}
+            },
+            "cost": 0.01
+        }
+    })
+    .to_string();
+
+    let msg = parse_line(&line).unwrap();
+    let ParsedMessage::StepFinish { usage } = msg else {
+        panic!("expected StepFinish");
+    };
+    assert_eq!(usage.input_tokens, Some(315));
+    assert_eq!(usage.output_tokens, Some(52));
+    assert_eq!(usage.cache_read_tokens, Some(76_884));
+    assert_eq!(usage.cache_creation_tokens, Some(12));
+    assert_eq!(usage.used_percent, None);
+}
+
+#[test]
+fn parse_step_finish_without_tokens_returns_none() {
     let line = json!({"type": "step_finish", "sessionID": "s-1", "part": {}}).to_string();
     assert!(parse_line(&line).is_none());
 }
