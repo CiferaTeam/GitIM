@@ -183,14 +183,30 @@ test("browser mode setup is reachable without a runtime port", async ({ page }) 
   await expect(page.getByRole("button", { name: "Connect" })).toBeDisabled();
 });
 
-test("fresh setup can switch to browser mode from the install step", async ({ page }) => {
+test("fresh setup can continue with desktop runtime mode", async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.clear();
   });
   await page.goto("/");
 
+  await expect(page.getByText("Choose Mode")).toBeVisible();
+  await page.getByRole("button", { name: /Desktop Runtime/ }).click();
+
   await expect(page.getByText("Install Runtime")).toBeVisible();
-  await page.getByRole("button", { name: "Use browser mode" }).click();
+  await page.getByRole("button", { name: "Runtime is running — continue" }).click();
+
+  await expect(page.getByText("Connect Runtime")).toBeVisible();
+  await expect(page.getByTestId("port-input")).toBeVisible();
+});
+
+test("fresh setup can switch to browser mode from the mode choice", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.clear();
+  });
+  await page.goto("/");
+
+  await expect(page.getByText("Choose Mode")).toBeVisible();
+  await page.getByRole("button", { name: /Browser Mode/ }).click();
 
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByLabel("Git remote URL")).toBeVisible();

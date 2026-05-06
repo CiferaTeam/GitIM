@@ -19,6 +19,7 @@ interface SetupShellProps {
   children?: React.ReactNode;
   footer?: React.ReactNode;
   loading?: boolean;
+  showSteps?: boolean;
 }
 
 export function SetupShell({
@@ -30,6 +31,7 @@ export function SetupShell({
   children,
   footer,
   loading = false,
+  showSteps = true,
 }: SetupShellProps) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-background p-6">
@@ -42,55 +44,54 @@ export function SetupShell({
           <p className="text-sm text-text-muted mt-1">AI-native IM over Git</p>
         </div>
 
-        {/* Stepper */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between relative">
-            {/* Background line */}
-            <div className="absolute left-0 right-0 top-4 h-0.5 bg-border rounded-full" />
-            {/* Active line */}
-            <div
-              className="absolute left-0 top-4 h-0.5 bg-primary rounded-full transition-all duration-500"
-              style={{
-                width:
-                  STEPS.length > 1
-                    ? `${((step - 1) / (STEPS.length - 1)) * 100}%`
-                    : "0%",
-              }}
-            />
-            {STEPS.map((s) => {
-              const isActive = s.number === step;
-              const isCompleted = s.number < step;
-              return (
-                <div key={s.number} className="relative z-10 flex flex-col items-center gap-2">
-                  <div
-                    className={[
-                      "w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300",
-                      isActive
-                        ? "bg-primary border-primary text-white shadow-[0_0_12px_var(--color-glow-primary)]"
-                        : isCompleted
-                          ? "bg-primary border-primary text-white"
-                          : "bg-card border-border text-text-muted",
-                    ].join(" ")}
-                  >
-                    {isCompleted ? "✓" : s.number}
+        {showSteps && (
+          <div className="mb-8">
+            <div className="flex items-center justify-between relative">
+              <div className="absolute left-0 right-0 top-4 h-0.5 bg-border rounded-full" />
+              <div
+                className="absolute left-0 top-4 h-0.5 bg-primary rounded-full transition-all duration-500"
+                style={{
+                  width:
+                    STEPS.length > 1
+                      ? `${((step - 1) / (STEPS.length - 1)) * 100}%`
+                      : "0%",
+                }}
+              />
+              {STEPS.map((s) => {
+                const isActive = s.number === step;
+                const isCompleted = s.number < step;
+                return (
+                  <div key={s.number} className="relative z-10 flex flex-col items-center gap-2">
+                    <div
+                      className={[
+                        "w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300",
+                        isActive
+                          ? "bg-primary border-primary text-white shadow-[0_0_12px_var(--color-glow-primary)]"
+                          : isCompleted
+                            ? "bg-primary border-primary text-white"
+                            : "bg-card border-border text-text-muted",
+                      ].join(" ")}
+                    >
+                      {isCompleted ? "✓" : s.number}
+                    </div>
+                    <span
+                      className={[
+                        "text-xs font-medium transition-colors",
+                        isActive
+                          ? "text-primary"
+                          : isCompleted
+                            ? "text-text-secondary"
+                            : "text-text-muted",
+                      ].join(" ")}
+                    >
+                      {s.label}
+                    </span>
                   </div>
-                  <span
-                    className={[
-                      "text-xs font-medium transition-colors",
-                      isActive
-                        ? "text-primary"
-                        : isCompleted
-                          ? "text-text-secondary"
-                          : "text-text-muted",
-                    ].join(" ")}
-                  >
-                    {s.label}
-                  </span>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Card */}
         <div className="rounded-2xl border border-border bg-card/90 shadow-xl shadow-[var(--color-shadow)] p-6">

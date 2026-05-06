@@ -10,15 +10,16 @@ const RELEASES_URL =
 
 interface InstallStepProps {
   onContinue: () => void;
-  onUseBrowserMode: () => void;
+  onBack?: () => void;
 }
 
-export function InstallStep({ onContinue, onUseBrowserMode }: InstallStepProps) {
+export function InstallStep({ onContinue, onBack }: InstallStepProps) {
   return (
     <SetupShell
       step={1}
       title="Install Runtime"
       description="Download the gitim-runtime binary before you connect"
+      onBack={onBack}
       footer={
         <>
           Currently supported:{" "}
@@ -69,13 +70,6 @@ export function InstallStep({ onContinue, onUseBrowserMode }: InstallStepProps) 
           className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors shadow-lg shadow-primary/20"
         >
           Runtime is running — continue
-        </button>
-        <button
-          type="button"
-          onClick={onUseBrowserMode}
-          className="w-full text-center text-sm text-text-muted hover:text-foreground transition-colors"
-        >
-          Use browser mode
         </button>
       </div>
     </SetupShell>

@@ -3,6 +3,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { ConnectForm } from "./connect-form";
 import { InstallStep } from "./install-step";
 import { LocalSetup } from "./local-setup";
+import { ModeChoiceStep } from "./mode-choice-step";
 import { SetupShell } from "./setup-shell";
 
 interface SetupGateProps {
@@ -32,6 +33,7 @@ export function SetupGate({ children }: SetupGateProps) {
   const [installAcknowledged, setInstallAcknowledged] = useState(
     () => port != null,
   );
+  const [modeSelected, setModeSelected] = useState(() => port != null || mode === "local");
 
   // On mount: if we have a stored port, try to connect automatically.
   useEffect(() => {
@@ -86,11 +88,20 @@ export function SetupGate({ children }: SetupGateProps) {
   }
 
   if (status === "disconnected") {
+    if (!modeSelected) {
+      return (
+        <ModeChoiceStep
+          onUseRuntime={() => setModeSelected(true)}
+          onUseBrowserMode={() => setMode("local")}
+        />
+      );
+    }
+
     if (!installAcknowledged) {
       return (
         <InstallStep
           onContinue={() => setInstallAcknowledged(true)}
-          onUseBrowserMode={() => setMode("local")}
+          onBack={port == null ? () => setModeSelected(false) : undefined}
         />
       );
     }
