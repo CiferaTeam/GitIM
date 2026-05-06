@@ -1,6 +1,7 @@
 use crate::api::Response;
 use crate::identity::{AuthData, GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
+use gitim_core::me_json::MeJson;
 use gitim_core::types::{ChannelMeta, Handler, UserMeta};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
@@ -199,60 +200,39 @@ fn write_me_json(
     let me_path = gitim_dir.join("me.json");
 
     // Merge semantics: start from the existing file (if any) so fields this
-    // code path doesn't set — github_email, model, provider, etc. — aren't
-    // silently erased on re-onboard. Caller-provided fields below still take
-    // precedence.
-    let mut me = read_me_json_object(&me_path);
+    // code path doesn't set — github_email, provider, model, system_prompt,
+    // env, user-added extras — aren't silently erased on re-onboard.
+    let existing = read_existing_me(&me_path);
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let obj = me.as_object_mut().unwrap();
-    obj.insert(
-        "handler".to_string(),
-        serde_json::Value::String(handler.to_string()),
-    );
-    obj.insert(
-        "git_server".to_string(),
-        serde_json::Value::String(git_server.to_string()),
-    );
-    obj.insert(
-        "display_name".to_string(),
-        serde_json::Value::String(display_name.to_string()),
-    );
-    obj.insert("onboarded_at".to_string(), serde_json::Value::String(now));
-    // Caller-provided email overrides; absent → preserve whatever was there.
-    if let Some(email) = github_email {
-        obj.insert(
-            "github_email".to_string(),
-            serde_json::Value::String(email.to_string()),
-        );
-    }
-    // Guest flag is mutually exclusive with a real handler — clear stale value.
-    obj.remove("guest");
+    let patch = MeJson {
+        handler: Some(handler.to_string()),
+        display_name: Some(display_name.to_string()),
+        git_server: Some(git_server.to_string()),
+        onboarded_at: Some(now),
+        github_email: github_email.map(str::to_string),
+        ..Default::default()
+    };
 
-    let content = serde_json::to_string_pretty(&me).unwrap();
+    let mut merged = existing.merged_with(patch);
+    // Going from guest → real identity, drop any stale guest flag.
+    merged.clear_guest();
+
+    let content = serde_json::to_string_pretty(&merged).unwrap();
     std::fs::write(&me_path, &content)
         .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
 
     Ok(())
 }
 
-/// Read existing me.json as a JSON object. On missing / invalid / non-object
-/// content, return an empty object — callers rely on `as_object_mut()` always
-/// succeeding.
-fn read_me_json_object(me_path: &std::path::Path) -> serde_json::Value {
+/// Read existing me.json into a typed `MeJson`. Missing file / invalid JSON
+/// degrade to `MeJson::default()` so callers can always merge into something.
+fn read_existing_me(me_path: &std::path::Path) -> MeJson {
     let content = match std::fs::read_to_string(me_path) {
         Ok(s) => s,
-        Err(_) => return serde_json::json!({}),
+        Err(_) => return MeJson::default(),
     };
-    let parsed: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return serde_json::json!({}),
-    };
-    if parsed.is_object() {
-        parsed
-    } else {
-        serde_json::json!({})
-    }
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
 fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
@@ -261,11 +241,14 @@ fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
         .map_err(|e| Response::error(format!("failed to create .gitim dir: {}", e)))?;
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let me = serde_json::json!({
-        "handler": null,
-        "guest": true,
-        "onboarded_at": now,
-    });
+    // Guest mode intentionally does NOT merge with an existing me.json —
+    // entering guest clears prior identity (see handle_onboard guest branch).
+    let me = MeJson {
+        handler: None,
+        guest: Some(true),
+        onboarded_at: Some(now),
+        ..Default::default()
+    };
 
     let me_path = gitim_dir.join("me.json");
     let content = serde_json::to_string_pretty(&me).unwrap();
@@ -603,6 +586,49 @@ mod tests {
         assert_eq!(content["display_name"], "Alice W");
         assert_eq!(content["github_email"], "alice@example.com");
         assert!(content["onboarded_at"].as_str().is_some());
+    }
+
+    /// CLAUDE.md merge semantics: a re-onboard that doesn't pass
+    /// github_email must NOT erase the value written by an earlier onboard.
+    /// Same goes for any field this code path doesn't set (provider, model,
+    /// system_prompt — written by runtime add_agent on top).
+    #[tokio::test]
+    async fn write_me_json_preserves_existing_unrelated_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".gitim")).unwrap();
+        // Pre-existing me.json with a runtime-config field and an email
+        std::fs::write(
+            repo.join(".gitim/me.json"),
+            r#"{
+                "handler": "alice",
+                "display_name": "Alice W",
+                "git_server": "github",
+                "github_email": "alice@example.com",
+                "provider": "claude",
+                "model": "sonnet-4-6"
+            }"#,
+        )
+        .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
+
+        // Re-onboard without an email — simulates a token that no longer
+        // exposes the verified email.
+        write_me_json(&state, "alice", "Alice W", "github", None).unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(repo.join(".gitim/me.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            content["github_email"], "alice@example.com",
+            "github_email must survive re-onboard with None email"
+        );
+        assert_eq!(
+            content["provider"], "claude",
+            "runtime-only fields must survive re-onboard"
+        );
+        assert_eq!(content["model"], "sonnet-4-6");
     }
 
     #[tokio::test]
