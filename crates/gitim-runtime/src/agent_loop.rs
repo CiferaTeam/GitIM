@@ -395,8 +395,16 @@ impl AgentLoop {
         // The agent signals an intentional context reset by emitting "[[RESET]]" in its output.
         // This is a private runtime protocol — silent, not surfaced to IM or the WebUI.
         let mut text_tail = String::new();
-        // Task 12: accumulate full assistant text across the turn for tiktoken estimate.
-        // Intentionally uncapped (unlike text_tail) — we want total token count.
+        // Buffer everything the model emitted or consumed this turn for the
+        // tiktoken estimate: assistant text, thinking blocks, tool-use JSON
+        // arguments, tool results that feed back as next-turn input. Tool I/O
+        // dominates real context once tools fire (file reads, bash output,
+        // grep), so dropping it leaves the fallback estimate underreporting
+        // by an order of magnitude vs. the real provider-reported usage —
+        // which is why providers without `usage` (gemini/hermes/openclaw/pi
+        // pre-fix) showed ~5% while Claude reported ~35% on identical work.
+        // Intentionally uncapped (unlike text_tail) — we want a complete
+        // turn footprint, not a sliding window.
         let mut assistant_text_buf = String::new();
         let mut reset_requested = false;
 
@@ -432,9 +440,29 @@ impl AgentLoop {
                                     let snippet = summarize_tool_input(tool, input);
                                     info!(tool = %tool, input = %snippet, "agent tool use");
                                     self.emit_activity("tool_use", &format!("{tool}: {snippet}"));
+                                    // Tool-call arguments are emitted by the model and consume
+                                    // assistant tokens. Snippet is for human display; the model
+                                    // emits the full JSON, so we tokenize that.
+                                    assistant_text_buf.push_str(tool);
+                                    assistant_text_buf.push(' ');
+                                    assistant_text_buf.push_str(&input.to_string());
+                                    assistant_text_buf.push('\n');
                                 }
                                 gitim_agent_provider::Event::ToolResult { call_id, output } => {
                                     tracing::debug!(call_id = %call_id, output_len = output.len(), "tool result");
+                                    // Tool results land in the next turn's input. Counting them
+                                    // here cumulatively over the session is the right shape:
+                                    // estimated_tokens is reset on cold start and accumulated
+                                    // until [[RESET]] / failure clears it.
+                                    assistant_text_buf.push_str(output);
+                                    assistant_text_buf.push('\n');
+                                }
+                                gitim_agent_provider::Event::Thinking { content } => {
+                                    // Extended-thinking blocks are real context tokens for
+                                    // models that emit them (Claude extended thinking, o1
+                                    // reasoning summaries when surfaced).
+                                    assistant_text_buf.push_str(content);
+                                    assistant_text_buf.push('\n');
                                 }
                                 gitim_agent_provider::Event::Error { content } => {
                                     tracing::warn!(error = %content, "agent error event");
