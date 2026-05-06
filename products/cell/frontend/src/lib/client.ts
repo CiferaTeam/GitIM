@@ -523,9 +523,7 @@ export async function archiveCard(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void cardId;
-    return { ok: false, error: "cards are unavailable in browser mode" };
+    return localCardBackend().archiveCard(channel, cardId);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/archive`,
@@ -541,9 +539,7 @@ export async function unarchiveCard(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void cardId;
-    return { ok: false, error: "cards are unavailable in browser mode" };
+    return localCardBackend().unarchiveCard(channel, cardId);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/unarchive`,
@@ -558,8 +554,7 @@ export async function listArchivedCards(
 ): Promise<ApiResponse<{ cards: Card[] }>> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    return { ok: true, data: { cards: [] } };
+    return localCardBackend().listArchivedCards(channel) as Promise<ApiResponse<{ cards: Card[] }>>;
   }
   const qs = channel ? `?channel=${encodeURIComponent(channel)}` : "";
   const res = await fetch(`${wsBase(slug)}/im/cards/archived${qs}`);

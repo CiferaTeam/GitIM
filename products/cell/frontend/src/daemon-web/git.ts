@@ -87,6 +87,28 @@ export async function addAndCommit(
   });
 }
 
+export async function addRemoveAndCommit(
+  dir: string,
+  addFilepaths: string[],
+  removeFilepaths: string[],
+  message: string,
+  author: string,
+): Promise<string> {
+  const fs = getFs();
+  for (const filepath of addFilepaths) {
+    await git.add({ fs, dir, filepath });
+  }
+  for (const filepath of removeFilepaths) {
+    await git.remove({ fs, dir, filepath });
+  }
+  return git.commit({
+    fs,
+    dir,
+    message,
+    author: { name: author, email: `${author}@gitim` },
+  });
+}
+
 /** Push local commits to origin. */
 export async function push(
   dir: string,

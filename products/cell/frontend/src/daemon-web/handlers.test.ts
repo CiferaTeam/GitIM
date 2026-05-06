@@ -4,6 +4,40 @@ const files = vi.hoisted(() => new Map<string, string>());
 const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
 
+function parentDir(path: string): string | null {
+  const idx = path.lastIndexOf("/");
+  if (idx <= 0) return path.startsWith("/") ? "/" : null;
+  return path.slice(0, idx);
+}
+
+function basename(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx < 0 ? path : path.slice(idx + 1);
+}
+
+function registerDir(path: string): void {
+  if (!dirs.has(path)) dirs.set(path, []);
+  const parent = parentDir(path);
+  if (!parent || parent === path) return;
+  const entries = dirs.get(parent);
+  if (entries && !entries.includes(basename(path))) entries.push(basename(path));
+}
+
+function registerFile(path: string): void {
+  const parent = parentDir(path);
+  if (!parent) return;
+  const entries = dirs.get(parent);
+  if (entries && !entries.includes(basename(path))) entries.push(basename(path));
+}
+
+function unregisterPath(path: string): void {
+  const parent = parentDir(path);
+  if (!parent) return;
+  const entries = dirs.get(parent);
+  if (!entries) return;
+  dirs.set(parent, entries.filter((entry) => entry !== basename(path)));
+}
+
 vi.mock("gitim-wasm", () => ({
   default: vi.fn(async () => undefined),
   parseCardMeta: vi.fn((yaml: string) => {
@@ -67,17 +101,39 @@ vi.mock("./storage", () => ({
   }),
   writeFile: vi.fn(async (path: string, content: string) => {
     files.set(path, content);
+    registerFile(path);
   }),
   readdir: vi.fn(async (path: string) => dirs.get(path) ?? []),
   exists: vi.fn(async (path: string) => files.has(path) || dirs.has(path)),
   mkdir: vi.fn(async (path: string) => {
-    if (!dirs.has(path)) dirs.set(path, []);
+    registerDir(path);
+  }),
+  removeFile: vi.fn(async (path: string) => {
+    files.delete(path);
+    unregisterPath(path);
+  }),
+  removeDir: vi.fn(async (path: string) => {
+    dirs.delete(path);
+    unregisterPath(path);
   }),
 }));
 
 vi.mock("./git", () => ({
   addAndCommit: vi.fn(async (_dir: string, filepaths: string[], message: string) => {
     commits.push({ filepaths, message });
+    return "new-head";
+  }),
+  addRemoveAndCommit: vi.fn(async (
+    _dir: string,
+    addFilepaths: string[],
+    removeFilepaths: string[],
+    message: string,
+  ) => {
+    for (const filepath of removeFilepaths) {
+      files.delete(`/repo/${filepath}`);
+      unregisterPath(`/repo/${filepath}`);
+    }
+    commits.push({ filepaths: [...addFilepaths, ...removeFilepaths], message });
     return "new-head";
   }),
   checkout: vi.fn(async () => undefined),
@@ -96,8 +152,10 @@ vi.mock("./sync", () => ({
 }));
 
 import {
+  archiveCard,
   channels,
   createCard,
+  listArchivedCards,
   listCards,
   poll,
   read,
@@ -107,6 +165,7 @@ import {
   thread,
   updateCard,
   joinChannel,
+  unarchiveCard,
 } from "./handlers";
 import { initState, setState } from "./state";
 
@@ -396,5 +455,65 @@ describe("daemon-web handlers", () => {
         entries: [expect.objectContaining({ line_number: 1, body: "card note" })],
       },
     ]);
+  });
+
+  it("archives active cards into archive/channels and removes them from active lists", async () => {
+    const res = await archiveCard("general", "20260317-120000-abc");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      channel: "general",
+      card_id: "20260317-120000-abc",
+      archived_by: "lewis",
+    });
+    expect(files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toBe(false);
+    expect(files.get("/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toContain("title: Existing card");
+    expect(commits.at(-1)).toEqual({
+      filepaths: [
+        "archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "archive/channels/general/cards/20260317-120000-abc/discussion.thread",
+        "channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "channels/general/cards/20260317-120000-abc/discussion.thread",
+      ],
+      message: "card: archive 20260317-120000-abc in general by @lewis",
+    });
+
+    const active = await listCards();
+    expect(active.data?.cards).toEqual([]);
+
+    const archived = await listArchivedCards();
+    expect(archived.data?.cards).toEqual([
+      expect.objectContaining({
+        card_id: "20260317-120000-abc",
+        title: "Existing card",
+      }),
+    ]);
+  });
+
+  it("reads archived cards and restores them into active cards", async () => {
+    await archiveCard("general", "20260317-120000-abc");
+
+    const archivedRead = await readCard("general", "20260317-120000-abc");
+    expect(archivedRead.ok).toBe(true);
+    expect(archivedRead.data?.archived).toBe(true);
+    expect(archivedRead.data?.entries).toEqual([
+      expect.objectContaining({ body: "card note" }),
+    ]);
+
+    const res = await unarchiveCard("general", "20260317-120000-abc");
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      channel: "general",
+      card_id: "20260317-120000-abc",
+      unarchived_by: "lewis",
+    });
+    expect(files.get("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toContain("title: Existing card");
+    expect(files.has("/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toBe(false);
+    expect(commits.at(-1)?.message)
+      .toBe("card: unarchive 20260317-120000-abc in general by @lewis");
   });
 });

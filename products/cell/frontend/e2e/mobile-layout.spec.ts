@@ -149,6 +149,7 @@ async function stubBrowserModeWorker(page: Page) {
     };
 
     const cards: Card[] = [];
+    const archivedCards: Card[] = [];
     const messagesByCard = new Map<string, Message[]>();
 
     function handleMethod(method: string, args: unknown[]): RpcResult {
@@ -196,6 +197,8 @@ async function stubBrowserModeWorker(page: Page) {
           return { ok: true, data: { entries: [] } };
         case "listCards":
           return { ok: true, data: { cards } };
+        case "listArchivedCards":
+          return { ok: true, data: { cards: archivedCards } };
         case "createCard": {
           const [channel, title, optsRaw] = args as [
             string,
@@ -222,14 +225,16 @@ async function stubBrowserModeWorker(page: Page) {
         }
         case "readCard": {
           const [channel, cardId] = args as [string, string];
-          const card = cards.find((c) => c.channel === channel && c.card_id === cardId);
+          const active = cards.find((c) => c.channel === channel && c.card_id === cardId);
+          const archived = archivedCards.find((c) => c.channel === channel && c.card_id === cardId);
+          const card = active ?? archived;
           if (!card) return { ok: false, error: "card not found" };
           return {
             ok: true,
             data: {
               channel,
               card_id: cardId,
-              archived: false,
+              archived: !!archived,
               meta: card,
               entries: messagesByCard.get(`${channel}/${cardId}`) ?? [],
             },
@@ -273,6 +278,22 @@ async function stubBrowserModeWorker(page: Page) {
               assignee: card.assignee,
             },
           };
+        }
+        case "archiveCard": {
+          const [channel, cardId] = args as [string, string];
+          const idx = cards.findIndex((c) => c.channel === channel && c.card_id === cardId);
+          if (idx < 0) return { ok: false, error: "card not found" };
+          const [card] = cards.splice(idx, 1);
+          archivedCards.splice(0, archivedCards.length, card);
+          return { ok: true, data: { channel, card_id: cardId, archived_by: "flame4" } };
+        }
+        case "unarchiveCard": {
+          const [channel, cardId] = args as [string, string];
+          const idx = archivedCards.findIndex((c) => c.channel === channel && c.card_id === cardId);
+          if (idx < 0) return { ok: false, error: "card not found" };
+          const [card] = archivedCards.splice(idx, 1);
+          cards.splice(0, cards.length, card);
+          return { ok: true, data: { channel, card_id: cardId, unarchived_by: "flame4" } };
         }
         default:
           return { ok: false, error: `unexpected worker method: ${method}` };
@@ -462,6 +483,18 @@ test("browser mode mobile cards can be created and discussed", async ({ page }) 
   await noteInput.fill("first browser note");
   await noteInput.press("Enter");
   await expect(page.getByText("first browser note")).toBeVisible();
+
+  await page.getByRole("button", { name: "Archive" }).click();
+  await expect(page).toHaveURL(/\/cards$/);
+  await expect(page.getByText("No cards yet")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.history.pushState({}, "", "/cards/general/20260317-123456-abc");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page.getByText("This card is archived. Edits are disabled.")).toBeVisible();
+  await page.getByRole("button", { name: "Unarchive" }).click();
+  await expect(page.getByRole("button", { name: "Archive" })).toBeVisible();
 });
 
 test("browser mode preflights worker dependencies before clone", async ({ page }) => {

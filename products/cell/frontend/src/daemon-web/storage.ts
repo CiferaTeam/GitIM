@@ -20,6 +20,16 @@ export async function writeFile(path: string, content: string): Promise<void> {
   await f.promises.writeFile(path, content, "utf8");
 }
 
+export async function removeFile(path: string): Promise<void> {
+  const f = getFs();
+  await f.promises.unlink(path);
+}
+
+export async function removeDir(path: string): Promise<void> {
+  const f = getFs();
+  await f.promises.rmdir(path);
+}
+
 export async function readdir(path: string): Promise<string[]> {
   const f = getFs();
   return (await f.promises.readdir(path)) as string[];

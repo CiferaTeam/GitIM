@@ -2,7 +2,15 @@
 // Each function mirrors what gitim-runtime returns over HTTP.
 
 import * as gitOps from "./git";
-import { readFile, writeFile, readdir, exists, mkdir, stat } from "./storage";
+import {
+  readFile,
+  writeFile,
+  readdir,
+  exists,
+  mkdir,
+  stat,
+  removeDir,
+} from "./storage";
 import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
@@ -52,6 +60,12 @@ export interface UpdateCardPatch {
   status?: CardStatus;
   labels?: string[];
   assignee?: string | null;
+}
+
+interface LocatedCard {
+  relDir: string;
+  absDir: string;
+  archived: boolean;
 }
 
 let wasmReady: Promise<void> | null = null;
@@ -590,13 +604,13 @@ export async function readCard(
 ): Promise<ApiResponse> {
   try {
     await ensureWasmReady();
-    const located = await locateActiveCard(channel, cardId);
+    const located = await locateCard(channel, cardId);
     const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
     const entries = await readCardEntries(channel, cardId, query.limit, query.since);
     return ok({
       channel,
       card_id: cardId,
-      archived: false,
+      archived: located.archived,
       meta: card,
       entries,
     });
@@ -706,6 +720,101 @@ export async function updateCard(
   }
 }
 
+export async function archiveCard(
+  channel: string,
+  cardId: string,
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const located = await locateActiveCard(channel, cardId);
+    const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
+    const permissionError = checkCardArchivePermission(card, s.me.handler, "archive");
+    if (permissionError) return err(permissionError);
+
+    const targetRelDir = `archive/channels/${channel}/cards/${cardId}`;
+    const targetAbsDir = `${s.repoDir}/${targetRelDir}`;
+    await moveCardDirectory(
+      located,
+      { relDir: targetRelDir, absDir: targetAbsDir, archived: true },
+      `card: archive ${cardId} in ${channel} by @${s.me.handler}`,
+    );
+
+    runSync().catch(console.error);
+    return ok({ channel, card_id: cardId, archived_by: s.me.handler });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function unarchiveCard(
+  channel: string,
+  cardId: string,
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const located = await locateCard(channel, cardId);
+    if (!located.archived) return err(`card '${cardId}' is not archived`);
+    const channelMeta = `${s.repoDir}/${channelMetaPath(channel)}`;
+    if (!(await exists(channelMeta))) {
+      return err(`cannot unarchive card: channel '${channel}' is not active`);
+    }
+    const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
+    const permissionError = checkCardArchivePermission(card, s.me.handler, "unarchive");
+    if (permissionError) return err(permissionError);
+
+    const targetRelDir = `channels/${channel}/cards/${cardId}`;
+    const targetAbsDir = `${s.repoDir}/${targetRelDir}`;
+    await moveCardDirectory(
+      located,
+      { relDir: targetRelDir, absDir: targetAbsDir, archived: false },
+      `card: unarchive ${cardId} in ${channel} by @${s.me.handler}`,
+    );
+
+    runSync().catch(console.error);
+    return ok({ channel, card_id: cardId, unarchived_by: s.me.handler });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function listArchivedCards(
+  channel?: string,
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const archiveChannelsDir = `${s.repoDir}/archive/channels`;
+    if (!(await exists(archiveChannelsDir))) return ok({ cards: [] });
+
+    const channelNames = channel ? [channel] : await readdir(archiveChannelsDir);
+    const cards: Card[] = [];
+    for (const name of channelNames) {
+      const invalidChannel = validateChannelName(name);
+      if (invalidChannel) return err(invalidChannel);
+
+      const cardsDir = `${archiveChannelsDir}/${name}/cards`;
+      if (!(await exists(cardsDir))) continue;
+      const cardIds = await readdir(cardsDir);
+      for (const cardId of cardIds) {
+        const metaPath = `${cardsDir}/${cardId}/card.meta.yaml`;
+        if (!(await exists(metaPath))) continue;
+        try {
+          cards.push(await readCardMeta(name, cardId, metaPath));
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    cards.sort((a, b) => a.channel.localeCompare(b.channel) || a.card_id.localeCompare(b.card_id));
+    return ok({ cards });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
 // --- Internal helpers ---
 
 async function readChannelEntries(
@@ -728,7 +837,7 @@ async function readCardEntries(
   limit?: number,
   since?: number,
 ): Promise<ThreadEntry[]> {
-  const located = await locateActiveCard(channel, cardId);
+  const located = await locateCard(channel, cardId);
   const threadPath = `${located.absDir}/discussion.thread`;
   if (!(await exists(threadPath))) return [];
   const content = await readFile(threadPath);
@@ -742,7 +851,18 @@ async function readCardEntries(
 async function locateActiveCard(
   channel: string,
   cardId: string,
-): Promise<{ relDir: string; absDir: string }> {
+): Promise<LocatedCard> {
+  const located = await locateCard(channel, cardId);
+  if (located.archived) {
+    throw new Error(`card '${cardId}' is archived`);
+  }
+  return located;
+}
+
+async function locateCard(
+  channel: string,
+  cardId: string,
+): Promise<LocatedCard> {
   await ensureWasmReady();
   const s = getState();
   const invalidChannel = validateChannelName(channel);
@@ -750,10 +870,17 @@ async function locateActiveCard(
   validateCardId(cardId);
   const relDir = `channels/${channel}/cards/${cardId}`;
   const absDir = `${s.repoDir}/${relDir}`;
-  if (!(await exists(`${absDir}/card.meta.yaml`))) {
-    throw new Error(`card '${cardId}' not found in channel '${channel}'`);
+  if (await exists(`${absDir}/card.meta.yaml`)) {
+    return { relDir, absDir, archived: false };
   }
-  return { relDir, absDir };
+
+  const archivedRelDir = `archive/channels/${channel}/cards/${cardId}`;
+  const archivedAbsDir = `${s.repoDir}/${archivedRelDir}`;
+  if (await exists(`${archivedAbsDir}/card.meta.yaml`)) {
+    return { relDir: archivedRelDir, absDir: archivedAbsDir, archived: true };
+  }
+
+  throw new Error(`card '${cardId}' not found in channel '${channel}'`);
 }
 
 async function readCardMeta(
@@ -796,6 +923,45 @@ async function mkdirp(path: string): Promise<void> {
   }
 }
 
+async function moveCardDirectory(
+  from: LocatedCard,
+  to: LocatedCard,
+  message: string,
+): Promise<void> {
+  const s = getState();
+  const meta = await readFile(`${from.absDir}/card.meta.yaml`);
+  const thread = (await exists(`${from.absDir}/discussion.thread`))
+    ? await readFile(`${from.absDir}/discussion.thread`)
+    : "";
+
+  await mkdirp(to.absDir);
+  await writeFile(`${to.absDir}/card.meta.yaml`, meta);
+  await writeFile(`${to.absDir}/discussion.thread`, thread);
+
+  await gitOps.addRemoveAndCommit(
+    s.repoDir,
+    [`${to.relDir}/card.meta.yaml`, `${to.relDir}/discussion.thread`],
+    [`${from.relDir}/card.meta.yaml`, `${from.relDir}/discussion.thread`],
+    message,
+    s.me.handler,
+  );
+
+  try {
+    await removeDir(from.absDir);
+  } catch {
+    // Empty directory cleanup is best-effort; git tracks files, not directories.
+  }
+}
+
+function checkCardArchivePermission(
+  card: Card,
+  handler: string,
+  action: "archive" | "unarchive",
+): string | null {
+  if (card.created_by === handler || card.assignee === handler) return null;
+  return `only creator or assignee can ${action}`;
+}
+
 function generateCardId(): string {
   const now = new Date();
   const pad = (n: number, len = 2) => String(n).padStart(len, "0");
@@ -821,7 +987,7 @@ function cardChangeFromPath(
   path: string,
 ): { channel: string; cardId: string; file: "meta" | "thread" } | null {
   const match = path.match(
-    /^channels\/([^/]+)\/cards\/([^/]+)\/(card\.meta\.yaml|discussion\.thread)$/,
+    /^(?:archive\/)?channels\/([^/]+)\/cards\/([^/]+)\/(card\.meta\.yaml|discussion\.thread)$/,
   );
   if (!match) return null;
   return {

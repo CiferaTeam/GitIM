@@ -91,6 +91,12 @@ const handler: Record<
       cardId as string,
       (patch ?? {}) as handlers.UpdateCardPatch,
     ),
+  archiveCard: (channel: unknown, cardId: unknown) =>
+    handlers.archiveCard(channel as string, cardId as string),
+  unarchiveCard: (channel: unknown, cardId: unknown) =>
+    handlers.unarchiveCard(channel as string, cardId as string),
+  listArchivedCards: (channel?: unknown) =>
+    handlers.listArchivedCards(channel as string | undefined),
   startSync: () => {
     startSyncLoop();
     return Promise.resolve({ ok: true });

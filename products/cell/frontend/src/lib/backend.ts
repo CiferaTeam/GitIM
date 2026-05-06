@@ -76,6 +76,9 @@ export interface CardBackend {
     cardId: string,
     patch: UpdateCardPatch,
   ): Promise<ApiResponse>;
+  archiveCard(channel: string, cardId: string): Promise<ApiResponse>;
+  unarchiveCard(channel: string, cardId: string): Promise<ApiResponse>;
+  listArchivedCards(channel?: string): Promise<ApiResponse>;
 }
 
 export class HttpBackend implements Backend {
@@ -306,6 +309,15 @@ export class LocalBackend implements Backend {
     patch: UpdateCardPatch,
   ): Promise<ApiResponse> {
     return this.call("updateCard", channel, cardId, patch);
+  }
+  archiveCard(channel: string, cardId: string): Promise<ApiResponse> {
+    return this.call("archiveCard", channel, cardId);
+  }
+  unarchiveCard(channel: string, cardId: string): Promise<ApiResponse> {
+    return this.call("unarchiveCard", channel, cardId);
+  }
+  listArchivedCards(channel?: string): Promise<ApiResponse> {
+    return this.call("listArchivedCards", channel);
   }
 
   terminate(): void {
