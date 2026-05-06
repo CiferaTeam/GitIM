@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsage, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -125,6 +126,10 @@ pub enum ParsedNotification {
     },
     /// Tool result (completed or failed).
     ToolResult { call_id: String, output: String },
+    /// Mid-session token usage push. Hermes emits these as
+    /// `sessionUpdate: "usage_update"` with camelCase fields, separately
+    /// from the snake_case usage on the final session/prompt response.
+    Usage(ProviderUsage),
 }
 
 /// Detect a hermes-internal API failure that's been streamed as plain
@@ -226,8 +231,51 @@ pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
                 .unwrap_or_default();
             Some(ParsedNotification::ToolResult { call_id, output })
         }
+        "usage_update" => parse_acp_usage(update.get("usage")?).map(ParsedNotification::Usage),
         _ => None,
     }
+}
+
+/// Map a Hermes `usage` object to the provider-agnostic `ProviderUsage`.
+///
+/// Hermes surfaces usage in two distinct shapes:
+///
+/// 1. **session/prompt response** (id=3) — ACP-spec snake_case:
+///    `{input_tokens, output_tokens, cache_read_input_tokens?,
+///      cache_creation_input_tokens?}` — Hermes wraps Claude today and
+///    relays Anthropic fields verbatim per the Agent Client Protocol.
+///
+/// 2. **session/update with sessionUpdate=usage_update** — Hermes' own
+///    mid-stream push, camelCase: `{inputTokens, outputTokens,
+///    cacheReadInputTokens?, cacheCreationInputTokens?}`. The existing
+///    `parse_usage_update_returns_none` test fixture documents the
+///    camelCase shape; this used to be intentionally ignored.
+///
+/// Accept both naming conventions in one parser: try snake_case first
+/// (it's what the ACP spec mandates), then camelCase as a fallback.
+/// Returns `None` when none of the four counts are present, so an empty
+/// `usage: {}` doesn't fabricate a 0% snapshot.
+fn parse_acp_usage(v: &Value) -> Option<ProviderUsage> {
+    let obj = v.as_object()?;
+    let pick = |snake: &str, camel: &str| -> Option<u64> {
+        obj.get(snake)
+            .or_else(|| obj.get(camel))
+            .and_then(Value::as_u64)
+    };
+    let input = pick("input_tokens", "inputTokens");
+    let output = pick("output_tokens", "outputTokens");
+    let cache_read = pick("cache_read_input_tokens", "cacheReadInputTokens");
+    let cache_creation = pick("cache_creation_input_tokens", "cacheCreationInputTokens");
+    if input.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none() {
+        return None;
+    }
+    Some(ProviderUsage {
+        input_tokens: input,
+        output_tokens: output,
+        used_percent: None,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+    })
 }
 
 // ── JSON-RPC types (internal) ──
@@ -264,6 +312,12 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
+    // ACP spec: session/prompt response carries `result.usage` per the Agent
+    // Client Protocol. Hermes is a Claude wrapper today, so it relays
+    // Anthropic-style snake_case fields. We only see one prompt response
+    // per call (id=3), but keep the same `latest_usage` shape as Pi/Codex
+    // for consistency.
+    let mut latest_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -511,6 +565,10 @@ async fn drive_session(
                                             .unwrap_or("prompt failed")
                                             .to_string(),
                                     );
+                                } else if let Some(usage_val) = raw.pointer("/result/usage") {
+                                    if let Some(u) = parse_acp_usage(usage_val) {
+                                        latest_usage = Some(u);
+                                    }
                                 }
                                 break;
                             }
@@ -532,6 +590,9 @@ async fn drive_session(
                                             }
                                             ParsedNotification::ToolResult { call_id, output: tool_output } => {
                                                 try_send_event(&event_tx, Event::ToolResult { call_id, output: tool_output });
+                                            }
+                                            ParsedNotification::Usage(u) => {
+                                                latest_usage = Some(u);
                                             }
                                         }
                                     }
@@ -612,7 +673,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: None,
+        usage: latest_usage,
     });
 }
 

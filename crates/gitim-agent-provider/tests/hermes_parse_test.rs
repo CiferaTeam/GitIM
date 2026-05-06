@@ -129,10 +129,58 @@ fn parse_tool_call_update_pending_returns_none() {
 }
 
 #[test]
-fn parse_usage_update_returns_none() {
+fn parse_usage_update_extracts_camelcase_tokens() {
+    // Hermes' own mid-stream push uses camelCase; the parse_acp_usage helper
+    // accepts both naming conventions so the same code path also handles
+    // ACP-spec snake_case on the prompt response.
     let params = json!({
         "sessionId": "s-1",
-        "update": {"sessionUpdate": "usage_update", "usage": {"inputTokens": 100}}
+        "update": {
+            "sessionUpdate": "usage_update",
+            "usage": {
+                "inputTokens": 1250,
+                "outputTokens": 340,
+                "cacheReadInputTokens": 95000,
+                "cacheCreationInputTokens": 200
+            }
+        }
+    });
+    let msg = parse_notification(&params).unwrap();
+    let ParsedNotification::Usage(u) = msg else {
+        panic!("expected Usage variant, got {msg:?}");
+    };
+    assert_eq!(u.input_tokens, Some(1_250));
+    assert_eq!(u.output_tokens, Some(340));
+    assert_eq!(u.cache_read_tokens, Some(95_000));
+    assert_eq!(u.cache_creation_tokens, Some(200));
+    assert!(u.used_percent.is_none());
+}
+
+#[test]
+fn parse_usage_update_accepts_acp_snake_case() {
+    // Defensive: if a future hermes build (or a different ACP server)
+    // uses spec-compliant snake_case on the same notification path,
+    // the parser should still pick it up.
+    let params = json!({
+        "sessionId": "s-1",
+        "update": {
+            "sessionUpdate": "usage_update",
+            "usage": {"input_tokens": 50, "output_tokens": 10}
+        }
+    });
+    let msg = parse_notification(&params).unwrap();
+    let ParsedNotification::Usage(u) = msg else {
+        panic!("expected Usage variant");
+    };
+    assert_eq!(u.input_tokens, Some(50));
+    assert_eq!(u.output_tokens, Some(10));
+}
+
+#[test]
+fn parse_usage_update_with_empty_usage_returns_none() {
+    let params = json!({
+        "sessionId": "s-1",
+        "update": {"sessionUpdate": "usage_update", "usage": {}}
     });
     assert!(parse_notification(&params).is_none());
 }
