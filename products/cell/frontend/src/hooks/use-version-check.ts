@@ -111,6 +111,7 @@ export function useVersionCheck(): VersionCheckResult {
 
   // Current runtime version is the source of truth in the store — we just
   // read it here so the connection probe + periodic refresh share one slot.
+  const mode = useConnectionStore((s) => s.mode);
   const current = useConnectionStore((s) => s.runtimeVersion);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
   const isUpdating = useConnectionStore((s) => s.isUpdating);
@@ -146,6 +147,11 @@ export function useVersionCheck(): VersionCheckResult {
   // --- Periodic version check ------------------------------------------------
 
   useEffect(() => {
+    if (mode !== "remote") {
+      setLatest(null);
+      return;
+    }
+
     let cancelled = false;
 
     async function tick() {
@@ -159,7 +165,7 @@ export function useVersionCheck(): VersionCheckResult {
       cancelled = true;
       clearInterval(handle);
     };
-  }, [refreshCurrent, refreshLatest]);
+  }, [mode, refreshCurrent, refreshLatest]);
 
   // --- Unmount cleanup for restart-window poll -------------------------------
 
@@ -176,6 +182,7 @@ export function useVersionCheck(): VersionCheckResult {
   // --- Update trigger --------------------------------------------------------
 
   const triggerUpdate = useCallback(async () => {
+    if (mode !== "remote") return;
     if (restartingRef.current) return;
     restartingRef.current = true;
     setUpdateError(null);
@@ -274,6 +281,7 @@ export function useVersionCheck(): VersionCheckResult {
       void poll();
     });
   }, [
+    mode,
     refreshCurrent,
     refreshLatest,
     setIsRestarting,
@@ -282,7 +290,7 @@ export function useVersionCheck(): VersionCheckResult {
     setUpdateError,
   ]);
 
-  const hasUpdate = isNewer(current, latest);
+  const hasUpdate = mode === "remote" && isNewer(current, latest);
 
   return {
     current,

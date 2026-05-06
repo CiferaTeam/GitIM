@@ -4,7 +4,6 @@ import { HelpCircle } from "lucide-react";
 import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
-import { useVersionCheck } from "../../hooks/use-version-check";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
@@ -20,8 +19,6 @@ export function AppShell({ children }: AppShellProps) {
   const navigate = useNavigate();
   const connected = useChatStore((s) => s.connected);
   const currentUser = useChatStore((s) => s.currentUser);
-
-  useVersionCheck();
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
