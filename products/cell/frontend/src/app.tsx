@@ -529,7 +529,15 @@ export default function App() {
 
   return (
     <SetupGate>
-      <Toaster position="top-right" richColors />
+      <Toaster
+        position={isMobile ? "bottom-center" : "top-right"}
+        mobileOffset={{
+          bottom: "calc(env(safe-area-inset-bottom) + 72px)",
+          left: 16,
+          right: 16,
+        }}
+        richColors
+      />
       {gated}
     </SetupGate>
   );
