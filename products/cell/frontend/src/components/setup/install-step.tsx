@@ -3,10 +3,10 @@ import { Check, Copy } from "lucide-react";
 import { SetupShell } from "./setup-shell";
 
 const INSTALL_CMD =
-  "curl -sSf https://raw.githubusercontent.com/CiferaTeam/gitim-releases/main/install.sh | sh";
+  "curl -sSf https://raw.githubusercontent.com/CiferaTeam/GitIM/main/install.sh | sh";
 const RUN_CMD = "gitim-runtime --port 16868 -d";
 const RELEASES_URL =
-  "https://github.com/CiferaTeam/gitim-releases/releases/latest";
+  "https://github.com/CiferaTeam/GitIM/releases/latest";
 
 interface InstallStepProps {
   onContinue: () => void;
@@ -58,7 +58,7 @@ export function InstallStep({ onContinue, onBack }: InstallStepProps) {
             rel="noopener noreferrer"
             className="text-primary hover:underline"
           >
-            gitim-releases
+            GitHub Releases
           </a>
           .
         </div>

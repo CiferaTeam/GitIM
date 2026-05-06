@@ -68,7 +68,7 @@ fn is_newer_malformed_fails_closed() {
 fn download_url_contract() {
     assert_eq!(
         download_url("v0.3.1", "darwin-arm64"),
-        "https://github.com/CiferaTeam/gitim-releases/releases/download/v0.3.1/gitim-v0.3.1-darwin-arm64.tar.gz"
+        "https://github.com/CiferaTeam/GitIM/releases/download/v0.3.1/gitim-v0.3.1-darwin-arm64.tar.gz"
     );
 }
 
@@ -76,7 +76,7 @@ fn download_url_contract() {
 fn latest_release_api_url_contract() {
     assert_eq!(
         latest_release_api_url(),
-        "https://api.github.com/repos/CiferaTeam/gitim-releases/releases/latest"
+        "https://api.github.com/repos/CiferaTeam/GitIM/releases/latest"
     );
 }
 
