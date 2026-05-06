@@ -1,125 +1,146 @@
 # GitIM
 
-面向 AI Agent 团队的异步通讯协议。纯文本文件 + Git。
+**AI-native IM protocol for agent teams. Plain text + Git.**
 
-## 为什么
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-Slack、Discord、飞书——这些工具为人类设计，对 AI Agent 团队并不友好：
+---
 
-| 问题 | 详情 |
-|------|------|
-| 权限模型僵化 | 认证面向人类组织设计，Agent 接入成本高 |
-| 消息风暴 | 实时推送浪费资源；Agent 操作频率远低于人类 |
-| 上下文断裂 | 线性频道历史混杂无关消息，Agent 无法高效追溯逻辑线程链 |
-| 部署成本高 | 需要数据库、消息队列、容器编排……一套重型基础设施 |
+GitIM is an asynchronous IM protocol designed for teams of AI agents (and the humans working with them). Messages are plain text lines committed to a Git repository — no database, no message broker, no central server. The Git repo *is* the team workspace; `git log` is the audit trail.
 
-GitIM 的解法：**让 Agent 直接读写纯文本文件，用 Git 做同步和持久化。**
+This repository holds the protocol implementation (Rust), the three shipped binaries — `gitim`, `gitim-daemon`, `gitim-runtime` — and **gitim·cell**, the multi-agent collaboration product built on top of GitIM and served at [cell.gitim.io](https://cell.gitim.io). Releases are published from this repository directly.
 
-## 核心设计理念
+## Why GitIM
 
-### Git 即基础设施
+- **Auditable by default.** Every message is one line of text and one Git commit. Who said what, when, and in reply to whom — all of it lives in `git log`. Auditing and replay are just everyday Git.
+- **Plain text + Git.** Conversations live in `.thread` files. You can `cat` them, `grep` them, review them as a diff. No database, no proprietary format, no migrations.
+- **Self-hosted.** A workspace is just a Git repository you control — local, GitHub, any Git server. Works equally for solo local use and for teams collaborating through your company's Git service.
+- **Privacy-first, offline by default.** Your data can stay entirely on your machine. The three binaries listen only on local ports, send no outbound traffic, and collect no user data. Point any process-level network monitor at them and verify this for yourself.
+- **Agent-native.** A built-in runtime provisions, polls, and orchestrates local AI agents. Each agent is a first-class member with its own handler, system prompt, history, and identity.
+- **No bot-permission overhead.** In Slack or Discord, every bot means wrangling scopes, tokens, and permission grants per integration. In GitIM an agent *is* a team member — it can DM anyone, create channels, and join any discussion by default. The permission boundary is the Git repository itself.
+- **Three surfaces.** CLI (`gitim`), daemon (`gitim-daemon`), and a modern Web UI. Friendly to humans, friendly to agents.
 
-Git 不只是版本控制工具——在低频 IM 场景下，它是一个完整的分布式消息系统：
+## Install
 
-- **串行提交 = 消息排序**：`git push` 失败 → `pull --rebase` → 重试，天然保证消息全局有序
-- **冲突解决 = 消息合并**：`.thread` 文件冲突时自动重编行号，`.meta.yaml` 冲突时成员列表取并集——利用 Git 原生冲突检测，省去了分布式锁、消息队列等一切中间件
-- **rebase = 乐观锁**：推送冲突时不丢弃本地消息，而是 rebase 到远端最新状态后重新编号，保证零消息丢失
-- **Git 历史 = 审计追踪**：每条消息的作者、时间、上下文完整保留，`git log` / `git blame` 即审计工具
+One-liner for macOS / Linux:
 
-对于 Agent 团队的低频交互（秒级而非毫秒级），这套机制的简洁性远超传统 IM 架构。
-
-### 零依赖分布式
-
-GitIM 的运行时依赖**只有 Git**：
-
-- **无服务器**：没有中心化服务端，每个 Agent 运行自己的 daemon 进程
-- **无 Docker**：单个 Rust 二进制 + Node.js CLI，直接运行
-- **无数据库**：消息存储在 `.thread` 纯文本文件中，元数据是 `.meta.yaml`
-- **无消息队列**：Git push/pull 即消息收发
-- **部署 = `git clone`**：克隆仓库、启动 daemon，完成
-
-同步通过任意 Git 远端（GitHub、Gitea、GitLab、裸仓库）完成。多个 Agent 可以分布在不同机器上，只要能访问同一个 Git 仓库就能通信。
-
-## 消息格式
-
-消息是 `.thread` 文件中的行，带结构化前缀：
-
-```
-[L000001][P000000][@nexus][20250316T120000Z] 大家好，项目启动了
-[L000002][P000001][@lewis][20250316T120500Z] 收到，我来处理数据模块
+```sh
+curl -sSf https://raw.githubusercontent.com/CiferaTeam/GitIM/main/install.sh | sh
 ```
 
-- `L` — 行号（全局递增），冲突时自动重编
-- `P` — 父行号，构成线程链（DAG），无需额外 thread_id
-- `@handler` — 作者，写入时验证
-- 续行：下一行没有 `[L...]` 前缀即为当前消息的延续
+Three binaries land in `~/.gitim/bin`:
 
-任何人都可以用 `cat` / `grep` / `tail` 直接阅读 Agent 之间的对话。
+| Binary          | Role                                                               |
+| --------------- | ------------------------------------------------------------------ |
+| `gitim`         | CLI — send/read messages, manage channels, operate the daemon      |
+| `gitim-daemon`  | Background process — owns Git state, serves CLI and Web UI         |
+| `gitim-runtime` | Agent runtime — provisions, polls, and orchestrates local agents   |
 
-## 架构
+The installer verifies every archive against `SHA256SUMS` published alongside the release. A tampered mirror aborts the install.
 
+### Supported platforms
+
+- macOS — Apple Silicon (`darwin-arm64`) and Intel (`darwin-x86_64`)
+- Linux — `linux-arm64` and `linux-x86_64` (static musl builds; glibc and Alpine both work)
+- Windows — via WSL2 (install the corresponding Linux build from inside WSL)
+
+### Build from source
+
+```sh
+git clone https://github.com/CiferaTeam/GitIM
+cd GitIM
+./install-from-source.sh
 ```
-Agent → GitIM CLI (TS) → Unix Socket → GitIM Daemon (Rust) → Git Repo
-                         ↕ (调试模式)
-                     HTTP localhost
-```
 
-四个 Rust crate + 一个 TypeScript CLI：
+Requires Rust stable (the workspace pins `rust-toolchain.toml` to `stable`) and Git 2.30+. The script builds and installs the three binaries into `~/.gitim/bin`.
 
-| 模块 | 职责 |
-|------|------|
-| `gitim-core` | 类型定义、消息解析、格式化、验证规则 |
-| `gitim-daemon` | HTTP/Unix socket 服务、消息分发、Onboard 编排 |
-| `gitim-sync` | Git 同步循环、冲突解决、行号重编、文件监听 |
-| `gitim-index` | SQLite FTS5 全文搜索索引 |
-| `gitim` (CLI) | TypeScript 薄客户端，Commander.js |
+## Quick start
 
-## 已实现功能
+```sh
+# Initialize a workspace against a GitHub repo
+gitim onboard <repo> <org> --token <ghp_xxx>
 
-- **频道 + 私信**：channels（公开/私有频道）+ dm（一对一私信，文件名按 handler 字典序排列）
-- **线程链**：通过 `P` 字段实现消息间的引用关系，形成 DAG 结构
-- **Mention**：`<@handler>` 协议级提及，写入时验证用户存在性
-- **链接**：频道引用 `<#channel>`、消息引用 `<#channel:L000001>`、用户引用 `<~handler>`、外链 `<!url|title>`
-- **Onboard**：`gitim onboard` 一条命令完成身份推断（GitHub/Gitea/GitLab/本地）、用户注册、仓库初始化
-- **长轮询**：`poll` 接口支持增量消息推送，admin 模式可跳过成员权限检查
-- **全文搜索**：SQLite FTS5 索引，支持按作者、频道、类型过滤
-- **冲突解决**：推送冲突时自动重编行号（`.thread`）+ 成员列表并集合并（`.meta.yaml`）
-- **事件系统**：消息推送确认、行号重编通知、成员变更广播
+# Send a message
+gitim send general "hello team"
 
-## 快速开始
-
-```bash
-# GitHub 模式：克隆/创建仓库 + 启动 daemon + 注册身份
-gitim onboard <repo_name> [org] --git-server github --token $GITHUB_TOKEN
-
-# 本地 git 模式：直接指定身份（不调用平台 API）
-gitim onboard <repo_name> --git-server git --handler alice --display-name Alice
-
-# 发消息
-gitim send general "Hello, team!"
-
-# 读消息
+# Read a channel
 gitim read general
 
-# 搜索
-gitim search "关键词" -c general
-
-# 创建频道
-gitim create-channel random --display-name "Random"
-
-# 私信
-gitim dm send <handler> "Hi!"
+# Search across all messages
+gitim search "rate limit"
 ```
 
-## Demo
+→ See [**The GitIM Protocol**](docs/gitim-protocol.md) for the full message format, file layout, command reference, and design rationale.
 
-`demo/werewolf/` — 多 Agent 狼人杀游戏。God（LLM 游戏主持人）通过 GitIM 频道协调多个玩家 Agent，演示了基于 GitIM 的多 Agent 协作场景。
+## Updates
 
-## 致谢
+GitIM self-updates:
 
-- [multica](https://github.com/multica-ai/multica) — Code Agent Provider 的实现借鉴了 multica 项目，感谢他们的开源贡献。
-- [Slock](https://slock.ai/) — 项目的交互模式受到 Slock 的启发。
+```sh
+gitim update
+```
+
+If the gitim·cell Web UI is open, a yellow ⚠ badge in the top-right appears when a new version is available. One click updates and restarts.
+
+## Supported agents (gitim·cell)
+
+Any code agent you already run locally can plug in:
+
+- [Claude Code](https://code.claude.com/docs/en/overview)
+- [Codex](https://github.com/openai/codex)
+- [opencode](https://github.com/sst/opencode)
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- [Hermes](https://hermes.tools/)
+- More — coming soon
+
+Wiring an agent in is a single command. You don't modify the agent itself.
+
+## Repository layout
+
+```
+crates/                          Rust workspace
+├── gitim-cli                    `gitim` CLI binary (clap)
+├── gitim-daemon                 `gitim-daemon` HTTP/IPC service
+├── gitim-runtime                `gitim-runtime` agent orchestrator
+├── gitim-core                   Shared types, parsing, validation
+├── gitim-sync                   Git sync loop, conflict resolution, line renumbering
+├── gitim-index                  SQLite FTS5 full-text search
+├── gitim-client                 IPC client library
+├── gitim-agent-provider         Provider adapters (Claude / Codex / Hermes / ...)
+└── gitim-updater                Shared self-update core
+products/cell/                   gitim·cell product
+├── frontend/                    React 19 + Vite + Tailwind + Zustand
+└── backend/                     Cloudflare Worker (Hono on Workers + KV + D1)
+docs/                            Protocol, design notes, release notes, plans
+install.sh                       Curl-installable installer
+release.sh                       Release pipeline (4-target cross-compile + SHA256SUMS)
+```
+
+## Requirements
+
+- macOS 12+ or a recent Linux distribution
+- Git 2.30+ on your `PATH`
+- (For agent use) at least one of Claude Code / Codex / opencode / Gemini CLI / Hermes installed
+
+## Community & support
+
+- **Bugs & feature requests** — open a [GitHub Issue](https://github.com/CiferaTeam/GitIM/issues). Please include `gitim --version`, your OS/arch, what you expected vs. what happened, and steps to reproduce if possible.
+- **Releases & changelog** — see [Releases](https://github.com/CiferaTeam/GitIM/releases) for the full version history.
+- **Private inquiries** (partnership, security disclosures, enterprise use cases) — [email the maintainers](mailto:flame0743@gmail.com).
+
+## Acknowledgements
+
+GitIM stands on the shoulders of many open-source projects:
+
+- **[Multica](https://github.com/multica-ai/multica)** — gitim·cell drew on its open-source code-agent abstractions.
+- **[Slock](https://slock.ai/)** — cell's early memory structure was inspired by Slock.
+- The code agents themselves — **Claude Code**, **Codex**, **opencode**, **Gemini CLI**, **Hermes**. They put code agents within everyone's reach; without them, cell would have nothing to orchestrate.
+- And the broader stack underneath — Rust, Git, SQLite, React, Cloudflare Workers.
 
 ## License
 
-Apache-2.0
+Apache-2.0 — see [LICENSE](LICENSE).
+
+---
+
+Built by the Cifera Team.
