@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { ConnectForm } from "./connect-form";
 import { InstallStep } from "./install-step";
+import { LocalSetup } from "./local-setup";
+import { ModeChoiceStep } from "./mode-choice-step";
 import { SetupShell } from "./setup-shell";
 
 interface SetupGateProps {
@@ -18,7 +20,10 @@ interface SetupGateProps {
  */
 export function SetupGate({ children }: SetupGateProps) {
   const status = useConnectionStore((s) => s.status);
+  const mode = useConnectionStore((s) => s.mode);
   const port = useConnectionStore((s) => s.port);
+  const localReady = useConnectionStore((s) => s.localReady);
+  const setMode = useConnectionStore((s) => s.setMode);
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
 
@@ -28,9 +33,14 @@ export function SetupGate({ children }: SetupGateProps) {
   const [installAcknowledged, setInstallAcknowledged] = useState(
     () => port != null,
   );
+  const [modeSelected, setModeSelected] = useState(() => port != null || mode === "local");
 
   // On mount: if we have a stored port, try to connect automatically.
   useEffect(() => {
+    if (mode === "local") {
+      if (!localReady) setStatus("disconnected");
+      return;
+    }
     if (status !== "checking") return;
     if (!port) {
       setStatus("disconnected");
@@ -60,7 +70,11 @@ export function SetupGate({ children }: SetupGateProps) {
 
     tryConnect();
     return () => { cancelled = true; };
-  }, [status, port, setStatus, setRuntimeVersion]);
+  }, [mode, localReady, status, port, setStatus, setRuntimeVersion]);
+
+  if (mode === "local" && !localReady) {
+    return <LocalSetup />;
+  }
 
   if (status === "checking") {
     return (
@@ -74,8 +88,22 @@ export function SetupGate({ children }: SetupGateProps) {
   }
 
   if (status === "disconnected") {
+    if (!modeSelected) {
+      return (
+        <ModeChoiceStep
+          onUseRuntime={() => setModeSelected(true)}
+          onUseBrowserMode={() => setMode("local")}
+        />
+      );
+    }
+
     if (!installAcknowledged) {
-      return <InstallStep onContinue={() => setInstallAcknowledged(true)} />;
+      return (
+        <InstallStep
+          onContinue={() => setInstallAcknowledged(true)}
+          onBack={port == null ? () => setModeSelected(false) : undefined}
+        />
+      );
     }
     return <ConnectForm onBack={() => setInstallAcknowledged(false)} />;
   }

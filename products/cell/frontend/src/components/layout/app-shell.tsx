@@ -4,11 +4,11 @@ import { HelpCircle } from "lucide-react";
 import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
-import { useVersionCheck } from "../../hooks/use-version-check";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
 import { DonateDialog } from "../donate-dialog";
+import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -20,14 +20,9 @@ export function AppShell({ children }: AppShellProps) {
   const connected = useChatStore((s) => s.connected);
   const currentUser = useChatStore((s) => s.currentUser);
 
-  // Version check lives here (not at App root) so UUID/DAU only counts
-  // once the user has reached the real workspace UI — not during the
-  // download/connect/install screens.
-  useVersionCheck();
-
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
-      {/* Top bar */}
+      {/* Top bar — desktop full, mobile minimal */}
       <header className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
         {/* Left: logo + workspace switcher + connection status */}
         <div className="flex items-center gap-2 min-w-0">
@@ -43,13 +38,15 @@ export function AppShell({ children }: AppShellProps) {
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
-          <div className="ml-1 min-w-0">
+          <div className="ml-1 min-w-0 hidden md:block">
             <WorkspaceSwitcher />
           </div>
         </div>
 
-        {/* Center: nav tabs */}
-        <NavTabs />
+        {/* Center: nav tabs — hidden on mobile */}
+        <div className="hidden md:block">
+          <NavTabs />
+        </div>
 
         {/* Right: theme toggle + twitter + update indicator + help + current user */}
         <div className="flex items-center justify-end gap-2 min-w-[140px]">
@@ -59,13 +56,19 @@ export function AppShell({ children }: AppShellProps) {
             target="_blank"
             rel="noopener noreferrer"
             title="Twitter / X"
-            className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
+            className="hidden md:flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-foreground hover:bg-surface/60 transition-colors"
           >
             <TwitterXIcon className="size-4" />
           </a>
-          <DonateDialog />
-          <UsageIndicator />
-          <UpdateIndicator />
+          <div className="hidden md:block">
+            <DonateDialog />
+          </div>
+          <div className="hidden md:block">
+            <UsageIndicator />
+          </div>
+          <div className="hidden md:block">
+            <UpdateIndicator />
+          </div>
           <button
             type="button"
             onClick={() => navigate("/docs")}
@@ -75,7 +78,7 @@ export function AppShell({ children }: AppShellProps) {
             <HelpCircle className="size-4" />
           </button>
           {currentUser ? (
-            <span className="text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border">
+            <span className="text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border hidden md:inline-block">
               @{currentUser}
             </span>
           ) : null}
@@ -86,6 +89,7 @@ export function AppShell({ children }: AppShellProps) {
       <main className="flex-1 overflow-hidden">
         {children ?? <Outlet />}
       </main>
+      <MobileTabBar />
     </div>
   );
 }

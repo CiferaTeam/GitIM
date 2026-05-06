@@ -1,15 +1,14 @@
 import { NavLink } from "react-router";
-
-const navItems = [
-  { to: "/management", label: "Agents" },
-  { to: "/chat", label: "Chat" },
-  { to: "/cards", label: "Cards" },
-];
+import { useConnectionStore } from "../../hooks/use-connection-store";
+import { getVisibleNavigationItems } from "./navigation-items";
 
 export function NavTabs() {
+  const mode = useConnectionStore((s) => s.mode);
+  const items = getVisibleNavigationItems(mode, "desktop");
+
   return (
     <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg border border-border/60">
-      {navItems.map((item) => (
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}

@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, LogIn } from "lucide-react";
+import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
 import { Button } from "../ui/button";
 import { ChannelCardDrawer } from "../cards/channel-card-drawer";
+import { MobileSidebarDrawer } from "../mobile/mobile-sidebar-drawer";
+import { MobileThreadOverlay } from "../mobile/mobile-thread-overlay";
+import { MobileActionSheet } from "../mobile/mobile-action-sheet";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -273,33 +277,112 @@ export function ChatLayout() {
     setThreadRoot(null);
   }, [setThreadRoot]);
 
+  // Mobile states
+  const isMobile = useIsMobile();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [actionSheetMessage, setActionSheetMessage] = useState<Message | null>(null);
+
+  const handleMobileReply = useCallback((msg: Message) => {
+    setReplyTo(msg);
+    setActionSheetMessage(null);
+  }, [setReplyTo]);
+
+  const handleMobileShowThread = useCallback((msg: Message) => {
+    setActionSheetMessage(null);
+    void handleShowThread(msg);
+  }, [handleShowThread]);
+
+  const isDm = currentChannelData?.kind === "dm";
+  const mobileChannelLabel = currentChannel
+    ? isDm
+      ? `@${currentChannel.split("--").find((p) => p !== currentUser) ?? currentChannel}`
+      : `#${currentChannel}`
+    : "Select a channel";
+
   return (
     <div className="flex h-full overflow-hidden">
-      <Sidebar
-        onChannelSelect={handleChannelSelect}
-        onStartDm={handleStartDm}
-      />
+      {/* Desktop sidebar */}
+      <div className="hidden md:block">
+        <Sidebar
+          onChannelSelect={handleChannelSelect}
+          onStartDm={handleStartDm}
+        />
+      </div>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ChatHeader
-          onStartDm={handleStartDm}
-          onOpenCards={
-            currentChannel && currentChannelData?.kind === "channel"
-              ? () => setCardDrawerOpen(true)
-              : undefined
-          }
-        >
-          {navHistory.length > 0 && (
-            <button
-              onClick={handleNavBack}
-              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors mr-2"
-              title="Back"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              <span>Back</span>
-            </button>
-          )}
-        </ChatHeader>
+        {/* Mobile top bar overlay when in chat */}
+        {isMobile && (
+          <div className="h-[52px] border-b border-border flex items-center px-3 justify-between shrink-0 bg-card/80 backdrop-blur-md md:hidden">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <button
+                onClick={() => setMobileSidebarOpen(true)}
+                className="p-2 -ml-1 rounded-lg hover:bg-surface transition-colors active:scale-90"
+                aria-label="Open conversations"
+              >
+                <Menu className="size-5 text-text-muted" />
+              </button>
+              {navHistory.length > 0 && (
+                <button
+                  onClick={handleNavBack}
+                  className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors active:scale-90"
+                  aria-label="Back"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
+              )}
+              <div className="flex items-center gap-1.5 min-w-0">
+                {isDm ? (
+                  <AtSign className="size-4 text-primary shrink-0" />
+                ) : (
+                  <Hash className="size-4 text-primary shrink-0" />
+                )}
+                <span className="font-semibold text-sm tracking-tight truncate">
+                  {mobileChannelLabel}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {replyTo && (
+                <span className="text-[11px] text-primary bg-primary/10 px-2 py-1 rounded-full">
+                  Replying
+                </span>
+              )}
+              {currentChannel && currentChannelData?.kind === "channel" && (
+                <button
+                  onClick={() => setCardDrawerOpen(true)}
+                  className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-text-muted hover:text-foreground hover:bg-surface transition-colors active:scale-90"
+                  aria-label={`Open cards for ${currentChannel}`}
+                >
+                  <LayoutGrid className="size-4" />
+                  <span className="text-xs font-medium">Cards</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Desktop header */}
+        {!isMobile && (
+          <ChatHeader
+            onStartDm={handleStartDm}
+            onOpenCards={
+              currentChannel && currentChannelData?.kind === "channel"
+                ? () => setCardDrawerOpen(true)
+                : undefined
+            }
+          >
+            {navHistory.length > 0 && (
+              <button
+                onClick={handleNavBack}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors mr-2"
+                title="Back"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Back</span>
+              </button>
+            )}
+          </ChatHeader>
+        )}
 
         {showJoinBanner && (
           <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
@@ -335,6 +418,7 @@ export function ChatLayout() {
           onChannelClick={handleChannelClick}
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
+          onActionSheet={isMobile ? setActionSheetMessage : undefined}
         />
         {currentChannel && !isArchivedView && (
           <InputArea
@@ -348,15 +432,37 @@ export function ChatLayout() {
         )}
       </div>
 
-      <ThreadPanel
+      {/* Desktop thread panel */}
+      <div className="hidden md:block">
+        <ThreadPanel
+          root={threadRoot}
+          messages={threadMessages}
+          onClose={handleThreadClose}
+          onReplyInThread={handleReply}
+          onMentionClick={handleMentionClick}
+          onChannelClick={handleChannelClick}
+          onMessageLinkClick={handleMessageLinkClick}
+          onUserProfileClick={handleUserProfileClick}
+        />
+      </div>
+
+      {/* Mobile overlays */}
+      <MobileSidebarDrawer
+        open={mobileSidebarOpen}
+        onClose={() => setMobileSidebarOpen(false)}
+        onChannelSelect={handleChannelSelect}
+      />
+      <MobileThreadOverlay
         root={threadRoot}
         messages={threadMessages}
         onClose={handleThreadClose}
         onReplyInThread={handleReply}
-        onMentionClick={handleMentionClick}
-        onChannelClick={handleChannelClick}
-        onMessageLinkClick={handleMessageLinkClick}
-        onUserProfileClick={handleUserProfileClick}
+      />
+      <MobileActionSheet
+        message={actionSheetMessage}
+        onClose={() => setActionSheetMessage(null)}
+        onReply={handleMobileReply}
+        onShowThread={handleMobileShowThread}
       />
 
       {userCardHandler && userCardPosition && (

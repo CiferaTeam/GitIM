@@ -1,8 +1,9 @@
+use serde::Serialize;
 use crate::types::handler::Handler;
 use crate::types::link::Link;
 
 /// A parsed message from a .thread file.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Message {
     pub line_number: u64,
     pub point_to: u64,
@@ -14,7 +15,7 @@ pub struct Message {
 }
 
 /// 频道事件（join/leave 等系统事件）
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChannelEvent {
     pub line_number: u64,
     pub point_to: u64,
@@ -24,7 +25,8 @@ pub struct ChannelEvent {
     pub meta: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadEntry {
     Message(Message),
     Event(ChannelEvent),
@@ -65,7 +67,7 @@ pub enum ThreadLine {
 }
 
 /// Result of parsing a .thread file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadFile {
     pub entries: Vec<ThreadEntry>,
 }

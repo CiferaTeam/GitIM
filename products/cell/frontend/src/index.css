@@ -101,6 +101,14 @@
     color: var(--color-primary-foreground);
   }
 
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
   @keyframes agent-row-enter {
     from {
       opacity: 0.72;

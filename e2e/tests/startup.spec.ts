@@ -22,7 +22,11 @@ test.describe("startup flow", () => {
 
   test("connect → workspace → git provider → main app", async ({ page }) => {
     await page.goto(`http://127.0.0.1:${env.vitePort}`);
-    await page.evaluate(() => localStorage.clear());
+    await page.evaluate(() => {
+      localStorage.clear();
+      localStorage.setItem("gitim:invite_verified", "true");
+      localStorage.setItem("gitim:setup_completed", "true");
+    });
     await page.reload();
 
     // Connect

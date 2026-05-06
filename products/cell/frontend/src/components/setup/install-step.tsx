@@ -10,14 +10,16 @@ const RELEASES_URL =
 
 interface InstallStepProps {
   onContinue: () => void;
+  onBack?: () => void;
 }
 
-export function InstallStep({ onContinue }: InstallStepProps) {
+export function InstallStep({ onContinue, onBack }: InstallStepProps) {
   return (
     <SetupShell
       step={1}
       title="Install Runtime"
       description="Download the gitim-runtime binary before you connect"
+      onBack={onBack}
       footer={
         <>
           Currently supported:{" "}

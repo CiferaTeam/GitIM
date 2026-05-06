@@ -5,9 +5,13 @@ export type ConnectionStatus =
   | "disconnected"   // no runtime found, show port form
   | "ready";         // runtime reachable, app can proceed
 
+export type ConnectionMode = "remote" | "local";
+
 const STORAGE_KEY = "gitim-runtime-port";
+const MODE_KEY = "gitim-connection-mode";
 
 interface ConnectionState {
+  mode: ConnectionMode;
   status: ConnectionStatus;
   port: number | null;
   runtimeVersion: string | null;
@@ -25,7 +29,10 @@ interface ConnectionState {
   isUpdating: boolean;
   isRestarting: boolean;
   updateError: string | null;
+  localReady: boolean;
+  cloneProgress: string | null;
 
+  setMode: (m: ConnectionMode) => void;
   setStatus: (s: ConnectionStatus) => void;
   setPort: (p: number) => void;
   setRuntimeVersion: (v: string | null) => void;
@@ -34,6 +41,8 @@ interface ConnectionState {
   setIsUpdating: (v: boolean) => void;
   setIsRestarting: (v: boolean) => void;
   setUpdateError: (e: string | null) => void;
+  setLocalReady: (v: boolean) => void;
+  setCloneProgress: (v: string | null) => void;
   baseUrl: () => string;
 }
 
@@ -44,7 +53,12 @@ function loadStoredPort(): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function loadStoredMode(): ConnectionMode {
+  return localStorage.getItem(MODE_KEY) === "local" ? "local" : "remote";
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
+  mode: loadStoredMode(),
   status: "checking",
   port: loadStoredPort(),
   runtimeVersion: null,
@@ -54,7 +68,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   isUpdating: false,
   isRestarting: false,
   updateError: null,
+  localReady: false,
+  cloneProgress: null,
 
+  setMode: (m) => {
+    localStorage.setItem(MODE_KEY, m);
+    set({ mode: m, status: m === "local" ? "disconnected" : "checking", error: null });
+  },
   setStatus: (s) => set({ status: s, error: null }),
   setPort: (p) => {
     localStorage.setItem(STORAGE_KEY, String(p));
@@ -66,5 +86,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setIsUpdating: (v) => set({ isUpdating: v }),
   setIsRestarting: (v) => set({ isRestarting: v }),
   setUpdateError: (e) => set({ updateError: e }),
+  setLocalReady: (v) => set({ localReady: v }),
+  setCloneProgress: (v) => set({ cloneProgress: v }),
   baseUrl: () => `http://127.0.0.1:${get().port}`,
 }));

@@ -13,6 +13,7 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
   const setError = useConnectionStore((s) => s.setError);
+  const setMode = useConnectionStore((s) => s.setMode);
 
   const [input, setInput] = useState(port?.toString() ?? "");
   const [checking, setChecking] = useState(false);
@@ -94,6 +95,13 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
           className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-primary/20"
         >
           {checking ? "连接中..." : "连接"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("local")}
+          className="w-full text-center text-sm text-text-muted hover:text-foreground transition-colors"
+        >
+          Use browser mode
         </button>
       </form>
     </SetupShell>
