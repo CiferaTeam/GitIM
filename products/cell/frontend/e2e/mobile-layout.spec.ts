@@ -125,6 +125,89 @@ async function stubRuntime(page: Page) {
   });
 }
 
+async function stubBrowserModeWorker(page: Page) {
+  await page.addInitScript(() => {
+    type RpcRequest = { id: number; method: string; args: unknown[] };
+    type RpcResult = { ok: boolean; data?: unknown; error?: string };
+
+    function handleMethod(method: string, args: unknown[]): RpcResult {
+      switch (method) {
+        case "preflight":
+          return { ok: true, data: { runtime: "browser", storage: "ready", git: "ready" } };
+        case "init":
+          return { ok: true, data: { handler: "flame4", display_name: "Flame4" } };
+        case "startSync":
+          return { ok: true };
+        case "health":
+          return { ok: true, data: { service: "daemon-web", initialized: true } };
+        case "me":
+          return { ok: true, data: { handler: "flame4", display_name: "Flame4" } };
+        case "channels":
+          return {
+            ok: true,
+            data: {
+              channels: [
+                { name: "general", kind: "channel", unreadCount: 0, members: ["flame4"] },
+              ],
+            },
+          };
+        case "users":
+          return { ok: true, data: { users: ["flame4"] } };
+        case "read":
+          return {
+            ok: true,
+            data: {
+              channel: args[0],
+              entries: [
+                {
+                  line_number: 1,
+                  point_to: 0,
+                  author: "flame4",
+                  timestamp: "20260317T120000Z",
+                  body: "hello browser cards",
+                },
+              ],
+            },
+          };
+        case "poll":
+          return { ok: true, data: { commit_id: "browser-1", changes: [] } };
+        case "thread":
+          return { ok: true, data: { entries: [] } };
+        default:
+          return { ok: false, error: `unexpected worker method: ${method}` };
+      }
+    }
+
+    class StubWorker extends EventTarget {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: ((event: MessageEvent) => void) | null = null;
+
+      postMessage(raw: unknown): void {
+        const request = raw as RpcRequest;
+        const result = handleMethod(request.method, request.args);
+        queueMicrotask(() => {
+          this.onmessage?.(
+            new MessageEvent("message", {
+              data: { id: request.id, result },
+            }),
+          );
+        });
+      }
+
+      terminate(): void {
+        return;
+      }
+    }
+
+    Object.defineProperty(window, "Worker", {
+      configurable: true,
+      writable: true,
+      value: StubWorker,
+    });
+  });
+}
+
 test("mobile runtime mode defaults to chat", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await stubRuntime(page);
@@ -211,6 +294,38 @@ test("fresh setup can switch to browser mode from the mode choice", async ({ pag
 
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByLabel("Git remote URL")).toBeVisible();
+});
+
+test("browser mode mobile app keeps the Cards tab after connecting", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("gitim-connection-mode", "local");
+  });
+  await stubBrowserModeWorker(page);
+  await page.route("https://api.github.com/user", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Git remote URL").fill("https://github.com/flame4/room");
+  await page.getByLabel("Personal access token").fill("dummy-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
+  const cardsTab = page.getByRole("button", { name: "Cards", exact: true });
+  await expect(cardsTab).toBeVisible();
+  await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
+
+  await cardsTab.click();
+  await expect(page).toHaveURL(/\/cards$/);
+  await expect(page.getByRole("heading", { name: "Cards" })).toBeVisible();
+  await expect(page.getByText("No cards yet")).toBeVisible();
 });
 
 test("browser mode preflights worker dependencies before clone", async ({ page }) => {

@@ -512,10 +512,10 @@ export default function App() {
                     isMobile ? <Navigate to="/chat" replace /> : <AgentDetail />
                   }
                 />
-                <Route path="/cards" element={<CardKanban />} />
-                <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
               </>
             )}
+            <Route path="/cards" element={<CardKanban />} />
+            <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/docs" element={<DocsPage />} />
             {mode === "local" && (
