@@ -2059,6 +2059,7 @@ async fn recover_single_workspace(
             workspace.clone(),
         );
         ctx.git_config = WorkspaceConfig::read(&workspace).ok();
+        ctx.human_repo = existing_human_repo(&workspace);
         s.workspaces.insert(slug.clone(), ctx);
     }
 
@@ -2492,6 +2493,15 @@ fn cleanup_partial_workspace(workspace: &Path) {
     cleanup_human_dir(workspace);
     let runtime_dir = workspace.join(".gitim-runtime");
     let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+fn existing_human_repo(workspace: &Path) -> Option<PathBuf> {
+    let human_dir = workspace.join(".gitim-runtime/human");
+    if human_dir.join(".git").is_dir() && human_dir.join(".gitim/me.json").is_file() {
+        Some(human_dir)
+    } else {
+        None
+    }
 }
 
 /// Provision a local-mode workspace: init bare at `{path}/repo.git` and run
@@ -3207,6 +3217,29 @@ mod tests {
         let summary = workspace_summary(&ctx);
         assert_eq!(summary.provider, GitProvider::Local);
         assert!(!summary.initialized);
+    }
+
+    #[test]
+    fn existing_human_repo_requires_me_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let human = workspace.join(".gitim-runtime/human");
+        std::fs::create_dir_all(human.join(".gitim")).unwrap();
+        std::fs::create_dir(human.join(".git")).unwrap();
+
+        assert!(existing_human_repo(workspace).is_none());
+
+        std::fs::write(
+            human.join(".gitim/me.json"),
+            serde_json::json!({
+                "handler": "alice",
+                "display_name": "Alice"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(existing_human_repo(workspace), Some(human));
     }
 
     #[tokio::test]
