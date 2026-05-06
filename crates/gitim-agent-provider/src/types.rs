@@ -125,12 +125,14 @@ pub enum ExecStatus {
 /// Per-turn usage as reported by a provider.
 ///
 /// Providers fill different subsets:
-/// - Claude populates `input_tokens` / `output_tokens` (+ cache variants when
-///   prompt caching is active); `used_percent` is `None`.
-/// - Codex populates `used_percent`; token counts are `None`.
+/// - Claude / opencode populate `input_tokens` / `output_tokens` (+ cache
+///   variants when prompt caching is active); `used_percent` is `None`.
+/// - Codex populates `input_tokens` / `cache_read_tokens` /
+///   `output_tokens` from `total_token_usage`; `cache_creation_tokens` and
+///   `used_percent` are `None`.
 /// - Mock fills whatever the test configures.
 ///
-/// For Claude, the true context-window occupancy is
+/// True context-window occupancy is
 /// `input_tokens + cache_read_tokens + cache_creation_tokens`. `input_tokens`
 /// alone excludes cached content and will underreport by orders of magnitude
 /// once caching kicks in — compute consumers must sum the three.

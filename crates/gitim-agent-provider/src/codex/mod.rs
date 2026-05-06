@@ -160,7 +160,7 @@ async fn drive_session(
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
     let mut saw_turn_completed = false;
-    let mut latest_used_percent: Option<f64> = None;
+    let mut latest_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -190,10 +190,10 @@ async fn drive_session(
                     }
 
                     // Codex streams token_count events mid-session; capture the
-                    // latest used_percent seen. Runs alongside parse_line since
+                    // latest cumulative usage. Runs alongside parse_line since
                     // token_count is an event_msg type parse_line doesn't handle.
-                    if let Some(pct) = parse_used_percent(&line) {
-                        latest_used_percent = Some(pct);
+                    if let Some(usage) = parse_token_count_usage(&line) {
+                        latest_usage = Some(usage);
                     }
 
                     let parsed = match parse_line(&line) {
@@ -302,12 +302,7 @@ async fn drive_session(
         error: final_error,
         duration_ms: duration.as_millis() as u64,
         session_token: thread_id,
-        usage: latest_used_percent.map(|p| ProviderUsage {
-            input_tokens: None,
-            output_tokens: None,
-            used_percent: Some(p),
-            ..Default::default()
-        }),
+        usage: latest_usage,
     });
 }
 
@@ -543,16 +538,61 @@ fn parse_rollout_line(line: &str) -> Option<String> {
     None
 }
 
-/// Extract `rate_limits.primary.used_percent` from an `event_msg` of type `token_count`.
-/// Returns `None` for other event types or malformed lines.
-fn parse_used_percent(line: &str) -> Option<f64> {
+/// Extract context-window usage from a `token_count` event_msg.
+///
+/// Codex CLI emits `payload.info.total_token_usage` as the cumulative
+/// session-so-far counts (input + cached_input + output + reasoning_output).
+/// This is the actual context occupancy — distinct from
+/// `rate_limits.primary.used_percent`, which tracks the *subscription* 5h /
+/// weekly plan window and bears no relation to the per-conversation context.
+///
+/// Field mapping into the provider-agnostic `ProviderUsage`:
+/// - `input_tokens` ← `total_token_usage.input_tokens`
+/// - `cache_read_tokens` ← `total_token_usage.cached_input_tokens`
+/// - `output_tokens` ← `total_token_usage.output_tokens`
+///   + `reasoning_output_tokens` (reasoning models bill these separately
+///   but they live in context just the same)
+/// - `cache_creation_tokens` is left `None` — Codex's prompt cache is
+///   server-managed; the protocol surfaces only the read side.
+/// - `used_percent` is left `None` so `compute_snapshot` derives the
+///   percentage from `(input + cache_read) / max_tokens`, matching the
+///   Claude/opencode path.
+///
+/// Returns `None` for non-token_count events, missing `info`, or when the
+/// event carries no token figures (Codex emits placeholder `info: {}`
+/// alongside rate-limit-only updates).
+fn parse_token_count_usage(line: &str) -> Option<ProviderUsage> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let payload_type = v.pointer("/payload/type")?.as_str()?;
-    if payload_type != "token_count" {
+    if v.pointer("/payload/type")?.as_str()? != "token_count" {
         return None;
     }
-    v.pointer("/payload/rate_limits/primary/used_percent")?
-        .as_f64()
+    let total = v.pointer("/payload/info/total_token_usage")?;
+    let input = total.get("input_tokens").and_then(serde_json::Value::as_u64);
+    let cached = total
+        .get("cached_input_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let output = total
+        .get("output_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let reasoning = total
+        .get("reasoning_output_tokens")
+        .and_then(serde_json::Value::as_u64);
+    if input.is_none() && cached.is_none() && output.is_none() {
+        return None;
+    }
+    let output_total = match (output, reasoning) {
+        (Some(o), Some(r)) => Some(o.saturating_add(r)),
+        (Some(o), None) => Some(o),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
+    };
+    Some(ProviderUsage {
+        input_tokens: input,
+        output_tokens: output_total,
+        used_percent: None,
+        cache_read_tokens: cached,
+        cache_creation_tokens: None,
+    })
 }
 
 /// Weaker fallback: a `token_count` event reporting `credits.balance == "0"`
@@ -786,20 +826,57 @@ mod usage_parse_tests {
     use super::*;
 
     #[test]
-    fn parse_token_count_used_percent() {
+    fn parse_token_count_extracts_total_usage() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12000,"cached_input_tokens":48000,"output_tokens":2400,"reasoning_output_tokens":600,"total_tokens":63000},"last_token_usage":{"input_tokens":300,"cached_input_tokens":59700,"output_tokens":120,"reasoning_output_tokens":40,"total_tokens":60160},"model_context_window":272000},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47.5},"credits":null,"plan_type":"plus"}}}"#;
+        let usage = parse_token_count_usage(line).expect("usage parses");
+        assert_eq!(usage.input_tokens, Some(12_000));
+        assert_eq!(usage.cache_read_tokens, Some(48_000));
+        // output (2400) + reasoning (600) collapsed into one — both consume context.
+        assert_eq!(usage.output_tokens, Some(3_000));
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert!(
+            usage.used_percent.is_none(),
+            "used_percent left None so compute_snapshot derives it"
+        );
+    }
+
+    #[test]
+    fn parse_token_count_ignores_rate_limit_only_events() {
+        // Codex emits `info: {}` for rate-limit-only token_count events.
+        // The pre-fix parser used to surface `rate_limits.primary.used_percent`
+        // here as if it were context occupancy — it isn't.
         let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47.5},"credits":null,"plan_type":"plus"}}}"#;
-        assert_eq!(parse_used_percent(line), Some(47.5));
+        assert!(parse_token_count_usage(line).is_none());
     }
 
     #[test]
-    fn parse_token_count_without_primary_returns_none() {
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"credits":{"has_credits":true}}}}"#;
-        assert_eq!(parse_used_percent(line), None);
+    fn parse_token_count_skips_non_token_count_payloads() {
+        let line = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"hi"}}"#;
+        assert!(parse_token_count_usage(line).is_none());
     }
 
     #[test]
-    fn parse_non_token_count_returns_none() {
-        let line = r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#;
-        assert_eq!(parse_used_percent(line), None);
+    fn parse_token_count_handles_zero_input_with_cache() {
+        // Late-session turn: prompt cached entirely; bare input_tokens drops
+        // toward 0 but cached_input_tokens carries the load. Same shape as the
+        // Claude `parse_result_with_cache_only_has_tiny_input` pattern.
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":159500,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":159580},"last_token_usage":{"input_tokens":0,"cached_input_tokens":159500,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":159580},"model_context_window":272000}}}"#;
+        let usage = parse_token_count_usage(line).expect("usage parses");
+        assert_eq!(usage.input_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(159_500));
+        // effective_input_tokens (input + cache_read + cache_creation) = 159500,
+        // matching the Claude/opencode authoritative-value path.
+    }
+
+    #[test]
+    fn parse_token_count_treats_empty_total_usage_as_no_data() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{}}}}"#;
+        assert!(parse_token_count_usage(line).is_none());
+    }
+
+    #[test]
+    fn parse_non_event_msg_returns_none() {
+        let line = r#"{"type":"response_item","payload":{"type":"message"}}"#;
+        assert!(parse_token_count_usage(line).is_none());
     }
 }
