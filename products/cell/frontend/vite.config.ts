@@ -9,6 +9,16 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  define: {
+    global: 'globalThis',
+  },
+  optimizeDeps: {
+    include: [
+      '@isomorphic-git/lightning-fs',
+      'isomorphic-git',
+      'isomorphic-git/http/web',
+    ],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -16,5 +26,10 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 800,
+  },
+  server: {
+    fs: {
+      allow: [path.resolve(__dirname, '../../..')],
+    },
   },
 })
