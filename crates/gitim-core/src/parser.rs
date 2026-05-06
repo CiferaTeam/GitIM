@@ -1,9 +1,9 @@
+use crate::link::extract_links;
+use crate::mention::extract_mentions;
+use crate::types::{ChannelEvent, Handler, Message, ThreadEntry, ThreadFile};
 use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
-use crate::link::extract_links;
-use crate::mention::extract_mentions;
-use crate::types::{Handler, Message, ChannelEvent, ThreadEntry, ThreadFile};
 
 #[derive(Error, Debug)]
 pub enum ParseError {
@@ -17,7 +17,10 @@ pub enum ParseError {
 }
 
 static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z_]+)\])? (.+)$").unwrap()
+    Regex::new(
+        r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z_]+)\])? (.+)$",
+    )
+    .unwrap()
 });
 
 pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use thiserror::Error;
 use tracing::warn;
 
@@ -41,6 +41,7 @@ pub struct SearchParams {
     pub current_user: Option<String>,
     pub limit: usize,
     pub offset: usize,
+    pub include_cards: bool,
 }
 
 /// 搜索结果中的单条消息
@@ -131,9 +132,7 @@ impl Index {
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
         };
         let mut stmt = conn.prepare("SELECT commit_id FROM sync_state WHERE id = 1")?;
-        let result = stmt
-            .query_row([], |row| row.get::<_, String>(0))
-            .ok();
+        let result = stmt.query_row([], |row| row.get::<_, String>(0)).ok();
         Ok(result)
     }
 
@@ -148,7 +147,12 @@ impl Index {
     }
 
     /// 批量插入消息（在事务内）。
-    fn insert_messages(conn: &Connection, channel: &str, channel_type: &str, messages: &[&Message]) -> Result<(), IndexError> {
+    fn insert_messages(
+        conn: &Connection,
+        channel: &str,
+        channel_type: &str,
+        messages: &[&Message],
+    ) -> Result<(), IndexError> {
         let mut stmt = conn.prepare_cached(
             "INSERT OR IGNORE INTO messages (channel, channel_type, line_number, parent_line, author, timestamp, body)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
@@ -168,14 +172,22 @@ impl Index {
     }
 
     /// 从 .thread 文件内容索引消息。channel_name 是纯名称（如 "general" 或 "alice--bob"）。
-    pub fn index_thread_content(&self, channel_name: &str, content: &str) -> Result<usize, IndexError> {
+    pub fn index_thread_content(
+        &self,
+        channel_name: &str,
+        content: &str,
+    ) -> Result<usize, IndexError> {
         let guard = self.state.lock().unwrap();
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
         };
 
-        let channel_type = if parse_dm_filename(channel_name).is_some() { "dm" } else { "channel" };
+        let channel_type = if parse_dm_filename(channel_name).is_some() {
+            "dm"
+        } else {
+            "channel"
+        };
         let parsed = match parse_thread(content) {
             Ok(f) => f,
             Err(e) => {
@@ -260,7 +272,12 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages())?;
+                                Self::insert_messages(
+                                    &tx,
+                                    channel_name,
+                                    "channel",
+                                    &parsed.messages(),
+                                )?;
                                 total += parsed.messages().len();
                             }
                             Err(e) => warn!("index rebuild: skip {}: {}", name, e),
@@ -297,6 +314,61 @@ impl Index {
             }
         }
 
+        // 扫描 channels/<ch>/cards/<id>/discussion.thread
+        if channels_dir.exists() {
+            for ch_entry in std::fs::read_dir(&channels_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if !ch_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let cards_dir = ch_entry.path().join("cards");
+                if !cards_dir.exists() {
+                    continue;
+                }
+                let channel_name = ch_entry.file_name().to_string_lossy().to_string();
+                for card_entry in std::fs::read_dir(&cards_dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if !card_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let card_id = card_entry.file_name().to_string_lossy().to_string();
+                    let thread_path = card_entry.path().join("discussion.thread");
+                    if !thread_path.exists() {
+                        continue;
+                    }
+                    let content = match std::fs::read_to_string(&thread_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                "index rebuild: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let parsed = match parse_thread(&content) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(
+                                "index rebuild: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let ident = format!("channels/{}/cards/{}", channel_name, card_id);
+                    Self::insert_messages(&tx, &ident, "card", &parsed.messages())?;
+                    total += parsed.messages().len();
+                }
+            }
+        }
+
         Self::set_commit_id(&tx, commit_id)?;
         tx.commit()?;
         Ok(total)
@@ -327,13 +399,17 @@ impl Index {
                 // Recovery: try to open an empty db so we are not stuck in Rebuilding
                 match Connection::open(&self.db_path) {
                     Ok(conn) => {
-                        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+                        let _ = conn
+                            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
                         let _ = conn.execute_batch(SCHEMA_SQL);
                         let mut guard = self.state.lock().unwrap();
                         *guard = IndexState::Ready(conn);
                     }
                     Err(open_err) => {
-                        warn!("reindex recovery failed, index stuck in Rebuilding: {}", open_err);
+                        warn!(
+                            "reindex recovery failed, index stuck in Rebuilding: {}",
+                            open_err
+                        );
                     }
                 }
                 Err(e)
@@ -342,7 +418,11 @@ impl Index {
     }
 
     /// Open a fresh db, create schema, run full rebuild, return connection + count.
-    fn try_open_and_rebuild(&self, repo_root: &Path, commit_id: &str) -> Result<(Connection, usize), IndexError> {
+    fn try_open_and_rebuild(
+        &self,
+        repo_root: &Path,
+        commit_id: &str,
+    ) -> Result<(Connection, usize), IndexError> {
         let conn = Connection::open(&self.db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA_SQL)?;
@@ -367,7 +447,12 @@ impl Index {
                                         continue;
                                     }
                                 };
-                                Self::insert_messages(&tx, channel_name, "channel", &parsed.messages())?;
+                                Self::insert_messages(
+                                    &tx,
+                                    channel_name,
+                                    "channel",
+                                    &parsed.messages(),
+                                )?;
                                 total += parsed.messages().len();
                             }
                             Err(e) => warn!("index reindex: skip {}: {}", name, e),
@@ -404,6 +489,61 @@ impl Index {
             }
         }
 
+        // 扫描 channels/<ch>/cards/<id>/discussion.thread
+        if channels_dir.exists() {
+            for ch_entry in std::fs::read_dir(&channels_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if !ch_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let cards_dir = ch_entry.path().join("cards");
+                if !cards_dir.exists() {
+                    continue;
+                }
+                let channel_name = ch_entry.file_name().to_string_lossy().to_string();
+                for card_entry in std::fs::read_dir(&cards_dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if !card_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let card_id = card_entry.file_name().to_string_lossy().to_string();
+                    let thread_path = card_entry.path().join("discussion.thread");
+                    if !thread_path.exists() {
+                        continue;
+                    }
+                    let content = match std::fs::read_to_string(&thread_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                "index reindex: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let parsed = match parse_thread(&content) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(
+                                "index reindex: skip card {}/{}: {}",
+                                channel_name, card_id, e
+                            );
+                            continue;
+                        }
+                    };
+                    let ident = format!("channels/{}/cards/{}", channel_name, card_id);
+                    Self::insert_messages(&tx, &ident, "card", &parsed.messages())?;
+                    total += parsed.messages().len();
+                }
+            }
+        }
+
         Self::set_commit_id(&tx, commit_id)?;
         tx.commit()?;
         Ok((conn, total))
@@ -428,7 +568,10 @@ impl Index {
         if let Some(ref query) = params.query {
             let escaped = escape_fts_query(query);
             let idx = bind_values.len() + 1;
-            conditions.push(format!("m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?{})", idx));
+            conditions.push(format!(
+                "m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?{})",
+                idx
+            ));
             bind_values.push(Box::new(escaped));
         }
 
@@ -453,14 +596,27 @@ impl Index {
             bind_values.push(Box::new(channel_type.clone()));
         }
 
-        // DM 可见性过滤
+        // Cards 默认过滤：除非显式 include_cards=true 或指定了 channel_type
+        if !params.include_cards && params.channel_type.is_none() {
+            conditions.push("m.channel_type != 'card'".to_string());
+        }
+
+        // DM 可见性过滤 (不适用于 card：卡片通过所属 channel 管理访问权限)
+        let skip_dm_filter = params.channel_type.as_deref() == Some("card");
         if let Some(ref current_user) = params.current_user {
-            let idx1 = bind_values.len() + 1;
-            conditions.push(format!(
-                "(m.channel_type = 'channel' OR (m.channel LIKE '%' || ?{} || '%'))",
-                idx1
-            ));
-            bind_values.push(Box::new(current_user.clone()));
+            if !skip_dm_filter {
+                let idx1 = bind_values.len() + 1;
+                let card_clause = if params.include_cards {
+                    " OR m.channel_type = 'card'"
+                } else {
+                    ""
+                };
+                conditions.push(format!(
+                    "(m.channel_type = 'channel'{} OR (m.channel LIKE '%' || ?{} || '%'))",
+                    card_clause, idx1
+                ));
+                bind_values.push(Box::new(current_user.clone()));
+            }
         }
 
         let where_clause = if conditions.is_empty() {
@@ -471,7 +627,8 @@ impl Index {
 
         // 查询总数
         let count_sql = format!("SELECT COUNT(*) FROM messages m {}", where_clause);
-        let refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let total: usize = conn.query_row(&count_sql, refs.as_slice(), |row| row.get(0))?;
 
         // 查询结果
@@ -523,17 +680,33 @@ impl Index {
     }
 }
 
-/// 从 diff 文件路径解析出 channel_name 和 channel_type。
+/// 从 git diff 的文件路径解析 (channel_identifier, channel_type)。
+/// - "channels/<name>.thread" → (name, "channel")
+/// - "dm/<h1>--<h2>.thread" → ("<h1>--<h2>", "dm")
+/// - "channels/<ch>/cards/<id>/discussion.thread" → ("channels/<ch>/cards/<id>", "card")
 fn parse_diff_path(path_str: &str) -> Option<(String, &'static str)> {
-    if let Some(name) = path_str.strip_prefix("channels/") {
-        let name = name.strip_suffix(".thread")?;
-        Some((name.to_string(), "channel"))
-    } else if let Some(name) = path_str.strip_prefix("dm/") {
-        let name = name.strip_suffix(".thread")?;
-        Some((name.to_string(), "dm"))
-    } else {
-        None
+    if let Some(rest) = path_str.strip_prefix("channels/") {
+        // Plain channel: "channels/<name>.thread" with no nested slashes
+        if let Some(name) = rest.strip_suffix(".thread") {
+            if !name.contains('/') {
+                return Some((name.to_string(), "channel"));
+            }
+        }
+        // Card discussion: "channels/<ch>/cards/<id>/discussion.thread"
+        if let Some(card_rel) = rest.strip_suffix("/discussion.thread") {
+            let parts: Vec<&str> = card_rel.split('/').collect();
+            if parts.len() == 3 && parts[1] == "cards" {
+                let ident = format!("channels/{}/cards/{}", parts[0], parts[2]);
+                return Some((ident, "card"));
+            }
+        }
     }
+    if let Some(rest) = path_str.strip_prefix("dm/") {
+        if let Some(name) = rest.strip_suffix(".thread") {
+            return Some((name.to_string(), "dm"));
+        }
+    }
+    None
 }
 
 /// 转义 FTS5 查询中的特殊字符。将用户输入包裹在双引号中。
@@ -585,15 +758,18 @@ mod tests {
         ]);
         idx.index_thread_content("general", &content).unwrap();
 
-        let result = idx.search(SearchParams {
-            query: None,
-            author: Some("alice".to_string()),
-            channel: None,
-            channel_type: None,
-            current_user: Some("alice".to_string()),
-            limit: 50,
-            offset: 0,
-        }).unwrap();
+        let result = idx
+            .search(SearchParams {
+                query: None,
+                author: Some("alice".to_string()),
+                channel: None,
+                channel_type: None,
+                current_user: Some("alice".to_string()),
+                limit: 50,
+                offset: 0,
+                include_cards: false,
+            })
+            .unwrap();
 
         assert_eq!(result.messages.len(), 2);
         assert!(result.messages.iter().all(|m| m.author == "alice"));
@@ -609,15 +785,18 @@ mod tests {
         ]);
         idx.index_thread_content("ops", &content).unwrap();
 
-        let result = idx.search(SearchParams {
-            query: Some("deploy".to_string()),
-            author: None,
-            channel: None,
-            channel_type: None,
-            current_user: Some("alice".to_string()),
-            limit: 50,
-            offset: 0,
-        }).unwrap();
+        let result = idx
+            .search(SearchParams {
+                query: Some("deploy".to_string()),
+                author: None,
+                channel: None,
+                channel_type: None,
+                current_user: Some("alice".to_string()),
+                limit: 50,
+                offset: 0,
+                include_cards: false,
+            })
+            .unwrap();
 
         assert_eq!(result.messages.len(), 2);
         assert!(result.messages.iter().all(|m| m.body.contains("deploy")));
@@ -626,22 +805,29 @@ mod tests {
     #[test]
     fn test_search_by_channel_type() {
         let idx = Index::open_in_memory().unwrap();
-        idx.index_thread_content("general", &make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "channel msg"),
-        ])).unwrap();
-        idx.index_thread_content("alice--bob", &make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "dm msg"),
-        ])).unwrap();
+        idx.index_thread_content(
+            "general",
+            &make_thread_content(&[("alice", 1, "20260323T100000Z", "channel msg")]),
+        )
+        .unwrap();
+        idx.index_thread_content(
+            "alice--bob",
+            &make_thread_content(&[("alice", 1, "20260323T100000Z", "dm msg")]),
+        )
+        .unwrap();
 
-        let result = idx.search(SearchParams {
-            query: Some("msg".to_string()),
-            author: None,
-            channel: None,
-            channel_type: Some("dm".to_string()),
-            current_user: Some("alice".to_string()),
-            limit: 50,
-            offset: 0,
-        }).unwrap();
+        let result = idx
+            .search(SearchParams {
+                query: Some("msg".to_string()),
+                author: None,
+                channel: None,
+                channel_type: Some("dm".to_string()),
+                current_user: Some("alice".to_string()),
+                limit: 50,
+                offset: 0,
+                include_cards: false,
+            })
+            .unwrap();
 
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].channel_type, "dm");
@@ -650,23 +836,30 @@ mod tests {
     #[test]
     fn test_dm_visibility_filter() {
         let idx = Index::open_in_memory().unwrap();
-        idx.index_thread_content("alice--bob", &make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "secret to bob"),
-        ])).unwrap();
-        idx.index_thread_content("alice--charlie", &make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "secret to charlie"),
-        ])).unwrap();
+        idx.index_thread_content(
+            "alice--bob",
+            &make_thread_content(&[("alice", 1, "20260323T100000Z", "secret to bob")]),
+        )
+        .unwrap();
+        idx.index_thread_content(
+            "alice--charlie",
+            &make_thread_content(&[("alice", 1, "20260323T100000Z", "secret to charlie")]),
+        )
+        .unwrap();
 
         // bob 只能看到 alice--bob 的 DM
-        let result = idx.search(SearchParams {
-            query: Some("secret".to_string()),
-            author: None,
-            channel: None,
-            channel_type: None,
-            current_user: Some("bob".to_string()),
-            limit: 50,
-            offset: 0,
-        }).unwrap();
+        let result = idx
+            .search(SearchParams {
+                query: Some("secret".to_string()),
+                author: None,
+                channel: None,
+                channel_type: None,
+                current_user: Some("bob".to_string()),
+                limit: 50,
+                offset: 0,
+                include_cards: false,
+            })
+            .unwrap();
 
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].channel, "alice--bob");
@@ -675,9 +868,8 @@ mod tests {
     #[test]
     fn test_fts_escape_special_chars() {
         let idx = Index::open_in_memory().unwrap();
-        let content = make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "hello OR NOT world"),
-        ]);
+        let content =
+            make_thread_content(&[("alice", 1, "20260323T100000Z", "hello OR NOT world")]);
         idx.index_thread_content("general", &content).unwrap();
 
         // 不应该 panic 或报错
@@ -689,6 +881,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(result.is_ok());
     }
@@ -704,6 +897,7 @@ mod tests {
             current_user: Some("alice".to_string()),
             limit: 50,
             offset: 0,
+            include_cards: false,
         });
         assert!(matches!(result, Err(IndexError::EmptySearch)));
     }
@@ -732,7 +926,8 @@ mod tests {
                 ("alice", 1, "20260323T100000Z", "hello"),
                 ("bob", 2, "20260323T100001Z", "world"),
             ]),
-        ).unwrap();
+        )
+        .unwrap();
 
         let idx = Index::open_in_memory().unwrap();
         let count = idx.rebuild(dir.path(), "def456").unwrap();
@@ -744,28 +939,37 @@ mod tests {
     fn test_corrupted_thread_skipped() {
         let idx = Index::open_in_memory().unwrap();
         // 损坏的内容
-        let count = idx.index_thread_content("broken", "this is not valid thread format").unwrap();
+        let count = idx
+            .index_thread_content("broken", "this is not valid thread format")
+            .unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
     fn test_combined_search() {
         let idx = Index::open_in_memory().unwrap();
-        idx.index_thread_content("general", &make_thread_content(&[
-            ("alice", 1, "20260323T100000Z", "deploy to staging"),
-            ("bob", 2, "20260323T100001Z", "deploy to production"),
-            ("alice", 3, "20260323T100002Z", "checking logs"),
-        ])).unwrap();
+        idx.index_thread_content(
+            "general",
+            &make_thread_content(&[
+                ("alice", 1, "20260323T100000Z", "deploy to staging"),
+                ("bob", 2, "20260323T100001Z", "deploy to production"),
+                ("alice", 3, "20260323T100002Z", "checking logs"),
+            ]),
+        )
+        .unwrap();
 
-        let result = idx.search(SearchParams {
-            query: Some("deploy".to_string()),
-            author: Some("alice".to_string()),
-            channel: None,
-            channel_type: None,
-            current_user: Some("alice".to_string()),
-            limit: 50,
-            offset: 0,
-        }).unwrap();
+        let result = idx
+            .search(SearchParams {
+                query: Some("deploy".to_string()),
+                author: Some("alice".to_string()),
+                channel: None,
+                channel_type: None,
+                current_user: Some("alice".to_string()),
+                limit: 50,
+                offset: 0,
+                include_cards: false,
+            })
+            .unwrap();
 
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].author, "alice");
@@ -786,8 +990,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_diff_path_card() {
+        let result =
+            parse_diff_path("channels/backend/cards/20260417-120000-abc/discussion.thread");
+        assert_eq!(
+            result,
+            Some((
+                "channels/backend/cards/20260417-120000-abc".to_string(),
+                "card"
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_diff_path_channel_still_works() {
+        let result = parse_diff_path("channels/backend.thread");
+        assert_eq!(result, Some(("backend".to_string(), "channel")));
+    }
+
+    #[test]
+    fn parse_diff_path_dm_still_works() {
+        let result = parse_diff_path("dm/alice--bob.thread");
+        assert_eq!(result, Some(("alice--bob".to_string(), "dm")));
+    }
+
+    #[test]
+    fn parse_diff_path_unknown() {
+        let result = parse_diff_path("random/file.txt");
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn test_escape_fts_query() {
         assert_eq!(escape_fts_query("hello"), "\"hello\"");
-        assert_eq!(escape_fts_query("hello \"world\""), "\"hello \"\"world\"\"\"");
+        assert_eq!(
+            escape_fts_query("hello \"world\""),
+            "\"hello \"\"world\"\"\""
+        );
     }
 }

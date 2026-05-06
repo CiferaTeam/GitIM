@@ -1,6 +1,6 @@
-use thiserror::Error;
-use crate::types::meta::{UserMeta, ChannelMeta};
 use crate::types::config::Config;
+use crate::types::meta::{ChannelMeta, UserMeta};
+use thiserror::Error;
 
 pub mod compliance;
 pub mod im_rules;
@@ -72,16 +72,27 @@ pub fn validate_channel_meta(yaml: &str) -> Result<ChannelMeta, ValidationError>
 
 pub fn validate_channel_name(name: &str) -> Result<(), ValidationError> {
     if name.is_empty() || name.len() > 32 {
-        return Err(ValidationError::InvalidChannelName("must be 1-32 characters".into()));
+        return Err(ValidationError::InvalidChannelName(
+            "must be 1-32 characters".into(),
+        ));
     }
-    if !name.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-')) {
-        return Err(ValidationError::InvalidChannelName("invalid characters".into()));
+    if !name
+        .chars()
+        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+    {
+        return Err(ValidationError::InvalidChannelName(
+            "invalid characters".into(),
+        ));
     }
     if name.starts_with('-') || name.ends_with('-') {
-        return Err(ValidationError::InvalidChannelName("must not start or end with hyphen".into()));
+        return Err(ValidationError::InvalidChannelName(
+            "must not start or end with hyphen".into(),
+        ));
     }
     if name.contains("--") {
-        return Err(ValidationError::InvalidChannelName("must not contain consecutive hyphens".into()));
+        return Err(ValidationError::InvalidChannelName(
+            "must not contain consecutive hyphens".into(),
+        ));
     }
     Ok(())
 }
@@ -89,9 +100,10 @@ pub fn validate_channel_name(name: &str) -> Result<(), ValidationError> {
 pub fn validate_config(yaml: &str) -> Result<Config, ValidationError> {
     let config: Config = serde_yaml::from_str(yaml)?;
     if config.version != 1 {
-        return Err(ValidationError::InvalidConfig(
-            format!("unsupported version: {}, expected 1", config.version),
-        ));
+        return Err(ValidationError::InvalidConfig(format!(
+            "unsupported version: {}, expected 1",
+            config.version
+        )));
     }
     Ok(config)
 }

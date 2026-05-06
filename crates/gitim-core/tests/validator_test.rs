@@ -1,4 +1,6 @@
-use gitim_core::validator::{validate_user_meta, validate_channel_meta, validate_config, validate_channel_name};
+use gitim_core::validator::{
+    validate_channel_meta, validate_channel_name, validate_config, validate_user_meta,
+};
 
 #[test]
 fn test_valid_user_meta() {
@@ -33,7 +35,8 @@ fn test_channel_meta_missing_field() {
 
 #[test]
 fn test_channel_meta_invalid_created_at() {
-    let yaml = "display_name: General\ncreated_by: nexus\ncreated_at: not-a-date\nintroduction: hello\n";
+    let yaml =
+        "display_name: General\ncreated_by: nexus\ncreated_at: not-a-date\nintroduction: hello\n";
     assert!(validate_channel_meta(yaml).is_err());
 }
 

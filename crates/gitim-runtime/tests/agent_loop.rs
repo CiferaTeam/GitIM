@@ -85,10 +85,14 @@ async fn test_agent_loop_end_to_end() {
         handler: "loop-agent".into(),
         display_name: "Loop Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);
-    eprintln!("[setup] agent provisioned at {}", handle.repo_root.display());
+    eprintln!(
+        "[setup] agent provisioned at {}",
+        handle.repo_root.display()
+    );
 
     let mut agent_loop = AgentLoop::with_defaults(&handle.repo_root).unwrap();
 
@@ -99,7 +103,12 @@ async fn test_agent_loop_end_to_end() {
 
     // Send trigger message
     let send_resp = client
-        .send("general", "This is a test. Please reply with: test-reply-ok", None, None)
+        .send(
+            "general",
+            "This is a test. Please reply with: test-reply-ok",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(send_resp.ok, "send failed: {:?}", send_resp.error);
@@ -134,4 +143,245 @@ async fn test_agent_loop_end_to_end() {
     );
 
     stop_daemon(&handle.repo_root).await;
+}
+
+use gitim_agent_provider::ProviderUsage;
+use gitim_runtime::agent_loop::compute_snapshot;
+use gitim_runtime::state::UsageSource;
+
+#[test]
+fn snapshot_from_claude_provider_reported() {
+    let snap = compute_snapshot(
+        "sess-abc",
+        Some(&ProviderUsage {
+            input_tokens: Some(160_000),
+            output_tokens: Some(500),
+            used_percent: None,
+            ..Default::default()
+        }),
+        42_000,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    assert_eq!(snap.session_id, "sess-abc");
+    assert_eq!(snap.input_tokens, Some(160_000));
+    assert!((snap.used_percent - 80.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
+fn snapshot_from_claude_aggregates_cache_tokens() {
+    // Turn 2+ of a cached Claude session: input_tokens alone reports 312,
+    // but 159_500 tokens are coming in through cache_read. The percentage
+    // must reflect the aggregate (~80%), not the uncached fraction (~0%).
+    let snap = compute_snapshot(
+        "sess-cached",
+        Some(&ProviderUsage {
+            input_tokens: Some(312),
+            output_tokens: Some(180),
+            used_percent: None,
+            cache_read_tokens: Some(159_500),
+            cache_creation_tokens: Some(220),
+        }),
+        0,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    // 312 + 159_500 + 220 = 160_032  →  160_032 / 200_000 = 80.016%
+    assert!(
+        (snap.used_percent - 80.016).abs() < 0.01,
+        "got {}, want ~80.016",
+        snap.used_percent
+    );
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
+fn snapshot_from_claude_without_cache_still_uses_input_tokens() {
+    // No cache activity — behavior unchanged from the pre-fix path.
+    let snap = compute_snapshot(
+        "sess-nocache",
+        Some(&ProviderUsage {
+            input_tokens: Some(100_000),
+            output_tokens: Some(400),
+            used_percent: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+        }),
+        0,
+        Some(200_000),
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    assert!((snap.used_percent - 50.0).abs() < 0.01);
+}
+
+#[test]
+fn snapshot_from_codex_used_percent() {
+    let snap = compute_snapshot(
+        "sess-xyz",
+        Some(&ProviderUsage {
+            input_tokens: None,
+            output_tokens: None,
+            used_percent: Some(47.5),
+            ..Default::default()
+        }),
+        0,
+        None,
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    assert!((snap.used_percent - 47.5).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+    assert!(snap.max_tokens.is_none());
+}
+
+#[test]
+fn snapshot_falls_back_to_estimator() {
+    let snap = compute_snapshot(
+        "sess-fut",
+        None,
+        80_000,
+        Some(100_000),
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    assert!((snap.used_percent - 80.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::RuntimeEstimated));
+}
+
+#[test]
+fn snapshot_returns_none_when_no_data_available() {
+    let snap = compute_snapshot("sess", None, 0, None, "2026-04-20T10:00:00Z");
+    assert!(snap.is_none());
+}
+
+#[test]
+fn snapshot_clamps_above_100_with_warning_signal() {
+    let snap = compute_snapshot(
+        "sess",
+        Some(&ProviderUsage {
+            input_tokens: None,
+            output_tokens: None,
+            used_percent: Some(115.0),
+            ..Default::default()
+        }),
+        0,
+        None,
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+    assert!((snap.used_percent - 100.0).abs() < 0.01);
+}
+
+use gitim_runtime::agent_loop::just_crossed_threshold;
+use gitim_runtime::context_window::WARN_AT_PERCENT;
+
+#[test]
+fn crossed_on_first_observation_above_threshold() {
+    assert!(just_crossed_threshold(None, 85.0));
+}
+
+#[test]
+fn not_crossed_below_threshold() {
+    assert!(!just_crossed_threshold(Some(45.0), 62.0));
+    assert!(!just_crossed_threshold(None, 30.0));
+}
+
+#[test]
+fn crossed_when_previous_below_and_new_above() {
+    assert!(just_crossed_threshold(Some(78.0), 82.0));
+    assert!(just_crossed_threshold(Some(79.99), WARN_AT_PERCENT));
+}
+
+#[test]
+fn not_crossed_when_already_above() {
+    assert!(!just_crossed_threshold(Some(82.0), 90.0));
+    assert!(!just_crossed_threshold(Some(WARN_AT_PERCENT), 95.0));
+}
+
+#[test]
+fn not_crossed_when_dropping() {
+    assert!(!just_crossed_threshold(Some(90.0), 40.0));
+}
+
+use gitim_runtime::agent_loop::build_usage_notice_preamble;
+
+#[test]
+fn preamble_contains_percentage() {
+    let p = build_usage_notice_preamble(82.4);
+    assert!(p.contains("82"), "preamble: {p}");
+}
+
+#[test]
+fn preamble_mentions_reset_marker() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("[[RESET]]"));
+}
+
+#[test]
+fn preamble_marks_as_system_notice() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.starts_with("[系统通知]"));
+}
+
+#[test]
+fn preamble_says_only_once() {
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("仅发送一次"));
+}
+
+#[test]
+fn preamble_frames_as_handoff_not_completion() {
+    // Lock the "stop now, write orientation, hand off" framing — the whole
+    // point of the revised preamble. If a future edit drifts back toward
+    // "finish your tasks first", these assertions fail.
+    let p = build_usage_notice_preamble(85.0);
+    assert!(p.contains("立即"), "must convey stop-now urgency: {p}");
+    assert!(p.contains("交接"), "must frame as handoff: {p}");
+    assert!(
+        p.contains("记忆文件"),
+        "must name the persistence target: {p}"
+    );
+    assert!(
+        p.contains("orientation"),
+        "must name the handoff shape (not inventory): {p}"
+    );
+    assert!(
+        !p.contains("请在本轮完成手头任务后"),
+        "must NOT tell the agent to finish its work first: {p}"
+    );
+}
+
+#[test]
+fn preamble_does_not_blanket_ban_tool_use() {
+    // Regression guard for the 2026-04-21 repro (sid f6cf86eb): the old
+    // preamble said "停下所有新的工具调用和任务步骤" in step 1 and then
+    // asked the agent to "在记忆文件里留一段 orientation" in step 2 —
+    // which requires Read + Edit tool calls. The agent resolved the
+    // contradiction by firing misdirected DMs before [[RESET]]. The
+    // rewritten copy must name the allowed tool surface explicitly
+    // (Read + Edit of memory files) and must NOT contain a blanket
+    // "stop all tool calls" instruction.
+    let p = build_usage_notice_preamble(85.0);
+    assert!(
+        !p.contains("停下所有新的工具调用"),
+        "blanket tool-use ban contradicts the write-orientation step: {p}"
+    );
+    assert!(
+        p.contains("Read") && p.contains("Edit"),
+        "must name the allowed tools so the agent does not guess: {p}"
+    );
+    assert!(
+        p.contains("不要发消息") || p.contains("不要回复用户"),
+        "must explicitly prohibit the side-channel actions the agent \
+         was observed to drift into (misdirected DMs in f6cf86eb): {p}"
+    );
 }

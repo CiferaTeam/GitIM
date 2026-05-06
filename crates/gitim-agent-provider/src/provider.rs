@@ -26,11 +26,17 @@ pub trait Provider: Send + Sync {
     fn prompt_memory(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_memory(ctx)
     }
+    fn prompt_reset_protocol(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_reset_protocol(ctx)
+    }
     fn prompt_cold_start(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_cold_start(ctx)
     }
     fn prompt_gitim_api(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_gitim_api(ctx)
+    }
+    fn prompt_host_safety(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_host_safety(ctx)
     }
     fn build_system_prompt(&self, ctx: &PromptContext) -> String {
         [
@@ -39,8 +45,10 @@ pub trait Provider: Send + Sync {
             self.prompt_cognitive_loop(ctx),
             self.prompt_collaboration(ctx),
             self.prompt_memory(ctx),
+            self.prompt_reset_protocol(ctx),
             self.prompt_cold_start(ctx),
             self.prompt_gitim_api(ctx),
+            self.prompt_host_safety(ctx),
         ]
         .join("\n\n")
     }
@@ -48,7 +56,7 @@ pub trait Provider: Send + Sync {
 
 /// Create a provider for the given type.
 ///
-/// Supported types: "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "cursor", "mock".
+/// Supported types: "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "cursor", "mock", "pi".
 pub fn create(
     provider_type: &str,
     config: ProviderConfig,
@@ -62,6 +70,7 @@ pub fn create(
         "mock" => Ok(Box::new(crate::mock::MockProvider::new(config))),
         "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
         "opencode" => Ok(Box::new(crate::opencode::OpencodeProvider::new(config))),
+        "pi" => Ok(Box::new(crate::pi::PiProvider::new(config))),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),
     }
 }

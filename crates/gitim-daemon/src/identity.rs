@@ -23,27 +23,29 @@ pub enum AuthData {
     Git {
         handler: String,
         display_name: String,
+        /// Optional — runtime injects this when provisioning an agent inside
+        /// a github-backed workspace, so the agent's commits attribute to
+        /// the workspace owner's GitHub account even though the agent
+        /// itself onboards via the `git` variant.
+        #[serde(default)]
+        github_email: Option<String>,
     },
     #[serde(rename = "github")]
-    GitHub {
-        token: String,
-    },
+    GitHub { token: String },
     #[serde(rename = "gitea")]
-    Gitea {
-        token: String,
-        url: String,
-    },
+    Gitea { token: String, url: String },
     #[serde(rename = "gitlab")]
-    GitLab {
-        token: String,
-        url: String,
-    },
+    GitLab { token: String, url: String },
 }
 
 #[derive(Debug, Clone)]
 pub struct InferredIdentity {
     pub handler: Handler,
     pub display_name: String,
+    /// GitHub-mode only for now — persisted into `.gitim/me.json` as
+    /// `github_email` so daemon commits can attribute to the user's
+    /// GitHub account. None for git / gitea / gitlab modes.
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +80,26 @@ fn run_curl(args: &[&str]) -> Result<String, IdentityError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn github_email_from_user_json(v: &serde_json::Value) -> Option<String> {
+    if let Some(email) = v
+        .get("email")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(email.to_string());
+    }
+
+    let id = v.get("id").and_then(|x| x.as_u64());
+    let login = v
+        .get("login")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty());
+    match (id, login) {
+        (Some(id), Some(login)) => Some(format!("{id}+{login}@users.noreply.github.com")),
+        _ => None,
+    }
+}
+
 /// Infer identity from the given git server and auth data.
 ///
 /// For `Git` variant the caller provides handler + display_name directly.
@@ -90,17 +112,25 @@ pub fn infer_identity(
         AuthData::Git {
             handler,
             display_name,
+            github_email,
         } => {
             let validated = Handler::new(&handler)?;
             Ok(InferredIdentity {
                 handler: validated,
                 display_name,
+                email: github_email.filter(|s| !s.is_empty()),
             })
         }
 
         AuthData::GitHub { token } => {
             let auth_header = format!("Authorization: token {}", token);
-            let body = run_curl(&["-H", &auth_header, "https://api.github.com/user"])?;
+            // E2E test seam mirroring the one in gitim-runtime: points at a
+            // local stub so a compiled daemon binary can run the full onboard
+            // flow without talking to github.com. Unset in production.
+            let api_base = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+                .unwrap_or_else(|_| "https://api.github.com".to_string());
+            let url = format!("{}/user", api_base.trim_end_matches('/'));
+            let body = run_curl(&["-H", &auth_header, &url])?;
 
             let v: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| IdentityError::ParseError(e.to_string()))?;
@@ -117,10 +147,13 @@ pub fn infer_identity(
                 .unwrap_or(&login)
                 .to_string();
 
+            let email = github_email_from_user_json(&v);
+
             let handler = Handler::new(&login)?;
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email,
             })
         }
 
@@ -149,6 +182,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
 
@@ -176,6 +210,7 @@ pub fn infer_identity(
             Ok(InferredIdentity {
                 handler,
                 display_name,
+                email: None,
             })
         }
     }
@@ -184,6 +219,9 @@ pub fn infer_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn git_mode_returns_passed_values() {
@@ -192,11 +230,44 @@ mod tests {
             AuthData::Git {
                 handler: "alice".to_string(),
                 display_name: "Alice Wonderland".to_string(),
+                github_email: None,
             },
         )
         .unwrap();
         assert_eq!(result.handler.as_str(), "alice");
         assert_eq!(result.display_name, "Alice Wonderland");
+        assert!(result.email.is_none());
+    }
+
+    #[test]
+    fn git_mode_propagates_github_email() {
+        let result = infer_identity(
+            GitServer::Git,
+            AuthData::Git {
+                handler: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                github_email: Some("alice@example.com".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.email.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn git_mode_empty_github_email_treated_as_none() {
+        let result = infer_identity(
+            GitServer::Git,
+            AuthData::Git {
+                handler: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                github_email: Some("".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(
+            result.email.is_none(),
+            "empty string should not produce a fake git author email"
+        );
     }
 
     #[test]
@@ -206,6 +277,7 @@ mod tests {
             AuthData::Git {
                 handler: "INVALID_UPPER".to_string(),
                 display_name: "Bad".to_string(),
+                github_email: None,
             },
         );
         assert!(matches!(result, Err(IdentityError::InvalidHandler(_))));
@@ -218,9 +290,49 @@ mod tests {
             AuthData::Git {
                 handler: "system".to_string(),
                 display_name: "System".to_string(),
+                github_email: None,
             },
         );
         assert!(matches!(result, Err(IdentityError::InvalidHandler(_))));
+    }
+
+    fn serve_github_user_once(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn github_private_email_derives_noreply() {
+        let api_base = serve_github_user_once(
+            r#"{"id":12345,"login":"octocat","name":"Octocat","email":null}"#,
+        );
+        std::env::set_var("GITIM_TEST_GITHUB_API_BASE", api_base);
+
+        let result = infer_identity(
+            GitServer::GitHub,
+            AuthData::GitHub {
+                token: "fake-token".to_string(),
+            },
+        )
+        .unwrap();
+
+        std::env::remove_var("GITIM_TEST_GITHUB_API_BASE");
+        assert_eq!(
+            result.email.as_deref(),
+            Some("12345+octocat@users.noreply.github.com")
+        );
     }
 
     #[test]

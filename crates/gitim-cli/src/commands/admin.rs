@@ -31,12 +31,10 @@ pub async fn cmd_stop(mode: &OutputMode) {
 
     let client = GitimClient::new(&repo_root);
     match client.stop().await {
-        Ok(_resp) => {
-            match mode {
-                OutputMode::Human => println!("Daemon stopped."),
-                OutputMode::Json => println!(r#"{{"status":"stopping"}}"#),
-            }
-        }
+        Ok(_resp) => match mode {
+            OutputMode::Human => println!("Daemon stopped."),
+            OutputMode::Json => println!(r#"{{"status":"stopping"}}"#),
+        },
         Err(_) => {
             // Daemon may shut down mid-response — treat connection errors as success
             match mode {
@@ -72,9 +70,18 @@ pub async fn cmd_search(
     channel_type: Option<&str>,
     limit: u64,
     offset: u64,
+    include_cards: bool,
 ) {
     match client
-        .search(query, author, channel, channel_type, Some(limit), Some(offset))
+        .search(
+            query,
+            author,
+            channel,
+            channel_type,
+            Some(limit),
+            Some(offset),
+            include_cards,
+        )
         .await
     {
         Ok(resp) => {
@@ -93,11 +100,23 @@ pub async fn cmd_search(
 
                     println!("Found {total} results:");
 
-                    if let Some(messages) = data.and_then(|d| d.get("messages")).and_then(|m| m.as_array()) {
+                    if let Some(messages) = data
+                        .and_then(|d| d.get("messages"))
+                        .and_then(|m| m.as_array())
+                    {
                         for msg in messages {
-                            let ch = msg.get("channel").and_then(|v| v.as_str()).unwrap_or("unknown");
-                            let ct = msg.get("channel_type").and_then(|v| v.as_str()).unwrap_or("channel");
-                            let author = msg.get("author").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            let ch = msg
+                                .get("channel")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let ct = msg
+                                .get("channel_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("channel");
+                            let author = msg
+                                .get("author")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
                             let line = msg.get("line_number").and_then(|v| v.as_u64()).unwrap_or(0);
                             let ts = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
                             let body = msg.get("body").and_then(|v| v.as_str()).unwrap_or("");

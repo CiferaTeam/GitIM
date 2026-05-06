@@ -4,6 +4,7 @@ mod commands;
 mod output;
 
 use std::env;
+use std::io::Read;
 use std::process;
 
 use clap::{Parser, Subcommand};
@@ -32,7 +33,11 @@ enum Commands {
         /// Channel name
         channel: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
@@ -77,8 +82,20 @@ enum Commands {
         targets: Vec<String>,
     },
 
+    /// Leave a channel (stop receiving events from it)
+    LeaveChannel {
+        /// Channel name
+        channel: String,
+    },
+
     /// Archive a channel
     ArchiveChannel {
+        /// Channel name
+        name: String,
+    },
+
+    /// Unarchive a channel
+    UnarchiveChannel {
         /// Channel name
         name: String,
     },
@@ -117,6 +134,9 @@ enum Commands {
         /// Offset for pagination
         #[arg(long, default_value = "0")]
         offset: u64,
+        /// Include card discussion messages in results
+        #[arg(long)]
+        include_cards: bool,
     },
 
     /// Rebuild the search index
@@ -166,12 +186,6 @@ enum Commands {
         yes: bool,
     },
 
-    /// Board (kanban) commands
-    Board {
-        #[command(subcommand)]
-        command: BoardCommands,
-    },
-
     /// Card commands
     Card {
         #[command(subcommand)]
@@ -186,7 +200,11 @@ enum DmCommands {
         /// Target handler
         handler: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
@@ -215,52 +233,44 @@ enum DmCommands {
 }
 
 #[derive(Subcommand)]
-enum BoardCommands {
-    /// Create a new board
-    Create {
-        /// Board name
-        name: String,
-        /// Display name
-        #[arg(long)]
-        display_name: Option<String>,
-        /// Comma-separated list of statuses
-        #[arg(long)]
-        statuses: Option<String>,
-    },
-
-    /// List all boards
-    Ls,
-}
-
-#[derive(Subcommand)]
 enum CardCommands {
-    /// Create a new card
+    /// Create a new card in a channel
     Create {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card title
         title: String,
+        /// Labels (repeatable)
+        #[arg(short, long)]
+        label: Vec<String>,
         /// Assignee handler
         #[arg(long)]
         assignee: Option<String>,
-        /// Initial status
+        /// Initial status (todo/doing/done)
         #[arg(long)]
         status: Option<String>,
     },
 
-    /// List cards in a board
+    /// List cards with optional filters
     Ls {
-        /// Board name
-        board: String,
+        /// Filter by channel
+        #[arg(short, long)]
+        channel: Option<String>,
+        /// Filter by label (repeatable; all must match)
+        #[arg(short, long)]
+        label: Vec<String>,
         /// Filter by status
         #[arg(long)]
         status: Option<String>,
+        /// Filter by assignee handler
+        #[arg(long)]
+        assignee: Option<String>,
     },
 
     /// Read card discussion
     Read {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// Maximum number of entries
@@ -271,31 +281,64 @@ enum CardCommands {
         since: Option<u64>,
     },
 
-    /// Send a message to a card
-    Send {
-        /// Board name
-        board: String,
+    /// Comment on a card
+    Comment {
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// Message body
-        body: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        /// Read message body from stdin
+        #[arg(long)]
+        stdin: bool,
         /// Line number to reply to
         #[arg(short, long)]
         reply_to: Option<u64>,
     },
 
-    /// Update card status or assignee
+    /// Update card status / labels / assignee
     Update {
-        /// Board name
-        board: String,
+        /// Channel name
+        channel: String,
         /// Card ID
         card_id: String,
         /// New status
         #[arg(long)]
         status: Option<String>,
+        /// Replace labels (repeatable)
+        #[arg(short, long)]
+        label: Vec<String>,
+        /// Clear labels (if set, ignore --label)
+        #[arg(long)]
+        label_clear: bool,
         /// New assignee handler
         #[arg(long)]
         assignee: Option<String>,
+    },
+
+    /// Archive a card
+    Archive {
+        /// Channel name
+        channel: String,
+        /// Card ID
+        card_id: String,
+    },
+
+    /// Unarchive a card
+    Unarchive {
+        /// Channel name
+        channel: String,
+        /// Card ID
+        card_id: String,
+    },
+
+    /// List archived cards
+    Archived {
+        /// Filter by channel name
+        #[arg(short, long)]
+        channel: Option<String>,
     },
 }
 
@@ -357,9 +400,11 @@ async fn main() {
         Commands::Send {
             channel,
             body,
+            stdin,
             author,
             reply_to,
         } => {
+            let body = read_body_or_exit(body, stdin);
             commands::messaging::cmd_send(
                 &client,
                 &mode,
@@ -374,9 +419,7 @@ async fn main() {
             channel,
             limit,
             since,
-        } => {
-            commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await
-        }
+        } => commands::messaging::cmd_read(&client, &mode, &channel, limit, since).await,
         Commands::Channels => commands::channels::cmd_channels(&client, &mode).await,
         Commands::CreateChannel {
             name,
@@ -395,8 +438,14 @@ async fn main() {
         Commands::JoinChannel { channel, targets } => {
             commands::channels::cmd_join_channel(&client, &mode, &channel, &targets).await
         }
+        Commands::LeaveChannel { channel } => {
+            commands::channels::cmd_leave_channel(&client, &mode, &channel).await
+        }
         Commands::ArchiveChannel { name } => {
             commands::channels::cmd_archive_channel(&client, &mode, &name).await
+        }
+        Commands::UnarchiveChannel { name } => {
+            commands::channels::cmd_unarchive_channel(&client, &mode, &name).await
         }
         Commands::ArchivedChannels => {
             commands::channels::cmd_archived_channels(&client, &mode).await
@@ -409,6 +458,7 @@ async fn main() {
             channel_type,
             limit,
             offset,
+            include_cards,
         } => {
             commands::admin::cmd_search(
                 &client,
@@ -419,6 +469,7 @@ async fn main() {
                 channel_type.as_deref(),
                 limit,
                 offset,
+                include_cards,
             )
             .await
         }
@@ -427,9 +478,11 @@ async fn main() {
             DmCommands::Send {
                 handler,
                 body,
+                stdin,
                 author,
                 reply_to,
             } => {
+                let body = read_body_or_exit(body, stdin);
                 commands::dm::cmd_dm_send(
                     &client,
                     &mode,
@@ -446,96 +499,102 @@ async fn main() {
                 limit,
                 since,
             } => {
-                commands::dm::cmd_dm_read(
-                    &client,
-                    &mode,
-                    &handler,
-                    author.as_deref(),
-                    limit,
-                    since,
-                )
-                .await
+                commands::dm::cmd_dm_read(&client, &mode, &handler, author.as_deref(), limit, since)
+                    .await
             }
             DmCommands::List => commands::dm::cmd_dm_list(&mode),
         },
-        Commands::Board { command } => match command {
-            BoardCommands::Create {
-                name,
-                display_name,
-                statuses,
-            } => {
-                let status_vec: Option<Vec<String>> = statuses
-                    .map(|s| s.split(',').map(|s| s.trim().to_string()).collect());
-                commands::board::cmd_create_board(
-                    &client,
-                    &mode,
-                    &name,
-                    display_name.as_deref(),
-                    status_vec.as_deref(),
-                )
-                .await
-            }
-            BoardCommands::Ls => commands::board::cmd_list_boards(&client, &mode).await,
-        },
         Commands::Card { command } => match command {
             CardCommands::Create {
-                board,
+                channel,
                 title,
+                label,
                 assignee,
                 status,
             } => {
                 commands::card::cmd_create_card(
                     &client,
                     &mode,
-                    &board,
+                    &channel,
                     &title,
+                    if label.is_empty() { None } else { Some(&label) },
                     assignee.as_deref(),
                     status.as_deref(),
                 )
                 .await
             }
-            CardCommands::Ls { board, status } => {
-                commands::card::cmd_list_cards(&client, &mode, &board, status.as_deref()).await
+            CardCommands::Ls {
+                channel,
+                label,
+                status,
+                assignee,
+            } => {
+                commands::card::cmd_list_cards(
+                    &client,
+                    &mode,
+                    channel.as_deref(),
+                    if label.is_empty() { None } else { Some(&label) },
+                    status.as_deref(),
+                    assignee.as_deref(),
+                )
+                .await
             }
             CardCommands::Read {
-                board,
+                channel,
                 card_id,
                 limit,
                 since,
             } => {
-                commands::card::cmd_read_card(&client, &mode, &board, &card_id, limit, since).await
+                commands::card::cmd_read_card(&client, &mode, &channel, &card_id, limit, since)
+                    .await
             }
-            CardCommands::Send {
-                board,
+            CardCommands::Comment {
+                channel,
                 card_id,
                 body,
+                stdin,
                 reply_to,
             } => {
+                let body = read_body_or_exit(body, stdin);
                 commands::card::cmd_send_card_message(
-                    &client,
-                    &mode,
-                    &board,
-                    &card_id,
-                    &body,
-                    reply_to,
+                    &client, &mode, &channel, &card_id, &body, reply_to,
                 )
                 .await
             }
             CardCommands::Update {
-                board,
+                channel,
                 card_id,
                 status,
+                label,
+                label_clear,
                 assignee,
             } => {
+                let labels_param: Option<Vec<String>> = if label_clear {
+                    Some(Vec::new())
+                } else if !label.is_empty() {
+                    Some(label)
+                } else {
+                    None
+                };
                 commands::card::cmd_update_card(
                     &client,
                     &mode,
-                    &board,
+                    &channel,
                     &card_id,
                     status.as_deref(),
+                    labels_param.as_deref(),
                     assignee.as_deref(),
                 )
                 .await
+            }
+            CardCommands::Archive { channel, card_id } => {
+                commands::card::cmd_archive_card(&client, &mode, &channel, &card_id).await
+            }
+            CardCommands::Unarchive { channel, card_id } => {
+                commands::card::cmd_unarchive_card(&client, &mode, &channel, &card_id).await
+            }
+            CardCommands::Archived { channel } => {
+                commands::card::cmd_archived_cards(&client, &mode, channel.as_deref()).await
             }
         },
     }
@@ -563,6 +622,28 @@ fn init_client() -> GitimClient {
     GitimClient::new(&repo_root)
 }
 
+fn read_body_or_exit(body: Option<String>, stdin: bool) -> String {
+    match (body, stdin) {
+        (Some(body), false) => body,
+        (None, true) => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("Error: failed to read stdin: {e}");
+                process::exit(1);
+            }
+            buf
+        }
+        (Some(_), true) => {
+            eprintln!("Error: cannot pass both a message body and --stdin");
+            process::exit(1);
+        }
+        (None, false) => {
+            eprintln!("Error: message body is required unless --stdin is set");
+            process::exit(1);
+        }
+    }
+}
+
 async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
     match client.status().await {
         Ok(resp) => {
@@ -575,5 +656,51 @@ async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
             eprintln!("Error: {e}");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn send_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from(["gitim", "send", "general", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "send should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn dm_send_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from(["gitim", "dm", "send", "alice", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "dm send should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn card_comment_accepts_stdin_without_body() {
+        let parsed = Cli::try_parse_from([
+            "gitim",
+            "card",
+            "comment",
+            "dev",
+            "20260424-stdin",
+            "--stdin",
+        ]);
+
+        assert!(
+            parsed.is_ok(),
+            "card comment should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
     }
 }

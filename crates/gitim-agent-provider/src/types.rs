@@ -109,6 +109,8 @@ pub struct ExecResult {
     pub duration_ms: u64,
     /// Session token for resuming (provider-specific).
     pub session_token: Option<String>,
+    /// Per-turn usage data, when the provider reported any.
+    pub usage: Option<ProviderUsage>,
 }
 
 /// Execution outcome status.
@@ -118,6 +120,30 @@ pub enum ExecStatus {
     Failed,
     Aborted,
     Timeout,
+}
+
+/// Per-turn usage as reported by a provider.
+///
+/// Providers fill different subsets:
+/// - Claude populates `input_tokens` / `output_tokens` (+ cache variants when
+///   prompt caching is active); `used_percent` is `None`.
+/// - Codex populates `used_percent`; token counts are `None`.
+/// - Mock fills whatever the test configures.
+///
+/// For Claude, the true context-window occupancy is
+/// `input_tokens + cache_read_tokens + cache_creation_tokens`. `input_tokens`
+/// alone excludes cached content and will underreport by orders of magnitude
+/// once caching kicks in — compute consumers must sum the three.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProviderUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub used_percent: Option<f64>,
+    /// Tokens served from the prompt cache (Claude `cache_read_input_tokens`).
+    pub cache_read_tokens: Option<u64>,
+    /// Tokens written into the prompt cache this turn
+    /// (Claude `cache_creation_input_tokens`).
+    pub cache_creation_tokens: Option<u64>,
 }
 
 /// Context passed to prompt generation methods.

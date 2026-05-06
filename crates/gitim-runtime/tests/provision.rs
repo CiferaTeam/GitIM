@@ -17,6 +17,7 @@ async fn test_provision_fresh() {
         handler: "test-agent".into(),
         display_name: "Test Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
 
     let handle = provision_agent(&agents_dir, &config).await.unwrap();
@@ -44,6 +45,7 @@ async fn test_provision_idempotent() {
         handler: "idem-agent".into(),
         display_name: "Idempotent Agent".into(),
         remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
     };
 
     let handle1 = provision_agent(&agents_dir, &config).await.unwrap();
@@ -70,9 +72,13 @@ async fn test_provision_invalid_remote() {
         handler: "bad-agent".into(),
         display_name: "Bad Agent".into(),
         remote_url: "/nonexistent/repo.git".into(),
+        github_email: None,
     };
 
     let result = provision_agent(&agents_dir, &config).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), RuntimeError::GitCloneFailed(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        RuntimeError::GitCloneFailed(_)
+    ));
 }

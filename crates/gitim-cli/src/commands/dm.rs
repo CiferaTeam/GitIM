@@ -1,56 +1,16 @@
 #![deny(warnings)]
 
-use std::path::Path;
-use std::{env, fs, process};
+use std::{fs, process};
 
-use gitim_client::{find_repo_root, GitimClient};
+use gitim_client::GitimClient;
 
+use super::{get_repo_root, read_my_handler};
 use crate::output::OutputMode;
-
-/// Read the current user's handler from `.gitim/me.json`.
-fn read_my_handler(repo_root: &Path) -> String {
-    let me_path = repo_root.join(".gitim/me.json");
-    let contents = match fs::read_to_string(&me_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: cannot read {}: {e}", me_path.display());
-            process::exit(1);
-        }
-    };
-    let v: serde_json::Value = match serde_json::from_str(&contents) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error: invalid me.json: {e}");
-            process::exit(1);
-        }
-    };
-    match v.get("handler").and_then(|h| h.as_str()) {
-        Some(h) => h.to_string(),
-        None => {
-            eprintln!("Error: me.json missing \"handler\" field");
-            process::exit(1);
-        }
-    }
-}
 
 /// Build the DM channel name from two handlers: `dm:{sorted[0]},{sorted[1]}`.
 fn dm_channel(h1: &str, h2: &str) -> String {
     let (a, b) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
     format!("dm:{a},{b}")
-}
-
-fn get_repo_root() -> std::path::PathBuf {
-    let cwd = env::current_dir().unwrap_or_else(|e| {
-        eprintln!("Error: cannot read current directory: {e}");
-        process::exit(1);
-    });
-    match find_repo_root(&cwd) {
-        Some(r) => r,
-        None => {
-            eprintln!("Error: not in a GitIM repository (no .gitim/ found)");
-            process::exit(1);
-        }
-    }
 }
 
 pub async fn cmd_dm_send(
@@ -67,7 +27,10 @@ pub async fn cmd_dm_send(
         .unwrap_or_else(|| read_my_handler(&repo_root));
     let channel = dm_channel(&my_handler, target);
 
-    match client.send(&channel, body, Some(&my_handler), reply_to).await {
+    match client
+        .send(&channel, body, Some(&my_handler), reply_to)
+        .await
+    {
         Ok(resp) => {
             if !resp.ok {
                 let msg = resp.error.as_deref().unwrap_or("unknown error");

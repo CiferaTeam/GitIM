@@ -8,11 +8,7 @@ struct TestOverrideProvider;
 
 #[async_trait]
 impl Provider for TestOverrideProvider {
-    async fn execute(
-        &self,
-        _prompt: &str,
-        _opts: ExecOptions,
-    ) -> Result<Session, ProviderError> {
+    async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
         Err(ProviderError::NotImplemented("test".to_string()))
     }
 
@@ -23,8 +19,7 @@ impl Provider for TestOverrideProvider {
 
 #[test]
 fn default_prompt_contains_all_sections() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "test-bot",
         model: None,
@@ -36,14 +31,18 @@ fn default_prompt_contains_all_sections() {
     assert!(prompt.contains("## 认知循环"));
     assert!(prompt.contains("## IM 协作原则"));
     assert!(prompt.contains("## 记忆"));
+    assert!(prompt.contains("## 主动净化上下文"));
+    assert!(prompt.contains("[[RESET]]"));
+    assert!(prompt.contains("leave-channel"));
     assert!(prompt.contains("## 首次启动"));
     assert!(prompt.contains("## GitIM 工具"));
+    assert!(prompt.contains("## 主机操作边界"));
+    assert!(prompt.contains("pkill -f gitim-daemon"));
 }
 
 #[test]
 fn default_memory_references_claude_md() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "bot",
         model: None,
@@ -76,8 +75,7 @@ fn override_replaces_single_section() {
 
 #[test]
 fn prompt_context_handler_is_interpolated() {
-    let provider =
-        gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "my-agent",
         model: None,
@@ -87,9 +85,46 @@ fn prompt_context_handler_is_interpolated() {
 }
 
 #[test]
+fn gitim_api_exposes_card_and_archive_commands() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+    let api = provider.prompt_gitim_api(&ctx);
+
+    // Card base commands
+    assert!(api.contains("gitim card create"));
+    assert!(api.contains("gitim card ls"));
+    assert!(api.contains("gitim card read"));
+    assert!(api.contains("gitim card comment"));
+    assert!(api.contains("gitim card update"));
+
+    // Card archive triplet
+    assert!(api.contains("gitim card archive"));
+    assert!(api.contains("gitim card unarchive"));
+    assert!(api.contains("gitim card archived"));
+
+    // Safe multi-line message input
+    assert!(api.contains("gitim send <channel> --stdin"));
+    assert!(api.contains("gitim dm send <handler> --stdin"));
+    assert!(api.contains("gitim card comment <channel> <card_id> --stdin"));
+    assert!(api.contains("heredoc + `--stdin`"));
+
+    // CLI fallback must stay on the supported surface even when shell PATH is broken.
+    assert!(api.contains(".gitim/bin/gitim"));
+    assert!(api.contains("不要直接写 `.thread`"));
+    assert!(api.contains("不要直接写 `.gitim/index.db`"));
+
+    // Channel archive triplet
+    assert!(api.contains("gitim archive-channel"));
+    assert!(api.contains("gitim unarchive-channel"));
+    assert!(api.contains("gitim archived-channels"));
+}
+
+#[test]
 fn codex_provider_uses_agents_md() {
-    let provider =
-        gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
+    let provider = gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "codex-bot",
         model: None,

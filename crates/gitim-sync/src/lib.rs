@@ -1,10 +1,11 @@
 #![deny(warnings)]
 
+pub mod conflict;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod git;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod watcher;
+pub mod renumber;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sync_loop;
-pub mod renumber;
-pub mod conflict;
+pub mod url_redact;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod watcher;

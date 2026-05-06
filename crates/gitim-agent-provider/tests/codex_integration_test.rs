@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gitim_agent_provider::{create, Event, ExecOptions, ExecStatus, ProviderConfig};
 
@@ -9,6 +10,31 @@ fn mock_config() -> ProviderConfig {
         executable_path: Some(format!("{manifest_dir}/tests/fixtures/mock_codex.sh")),
         env: HashMap::new(),
     }
+}
+
+fn failing_mock_config() -> ProviderConfig {
+    let mut config = mock_config();
+    config
+        .env
+        .insert("MOCK_CODEX_FAIL_WITH_STDERR".to_string(), "1".to_string());
+    config
+}
+
+fn require_max_effort_mock_config() -> ProviderConfig {
+    let mut config = mock_config();
+    config
+        .env
+        .insert("MOCK_CODEX_REQUIRE_MAX_EFFORT".to_string(), "1".to_string());
+    config
+}
+
+fn slow_mock_config() -> ProviderConfig {
+    let mut config = mock_config();
+    config.env.insert(
+        "MOCK_CODEX_WAIT_AFTER_THREAD_STARTED".to_string(),
+        "1".to_string(),
+    );
+    config
 }
 
 #[tokio::test]
@@ -66,4 +92,92 @@ async fn execute_and_resume_return_completed_with_thread_id() {
     assert_eq!(result2.status, ExecStatus::Completed);
     assert_eq!(result2.output, "Resumed mock codex thread");
     assert_eq!(result2.session_token.as_deref(), Some("mock-codex-thread"));
+}
+
+#[tokio::test]
+async fn failed_codex_includes_stderr_tail() {
+    let provider = create("codex", failing_mock_config()).unwrap();
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let session = provider
+        .execute(
+            "hello",
+            ExecOptions {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    assert_eq!(result.status, ExecStatus::Failed);
+    let error = result.error.expect("failure should include error text");
+    assert!(error.contains("codex exited with status"));
+    assert!(error.contains("codex stderr tail: mock codex stderr diagnostic"));
+}
+
+#[tokio::test]
+async fn codex_provider_sets_xhigh_reasoning_effort() {
+    let provider = create("codex", require_max_effort_mock_config()).unwrap();
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let session = provider
+        .execute(
+            "hello",
+            ExecOptions {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    assert_eq!(result.status, ExecStatus::Completed);
+    assert_eq!(result.session_token.as_deref(), Some("mock-codex-thread"));
+}
+
+#[tokio::test]
+async fn cancelling_codex_returns_aborted_with_thread_id() {
+    let provider = create("codex", slow_mock_config()).unwrap();
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let mut session = provider
+        .execute(
+            "hello",
+            ExecOptions {
+                cwd: Some(cwd),
+                timeout: Some(Duration::from_secs(5)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut saw_running = false;
+    while let Some(event) = session.events.recv().await {
+        if matches!(event, Event::Status { .. }) {
+            saw_running = true;
+            session.cancel();
+            break;
+        }
+    }
+    assert!(
+        saw_running,
+        "should receive thread.started before cancellation"
+    );
+
+    while session.events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    assert_eq!(result.status, ExecStatus::Aborted);
+    assert_eq!(result.error.as_deref(), Some("cancelled by steering"));
+    assert_eq!(result.session_token.as_deref(), Some("mock-codex-thread"));
 }

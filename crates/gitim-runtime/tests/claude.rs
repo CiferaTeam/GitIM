@@ -1,7 +1,7 @@
 mod common;
 
-use gitim_agent_provider::{ExecOptions, ExecStatus, ProviderConfig, create};
 use common::short_tempdir;
+use gitim_agent_provider::{create, ExecOptions, ExecStatus, ProviderConfig};
 
 /// Real provider integration test. Requires `claude` CLI in PATH.
 /// Run with: cargo test -p gitim-runtime --test claude -- --ignored --nocapture
@@ -28,7 +28,10 @@ async fn test_provider_session_roundtrip() {
     while (events.recv().await).is_some() {}
 
     let result1 = session1.result.await.unwrap();
-    eprintln!("[1st] status={:?} output={}", result1.status, result1.output);
+    eprintln!(
+        "[1st] status={:?} output={}",
+        result1.status, result1.output
+    );
     eprintln!("[1st] session_token={:?}", result1.session_token);
     assert_eq!(result1.status, ExecStatus::Completed);
     assert!(!result1.output.is_empty());
@@ -45,13 +48,19 @@ async fn test_provider_session_roundtrip() {
         ..Default::default()
     };
 
-    let session2 = provider.execute("What did I just ask you?", opts2).await.unwrap();
+    let session2 = provider
+        .execute("What did I just ask you?", opts2)
+        .await
+        .unwrap();
 
     let mut events2 = session2.events;
     while (events2.recv().await).is_some() {}
 
     let result2 = session2.result.await.unwrap();
-    eprintln!("[2nd] status={:?} output={}", result2.status, result2.output);
+    eprintln!(
+        "[2nd] status={:?} output={}",
+        result2.status, result2.output
+    );
     eprintln!("[2nd] session_token={:?}", result2.session_token);
     assert_eq!(result2.status, ExecStatus::Completed);
     assert!(!result2.output.is_empty());

@@ -1,7 +1,7 @@
 use crate::parser::parse_thread;
 use crate::types::ThreadEntry;
-use thiserror::Error;
 use std::collections::HashSet;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ComplianceError {

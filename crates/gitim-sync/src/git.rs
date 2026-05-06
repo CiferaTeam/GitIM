@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::url_redact::redacted_url;
+
 #[derive(Error, Debug)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -13,6 +15,8 @@ pub enum GitError {
     PushConflict,
     #[error("rate limited by remote")]
     RateLimited,
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
 }
 
 pub struct GitStorage {
@@ -21,7 +25,9 @@ pub struct GitStorage {
 
 impl GitStorage {
     pub fn new(root: &Path) -> Self {
-        Self { root: root.to_path_buf() }
+        Self {
+            root: root.to_path_buf(),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -34,9 +40,9 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
         }
         Ok(())
     }
@@ -45,11 +51,14 @@ impl GitStorage {
         self.add_and_commit_as(paths, message, None)
     }
 
+    /// `author` is `Option<(name, email)>`. `None` → git picks author from
+    /// local git config (committer == author); `Some` → `name <email>`
+    /// becomes the `author` line, committer still comes from git config.
     pub fn add_and_commit_as(
         &self,
         paths: &[&str],
         message: &str,
-        author: Option<&str>,
+        author: Option<(&str, &str)>,
     ) -> Result<(), GitError> {
         let mut args = vec!["add"];
         args.extend(paths);
@@ -65,8 +74,8 @@ impl GitStorage {
 
         let mut commit_args = vec!["commit", "-m", message];
         let author_str;
-        if let Some(handler) = author {
-            author_str = format!("{} <{}@gitim>", handler, handler);
+        if let Some((name, email)) = author {
+            author_str = format!("{} <{}>", name, email);
             commit_args.push("--author");
             commit_args.push(&author_str);
         }
@@ -88,14 +97,9 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if is_rate_limited(&stderr) {
-                return Err(GitError::RateLimited);
-            }
-            if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
-                return Err(GitError::PushConflict);
-            }
-            return Err(GitError::CommandFailed(stderr));
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
         }
         Ok(())
     }
@@ -115,18 +119,16 @@ impl GitStorage {
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if is_rate_limited(&stderr) {
-                return Err(GitError::RateLimited);
-            }
-            return Err(GitError::CommandFailed(stderr));
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
         }
         Ok(())
     }
 
     pub fn has_unpushed_commits(&self) -> Result<bool, GitError> {
         let output = Command::new("git")
-            .args(["rev-list", "--count", "origin/main..HEAD"])
+            .args(["rev-list", "--count", "@{upstream}..HEAD"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -156,8 +158,14 @@ impl GitStorage {
 
     pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let range = format!("{}..{}", from, to);
+        // `--no-renames` is load-bearing: `git mv` (how we archive channels
+        // and cards) produces a pure rename that git happily reports as
+        // `rename from/to` with no `---`/`+++` headers — which parse_diff_output
+        // would silently skip. Forcing rename decomposition turns every
+        // archival into a delete + add pair, and the new path's full
+        // content lands in the returned map.
         let output = Command::new("git")
-            .args(["diff", &range])
+            .args(["diff", "--no-renames", &range])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -165,12 +173,14 @@ impl GitStorage {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
-        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "origin/main..HEAD", "--", pattern])
+            .args(["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -178,7 +188,9 @@ impl GitStorage {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
-        Ok(Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout)))
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
 
     fn parse_diff_output(stdout: &str) -> HashMap<PathBuf, String> {
@@ -216,7 +228,7 @@ impl GitStorage {
 
     pub fn rebase_onto_origin(&self) -> Result<(), GitError> {
         let output = Command::new("git")
-            .args(["rebase", "origin/main"])
+            .args(["rebase", "@{upstream}"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -227,11 +239,11 @@ impl GitStorage {
         Ok(())
     }
 
-    /// List files changed between origin/main and HEAD, matching a pattern.
+    /// List files changed between upstream and HEAD, matching a pattern.
     /// Returns relative paths (e.g. "channels/general.meta.yaml").
     pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
         let output = Command::new("git")
-            .args(["diff", "--name-only", "origin/main..HEAD", "--", pattern])
+            .args(["diff", "--name-only", "@{upstream}..HEAD", "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -259,8 +271,8 @@ impl GitStorage {
         Ok(())
     }
 
-    /// Discard all unpushed local changes, reset to remote state.
-    /// Encapsulates rebase_abort + reset_hard_origin.
+    /// Discard all unpushed local changes, reset to upstream state.
+    /// Encapsulates rebase_abort + reset_hard_upstream.
     pub fn discard_unpushed(&self) -> Result<(), GitError> {
         // Best-effort abort any in-progress rebase
         let _ = Command::new("git")
@@ -268,9 +280,9 @@ impl GitStorage {
             .current_dir(&self.root)
             .output();
 
-        // Reset to remote state
+        // Reset to upstream state
         let output = Command::new("git")
-            .args(["reset", "--hard", "origin/main"])
+            .args(["reset", "--hard", "@{upstream}"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -299,14 +311,52 @@ fn is_rate_limited(stderr: &str) -> bool {
         || lower.contains("secondaryratelimit")
 }
 
+fn is_auth_failed(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("authentication failed")
+        || lower.contains("invalid username or password")
+        || lower.contains("invalid username or token")
+        || lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("error: 401")
+        || lower.contains("error: 403")
+        || lower.contains("permission denied (publickey)")
+        || lower.contains("bad credentials")
+}
+
+/// Classify git push/fetch stderr into a structured error. Rate-limit takes
+/// precedence over auth (HTTP 429 from an authed request shouldn't look like
+/// credential decay), and divergence is push-only but harmless to detect for fetch.
+/// Credentials are redacted before the stderr enters the error value — anything
+/// that exits this function is safe to log.
+pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
+    let stderr = redacted_url(raw_stderr);
+    if is_rate_limited(&stderr) {
+        return GitError::RateLimited;
+    }
+    if is_auth_failed(&stderr) {
+        return GitError::AuthFailed(stderr);
+    }
+    if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+        return GitError::PushConflict;
+    }
+    GitError::CommandFailed(stderr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn rate_limit_detection_matches_known_patterns() {
-        assert!(is_rate_limited("fatal: unable to access '...': The requested URL returned error: 429"));
-        assert!(is_rate_limited("fatal: rate limit exceeded for this endpoint"));
+        assert!(is_rate_limited(
+            "fatal: unable to access '...': The requested URL returned error: 429"
+        ));
+        assert!(is_rate_limited(
+            "fatal: rate limit exceeded for this endpoint"
+        ));
         assert!(is_rate_limited("Rate Limit Exceeded"));
         assert!(is_rate_limited("Too Many Requests"));
         assert!(is_rate_limited("SecondaryRateLimit"));
@@ -316,8 +366,102 @@ mod tests {
     fn rate_limit_detection_no_false_positives() {
         assert!(!is_rate_limited("fatal: authentication failed"));
         assert!(!is_rate_limited("error: failed to push some refs"));
-        assert!(!is_rate_limited("[rejected] main -> main (non-fast-forward)"));
+        assert!(!is_rate_limited(
+            "[rejected] main -> main (non-fast-forward)"
+        ));
         assert!(!is_rate_limited(""));
+    }
+
+    #[test]
+    fn auth_failed_detection_matches_known_patterns() {
+        assert!(is_auth_failed(
+            "fatal: Authentication failed for 'https://github.com/x/y.git/'"
+        ));
+        assert!(is_auth_failed(
+            "remote: Invalid username or token. Password authentication is not supported"
+        ));
+        assert!(is_auth_failed(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        ));
+        assert!(is_auth_failed(
+            "fatal: could not read Password for 'https://x@gitlab.com'"
+        ));
+        assert!(is_auth_failed(
+            "error: The requested URL returned error: 401"
+        ));
+        assert!(is_auth_failed(
+            "error: The requested URL returned error: 403"
+        ));
+        assert!(is_auth_failed("fatal: unable to access '...': HTTP 401"));
+        assert!(is_auth_failed(
+            "git@github.com: Permission denied (publickey)."
+        ));
+        assert!(is_auth_failed("remote: Bad credentials"));
+        assert!(is_auth_failed("remote: invalid username or password"));
+    }
+
+    #[test]
+    fn auth_failed_detection_no_false_positives() {
+        assert!(!is_auth_failed(""));
+        assert!(!is_auth_failed("fatal: rate limit exceeded"));
+        assert!(!is_auth_failed(
+            "[rejected] main -> main (non-fast-forward)"
+        ));
+        assert!(!is_auth_failed(
+            "fatal: '/tmp/missing.git' does not appear to be a git repository"
+        ));
+    }
+
+    #[test]
+    fn classify_remote_error_prioritizes_rate_limit_over_auth() {
+        let stderr = "HTTP 429 rate limit exceeded, auth token invalid";
+        assert!(matches!(
+            classify_remote_error(stderr),
+            GitError::RateLimited
+        ));
+    }
+
+    #[test]
+    fn classify_remote_error_auth_case() {
+        let stderr = "fatal: Authentication failed for 'https://github.com/x/y.git/'";
+        match classify_remote_error(stderr) {
+            GitError::AuthFailed(msg) => assert!(msg.contains("Authentication failed")),
+            other => panic!("expected AuthFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_remote_error_redacts_credentials_in_stderr() {
+        let stderr = "fatal: Authentication failed for 'https://x:secrettoken@github.com/x/y.git/'";
+        match classify_remote_error(stderr) {
+            GitError::AuthFailed(msg) => {
+                assert!(
+                    !msg.contains("secrettoken"),
+                    "token should be redacted: {}",
+                    msg
+                );
+                assert!(msg.contains("<REDACTED>"));
+            }
+            other => panic!("expected AuthFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_remote_error_push_conflict_case() {
+        let stderr = "! [rejected]        main -> main (non-fast-forward)";
+        assert!(matches!(
+            classify_remote_error(stderr),
+            GitError::PushConflict
+        ));
+    }
+
+    #[test]
+    fn classify_remote_error_falls_through_to_command_failed() {
+        let stderr = "fatal: '/tmp/nope' does not appear to be a git repository";
+        assert!(matches!(
+            classify_remote_error(stderr),
+            GitError::CommandFailed(_)
+        ));
     }
 
     #[test]
@@ -338,29 +482,97 @@ mod tests {
         let clone_a = tempfile::TempDir::new().unwrap();
         let clone_b = tempfile::TempDir::new().unwrap();
 
-        std::process::Command::new("git").args(["init", "--bare"]).current_dir(bare_dir.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_dir.path())
+            .output()
+            .unwrap();
 
-        std::process::Command::new("git").args(["clone", bare_dir.path().to_str().unwrap(), clone_a.path().to_str().unwrap()]).current_dir(bare_dir.path().parent().unwrap()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.email", "a@test.com"]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.name", "A"]).current_dir(clone_a.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare_dir.path().to_str().unwrap(),
+                clone_a.path().to_str().unwrap(),
+            ])
+            .current_dir(bare_dir.path().parent().unwrap())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "a@test.com"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "A"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
 
         std::fs::write(clone_a.path().join("init.txt"), "init").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "initial"]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["push", "-u", "origin", "main"]).current_dir(clone_a.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
 
-        std::process::Command::new("git").args(["clone", bare_dir.path().to_str().unwrap(), clone_b.path().to_str().unwrap()]).current_dir(bare_dir.path().parent().unwrap()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.email", "b@test.com"]).current_dir(clone_b.path()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.name", "B"]).current_dir(clone_b.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare_dir.path().to_str().unwrap(),
+                clone_b.path().to_str().unwrap(),
+            ])
+            .current_dir(bare_dir.path().parent().unwrap())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "b@test.com"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "B"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
 
         std::fs::write(clone_a.path().join("init.txt"), "A's version").unwrap();
-        std::process::Command::new("git").args(["add", "init.txt"]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "A change"]).current_dir(clone_a.path()).output().unwrap();
-        std::process::Command::new("git").args(["push"]).current_dir(clone_a.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "A change"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
 
         std::fs::write(clone_b.path().join("init.txt"), "B's version").unwrap();
-        std::process::Command::new("git").args(["add", "init.txt"]).current_dir(clone_b.path()).output().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "B change"]).current_dir(clone_b.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "B change"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
 
         let repo_b = GitStorage::new(clone_b.path());
         repo_b.fetch().unwrap();
@@ -370,12 +582,21 @@ mod tests {
         repo_b.abort_rebase().unwrap();
 
         let content = std::fs::read_to_string(clone_b.path().join("init.txt")).unwrap();
-        assert_eq!(content, "B's version", "local commit should be preserved after abort_rebase");
+        assert_eq!(
+            content, "B's version",
+            "local commit should be preserved after abort_rebase"
+        );
 
         let rebase_merge = clone_b.path().join(".git/rebase-merge");
         let rebase_apply = clone_b.path().join(".git/rebase-apply");
-        assert!(!rebase_merge.exists() && !rebase_apply.exists(), "repo should be clean after abort");
+        assert!(
+            !rebase_merge.exists() && !rebase_apply.exists(),
+            "repo should be clean after abort"
+        );
 
-        assert!(repo_b.has_unpushed_commits().unwrap(), "local commit should still be unpushed");
+        assert!(
+            repo_b.has_unpushed_commits().unwrap(),
+            "local commit should still be unpushed"
+        );
     }
 }

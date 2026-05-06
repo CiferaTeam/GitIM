@@ -13,6 +13,8 @@ pub enum ImRuleError {
     AlreadyMember(String),
     #[error("user '{0}' is not a channel member")]
     NotMember(String),
+    #[error("user '{0}' is the last member; archive the channel instead")]
+    LastMember(String),
 }
 
 /// Validate a join operation.
@@ -81,6 +83,13 @@ pub fn validate_leave(
         if !members.contains(author) {
             return Err(ImRuleError::NotMember(author.to_string()));
         }
+        // Refuse to empty the member list. handle_poll treats an empty
+        // `meta.members` as legacy / public-access, so letting the last
+        // member leave silently turns a private channel into a discoverable
+        // one. Force archive-channel for that case.
+        if members.len() == 1 {
+            return Err(ImRuleError::LastMember(author.to_string()));
+        }
     } else {
         // Kick others: author MUST be a member
         if !members.contains(author) {
@@ -135,13 +144,19 @@ mod tests {
     #[test]
     fn join_target_not_registered() {
         let result = validate_join("alice", &["unknown"], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::TargetNotRegistered("unknown".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::TargetNotRegistered("unknown".into()))
+        );
     }
 
     #[test]
     fn join_author_not_registered() {
         let result = validate_join("nobody", &[], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::AuthorNotRegistered("nobody".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::AuthorNotRegistered("nobody".into()))
+        );
     }
 
     #[test]
@@ -173,12 +188,29 @@ mod tests {
     #[test]
     fn leave_author_not_registered() {
         let result = validate_leave("nobody", &[], USERS, MEMBERS);
-        assert_eq!(result, Err(ImRuleError::AuthorNotRegistered("nobody".into())));
+        assert_eq!(
+            result,
+            Err(ImRuleError::AuthorNotRegistered("nobody".into()))
+        );
     }
 
     #[test]
     fn leave_kick_target_not_member() {
         let result = validate_leave("alice", &["carol"], USERS, MEMBERS);
         assert_eq!(result, Err(ImRuleError::NotMember("carol".into())));
+    }
+
+    #[test]
+    fn leave_last_member_rejected() {
+        const SOLO: &[&str] = &["alice"];
+        let result = validate_leave("alice", &[], USERS, SOLO);
+        assert_eq!(result, Err(ImRuleError::LastMember("alice".into())));
+    }
+
+    #[test]
+    fn leave_two_members_self_ok() {
+        // Guard against the LastMember rule mis-triggering when len > 1.
+        let result = validate_leave("alice", &[], USERS, MEMBERS);
+        assert!(result.is_ok());
     }
 }

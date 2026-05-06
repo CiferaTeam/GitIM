@@ -32,7 +32,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     std::fs::write(&init_file, "init").unwrap();
     run_git(clone_dir.path(), &["add", "init.txt"]);
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     let repo = GitStorage::new(clone_dir.path());
     (bare_dir, clone_dir, repo)
@@ -107,7 +107,11 @@ fn test_diff_unpushed() {
     let channels = clone_dir.path().join("channels");
     std::fs::create_dir_all(&channels).unwrap();
     let thread_file = channels.join("general.thread");
-    std::fs::write(&thread_file, "[L000001][P000000][@alice][20250316T120000Z] hello\n").unwrap();
+    std::fs::write(
+        &thread_file,
+        "[L000001][P000000][@alice][20250316T120000Z] hello\n",
+    )
+    .unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add thread"]);
     run_git(clone_dir.path(), &["push"]);
@@ -122,10 +126,7 @@ fn test_diff_unpushed() {
     let diff = repo.diff_unpushed("*.thread").unwrap();
     assert_eq!(diff.len(), 1);
 
-    let key = diff
-        .keys()
-        .next()
-        .unwrap();
+    let key = diff.keys().next().unwrap();
     assert!(key.to_str().unwrap().ends_with("general.thread"));
 
     let added = diff.values().next().unwrap();
@@ -153,7 +154,8 @@ fn test_discard_unpushed_no_error_without_changes() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
     // Calling discard_unpushed when no divergence should not error
-    repo.discard_unpushed().expect("discard_unpushed should not error");
+    repo.discard_unpushed()
+        .expect("discard_unpushed should not error");
 }
 
 #[test]
@@ -239,7 +241,11 @@ fn test_diff_range_returns_added_lines() {
     let channels = clone_dir.path().join("channels");
     std::fs::create_dir_all(&channels).unwrap();
     let thread_file = channels.join("general.thread");
-    std::fs::write(&thread_file, "[L000001][P000000][@alice][20250316T120000Z] hello\n").unwrap();
+    std::fs::write(
+        &thread_file,
+        "[L000001][P000000][@alice][20250316T120000Z] hello\n",
+    )
+    .unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "add thread"]);
     run_git(clone_dir.path(), &["push"]);
@@ -290,10 +296,10 @@ fn test_rev_parse_returns_commit_hash() {
 }
 
 #[test]
-fn test_rev_parse_origin_main() {
+fn test_rev_parse_upstream() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
-    let hash = repo.rev_parse("origin/main").unwrap();
+    let hash = repo.rev_parse("@{upstream}").unwrap();
     assert_eq!(hash.len(), 40, "SHA should be 40 hex chars");
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -303,7 +309,10 @@ fn test_diff_range_invalid_commit() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 
     let result = repo.diff_range("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD");
-    assert!(result.is_err(), "diff_range with invalid commit should error");
+    assert!(
+        result.is_err(),
+        "diff_range with invalid commit should error"
+    );
 }
 
 #[test]

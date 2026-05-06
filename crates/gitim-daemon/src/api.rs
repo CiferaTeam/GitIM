@@ -28,18 +28,43 @@ pub enum Event {
     },
 
     #[serde(rename = "card_created")]
-    CardCreated {
-        board: String,
-        card_id: String,
-    },
+    CardCreated { channel: String, card_id: String },
 
     #[serde(rename = "card_status_changed")]
     CardStatusChanged {
-        board: String,
+        channel: String,
         card_id: String,
         old_status: String,
         new_status: String,
         author: String,
+    },
+
+    #[serde(rename = "card_message_appended")]
+    CardMessageAppended {
+        channel: String,
+        card_id: String,
+        line_numbers: Vec<u64>,
+    },
+
+    #[serde(rename = "card_archived")]
+    CardArchived {
+        channel: String,
+        card_id: String,
+        author: String,
+    },
+
+    #[serde(rename = "card_unarchived")]
+    CardUnarchived {
+        channel: String,
+        card_id: String,
+        author: String,
+    },
+
+    #[serde(rename = "channel_unarchived")]
+    ChannelUnarchived {
+        channel: String,
+        author: String,
+        timestamp: String,
     },
 }
 
@@ -121,6 +146,8 @@ pub enum Request {
         introduction: Option<String>,
         #[serde(default)]
         author: Option<String>,
+        #[serde(default)]
+        invitees: Vec<String>,
     },
     #[serde(rename = "search")]
     Search {
@@ -136,6 +163,8 @@ pub enum Request {
         limit: usize,
         #[serde(default)]
         offset: usize,
+        #[serde(default)]
+        include_cards: bool,
     },
     #[serde(rename = "reindex")]
     Reindex,
@@ -145,22 +174,20 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
-    #[serde(rename = "archived_channels")]
-    ListArchivedChannels,
-    #[serde(rename = "create_board")]
-    CreateBoard {
-        name: String,
-        #[serde(default)]
-        display_name: Option<String>,
-        #[serde(default)]
-        statuses: Option<Vec<String>>,
+    #[serde(rename = "unarchive_channel")]
+    UnarchiveChannel {
+        channel: String,
         #[serde(default)]
         author: Option<String>,
     },
+    #[serde(rename = "archived_channels")]
+    ListArchivedChannels,
     #[serde(rename = "create_card")]
     CreateCard {
-        board: String,
+        channel: String,
         title: String,
+        #[serde(default)]
+        labels: Option<Vec<String>>,
         #[serde(default)]
         assignee: Option<String>,
         #[serde(default)]
@@ -168,17 +195,20 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
-    #[serde(rename = "list_boards")]
-    ListBoards,
     #[serde(rename = "list_cards")]
     ListCards {
-        board: String,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        labels: Option<Vec<String>>,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        assignee: Option<String>,
     },
     #[serde(rename = "read_card")]
     ReadCard {
-        board: String,
+        channel: String,
         card_id: String,
         #[serde(default)]
         limit: Option<usize>,
@@ -187,7 +217,7 @@ pub enum Request {
     },
     #[serde(rename = "send_card_message")]
     SendCardMessage {
-        board: String,
+        channel: String,
         card_id: String,
         body: String,
         #[serde(default)]
@@ -197,14 +227,33 @@ pub enum Request {
     },
     #[serde(rename = "update_card")]
     UpdateCard {
-        board: String,
+        channel: String,
         card_id: String,
         #[serde(default)]
         status: Option<String>,
         #[serde(default)]
+        labels: Option<Vec<String>>,
+        #[serde(default)]
         assignee: Option<String>,
         #[serde(default)]
         author: Option<String>,
+    },
+    #[serde(rename = "archive_card")]
+    ArchiveCard {
+        channel: String,
+        card_id: String,
+        author: String,
+    },
+    #[serde(rename = "unarchive_card")]
+    UnarchiveCard {
+        channel: String,
+        card_id: String,
+        author: String,
+    },
+    #[serde(rename = "list_archived_cards")]
+    ListArchivedCards {
+        #[serde(default)]
+        channel: Option<String>,
     },
 }
 
@@ -218,6 +267,136 @@ fn default_role() -> String {
 
 fn default_introduction() -> String {
     "GitIM user".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Request deserialization tests: Request only derives Deserialize (wire format comes in as JSON).
+    // We construct the JSON string directly (as clients would send it) and verify deserialization.
+
+    #[test]
+    fn test_archive_card_request_roundtrip() {
+        let json = r#"{"method":"archive_card","channel":"foo","card_id":"abc","author":"lewis"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ArchiveCard {
+                channel,
+                card_id,
+                author,
+            } => {
+                assert_eq!(channel, "foo");
+                assert_eq!(card_id, "abc");
+                assert_eq!(author, "lewis");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_unarchive_card_request_roundtrip() {
+        let json =
+            r#"{"method":"unarchive_card","channel":"bar","card_id":"xyz","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::UnarchiveCard {
+                channel,
+                card_id,
+                author,
+            } => {
+                assert_eq!(channel, "bar");
+                assert_eq!(card_id, "xyz");
+                assert_eq!(author, "alice");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_archived_cards_request_roundtrip() {
+        // With channel
+        let json = r#"{"method":"list_archived_cards","channel":"eng"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedCards { channel } => assert_eq!(channel, Some("eng".to_string())),
+            _ => panic!("wrong variant"),
+        }
+
+        // Without channel — serde(default) means omitting the field deserializes to None
+        let json_no_ch = r#"{"method":"list_archived_cards"}"#;
+        let req2: Request = serde_json::from_str(json_no_ch).unwrap();
+        match req2 {
+            Request::ListArchivedCards { channel } => assert_eq!(channel, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // Event serialization tests: Event derives Serialize for SSE push to clients.
+
+    #[test]
+    fn test_card_archived_event_roundtrip() {
+        let ev = Event::CardArchived {
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            author: "bob".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"card_archived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"channel\":\"general\""));
+        assert!(json.contains("\"card_id\":\"card-1\""));
+        assert!(json.contains("\"author\":\"bob\""));
+    }
+
+    #[test]
+    fn test_card_unarchived_event_roundtrip() {
+        let ev = Event::CardUnarchived {
+            channel: "design".to_string(),
+            card_id: "card-2".to_string(),
+            author: "carol".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"card_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"channel\":\"design\""));
+        assert!(json.contains("\"card_id\":\"card-2\""));
+        assert!(json.contains("\"author\":\"carol\""));
+    }
+
+    #[test]
+    fn test_unarchive_channel_request_roundtrip() {
+        let json = r#"{"method":"unarchive_channel","channel":"design","author":"lewis"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::UnarchiveChannel { channel, author } => {
+                assert_eq!(channel, "design");
+                assert_eq!(author, Some("lewis".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_channel_unarchived_event_roundtrip() {
+        let ev = Event::ChannelUnarchived {
+            channel: "design".to_string(),
+            author: "lewis".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"channel_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"channel\":\"design\""));
+        assert!(json.contains("\"author\":\"lewis\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
 }
 
 #[derive(Debug, Serialize)]

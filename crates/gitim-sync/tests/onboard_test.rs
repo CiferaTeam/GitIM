@@ -53,7 +53,7 @@ fn setup_two_clones_with_initial_commit() -> (TempDir, TempDir, TempDir) {
     std::fs::write(clone_a_dir.path().join("init.txt"), "init").unwrap();
     run_git(clone_a_dir.path(), &["add", "init.txt"]);
     run_git(clone_a_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_a_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_a_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     // Clone B
     run_git(
@@ -209,7 +209,9 @@ fn test_concurrent_registration_rebase_succeeds() {
     let repo_a = GitStorage::new(clone_a_dir.path());
     let init_paths = write_ensure_repo_files(clone_a_dir.path());
     let init_refs: Vec<&str> = init_paths.iter().map(|s| s.as_str()).collect();
-    repo_a.add_and_commit(&init_refs, "init: repo structure").unwrap();
+    repo_a
+        .add_and_commit(&init_refs, "init: repo structure")
+        .unwrap();
     repo_a.push().unwrap();
 
     // Clone B: pull the initial structure

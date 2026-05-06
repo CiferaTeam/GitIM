@@ -125,7 +125,7 @@ async fn setup_with_remote() -> (TempDir, TempDir, Arc<AppState>) {
 
     run_git(&root, &["add", "."]);
     run_git(&root, &["commit", "-m", "initial structure"]);
-    run_git(&root, &["push", "-u", "origin", "main"]);
+    run_git(&root, &["push", "-u", "origin", "HEAD"]);
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
     let state = Arc::new(AppState::new(

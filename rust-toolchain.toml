@@ -1,0 +1,22 @@
+# GitIM project-wide Rust toolchain pin.
+#
+# All `cargo` / `rustc` invocations inside this repository use stable. This is
+# a hard policy: release reproducibility + multi-target cross-compilation both
+# depend on not drifting into nightly-only features (see e.g. the
+# `floor_char_boundary` leak caught in 2026-04: unstable `round_char_boundary`
+# compiled silently on the maintainer's nightly default but broke stable
+# cross-compile builds).
+#
+# Maintainer dev workflow: use `cargo +nightly <cmd>` when you genuinely want
+# nightly (e.g. newer rustfmt, build-std for smaller WASM binaries). Inside
+# release.sh the `+stable` proxy is kept as a second lock — even if this file
+# drifts, the release pipeline is still pinned.
+#
+# WASM route: stable fully supports wasm32-unknown-unknown / wasm32-wasip{1,2}.
+# We can go WASM without touching this pin; the architectural work lives in
+# IPC / storage / git layers, not toolchain.
+
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

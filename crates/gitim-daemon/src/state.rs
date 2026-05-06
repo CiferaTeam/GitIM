@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{broadcast, Notify, RwLock};
 
 pub type SharedState = Arc<AppState>;
@@ -30,6 +31,15 @@ pub struct AppState {
     pub users: RwLock<Vec<String>>,
     pub event_tx: broadcast::Sender<Event>,
     pub current_user: RwLock<Option<String>>,
+    /// Optional verified email read from `.gitim/me.json` → `github_email`.
+    /// When present, daemon-created commits use this as `author.email` so
+    /// they attribute to the GitHub account on the contribution graph.
+    /// Absent → fallback to `<handler>@gitim` (legacy behavior).
+    ///
+    /// Wrapped in `std::sync::RwLock` so onboard can set it after daemon
+    /// startup (me.json is written *during* onboard, not before) and
+    /// handler paths can read without needing async context.
+    pub github_email: std::sync::RwLock<Option<String>>,
     pub pending_push: std::sync::RwLock<Vec<PendingMessage>>,
     pub push_notify: Arc<Notify>,
     pub has_remote: bool,
@@ -39,6 +49,27 @@ pub struct AppState {
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
     /// Epoch seconds of last client connection. Used by idle watchdog.
     pub last_client_activity: AtomicU64,
+    /// Latched by sync_loop when 3 consecutive auth failures trip the circuit.
+    /// Readers can check this to surface "PAT expired" to the UI; the flag stays
+    /// set until daemon restart (v1).
+    pub auth_failed: Arc<AtomicBool>,
+    /// **Commit-tree invariant**: any in-process operation that mutates the
+    /// local commit tree MUST hold this lock for the duration of that
+    /// mutation. That covers:
+    ///   - handler write paths (read thread → append → `git commit`)
+    ///   - sync_loop's `git rebase` onto origin
+    ///   - conflict resolution (write merged files + commit)
+    ///
+    /// It does NOT cover the network-only ops (`git fetch`, `git push`) —
+    /// those don't touch the commit tree, and holding the lock through a slow
+    /// network round-trip would let a single fetch stall every writer.
+    ///
+    /// Shared as `Arc` so the sync_loop spawn can cheaply clone-and-own a
+    /// handle. `std::sync::Mutex` is deliberate: every critical section is
+    /// blocking I/O (fs + `git` subprocess), so there is no await point for
+    /// the guard to cross, and a tokio Mutex would force sync_loop —
+    /// currently a plain `fn` — into async plumbing for no gain.
+    pub commit_lock: Arc<StdMutex<()>>,
 }
 
 impl AppState {
@@ -47,6 +78,16 @@ impl AppState {
         config: Config,
         event_tx: broadcast::Sender<Event>,
         current_user: Option<String>,
+    ) -> Self {
+        Self::new_with_email(repo_root, config, event_tx, current_user, None)
+    }
+
+    pub fn new_with_email(
+        repo_root: PathBuf,
+        config: Config,
+        event_tx: broadcast::Sender<Event>,
+        current_user: Option<String>,
+        github_email: Option<String>,
     ) -> Self {
         let git_storage = GitStorage::new(&repo_root);
         let has_remote = git_storage.has_remote();
@@ -58,6 +99,7 @@ impl AppState {
             users: RwLock::new(Vec::new()),
             event_tx,
             current_user: RwLock::new(current_user),
+            github_email: std::sync::RwLock::new(github_email),
             pending_push: std::sync::RwLock::new(Vec::new()),
             push_notify: Arc::new(Notify::new()),
             has_remote,
@@ -71,7 +113,26 @@ impl AppState {
                     .unwrap()
                     .as_secs(),
             ),
+            auth_failed: Arc::new(AtomicBool::new(false)),
+            commit_lock: Arc::new(StdMutex::new(())),
         }
+    }
+
+    /// Build the `(name, email)` pair used as commit `author` when this
+    /// daemon writes on behalf of `handler`. Email comes from
+    /// `github_email` when set, otherwise the legacy `<handler>@gitim`
+    /// fallback so existing workspaces keep working unchanged.
+    ///
+    /// Read is a single `Option<String>` clone; never held across
+    /// await, safe from any handler context.
+    pub fn author_for(&self, handler: &str) -> (String, String) {
+        let email = self
+            .github_email
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| format!("{}@gitim", handler));
+        (handler.to_string(), email)
     }
 
     /// Open (or rebuild) the search index at `.gitim/index.db`.
@@ -144,16 +205,30 @@ impl AppState {
         let sync_interval = state.config.daemon.sync_interval;
         let sync_root = state.repo_root.clone();
         let push_notify = state.push_notify.clone();
+        let auth_failed = state.auth_failed.clone();
+        let commit_lock = state.commit_lock.clone();
         let push_state = state.clone();
         let renum_state = state.clone();
         let synced_state = state.clone();
         let cycle_done_state = state.clone();
 
+        // Snapshot (handler, email) for rebase-resolution commits. Each
+        // daemon only ever writes commits on behalf of its owner, so the
+        // snapshot is stable for the lifetime of this sync loop. Guest /
+        // unauthenticated → None → legacy git-config fallback.
+        let rebase_author_state = state.clone();
+
         tokio::spawn(async move {
+            let rebase_author = {
+                let current = rebase_author_state.current_user.read().await.clone();
+                current.map(|u| rebase_author_state.author_for(&u))
+            };
             gitim_sync::sync_loop::start_sync_loop(
                 &sync_root,
                 sync_interval,
                 push_notify,
+                auth_failed,
+                commit_lock,
                 move || {
                     // on_pushed: get commit_id, send PushResult::Pushed to waiters,
                     // clear pending_push and broadcast MessagesPushed events
@@ -219,7 +294,10 @@ impl AppState {
                         fresh.sort();
                         if let Ok(mut users) = synced_state.users.try_write() {
                             if *users != fresh {
-                                tracing::info!("on_synced: users list refreshed ({} users)", fresh.len());
+                                tracing::info!(
+                                    "on_synced: users list refreshed ({} users)",
+                                    fresh.len()
+                                );
                                 *users = fresh;
                             }
                         }
@@ -293,6 +371,7 @@ impl AppState {
                         }
                     });
                 },
+                rebase_author,
             )
             .await;
         });
@@ -309,4 +388,49 @@ fn is_ancestor(ancestor: &str, descendant: &str, repo_root: &PathBuf) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitim_core::types::Config;
+
+    fn make_state(github_email: Option<String>) -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _) = broadcast::channel(16);
+        AppState::new_with_email(
+            tmp.path().to_path_buf(),
+            Config::default(),
+            tx,
+            None,
+            github_email,
+        )
+    }
+
+    #[test]
+    fn author_for_uses_github_email_when_configured() {
+        let state = make_state(Some("flame0743@gmail.com".to_string()));
+        let (name, email) = state.author_for("framer-gpt");
+        assert_eq!(name, "framer-gpt");
+        assert_eq!(email, "flame0743@gmail.com");
+    }
+
+    #[test]
+    fn author_for_falls_back_to_gitim_domain_when_no_email() {
+        let state = make_state(None);
+        let (name, email) = state.author_for("framer-gpt");
+        assert_eq!(name, "framer-gpt");
+        assert_eq!(email, "framer-gpt@gitim");
+    }
+
+    #[test]
+    fn author_for_reflects_runtime_update() {
+        // Simulates the onboard flow: daemon starts with no email, then
+        // handle_onboard writes github_email into AppState.
+        let state = make_state(None);
+        assert_eq!(state.author_for("alice").1, "alice@gitim");
+
+        *state.github_email.write().unwrap() = Some("alice@example.com".to_string());
+        assert_eq!(state.author_for("alice").1, "alice@example.com");
+    }
 }

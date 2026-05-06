@@ -51,9 +51,9 @@ impl Poller {
             return Err(RuntimeError::PollFailed(msg));
         }
 
-        let data = resp.data.ok_or_else(|| {
-            RuntimeError::PollFailed("poll response missing data".into())
-        })?;
+        let data = resp
+            .data
+            .ok_or_else(|| RuntimeError::PollFailed("poll response missing data".into()))?;
 
         // Update cursor
         if let Some(commit_id) = data["commit_id"].as_str() {
@@ -68,11 +68,12 @@ impl Poller {
                     .filter_map(|c| {
                         let channel = c["channel"].as_str()?.to_string();
                         let kind = c["kind"].as_str()?.to_string();
-                        let entries = c["entries"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                        Some(ChannelChange { channel, kind, entries })
+                        let entries = c["entries"].as_array().cloned().unwrap_or_default();
+                        Some(ChannelChange {
+                            channel,
+                            kind,
+                            entries,
+                        })
                     })
                     .collect()
             })
@@ -98,9 +99,9 @@ impl Poller {
             return Err(RuntimeError::PollFailed(msg));
         }
 
-        let data = resp.data.ok_or_else(|| {
-            RuntimeError::PollFailed("poll response missing data".into())
-        })?;
+        let data = resp
+            .data
+            .ok_or_else(|| RuntimeError::PollFailed("poll response missing data".into()))?;
 
         let changes = data["changes"]
             .as_array()
@@ -109,11 +110,12 @@ impl Poller {
                     .filter_map(|c| {
                         let channel = c["channel"].as_str()?.to_string();
                         let kind = c["kind"].as_str()?.to_string();
-                        let entries = c["entries"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                        Some(ChannelChange { channel, kind, entries })
+                        let entries = c["entries"].as_array().cloned().unwrap_or_default();
+                        Some(ChannelChange {
+                            channel,
+                            kind,
+                            entries,
+                        })
                     })
                     .collect()
             })

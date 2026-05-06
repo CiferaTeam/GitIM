@@ -48,7 +48,7 @@ fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
     std::fs::write(&init_file, "init").unwrap();
     run_git(clone_a_dir.path(), &["add", "init.txt"]);
     run_git(clone_a_dir.path(), &["commit", "-m", "initial"]);
-    run_git(clone_a_dir.path(), &["push", "-u", "origin", "main"]);
+    run_git(clone_a_dir.path(), &["push", "-u", "origin", "HEAD"]);
 
     run_git(
         clone_b_dir.path().parent().unwrap(),
@@ -115,7 +115,10 @@ fn test_resolve_content_renumbers_local_messages() {
         let abs_path = repo_b.root().join(&resolved.path);
         std::fs::write(&abs_path, &resolved.content).unwrap();
     }
-    let paths: Vec<&str> = resolved_files.iter().map(|r| r.path.to_str().unwrap()).collect();
+    let paths: Vec<&str> = resolved_files
+        .iter()
+        .map(|r| r.path.to_str().unwrap())
+        .collect();
     repo_b.add_and_commit(&paths, "resolved").unwrap();
 
     // Verify: 4 messages total
@@ -269,7 +272,10 @@ fn test_resolve_content_preserves_external_p_references() {
     let bob_msg = &file.messages()[3];
     assert_eq!(bob_msg.line_number, 4);
     assert_eq!(bob_msg.author.as_str(), "bob");
-    assert_eq!(bob_msg.point_to, 1, "external P reference should be preserved");
+    assert_eq!(
+        bob_msg.point_to, 1,
+        "external P reference should be preserved"
+    );
 }
 
 use gitim_core::types::ChannelMeta;
