@@ -1,0 +1,15 @@
+{
+  "name": "gitim-wasm",
+  "type": "module",
+  "version": "0.5.5",
+  "files": [
+    "gitim_wasm_bg.wasm",
+    "gitim_wasm.js",
+    "gitim_wasm.d.ts"
+  ],
+  "main": "gitim_wasm.js",
+  "types": "gitim_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

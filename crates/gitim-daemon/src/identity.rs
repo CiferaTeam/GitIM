@@ -1,8 +1,14 @@
+use gitim_core::identity::{
+    gitea_identity_from_user_json, github_identity_from_user_json,
+    gitlab_identity_from_user_json, IdentityParseError,
+};
 use gitim_core::types::handler::HandlerError;
 use gitim_core::types::Handler;
 use serde::Deserialize;
 use std::process::Command;
 use thiserror::Error;
+
+pub use gitim_core::identity::InferredIdentity;
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum GitServer {
@@ -38,16 +44,6 @@ pub enum AuthData {
     GitLab { token: String, url: String },
 }
 
-#[derive(Debug, Clone)]
-pub struct InferredIdentity {
-    pub handler: Handler,
-    pub display_name: String,
-    /// GitHub-mode only for now — persisted into `.gitim/me.json` as
-    /// `github_email` so daemon commits can attribute to the user's
-    /// GitHub account. None for git / gitea / gitlab modes.
-    pub email: Option<String>,
-}
-
 #[derive(Debug, Error)]
 pub enum IdentityError {
     #[error("curl command failed: {0}")]
@@ -58,6 +54,16 @@ pub enum IdentityError {
     MissingField(String),
     #[error("invalid handler from API: {0}")]
     InvalidHandler(#[from] HandlerError),
+}
+
+impl From<IdentityParseError> for IdentityError {
+    fn from(value: IdentityParseError) -> Self {
+        match value {
+            IdentityParseError::ParseError(e) => IdentityError::ParseError(e),
+            IdentityParseError::MissingField(field) => IdentityError::MissingField(field),
+            IdentityParseError::InvalidHandler(e) => IdentityError::InvalidHandler(e),
+        }
+    }
 }
 
 /// Shell out `curl -sf` with the given args and return stdout as a String.
@@ -78,26 +84,6 @@ fn run_curl(args: &[&str]) -> Result<String, IdentityError> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn github_email_from_user_json(v: &serde_json::Value) -> Option<String> {
-    if let Some(email) = v
-        .get("email")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(email.to_string());
-    }
-
-    let id = v.get("id").and_then(|x| x.as_u64());
-    let login = v
-        .get("login")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty());
-    match (id, login) {
-        (Some(id), Some(login)) => Some(format!("{id}+{login}@users.noreply.github.com")),
-        _ => None,
-    }
 }
 
 /// Infer identity from the given git server and auth data.
@@ -131,87 +117,21 @@ pub fn infer_identity(
                 .unwrap_or_else(|_| "https://api.github.com".to_string());
             let url = format!("{}/user", api_base.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &url])?;
-
-            let v: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| IdentityError::ParseError(e.to_string()))?;
-
-            let login = v
-                .get("login")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| IdentityError::MissingField("login".to_string()))?
-                .to_lowercase();
-
-            let display_name = v
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or(&login)
-                .to_string();
-
-            let email = github_email_from_user_json(&v);
-
-            let handler = Handler::new(&login)?;
-            Ok(InferredIdentity {
-                handler,
-                display_name,
-                email,
-            })
+            Ok(github_identity_from_user_json(&body)?)
         }
 
         AuthData::Gitea { token, url } => {
             let auth_header = format!("Authorization: token {}", token);
             let api_url = format!("{}/api/v1/user", url.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &api_url])?;
-
-            let v: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| IdentityError::ParseError(e.to_string()))?;
-
-            let login = v
-                .get("login")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| IdentityError::MissingField("login".to_string()))?
-                .to_lowercase();
-
-            let display_name = v
-                .get("full_name")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&login)
-                .to_string();
-
-            let handler = Handler::new(&login)?;
-            Ok(InferredIdentity {
-                handler,
-                display_name,
-                email: None,
-            })
+            Ok(gitea_identity_from_user_json(&body)?)
         }
 
         AuthData::GitLab { token, url } => {
             let auth_header = format!("Authorization: Bearer {}", token);
             let api_url = format!("{}/api/v4/user", url.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &api_url])?;
-
-            let v: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| IdentityError::ParseError(e.to_string()))?;
-
-            let username = v
-                .get("username")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| IdentityError::MissingField("username".to_string()))?
-                .to_lowercase();
-
-            let display_name = v
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or(&username)
-                .to_string();
-
-            let handler = Handler::new(&username)?;
-            Ok(InferredIdentity {
-                handler,
-                display_name,
-                email: None,
-            })
+            Ok(gitlab_identity_from_user_json(&body)?)
         }
     }
 }

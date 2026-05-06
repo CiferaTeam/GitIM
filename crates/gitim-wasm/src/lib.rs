@@ -3,6 +3,15 @@ use std::path::PathBuf;
 
 use wasm_bindgen::prelude::*;
 
+// --- identity ---
+
+#[wasm_bindgen(js_name = "githubIdentityFromUserJson")]
+pub fn github_identity_from_user_json(user_json: &str) -> Result<JsValue, JsError> {
+    let identity = gitim_core::identity::github_identity_from_user_json(user_json)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&identity).map_err(|e| JsError::new(&e.to_string()))
+}
+
 // --- parse / format ---
 
 #[wasm_bindgen(js_name = "parseThread")]

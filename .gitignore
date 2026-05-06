@@ -1,7 +1,6 @@
 .claude/
 .worktrees/
 target/
-crates/gitim-wasm/pkg/
 .vscode/
 .context/
 node_modules/

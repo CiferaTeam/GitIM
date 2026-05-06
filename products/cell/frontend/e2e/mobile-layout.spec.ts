@@ -180,6 +180,7 @@ test("browser mode setup is reachable without a runtime port", async ({ page }) 
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByLabel("Git remote URL")).toBeVisible();
   await expect(page.getByLabel("Personal access token")).toBeVisible();
+  await expect(page.getByLabel("Handler")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Connect" })).toBeDisabled();
 });
 
