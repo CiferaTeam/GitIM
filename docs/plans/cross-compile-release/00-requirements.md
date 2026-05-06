@@ -31,7 +31,7 @@
 | 8 | Integrity | L1: `SHA256SUMS` 强制校验;无 signing | grill Q6 |
 | 9 | macOS codesign/notarize | 不做,不留 opt-in 钩子 | grill Q7 |
 | 10 | 前端 (webui-v2) | Out of scope,release 只 ship 3 Rust binary | 用户澄清 |
-| 11 | Releases repo | `CiferaTeam/gitim-releases` (沿用) | 代码分析 |
+| 11 | Releases repo | `CiferaTeam/GitIM` (沿用) | 代码分析 |
 | 12 | 4 target build 失败处理 | **Fail-fast,整体中止,不 upload 任何 asset** | eng Q A2 |
 | 13 | Apple Silicon QEMU 编译耗时 | 接受 (~20min release 端到端),不引入 OrbStack | eng Q A4 |
 | 14 | updater SHA 融入方式 | 拆 3 单职责函数 (`download_bytes` / `verify_sha256` / `extract_tarball`) + `install_update` 编排;删除旧 `download_and_extract` | eng Q Q3 |
@@ -100,7 +100,7 @@ install.sh [EXTEND]                           gitim-updater [REFACTOR]
 |---|---|---|
 | `bump.sh` | 100% | 版本派生 + release notes 生成 (claude CLI fallback) + tag + commit |
 | `install-from-source.sh` | 100% | `cargo install --path` 路径 |
-| `CiferaTeam/gitim-releases` | 100% | release 目标 repo |
+| `CiferaTeam/GitIM` | 100% | release 目标 repo |
 | `gitim-updater::detect_platform()` | 100% | 4 canonical slug 输出已就位 |
 | `gitim-updater::download_url()` / `latest_release_api_url()` | 100% | URL 组装逻辑 |
 | `gitim-updater::replace_binaries()` | 100% | 原子替换 + rollback,已 battle-tested |

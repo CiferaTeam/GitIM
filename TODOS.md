@@ -62,7 +62,7 @@
 **Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
 
 ### Release artifact L2 signing (minisign/GPG over SHA256SUMS)
-**What:** 当前 release pipeline 用 SHA256SUMS 做 artifact integrity 校验 (L1)。未来升级到 L2:maintainer 用 `minisign` 或 GPG 对 `SHA256SUMS` 文件签名,公钥嵌入 `gitim-updater` binary / 发布在 `CiferaTeam/gitim-releases` repo 根目录,`install.sh` 和 `gitim-updater` 在校验 SHA 前先验 SHA 文件的签名。
+**What:** 当前 release pipeline 用 SHA256SUMS 做 artifact integrity 校验 (L1)。未来升级到 L2:maintainer 用 `minisign` 或 GPG 对 `SHA256SUMS` 文件签名,公钥嵌入 `gitim-updater` binary / 发布在 `CiferaTeam/GitIM` repo 根目录,`install.sh` 和 `gitim-updater` 在校验 SHA 前先验 SHA 文件的签名。
 **Why:** L1 只挡 "单独污染 tarball" 攻击场景。如果 attacker 同时拿到 releases repo write token (或 maintainer 机器被攻破),可以同时篡改 SHA 文件和 tarball,L1 就穿了。L2 把信任锚定在 maintainer 私钥,repo 即使被完全控制也挡得住。
 **Pros:** 提升 self-update 通路的 threat model 一级;对 agent 工具 (能读 PAT、调 git、跑子进程) 的 RCE 链条再加一道锁。
 **Cons:** Maintainer 私钥管理成本 (YubiKey / 密码库);key 丢失/轮换流程;公钥分发冷启动问题 (新用户怎么拿到初始公钥并信任?)。`sigstore` keyless 能规避 key 管理但要求 CI 环境 OIDC,与本地脚本路线冲突。

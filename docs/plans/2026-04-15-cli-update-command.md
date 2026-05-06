@@ -4,7 +4,7 @@
 
 **Goal:** Add a `gitim update [VERSION]` command that self-updates all three binaries (gitim, gitim-daemon, gitim-runtime) from GitHub Releases.
 
-**Architecture:** The update command is self-contained in `commands/update.rs`. It fetches release metadata from `CiferaTeam/gitim-releases` via GitHub API, downloads the platform-matching tarball, extracts it, and replaces binaries in-place. If a daemon is running, it prompts the user to stop it first. Version is embedded at compile time via `env!("CARGO_PKG_VERSION")`.
+**Architecture:** The update command is self-contained in `commands/update.rs`. It fetches release metadata from `CiferaTeam/GitIM` via GitHub API, downloads the platform-matching tarball, extracts it, and replaces binaries in-place. If a daemon is running, it prompts the user to stop it first. Version is embedded at compile time via `env!("CARGO_PKG_VERSION")`.
 
 **Tech Stack:** reqwest (rustls-tls), flate2, tar, clap
 
@@ -72,7 +72,7 @@ In `crates/gitim-cli/src/commands/update.rs`:
 ```rust
 #![deny(warnings)]
 
-const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
+const RELEASES_REPO: &str = "CiferaTeam/GitIM";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
 
@@ -156,7 +156,7 @@ mod tests {
         let url = download_url("v0.3.1", "darwin-arm64");
         assert_eq!(
             url,
-            "https://github.com/CiferaTeam/gitim-releases/releases/download/v0.3.1/gitim-v0.3.1-darwin-arm64.tar.gz"
+            "https://github.com/CiferaTeam/GitIM/releases/download/v0.3.1/gitim-v0.3.1-darwin-arm64.tar.gz"
         );
     }
 
@@ -164,7 +164,7 @@ mod tests {
     fn test_latest_release_api_url() {
         assert_eq!(
             latest_release_api_url(),
-            "https://api.github.com/repos/CiferaTeam/gitim-releases/releases/latest"
+            "https://api.github.com/repos/CiferaTeam/GitIM/releases/latest"
         );
     }
 }
