@@ -1,8 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Bindings } from "./types";
-import { inviteRoutes } from "./invite";
-import { heartbeatRoutes } from "./heartbeat";
 import { adminRoutes } from "./admin";
 import { versionRoutes } from "./version";
 import { statsRoutes } from "./stats";
@@ -25,8 +23,6 @@ app.use(
   })
 );
 
-app.route("/", inviteRoutes);
-app.route("/", heartbeatRoutes);
 app.route("/", adminRoutes);
 app.route("/", versionRoutes);
 app.route("/", statsRoutes);

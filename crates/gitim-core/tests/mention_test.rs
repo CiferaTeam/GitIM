@@ -24,9 +24,9 @@ fn test_mention_in_continuation() {
 
 #[test]
 fn test_mention_with_hyphen() {
-    let mentions = extract_mentions("请 <@cifera-nexus> 确认");
+    let mentions = extract_mentions("请 <@code-reviewer> 确认");
     assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].as_str(), "cifera-nexus");
+    assert_eq!(mentions[0].as_str(), "code-reviewer");
 }
 
 #[test]
