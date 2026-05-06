@@ -22,6 +22,7 @@ export function SetupGate({ children }: SetupGateProps) {
   const mode = useConnectionStore((s) => s.mode);
   const port = useConnectionStore((s) => s.port);
   const localReady = useConnectionStore((s) => s.localReady);
+  const setMode = useConnectionStore((s) => s.setMode);
   const setStatus = useConnectionStore((s) => s.setStatus);
   const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
 
@@ -86,7 +87,12 @@ export function SetupGate({ children }: SetupGateProps) {
 
   if (status === "disconnected") {
     if (!installAcknowledged) {
-      return <InstallStep onContinue={() => setInstallAcknowledged(true)} />;
+      return (
+        <InstallStep
+          onContinue={() => setInstallAcknowledged(true)}
+          onUseBrowserMode={() => setMode("local")}
+        />
+      );
     }
     return <ConnectForm onBack={() => setInstallAcknowledged(false)} />;
   }

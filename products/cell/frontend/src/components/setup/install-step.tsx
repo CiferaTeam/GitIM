@@ -10,9 +10,10 @@ const RELEASES_URL =
 
 interface InstallStepProps {
   onContinue: () => void;
+  onUseBrowserMode: () => void;
 }
 
-export function InstallStep({ onContinue }: InstallStepProps) {
+export function InstallStep({ onContinue, onUseBrowserMode }: InstallStepProps) {
   return (
     <SetupShell
       step={1}
@@ -68,6 +69,13 @@ export function InstallStep({ onContinue }: InstallStepProps) {
           className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors shadow-lg shadow-primary/20"
         >
           Runtime is running — continue
+        </button>
+        <button
+          type="button"
+          onClick={onUseBrowserMode}
+          className="w-full text-center text-sm text-text-muted hover:text-foreground transition-colors"
+        >
+          Use browser mode
         </button>
       </div>
     </SetupShell>

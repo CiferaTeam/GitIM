@@ -182,3 +182,16 @@ test("browser mode setup is reachable without a runtime port", async ({ page }) 
   await expect(page.getByLabel("Personal access token")).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect" })).toBeDisabled();
 });
+
+test("fresh setup can switch to browser mode from the install step", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.clear();
+  });
+  await page.goto("/");
+
+  await expect(page.getByText("Install Runtime")).toBeVisible();
+  await page.getByRole("button", { name: "Use browser mode" }).click();
+
+  await expect(page.getByText("Browser Mode")).toBeVisible();
+  await expect(page.getByLabel("Git remote URL")).toBeVisible();
+});
