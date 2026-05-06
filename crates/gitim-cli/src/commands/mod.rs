@@ -33,18 +33,15 @@ pub(super) fn read_my_handler(repo_root: &Path) -> String {
             process::exit(1);
         }
     };
-    let v: serde_json::Value = match serde_json::from_str(&contents) {
+    let me: gitim_core::me_json::MeJson = match serde_json::from_str(&contents) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Error: invalid me.json: {e}");
             process::exit(1);
         }
     };
-    match v.get("handler").and_then(|h| h.as_str()) {
-        Some(h) => h.to_string(),
-        None => {
-            eprintln!("Error: me.json missing \"handler\" field");
-            process::exit(1);
-        }
-    }
+    me.handler.unwrap_or_else(|| {
+        eprintln!("Error: me.json missing \"handler\" field");
+        process::exit(1);
+    })
 }

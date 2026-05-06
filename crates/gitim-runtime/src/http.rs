@@ -27,6 +27,7 @@ use crate::github::{
 };
 use crate::gitignore::ensure_env_gitignored;
 use gitim_client::GitimClient;
+use gitim_core::me_json::MeJson;
 use gitim_sync::url_redact::redacted_url;
 
 /// Default TCP port for the runtime HTTP server. Shared between
@@ -408,13 +409,13 @@ async fn im_me(
 
     let me_path = human_repo.join(".gitim/me.json");
     match std::fs::read_to_string(&me_path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(content) => match serde_json::from_str::<MeJson>(&content) {
             Ok(me) => Json(serde_json::json!({
                 "ok": true,
                 "data": {
-                    "handler": me.get("handler").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                    "display_name": me.get("display_name").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-                    "guest": me.get("guest").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "handler": me.handler.as_deref().unwrap_or("unknown"),
+                    "display_name": me.display_name.as_deref().unwrap_or("Unknown"),
+                    "guest": me.guest.unwrap_or(false),
                 }
             }))
             .into_response(),
@@ -835,7 +836,7 @@ fn human_handler(
         )
             .into_response()
     })?;
-    let me: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+    let me: MeJson = serde_json::from_str(&content).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -845,19 +846,16 @@ fn human_handler(
         )
             .into_response()
     })?;
-    me.get("handler")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "me.json missing handler field"
-                })),
-            )
-                .into_response()
-        })
+    me.handler.ok_or_else(|| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "me.json missing handler field"
+            })),
+        )
+            .into_response()
+    })
 }
 
 async fn im_card_archive(
@@ -1192,21 +1190,26 @@ async fn agents_add(
                 }
             }
 
-            // Persist config to me.json
+            // Persist config to me.json. Empty env doesn't overwrite an
+            // existing env (None patch field = preserve).
             let me_path = handle.repo_root.join(".gitim/me.json");
             if let Ok(content) = std::fs::read_to_string(&me_path) {
-                if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
-                    me["provider"] = serde_json::Value::String(req.provider.clone());
-                    if let Some(model) = &req.model {
-                        me["model"] = serde_json::Value::String(model.clone());
-                    }
-                    if let Some(sp) = &req.system_prompt {
-                        me["system_prompt"] = serde_json::Value::String(sp.clone());
-                    }
-                    if !req.env.is_empty() {
-                        me["env"] = serde_json::to_value(&req.env).unwrap_or_default();
-                    }
-                    let _ = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap());
+                if let Ok(existing) = serde_json::from_str::<MeJson>(&content) {
+                    let env_patch = if req.env.is_empty() {
+                        None
+                    } else {
+                        Some(req.env.clone().into_iter().collect())
+                    };
+                    let patch = MeJson {
+                        provider: Some(req.provider.clone()),
+                        model: req.model.clone(),
+                        system_prompt: req.system_prompt.clone(),
+                        env: env_patch,
+                        ..Default::default()
+                    };
+                    let merged = existing.merged_with(patch);
+                    let _ =
+                        std::fs::write(&me_path, serde_json::to_string_pretty(&merged).unwrap());
                 }
             }
 

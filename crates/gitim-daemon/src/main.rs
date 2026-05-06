@@ -65,21 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let me_path = repo_root.join(".gitim").join("me.json");
     let (current_user, is_guest_from_me, github_email) = if me_path.exists() {
         let me_content = std::fs::read_to_string(&me_path)?;
-        let me_json: serde_json::Value = serde_json::from_str(&me_content)?;
-        let handler = me_json
-            .get("handler")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let guest = me_json
-            .get("guest")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let email = me_json
-            .get("github_email")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        (handler, guest, email)
+        let me: gitim_core::me_json::MeJson = serde_json::from_str(&me_content)?;
+        let email = me.github_email.filter(|s| !s.is_empty());
+        (me.handler, me.guest.unwrap_or(false), email)
     } else {
         (None, false, None)
     };

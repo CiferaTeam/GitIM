@@ -705,6 +705,7 @@ version = "0.5.5"
 dependencies = [
  "clap",
  "gitim-client",
+ "gitim-core",
  "gitim-updater",
  "regex",
  "serde_json",
@@ -790,6 +791,7 @@ dependencies = [
  "futures",
  "gitim-agent-provider",
  "gitim-client",
+ "gitim-core",
  "gitim-sync",
  "gitim-updater",
  "http-body-util",
