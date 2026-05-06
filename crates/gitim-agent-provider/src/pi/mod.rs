@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsage, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -120,6 +121,11 @@ async fn drive_session(
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
+    // Pi emits a `turn_end` per assistant turn carrying `message.usage`. Within
+    // a single `prompt` round we expect exactly one turn_end, but if Pi ever
+    // emits multiple (steered, tool retry) we want the latest authoritative
+    // count — same policy as Claude/Codex.
+    let mut latest_usage: Option<ProviderUsage> = None;
 
     // Collect stderr tail for error reporting.
     let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -148,7 +154,7 @@ async fn drive_session(
             error: Some(format!("failed to write prompt: {e}")),
             duration_ms: start.elapsed().as_millis() as u64,
             session_token: None,
-            usage: None,
+            usage: None, // prompt never made it out — no usage to report
         });
         return;
     }
@@ -188,10 +194,13 @@ async fn drive_session(
                                         status: "running".to_string(),
                                     });
                                 }
-                                Some(PiEvent::TurnEnd { stop_reason }) => {
+                                Some(PiEvent::TurnEnd { stop_reason, usage }) => {
                                     if stop_reason.as_deref() == Some("aborted") {
                                         final_status = ExecStatus::Aborted;
                                         final_error = Some("cancelled by steering".to_string());
+                                    }
+                                    if let Some(u) = usage {
+                                        latest_usage = Some(u);
                                     }
                                 }
                                 Some(PiEvent::AgentEnd) => {
@@ -283,7 +292,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: None,
+        usage: latest_usage,
     });
 }
 
@@ -369,6 +378,7 @@ enum PiEvent {
     },
     TurnEnd {
         stop_reason: Option<String>,
+        usage: Option<ProviderUsage>,
     },
     AgentEnd,
     GetStateResponse {
@@ -449,12 +459,13 @@ fn parse_event(line: &str) -> Option<PiEvent> {
         }
 
         "turn_end" => {
-            let stop_reason = v
-                .get("message")
+            let message = v.get("message");
+            let stop_reason = message
                 .and_then(|m| m.get("stopReason"))
                 .and_then(|r| r.as_str())
                 .map(|s| s.to_string());
-            Some(PiEvent::TurnEnd { stop_reason })
+            let usage = message.and_then(|m| m.get("usage")).and_then(parse_pi_usage);
+            Some(PiEvent::TurnEnd { stop_reason, usage })
         }
 
         "response" => {
@@ -490,6 +501,41 @@ fn parse_event(line: &str) -> Option<PiEvent> {
 
         _ => None,
     }
+}
+
+/// Map Pi's `usage` object onto the provider-agnostic `ProviderUsage`.
+///
+/// Pi (via `@mariozechner/pi-ai`) emits camelCase, flat:
+/// `{ input, output, cacheRead, cacheWrite, totalTokens, cost: {...} }`.
+///
+/// Field mapping:
+/// - `input` → `input_tokens` (Anthropic semantics: tokens NOT served from cache)
+/// - `output` → `output_tokens`
+/// - `cacheRead` → `cache_read_tokens`
+/// - `cacheWrite` → `cache_creation_tokens`
+/// - `cost`, `totalTokens` are dropped — `compute_snapshot` recomputes total
+///   as `input + cache_read + cache_creation`, which is what matches the
+///   Claude / opencode convention. Pi's `totalTokens` includes `output`,
+///   which is correct cost-wise but wrong window-occupancy-wise.
+///
+/// Returns `None` if the value isn't an object or every numeric field is
+/// missing — Pi's stub responses sometimes carry an empty `usage: {}`.
+fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
+    let obj = v.as_object()?;
+    let input = obj.get("input").and_then(Value::as_u64);
+    let output = obj.get("output").and_then(Value::as_u64);
+    let cache_read = obj.get("cacheRead").and_then(Value::as_u64);
+    let cache_write = obj.get("cacheWrite").and_then(Value::as_u64);
+    if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
+        return None;
+    }
+    Some(ProviderUsage {
+        input_tokens: input,
+        output_tokens: output,
+        used_percent: None,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
+    })
 }
 
 // ── Deserialize helpers (kept minimal — we use Value-based parsing above) ──
@@ -572,7 +618,7 @@ mod tests {
     fn parse_turn_end_aborted() {
         let line = r#"{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"aborted","errorMessage":"Request was aborted."},"toolResults":[]}"#;
         let event = parse_event(line).expect("should parse");
-        let PiEvent::TurnEnd { stop_reason } = event else {
+        let PiEvent::TurnEnd { stop_reason, .. } = event else {
             panic!("expected TurnEnd");
         };
         assert_eq!(stop_reason.as_deref(), Some("aborted"));
@@ -582,7 +628,7 @@ mod tests {
     fn parse_turn_end_stop() {
         let line = r#"{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"},"toolResults":[]}"#;
         let event = parse_event(line).expect("should parse");
-        let PiEvent::TurnEnd { stop_reason } = event else {
+        let PiEvent::TurnEnd { stop_reason, .. } = event else {
             panic!("expected TurnEnd");
         };
         assert_eq!(stop_reason.as_deref(), Some("stop"));
@@ -669,6 +715,60 @@ mod tests {
         let parsed: Value = serde_json::from_slice(command).expect("json command");
 
         assert_eq!(parsed["type"], "get_state");
+    }
+
+    #[test]
+    fn parse_turn_end_with_usage() {
+        // Real Pi turn_end shape: message.usage carries camelCase Pi-AI fields.
+        let line = r#"{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"api":"openai","provider":"openai","model":"gpt-4o-mini","usage":{"input":150,"output":200,"cacheRead":12000,"cacheWrite":300,"totalTokens":12650,"cost":{"input":0.001,"output":0.0006,"cacheRead":0,"cacheWrite":0,"total":0.0016}},"stopReason":"stop"},"toolResults":[]}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::TurnEnd { stop_reason, usage } = event else {
+            panic!("expected TurnEnd");
+        };
+        assert_eq!(stop_reason.as_deref(), Some("stop"));
+        let usage = usage.expect("usage extracted");
+        assert_eq!(usage.input_tokens, Some(150));
+        assert_eq!(usage.output_tokens, Some(200));
+        assert_eq!(usage.cache_read_tokens, Some(12_000));
+        assert_eq!(usage.cache_creation_tokens, Some(300));
+        assert!(
+            usage.used_percent.is_none(),
+            "compute_snapshot derives the percent — pi never sets it"
+        );
+    }
+
+    #[test]
+    fn parse_turn_end_without_usage_field_yields_none_usage() {
+        // Defensive: older Pi versions / aborted turns may omit `usage`.
+        let line = r#"{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"},"toolResults":[]}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::TurnEnd { usage, .. } = event else {
+            panic!("expected TurnEnd");
+        };
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn parse_turn_end_with_empty_usage_object_yields_none() {
+        // Pi has been seen to emit `usage: {}` on degenerate paths — that
+        // shouldn't trigger a 0% snapshot, it should fall through to estimate.
+        let line = r#"{"type":"turn_end","message":{"usage":{},"stopReason":"stop"}}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::TurnEnd { usage, .. } = event else {
+            panic!("expected TurnEnd");
+        };
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn parse_pi_usage_partial_input_only() {
+        // Streaming providers sometimes report only input on first chunk;
+        // missing fields should stay None rather than coerce to 0.
+        let usage = parse_pi_usage(&serde_json::json!({"input": 42})).expect("partial usage");
+        assert_eq!(usage.input_tokens, Some(42));
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
     }
 
     #[test]
