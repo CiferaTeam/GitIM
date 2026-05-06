@@ -362,7 +362,7 @@ export function AgentDetail() {
               value={draftPrompt}
               onChange={(e) => setDraftPrompt(e.target.value)}
               rows={4}
-              className="mt-2 font-mono text-sm"
+              className="mt-2 font-mono text-sm max-h-[40vh] overflow-y-auto"
               placeholder="Describe the agent's role and behavior…"
             />
           )}

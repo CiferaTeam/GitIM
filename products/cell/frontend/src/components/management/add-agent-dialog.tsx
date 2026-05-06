@@ -279,6 +279,7 @@ export function AddAgentDialog() {
                 rows={4}
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
+                className="max-h-[40vh] overflow-y-auto"
                 placeholder="Describe the agent's role and behavior…"
               />
             </div>
