@@ -146,6 +146,13 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Cards", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
 
+  const channelCardsButton = page.getByRole("button", { name: "Open cards for general" });
+  await expect(channelCardsButton).toContainText("Cards");
+  await channelCardsButton.click();
+  await expect(page.getByRole("dialog", { name: "Cards in #general" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Cards in #general" })).toHaveCount(0);
+
   await page.getByRole("button", { name: "Open conversations" }).click();
   await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "alice", exact: true })).toBeVisible();

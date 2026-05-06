@@ -350,10 +350,11 @@ export function ChatLayout() {
               {currentChannel && currentChannelData?.kind === "channel" && (
                 <button
                   onClick={() => setCardDrawerOpen(true)}
-                  className="p-2 rounded-lg text-text-muted hover:text-foreground hover:bg-surface transition-colors active:scale-90"
+                  className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-text-muted hover:text-foreground hover:bg-surface transition-colors active:scale-90"
                   aria-label={`Open cards for ${currentChannel}`}
                 >
                   <LayoutGrid className="size-4" />
+                  <span className="text-xs font-medium">Cards</span>
                 </button>
               )}
             </div>
