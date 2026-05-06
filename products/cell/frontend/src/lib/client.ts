@@ -17,7 +17,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
-import type { Backend } from "./backend";
+import type { Backend, CardBackend } from "./backend";
 import { HttpBackend } from "./backend";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -36,6 +36,10 @@ function baseUrl(): string {
 
 function isLocalMode(): boolean {
   return useConnectionStore.getState().mode === "local";
+}
+
+function localCardBackend(): CardBackend {
+  return activeBackend as Backend & CardBackend;
 }
 
 function wsBase(slug: string): string {
@@ -390,10 +394,9 @@ export async function createCard(
 ): Promise<ApiResponse<{ channel: string; card_id: string; title: string }>> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void title;
-    void opts;
-    return { ok: false, error: "card creation is unavailable in browser mode" };
+    return localCardBackend().createCard(channel, title, opts) as Promise<
+      ApiResponse<{ channel: string; card_id: string; title: string }>
+    >;
   }
   const payload: Record<string, unknown> = { channel, title };
   if (opts.labels && opts.labels.length > 0) payload.labels = opts.labels;
@@ -420,8 +423,7 @@ export async function listCards(
 ): Promise<ApiResponse<{ cards: Card[] }>> {
   if (isLocalMode()) {
     void slug;
-    void query;
-    return { ok: true, data: { cards: [] } };
+    return localCardBackend().listCards(query) as Promise<ApiResponse<{ cards: Card[] }>>;
   }
   const params = new URLSearchParams();
   if (query.channel) params.set("channel", query.channel);
@@ -449,10 +451,9 @@ export async function readCard(
 ): Promise<ApiResponse<{ meta: Card; entries: Message[]; archived: boolean }>> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void cardId;
-    void query;
-    return { ok: false, error: "cards are unavailable in browser mode" };
+    return localCardBackend().readCard(channel, cardId, query) as Promise<
+      ApiResponse<{ meta: Card; entries: Message[]; archived: boolean }>
+    >;
   }
   const params = new URLSearchParams();
   if (query.limit != null) params.set("limit", String(query.limit));
@@ -473,11 +474,7 @@ export async function sendCardMessage(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void cardId;
-    void body;
-    void replyTo;
-    return { ok: false, error: "cards are unavailable in browser mode" };
+    return localCardBackend().sendCardMessage(channel, cardId, body, replyTo);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
@@ -504,10 +501,7 @@ export async function updateCard(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void channel;
-    void cardId;
-    void patch;
-    return { ok: false, error: "cards are unavailable in browser mode" };
+    return localCardBackend().updateCard(channel, cardId, patch);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,

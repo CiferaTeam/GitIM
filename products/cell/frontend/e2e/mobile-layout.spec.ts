@@ -129,6 +129,27 @@ async function stubBrowserModeWorker(page: Page) {
   await page.addInitScript(() => {
     type RpcRequest = { id: number; method: string; args: unknown[] };
     type RpcResult = { ok: boolean; data?: unknown; error?: string };
+    type Card = {
+      card_id: string;
+      channel: string;
+      title: string;
+      status: "todo" | "doing" | "done";
+      labels: string[];
+      assignee: string | null;
+      created_by: string;
+      created_at: string;
+      updated_at: string;
+    };
+    type Message = {
+      line_number: number;
+      point_to: number;
+      author: string;
+      timestamp: string;
+      body: string;
+    };
+
+    const cards: Card[] = [];
+    const messagesByCard = new Map<string, Message[]>();
 
     function handleMethod(method: string, args: unknown[]): RpcResult {
       switch (method) {
@@ -173,6 +194,86 @@ async function stubBrowserModeWorker(page: Page) {
           return { ok: true, data: { commit_id: "browser-1", changes: [] } };
         case "thread":
           return { ok: true, data: { entries: [] } };
+        case "listCards":
+          return { ok: true, data: { cards } };
+        case "createCard": {
+          const [channel, title, optsRaw] = args as [
+            string,
+            string,
+            Partial<Card> | undefined,
+          ];
+          const card: Card = {
+            card_id: "20260317-123456-abc",
+            channel,
+            title,
+            status: optsRaw?.status ?? "todo",
+            labels: optsRaw?.labels ?? [],
+            assignee: optsRaw?.assignee ?? null,
+            created_by: "flame4",
+            created_at: "20260317T123456Z",
+            updated_at: "20260317T123456Z",
+          };
+          cards.splice(0, cards.length, card);
+          messagesByCard.set(`${channel}/${card.card_id}`, []);
+          return {
+            ok: true,
+            data: { channel, card_id: card.card_id, title },
+          };
+        }
+        case "readCard": {
+          const [channel, cardId] = args as [string, string];
+          const card = cards.find((c) => c.channel === channel && c.card_id === cardId);
+          if (!card) return { ok: false, error: "card not found" };
+          return {
+            ok: true,
+            data: {
+              channel,
+              card_id: cardId,
+              archived: false,
+              meta: card,
+              entries: messagesByCard.get(`${channel}/${cardId}`) ?? [],
+            },
+          };
+        }
+        case "sendCardMessage": {
+          const [channel, cardId, body, replyTo] = args as [
+            string,
+            string,
+            string,
+            number | undefined,
+          ];
+          const key = `${channel}/${cardId}`;
+          const existing = messagesByCard.get(key) ?? [];
+          const line_number = existing.length + 1;
+          const next = [
+            ...existing,
+            {
+              line_number,
+              point_to: replyTo ?? 0,
+              author: "flame4",
+              timestamp: "20260317T123500Z",
+              body,
+            },
+          ];
+          messagesByCard.set(key, next);
+          return { ok: true, data: { line_number, channel, card_id: cardId } };
+        }
+        case "updateCard": {
+          const [channel, cardId, patch] = args as [string, string, Partial<Card>];
+          const card = cards.find((c) => c.channel === channel && c.card_id === cardId);
+          if (!card) return { ok: false, error: "card not found" };
+          Object.assign(card, patch, { updated_at: "20260317T123600Z" });
+          return {
+            ok: true,
+            data: {
+              channel,
+              card_id: cardId,
+              status: card.status,
+              labels: card.labels,
+              assignee: card.assignee,
+            },
+          };
+        }
         default:
           return { ok: false, error: `unexpected worker method: ${method}` };
       }
@@ -326,6 +427,41 @@ test("browser mode mobile app keeps the Cards tab after connecting", async ({ pa
   await expect(page).toHaveURL(/\/cards$/);
   await expect(page.getByRole("heading", { name: "Cards" })).toBeVisible();
   await expect(page.getByText("No cards yet")).toBeVisible();
+});
+
+test("browser mode mobile cards can be created and discussed", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("gitim-connection-mode", "local");
+  });
+  await stubBrowserModeWorker(page);
+  await page.route("https://api.github.com/user", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Git remote URL").fill("https://github.com/flame4/room");
+  await page.getByLabel("Personal access token").fill("dummy-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  await page.getByRole("button", { name: "Cards", exact: true }).click();
+  await page.getByRole("button", { name: "New card" }).click();
+  await page.getByLabel("Title").fill("Browser card task");
+  await page.getByLabel("Channel").selectOption("general");
+  await page.getByRole("button", { name: "Create card" }).click();
+
+  await expect(page).toHaveURL(/\/cards\/general\/20260317-123456-abc$/);
+  await expect(page.getByRole("heading", { name: "Browser card task" })).toBeVisible();
+
+  const noteInput = page.getByPlaceholder("Write a note (Enter to send, Shift+Enter for newline)");
+  await noteInput.fill("first browser note");
+  await noteInput.press("Enter");
+  await expect(page.getByText("first browser note")).toBeVisible();
 });
 
 test("browser mode preflights worker dependencies before clone", async ({ page }) => {

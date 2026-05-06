@@ -7,6 +7,12 @@ import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
 import { runSync } from "./sync";
+import initWasm, {
+  parseCardMeta,
+  stringifyCardMeta,
+  validateCardId,
+  validateCardLabels,
+} from "gitim-wasm";
 import {
   channelMetaPath,
   channelNameFromMetaFile,
@@ -14,12 +20,41 @@ import {
   resolveThreadTarget,
   validateChannelName,
 } from "./paths";
+import type { Card, CardStatus } from "../lib/types";
 
 type ApiResponse = {
   ok: boolean;
   data?: Record<string, unknown>;
   error?: string;
 };
+
+type RawCardMeta = Omit<Card, "card_id">;
+
+export interface CreateCardOptions {
+  labels?: string[];
+  assignee?: string | null;
+  status?: CardStatus;
+}
+
+export interface ListCardsQuery {
+  channel?: string | null;
+  labels?: string[];
+  status?: CardStatus | null;
+  assignee?: string | null;
+}
+
+export interface ReadCardQuery {
+  limit?: number;
+  since?: number;
+}
+
+export interface UpdateCardPatch {
+  status?: CardStatus;
+  labels?: string[];
+  assignee?: string | null;
+}
+
+let wasmReady: Promise<void> | null = null;
 
 function ok(data: Record<string, unknown> = {}): ApiResponse {
   return { ok: true, data };
@@ -29,10 +64,16 @@ function err(error: string): ApiResponse {
   return { ok: false, error };
 }
 
+async function ensureWasmReady(): Promise<void> {
+  wasmReady ??= initWasm().then(() => undefined);
+  await wasmReady;
+}
+
 // --- Browser runtime preflight ---
 
 export async function preflight(): Promise<ApiResponse> {
   try {
+    await ensureWasmReady();
     const oid = await gitOps.hashEmptyBlob();
     if (oid !== "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391") {
       return err("browser git hashing is unavailable");
@@ -166,7 +207,16 @@ export async function poll(since?: string): Promise<ApiResponse> {
     let metaChanged = false;
 
     for (const fp of changedFiles) {
-      if (fp.startsWith("channels/") && fp.endsWith(".thread")) {
+      const cardChange = cardChangeFromPath(fp);
+      if (cardChange) {
+        const scope = `card:${cardChange.channel}/${cardChange.cardId}`;
+        if (cardChange.file === "meta") {
+          changes.push({ channel: scope, kind: "card_meta" });
+        } else {
+          const entries = await readCardEntries(cardChange.channel, cardChange.cardId);
+          changes.push({ channel: scope, kind: "card_thread", entries });
+        }
+      } else if (fp.startsWith("channels/") && fp.endsWith(".thread")) {
         const channelName = fp
           .replace("channels/", "")
           .replace(".thread", "");
@@ -431,6 +481,231 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
   }
 }
 
+// --- Card handlers ---
+
+export async function listCards(
+  query: ListCardsQuery = {},
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    await refreshChannelsCache();
+    const s = getState();
+
+    const channelNames = query.channel
+      ? [query.channel]
+      : Array.from(s.channels.keys()).filter((name) => !name.includes("--"));
+    const cards: Card[] = [];
+
+    for (const channel of channelNames) {
+      if (!channel) continue;
+      const invalidChannel = validateChannelName(channel);
+      if (invalidChannel) return err(invalidChannel);
+
+      const cardsDir = `${s.repoDir}/channels/${channel}/cards`;
+      if (!(await exists(cardsDir))) continue;
+
+      const cardIds = await readdir(cardsDir);
+      for (const cardId of cardIds) {
+        const metaPath = `${cardsDir}/${cardId}/card.meta.yaml`;
+        if (!(await exists(metaPath))) continue;
+
+        try {
+          const card = await readCardMeta(channel, cardId, metaPath);
+          if (matchesCardQuery(card, query)) cards.push(card);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    cards.sort((a, b) => a.channel.localeCompare(b.channel) || a.card_id.localeCompare(b.card_id));
+    return ok({ cards });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function createCard(
+  channel: string,
+  title: string,
+  opts: CreateCardOptions = {},
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const invalidChannel = validateChannelName(channel);
+    if (invalidChannel) return err(invalidChannel);
+
+    const channelMeta = `${s.repoDir}/${channelMetaPath(channel)}`;
+    if (!(await exists(channelMeta))) return err(`channel '${channel}' not found`);
+    const meta = parseYaml(await readFile(channelMeta)) as unknown as ChannelMeta;
+    if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
+      return err("not_member");
+    }
+
+    await refreshUsersCache();
+    if (opts.assignee && !s.users.has(opts.assignee)) {
+      return err(`assignee invalid: unknown user: ${opts.assignee}`);
+    }
+    if (opts.labels) validateCardLabels(opts.labels);
+
+    const cardId = generateCardId();
+    const now = utcTimestamp();
+    const card: RawCardMeta = {
+      title: title.trim(),
+      channel,
+      status: opts.status ?? "todo",
+      labels: opts.labels ?? [],
+      assignee: opts.assignee ?? null,
+      created_by: s.me.handler,
+      created_at: now,
+      updated_at: now,
+    };
+    const yaml = stringifyCardMeta(card) as string;
+
+    const relDir = `channels/${channel}/cards/${cardId}`;
+    const absDir = `${s.repoDir}/${relDir}`;
+    await mkdirp(absDir);
+    await writeFile(`${absDir}/card.meta.yaml`, yaml);
+    await writeFile(`${absDir}/discussion.thread`, "");
+
+    await gitOps.addAndCommit(
+      s.repoDir,
+      [`${relDir}/card.meta.yaml`, `${relDir}/discussion.thread`],
+      `card: create ${cardId} in ${channel} by @${s.me.handler}`,
+      s.me.handler,
+    );
+
+    runSync().catch(console.error);
+    return ok({ channel, card_id: cardId, title: card.title });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function readCard(
+  channel: string,
+  cardId: string,
+  query: ReadCardQuery = {},
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const located = await locateActiveCard(channel, cardId);
+    const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
+    const entries = await readCardEntries(channel, cardId, query.limit, query.since);
+    return ok({
+      channel,
+      card_id: cardId,
+      archived: false,
+      meta: card,
+      entries,
+    });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function sendCardMessage(
+  channel: string,
+  cardId: string,
+  body: string,
+  replyTo?: number,
+): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    const located = await locateActiveCard(channel, cardId);
+    const threadPath = `${located.absDir}/discussion.thread`;
+    const existing = (await exists(threadPath)) ? await readFile(threadPath) : "";
+    const file = parseThread(existing);
+    const maxLine =
+      file.entries.length > 0
+        ? Math.max(...file.entries.map((e) => e.line_number))
+        : 0;
+    const nextLine = maxLine + 1;
+    const line = formatMessage(
+      nextLine,
+      replyTo ?? 0,
+      s.me.handler,
+      utcTimestamp(),
+      body,
+    );
+    let nextContent = existing;
+    if (nextContent && !nextContent.endsWith("\n")) nextContent += "\n";
+    nextContent += line;
+    await writeFile(threadPath, nextContent);
+
+    const relPath = `${located.relDir}/discussion.thread`;
+    await gitOps.addAndCommit(
+      s.repoDir,
+      [relPath],
+      `card-msg: @${s.me.handler} -> ${channel}/${cardId} L${String(nextLine).padStart(6, "0")}`,
+      s.me.handler,
+    );
+
+    runSync().catch(console.error);
+    return ok({ line_number: nextLine, channel, card_id: cardId, status: "committed" });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function updateCard(
+  channel: string,
+  cardId: string,
+  patch: UpdateCardPatch,
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const located = await locateActiveCard(channel, cardId);
+    if (
+      patch.status === undefined &&
+      patch.labels === undefined &&
+      patch.assignee === undefined
+    ) {
+      return err("must provide at least one field to update");
+    }
+    await refreshUsersCache();
+    if (patch.assignee && !s.users.has(patch.assignee)) {
+      return err(`assignee invalid: unknown user: ${patch.assignee}`);
+    }
+    if (patch.labels) validateCardLabels(patch.labels);
+
+    const metaPath = `${located.absDir}/card.meta.yaml`;
+    const card = await readCardMeta(channel, cardId, metaPath);
+    const next: RawCardMeta = {
+      title: card.title,
+      channel: card.channel,
+      status: patch.status ?? card.status,
+      labels: patch.labels ?? card.labels,
+      assignee: patch.assignee !== undefined ? patch.assignee : card.assignee,
+      created_by: card.created_by,
+      created_at: card.created_at,
+      updated_at: utcTimestamp(),
+    };
+    await writeFile(metaPath, stringifyCardMeta(next) as string);
+
+    const relPath = `${located.relDir}/card.meta.yaml`;
+    await gitOps.addAndCommit(
+      s.repoDir,
+      [relPath],
+      `card: update ${cardId} in ${channel} by @${s.me.handler}`,
+      s.me.handler,
+    );
+
+    runSync().catch(console.error);
+    return ok({
+      channel,
+      card_id: cardId,
+      status: next.status,
+      labels: next.labels,
+      assignee: next.assignee,
+    });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
 // --- Internal helpers ---
 
 async function readChannelEntries(
@@ -445,6 +720,115 @@ async function readChannelEntries(
   const content = await readFile(absPath);
   const file = parseThread(content);
   return file.entries;
+}
+
+async function readCardEntries(
+  channel: string,
+  cardId: string,
+  limit?: number,
+  since?: number,
+): Promise<ThreadEntry[]> {
+  const located = await locateActiveCard(channel, cardId);
+  const threadPath = `${located.absDir}/discussion.thread`;
+  if (!(await exists(threadPath))) return [];
+  const content = await readFile(threadPath);
+  const file = parseThread(content);
+  let entries = file.entries;
+  if (since != null) entries = entries.filter((e) => e.line_number > since);
+  if (limit != null) entries = entries.slice(-limit);
+  return entries;
+}
+
+async function locateActiveCard(
+  channel: string,
+  cardId: string,
+): Promise<{ relDir: string; absDir: string }> {
+  await ensureWasmReady();
+  const s = getState();
+  const invalidChannel = validateChannelName(channel);
+  if (invalidChannel) throw new Error(invalidChannel);
+  validateCardId(cardId);
+  const relDir = `channels/${channel}/cards/${cardId}`;
+  const absDir = `${s.repoDir}/${relDir}`;
+  if (!(await exists(`${absDir}/card.meta.yaml`))) {
+    throw new Error(`card '${cardId}' not found in channel '${channel}'`);
+  }
+  return { relDir, absDir };
+}
+
+async function readCardMeta(
+  channel: string,
+  cardId: string,
+  metaPath: string,
+): Promise<Card> {
+  const meta = parseCardMeta(await readFile(metaPath)) as RawCardMeta;
+  return {
+    card_id: cardId,
+    channel: meta.channel || channel,
+    title: meta.title,
+    status: meta.status,
+    labels: meta.labels ?? [],
+    assignee: meta.assignee ?? null,
+    created_by: meta.created_by,
+    created_at: meta.created_at,
+    updated_at: meta.updated_at,
+  };
+}
+
+function matchesCardQuery(card: Card, query: ListCardsQuery): boolean {
+  if (query.status && card.status !== query.status) return false;
+  if (query.assignee && card.assignee !== query.assignee) return false;
+  if (query.labels && query.labels.length > 0) {
+    const labels = new Set(card.labels);
+    for (const label of query.labels) {
+      if (!labels.has(label)) return false;
+    }
+  }
+  return true;
+}
+
+async function mkdirp(path: string): Promise<void> {
+  const parts = path.split("/").filter(Boolean);
+  let current = path.startsWith("/") ? "" : ".";
+  for (const part of parts) {
+    current = current === "" ? `/${part}` : `${current}/${part}`;
+    if (!(await exists(current))) await mkdir(current);
+  }
+}
+
+function generateCardId(): string {
+  const now = new Date();
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  const ts =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  const rand = Math.floor(Math.random() * 0x1000)
+    .toString(16)
+    .padStart(3, "0");
+  return `${ts}-${rand}`;
+}
+
+function utcTimestamp(): string {
+  const now = new Date();
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return (
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`
+  );
+}
+
+function cardChangeFromPath(
+  path: string,
+): { channel: string; cardId: string; file: "meta" | "thread" } | null {
+  const match = path.match(
+    /^channels\/([^/]+)\/cards\/([^/]+)\/(card\.meta\.yaml|discussion\.thread)$/,
+  );
+  if (!match) return null;
+  return {
+    channel: match[1],
+    cardId: match[2],
+    file: match[3] === "card.meta.yaml" ? "meta" : "thread",
+  };
 }
 
 async function refreshChannelsCache(): Promise<void> {

@@ -6,7 +6,10 @@ pub mod link;
 pub mod message;
 pub mod meta;
 
-pub use card::{validate_labels, CardError, CardMeta, CardStatus};
+pub use card::{
+    parse_card_meta_yaml, stringify_card_meta_yaml, validate_card_id, validate_card_meta,
+    validate_labels, CardError, CardMeta, CardMetaYamlError, CardStatus,
+};
 pub use channel::ChannelName;
 pub use config::Config;
 pub use handler::Handler;

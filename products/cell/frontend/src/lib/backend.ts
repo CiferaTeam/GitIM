@@ -5,6 +5,7 @@
  *   - LocalBackend: talks to daemon-web via Web Worker (mobile)
  */
 import type { ApiResponse } from "./types";
+import type { CardStatus } from "./types";
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -26,6 +27,55 @@ export interface Backend {
   thread(channel: string, line: number): Promise<ApiResponse>;
   users(): Promise<ApiResponse>;
   joinChannel(channel: string): Promise<ApiResponse>;
+}
+
+export interface CreateCardOptions {
+  labels?: string[];
+  assignee?: string | null;
+  status?: CardStatus;
+}
+
+export interface ListCardsQuery {
+  channel?: string | null;
+  labels?: string[];
+  status?: CardStatus | null;
+  assignee?: string | null;
+}
+
+export interface ReadCardQuery {
+  limit?: number;
+  since?: number;
+}
+
+export interface UpdateCardPatch {
+  status?: CardStatus;
+  labels?: string[];
+  assignee?: string | null;
+}
+
+export interface CardBackend {
+  createCard(
+    channel: string,
+    title: string,
+    opts?: CreateCardOptions,
+  ): Promise<ApiResponse>;
+  listCards(query?: ListCardsQuery): Promise<ApiResponse>;
+  readCard(
+    channel: string,
+    cardId: string,
+    query?: ReadCardQuery,
+  ): Promise<ApiResponse>;
+  sendCardMessage(
+    channel: string,
+    cardId: string,
+    body: string,
+    replyTo?: number,
+  ): Promise<ApiResponse>;
+  updateCard(
+    channel: string,
+    cardId: string,
+    patch: UpdateCardPatch,
+  ): Promise<ApiResponse>;
 }
 
 export class HttpBackend implements Backend {
@@ -224,6 +274,38 @@ export class LocalBackend implements Backend {
   }
   joinChannel(channel: string): Promise<ApiResponse> {
     return this.call("joinChannel", channel);
+  }
+  createCard(
+    channel: string,
+    title: string,
+    opts: CreateCardOptions = {},
+  ): Promise<ApiResponse> {
+    return this.call("createCard", channel, title, opts);
+  }
+  listCards(query: ListCardsQuery = {}): Promise<ApiResponse> {
+    return this.call("listCards", query);
+  }
+  readCard(
+    channel: string,
+    cardId: string,
+    query: ReadCardQuery = {},
+  ): Promise<ApiResponse> {
+    return this.call("readCard", channel, cardId, query);
+  }
+  sendCardMessage(
+    channel: string,
+    cardId: string,
+    body: string,
+    replyTo?: number,
+  ): Promise<ApiResponse> {
+    return this.call("sendCardMessage", channel, cardId, body, replyTo);
+  }
+  updateCard(
+    channel: string,
+    cardId: string,
+    patch: UpdateCardPatch,
+  ): Promise<ApiResponse> {
+    return this.call("updateCard", channel, cardId, patch);
   }
 
   terminate(): void {

@@ -17,13 +17,23 @@ export function githubIdentityFromUserJson(user_json: string): any;
 
 export function mergeChannelMeta(local_yaml: string, remote_yaml: string): any;
 
+export function parseCardMeta(yaml: string): any;
+
 export function parseThread(text: string): any;
 
 export function renumberBatch(batch: string, max_existing: bigint): string;
 
 export function resolveContentPure(additions_json: string, remote_json: string): any;
 
+export function stringifyCardMeta(meta: any): string;
+
 export function validateAppend(existing: string, new_lines: string, users: any, senders: any): void;
+
+export function validateCardId(card_id: string): void;
+
+export function validateCardLabels(labels: any): void;
+
+export function validateCardMeta(meta: any): void;
 
 export function validateChannelMeta(yaml: string): any;
 
@@ -46,6 +56,11 @@ export interface InitOutput {
     readonly validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateChannelMeta: (a: number, b: number) => [number, number, number];
+    readonly parseCardMeta: (a: number, b: number) => [number, number, number];
+    readonly stringifyCardMeta: (a: any) => [number, number, number, number];
+    readonly validateCardMeta: (a: any) => [number, number];
+    readonly validateCardId: (a: number, b: number) => [number, number];
+    readonly validateCardLabels: (a: any) => [number, number];
     readonly extractMentions: (a: number, b: number) => [number, number, number];
     readonly extractLinks: (a: number, b: number) => [number, number, number];
     readonly dmFilename: (a: number, b: number, c: number, d: number) => [number, number, number, number];

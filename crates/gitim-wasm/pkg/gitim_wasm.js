@@ -184,6 +184,20 @@ export function mergeChannelMeta(local_yaml, remote_yaml) {
 }
 
 /**
+ * @param {string} yaml
+ * @returns {any}
+ */
+export function parseCardMeta(yaml) {
+    const ptr0 = passStringToWasm0(yaml, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.parseCardMeta(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {string} text
  * @returns {any}
  */
@@ -241,6 +255,29 @@ export function resolveContentPure(additions_json, remote_json) {
 }
 
 /**
+ * @param {any} meta
+ * @returns {string}
+ */
+export function stringifyCardMeta(meta) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.stringifyCardMeta(meta);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * @param {string} existing
  * @param {string} new_lines
  * @param {any} users
@@ -252,6 +289,38 @@ export function validateAppend(existing, new_lines, users, senders) {
     const ptr1 = passStringToWasm0(new_lines, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.validateAppend(ptr0, len0, ptr1, len1, users, senders);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {string} card_id
+ */
+export function validateCardId(card_id) {
+    const ptr0 = passStringToWasm0(card_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.validateCardId(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {any} labels
+ */
+export function validateCardLabels(labels) {
+    const ret = wasm.validateCardLabels(labels);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {any} meta
+ */
+export function validateCardMeta(meta) {
+    const ret = wasm.validateCardMeta(meta);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -340,6 +409,10 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbg___wbindgen_in_2617fa76397620d3: function(arg0, arg1) {
+            const ret = arg0 in arg1;
+            return ret;
+        },
         __wbg___wbindgen_is_function_2f0fd7ceb86e64c5: function(arg0) {
             const ret = typeof(arg0) === 'function';
             return ret;
@@ -351,6 +424,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_string_eddc07a3efad52e6: function(arg0) {
             const ret = typeof(arg0) === 'string';
+            return ret;
+        },
+        __wbg___wbindgen_is_undefined_244a92c34d3b6ec0: function(arg0) {
+            const ret = arg0 === undefined;
             return ret;
         },
         __wbg___wbindgen_jsval_loose_eq_1978f1e77b4bce62: function(arg0, arg1) {
@@ -382,12 +459,24 @@ function __wbg_get_imports() {
             const ret = arg0.done;
             return ret;
         },
+        __wbg_entries_bb9843ba73dc70d6: function(arg0) {
+            const ret = Object.entries(arg0);
+            return ret;
+        },
+        __wbg_get_652f640b3b0b6e3e: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
         __wbg_get_9cfea9b7bbf12a15: function() { return handleError(function (arg0, arg1) {
             const ret = Reflect.get(arg0, arg1);
             return ret;
         }, arguments); },
         __wbg_get_unchecked_be562b1421656321: function(arg0, arg1) {
             const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_get_with_ref_key_6412cf3094599694: function(arg0, arg1) {
+            const ret = arg0[arg1];
             return ret;
         },
         __wbg_instanceof_ArrayBuffer_eab9f28fbec23477: function(arg0) {

@@ -16,8 +16,7 @@ pub fn github_identity_from_user_json(user_json: &str) -> Result<JsValue, JsErro
 
 #[wasm_bindgen(js_name = "parseThread")]
 pub fn parse_thread(text: &str) -> Result<JsValue, JsError> {
-    let file = gitim_core::parser::parse_thread(text)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let file = gitim_core::parser::parse_thread(text).map_err(|e| JsError::new(&e.to_string()))?;
     serde_wasm_bindgen::to_value(&file).map_err(|e| JsError::new(&e.to_string()))
 }
 
@@ -29,8 +28,8 @@ pub fn format_message(
     timestamp: &str,
     body: &str,
 ) -> Result<String, JsError> {
-    let handler = gitim_core::types::Handler::new(author)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let handler =
+        gitim_core::types::Handler::new(author).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(gitim_core::formatter::format_message(
         line_number,
         point_to,
@@ -48,10 +47,10 @@ pub fn format_event(
     event_type: &str,
     meta_json: &str,
 ) -> Result<String, JsError> {
-    let handler = gitim_core::types::Handler::new(author)
-        .map_err(|e| JsError::new(&e.to_string()))?;
-    let meta: serde_json::Value = serde_json::from_str(meta_json)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let handler =
+        gitim_core::types::Handler::new(author).map_err(|e| JsError::new(&e.to_string()))?;
+    let meta: serde_json::Value =
+        serde_json::from_str(meta_json).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(gitim_core::formatter::format_event(
         line_number,
         &handler,
@@ -140,6 +139,39 @@ pub fn validate_channel_meta(yaml: &str) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(&meta).map_err(|e| JsError::new(&e.to_string()))
 }
 
+#[wasm_bindgen(js_name = "parseCardMeta")]
+pub fn parse_card_meta(yaml: &str) -> Result<JsValue, JsError> {
+    let meta =
+        gitim_core::types::parse_card_meta_yaml(yaml).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "stringifyCardMeta")]
+pub fn stringify_card_meta(meta: JsValue) -> Result<String, JsError> {
+    let meta: gitim_core::types::CardMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::stringify_card_meta_yaml(&meta).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "validateCardMeta")]
+pub fn validate_card_meta(meta: JsValue) -> Result<(), JsError> {
+    let meta: gitim_core::types::CardMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::validate_card_meta(&meta).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "validateCardId")]
+pub fn validate_card_id(card_id: &str) -> Result<(), JsError> {
+    gitim_core::types::validate_card_id(card_id).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "validateCardLabels")]
+pub fn validate_card_labels(labels: JsValue) -> Result<(), JsError> {
+    let labels: Vec<String> =
+        serde_wasm_bindgen::from_value(labels).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::validate_labels(&labels).map_err(|e| JsError::new(&e.to_string()))
+}
+
 // --- extraction ---
 
 #[wasm_bindgen(js_name = "extractMentions")]
@@ -159,10 +191,8 @@ pub fn extract_links(body: &str) -> Result<JsValue, JsError> {
 
 #[wasm_bindgen(js_name = "dmFilename")]
 pub fn dm_filename(a: &str, b: &str) -> Result<String, JsError> {
-    let ha = gitim_core::types::Handler::new(a)
-        .map_err(|e| JsError::new(&e.to_string()))?;
-    let hb = gitim_core::types::Handler::new(b)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let ha = gitim_core::types::Handler::new(a).map_err(|e| JsError::new(&e.to_string()))?;
+    let hb = gitim_core::types::Handler::new(b).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(gitim_core::dm::dm_filename(&ha, &hb))
 }
 
@@ -176,10 +206,10 @@ pub fn renumber_batch(batch: &str, max_existing: u64) -> Result<String, JsError>
 
 #[wasm_bindgen(js_name = "mergeChannelMeta")]
 pub fn merge_channel_meta(local_yaml: &str, remote_yaml: &str) -> Result<JsValue, JsError> {
-    let local: gitim_core::types::ChannelMeta = serde_yaml::from_str(local_yaml)
-        .map_err(|e| JsError::new(&e.to_string()))?;
-    let remote: gitim_core::types::ChannelMeta = serde_yaml::from_str(remote_yaml)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let local: gitim_core::types::ChannelMeta =
+        serde_yaml::from_str(local_yaml).map_err(|e| JsError::new(&e.to_string()))?;
+    let remote: gitim_core::types::ChannelMeta =
+        serde_yaml::from_str(remote_yaml).map_err(|e| JsError::new(&e.to_string()))?;
     let merged = gitim_sync::conflict::merge_channel_meta(&local, &remote);
     serde_wasm_bindgen::to_value(&merged).map_err(|e| JsError::new(&e.to_string()))
 }
@@ -194,16 +224,12 @@ pub fn build_rebase_commit_msg(
     let additions: HashMap<PathBuf, String> =
         serde_json::from_str(additions_json).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(gitim_sync::conflict::build_rebase_commit_msg(
-        &mappings,
-        &additions,
+        &mappings, &additions,
     ))
 }
 
 #[wasm_bindgen(js_name = "resolveContentPure")]
-pub fn resolve_content_pure(
-    additions_json: &str,
-    remote_json: &str,
-) -> Result<JsValue, JsError> {
+pub fn resolve_content_pure(additions_json: &str, remote_json: &str) -> Result<JsValue, JsError> {
     let additions: HashMap<PathBuf, String> =
         serde_json::from_str(additions_json).map_err(|e| JsError::new(&e.to_string()))?;
     let remote: HashMap<PathBuf, String> =

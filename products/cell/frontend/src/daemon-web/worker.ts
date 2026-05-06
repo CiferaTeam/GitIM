@@ -59,6 +59,38 @@ const handler: Record<
   users: () => handlers.users(),
   joinChannel: (channel: unknown) =>
     handlers.joinChannel(channel as string),
+  listCards: (query?: unknown) =>
+    handlers.listCards((query ?? {}) as handlers.ListCardsQuery),
+  createCard: (channel: unknown, title: unknown, opts?: unknown) =>
+    handlers.createCard(
+      channel as string,
+      title as string,
+      (opts ?? {}) as handlers.CreateCardOptions,
+    ),
+  readCard: (channel: unknown, cardId: unknown, query?: unknown) =>
+    handlers.readCard(
+      channel as string,
+      cardId as string,
+      (query ?? {}) as handlers.ReadCardQuery,
+    ),
+  sendCardMessage: (
+    channel: unknown,
+    cardId: unknown,
+    body: unknown,
+    replyTo?: unknown,
+  ) =>
+    handlers.sendCardMessage(
+      channel as string,
+      cardId as string,
+      body as string,
+      replyTo as number | undefined,
+    ),
+  updateCard: (channel: unknown, cardId: unknown, patch: unknown) =>
+    handlers.updateCard(
+      channel as string,
+      cardId as string,
+      (patch ?? {}) as handlers.UpdateCardPatch,
+    ),
   startSync: () => {
     startSyncLoop();
     return Promise.resolve({ ok: true });
