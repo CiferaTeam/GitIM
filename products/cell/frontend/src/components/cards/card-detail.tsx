@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { InputArea } from "@/components/chat/input-area";
 import { MessageList } from "@/components/chat/message-list";
-import { MobileTabBar } from "@/components/mobile/mobile-tab-bar";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import {
   useCardStore,
@@ -366,8 +365,6 @@ export function CardDetail() {
           placeholder="Write a note (Enter to send, Shift+Enter for newline)"
         />
       )}
-
-      <MobileTabBar />
     </div>
   );
 }

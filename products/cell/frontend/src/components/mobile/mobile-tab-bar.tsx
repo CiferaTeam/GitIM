@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutGrid, Bot } from "lucide-react";
+import { MessageSquare, LayoutGrid } from "lucide-react";
 import { useNavigate, useLocation } from "react-router";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { cn } from "../../lib/utils";
@@ -15,7 +15,6 @@ export function MobileTabBar() {
       : [
           { key: "/chat", label: "Chat", icon: MessageSquare },
           { key: "/cards", label: "Cards", icon: LayoutGrid },
-          { key: "/management", label: "Agents", icon: Bot },
         ];
 
   return (

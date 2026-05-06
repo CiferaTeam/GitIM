@@ -13,6 +13,7 @@ import { useAgentStore } from "./hooks/use-agent-store";
 import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
+import { useIsMobile } from "./hooks/use-media-query";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
@@ -114,6 +115,7 @@ export default function App() {
   const localReady = useConnectionStore((s) => s.localReady);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
+  const isMobile = useIsMobile();
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -491,15 +493,25 @@ export default function App() {
               index
               element={
                 <Navigate
-                  to={mode === "local" ? "/chat" : "/management"}
+                  to={mode === "local" || isMobile ? "/chat" : "/management"}
                   replace
                 />
               }
             />
             {mode === "remote" && (
               <>
-                <Route path="/management" element={<ManagementPage />} />
-                <Route path="/management/:agentId" element={<AgentDetail />} />
+                <Route
+                  path="/management"
+                  element={
+                    isMobile ? <Navigate to="/chat" replace /> : <ManagementPage />
+                  }
+                />
+                <Route
+                  path="/management/:agentId"
+                  element={
+                    isMobile ? <Navigate to="/chat" replace /> : <AgentDetail />
+                  }
+                />
                 <Route path="/cards" element={<CardKanban />} />
                 <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
               </>

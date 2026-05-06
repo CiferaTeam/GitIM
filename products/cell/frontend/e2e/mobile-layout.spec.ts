@@ -71,6 +71,28 @@ async function stubRuntime(page: Page) {
       await route.fulfill({ json: { ok: true, data: { cards: [] } } });
       return;
     }
+    if (url.pathname === `/workspaces/${slug}/im/cards/general/card-1`) {
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            meta: {
+              channel: "general",
+              card_id: "card-1",
+              title: "Mobile card",
+              status: "todo",
+              labels: [],
+              created_by: "lewis",
+              created_at: "20260317T120000Z",
+              updated_at: "20260317T120000Z",
+            },
+            entries: [],
+            archived: false,
+          },
+        },
+      });
+      return;
+    }
     if (url.pathname === `/workspaces/${slug}/im/read`) {
       await route.fulfill({
         json: {
@@ -103,6 +125,16 @@ async function stubRuntime(page: Page) {
   });
 }
 
+test("mobile runtime mode defaults to chat", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubRuntime(page);
+  await page.goto("/");
+
+  await expect(page).toHaveURL(/\/chat$/);
+  await expect(page.getByText("hello mobile")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
+});
+
 test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await stubRuntime(page);
@@ -112,11 +144,22 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Open conversations" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cards", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Agents", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Open conversations" }).click();
   await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+});
+
+test("mobile card detail uses the shared bottom tabs once", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubRuntime(page);
+  await page.goto("/cards/general/card-1");
+
+  await expect(page.getByText("Mobile card")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Chat", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Cards", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
 });
 
 test("browser mode setup is reachable without a runtime port", async ({ page }) => {
