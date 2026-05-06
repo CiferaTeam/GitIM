@@ -349,6 +349,25 @@ fn cleanup_human_dir(workspace: &Path) {
     let _ = std::fs::remove_dir_all(&human_dir);
 }
 
+fn persistent_human_repo(workspace: &Path) -> Option<PathBuf> {
+    let human_dir = workspace.join(".gitim-runtime").join("human");
+    if human_dir.join(".git").is_dir() && human_dir.join(".gitim").join("me.json").is_file() {
+        Some(human_dir)
+    } else {
+        None
+    }
+}
+
+fn workspace_initialized(ctx: &crate::workspace::WorkspaceContext) -> bool {
+    ctx.human_repo.is_some() || persistent_human_repo(&ctx.path).is_some()
+}
+
+fn human_repo_path(ctx: &crate::workspace::WorkspaceContext) -> Option<PathBuf> {
+    ctx.human_repo
+        .clone()
+        .or_else(|| persistent_human_repo(&ctx.path))
+}
+
 // -- IM helpers --
 
 fn human_client(
@@ -360,6 +379,14 @@ fn human_client(
     let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
     match &ctx.human_repo {
         Some(p) => Ok(GitimClient::new(p)),
+        None if persistent_human_repo(&ctx.path).is_some() => Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "human daemon unavailable"
+            })),
+        )
+            .into_response()),
         None => Err(Json(serde_json::json!({
             "ok": false,
             "error": "human daemon not initialized"
@@ -394,7 +421,7 @@ async fn im_me(
     WorkspaceSlug(slug): WorkspaceSlug,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let human_repo = match with_workspace_snapshot(&state, &slug, |ctx| ctx.human_repo.clone()) {
+    let human_repo = match with_workspace_snapshot(&state, &slug, human_repo_path) {
         Ok(Some(p)) => p,
         Ok(None) => {
             return Json(serde_json::json!({
@@ -813,17 +840,16 @@ fn human_handler(
     slug: &str,
 ) -> Result<String, axum::response::Response> {
     use axum::response::IntoResponse;
-    let human_repo = with_workspace_snapshot(state, slug, |ctx| ctx.human_repo.clone())?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "human daemon not initialized"
-                })),
-            )
-                .into_response()
-        })?;
+    let human_repo = with_workspace_snapshot(state, slug, human_repo_path)?.ok_or_else(|| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "human daemon not initialized"
+            })),
+        )
+            .into_response()
+    })?;
     let me_path = human_repo.join(".gitim/me.json");
     let content = std::fs::read_to_string(&me_path).map_err(|e| {
         (
@@ -2377,7 +2403,7 @@ fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSumma
         workspace_name: ctx.workspace_name.clone(),
         path: ctx.path.to_string_lossy().into_owned(),
         provider,
-        initialized: ctx.human_repo.is_some(),
+        initialized: workspace_initialized(ctx),
     }
 }
 
@@ -2409,7 +2435,7 @@ async fn workspaces_get(
                 "workspace_name": ctx.workspace_name,
                 "path": ctx.path.to_string_lossy(),
                 "provider": provider,
-                "initialized": ctx.human_repo.is_some(),
+                "initialized": workspace_initialized(ctx),
                 "agents_count": ctx.agents.len(),
                 "human_repo": ctx.human_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
             });
@@ -3112,6 +3138,13 @@ mod tests {
 
     use super::*;
 
+    fn write_persistent_human_repo(workspace: &Path) {
+        let human = workspace.join(".gitim-runtime").join("human");
+        std::fs::create_dir_all(human.join(".git")).unwrap();
+        std::fs::create_dir_all(human.join(".gitim")).unwrap();
+        std::fs::write(human.join(".gitim").join("me.json"), "{}").unwrap();
+    }
+
     #[test]
     fn workspaces_create_request_deserializes_local() {
         let body = serde_json::json!({
@@ -3207,6 +3240,105 @@ mod tests {
         let summary = workspace_summary(&ctx);
         assert_eq!(summary.provider, GitProvider::Local);
         assert!(!summary.initialized);
+    }
+
+    #[test]
+    fn workspace_summary_treats_persistent_human_repo_as_initialized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("room");
+        write_persistent_human_repo(&workspace);
+
+        let ctx = crate::workspace::WorkspaceContext::new(
+            "room".to_string(),
+            "Room".to_string(),
+            workspace,
+        );
+
+        let summary = workspace_summary(&ctx);
+        assert!(ctx.human_repo.is_none());
+        assert!(summary.initialized);
+    }
+
+    #[tokio::test]
+    async fn im_channels_reports_unavailable_when_human_daemon_is_not_recovered() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("room");
+        write_persistent_human_repo(&workspace);
+
+        let (router, state) = create_router();
+        {
+            let mut s = state.lock().unwrap();
+            s.workspaces.insert(
+                "room".to_string(),
+                crate::workspace::WorkspaceContext::new(
+                    "room".to_string(),
+                    "Room".to_string(),
+                    workspace,
+                ),
+            );
+        }
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces/room/im/channels")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "human daemon unavailable");
+    }
+
+    #[tokio::test]
+    async fn workspaces_get_separates_initialized_from_recovered_human_daemon() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("room");
+        write_persistent_human_repo(&workspace);
+
+        let (router, state) = create_router();
+        {
+            let mut s = state.lock().unwrap();
+            s.workspaces.insert(
+                "room".to_string(),
+                crate::workspace::WorkspaceContext::new(
+                    "room".to_string(),
+                    "Room".to_string(),
+                    workspace,
+                ),
+            );
+        }
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces/room")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["initialized"], true);
+        assert_eq!(body["human_repo"], serde_json::Value::Null);
     }
 
     #[tokio::test]
