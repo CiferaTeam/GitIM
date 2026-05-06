@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, LogIn, Menu } from "lucide-react";
+import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
@@ -11,7 +11,6 @@ import { ChannelCardDrawer } from "../cards/channel-card-drawer";
 import { MobileSidebarDrawer } from "../mobile/mobile-sidebar-drawer";
 import { MobileThreadOverlay } from "../mobile/mobile-thread-overlay";
 import { MobileActionSheet } from "../mobile/mobile-action-sheet";
-import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -293,6 +292,13 @@ export function ChatLayout() {
     void handleShowThread(msg);
   }, [handleShowThread]);
 
+  const isDm = currentChannelData?.kind === "dm";
+  const mobileChannelLabel = currentChannel
+    ? isDm
+      ? `@${currentChannel.split("--").find((p) => p !== currentUser) ?? currentChannel}`
+      : `#${currentChannel}`
+    : "Select a channel";
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Desktop sidebar */}
@@ -311,34 +317,46 @@ export function ChatLayout() {
               <button
                 onClick={() => setMobileSidebarOpen(true)}
                 className="p-2 -ml-1 rounded-lg hover:bg-surface transition-colors active:scale-90"
+                aria-label="Open conversations"
               >
                 <Menu className="size-5 text-text-muted" />
               </button>
-              <ChatHeader
-                onStartDm={handleStartDm}
-                onOpenCards={
-                  currentChannel && currentChannelData?.kind === "channel"
-                    ? () => setCardDrawerOpen(true)
-                    : undefined
-                }
-              >
-                {navHistory.length > 0 && (
-                  <button
-                    onClick={handleNavBack}
-                    className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors mr-2"
-                    title="Back"
-                  >
-                    <ArrowLeft className="h-3.5 w-3.5" />
-                    <span>Back</span>
-                  </button>
+              {navHistory.length > 0 && (
+                <button
+                  onClick={handleNavBack}
+                  className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors active:scale-90"
+                  aria-label="Back"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
+              )}
+              <div className="flex items-center gap-1.5 min-w-0">
+                {isDm ? (
+                  <AtSign className="size-4 text-primary shrink-0" />
+                ) : (
+                  <Hash className="size-4 text-primary shrink-0" />
                 )}
-              </ChatHeader>
+                <span className="font-semibold text-sm tracking-tight truncate">
+                  {mobileChannelLabel}
+                </span>
+              </div>
             </div>
-            {replyTo && (
-              <span className="text-[11px] text-primary bg-primary/10 px-2 py-1 rounded-full shrink-0">
-                Replying
-              </span>
-            )}
+            <div className="flex items-center gap-1 shrink-0">
+              {replyTo && (
+                <span className="text-[11px] text-primary bg-primary/10 px-2 py-1 rounded-full">
+                  Replying
+                </span>
+              )}
+              {currentChannel && currentChannelData?.kind === "channel" && (
+                <button
+                  onClick={() => setCardDrawerOpen(true)}
+                  className="p-2 rounded-lg text-text-muted hover:text-foreground hover:bg-surface transition-colors active:scale-90"
+                  aria-label={`Open cards for ${currentChannel}`}
+                >
+                  <LayoutGrid className="size-4" />
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -399,7 +417,7 @@ export function ChatLayout() {
           onChannelClick={handleChannelClick}
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
-          onActionSheet={setActionSheetMessage}
+          onActionSheet={isMobile ? setActionSheetMessage : undefined}
         />
         {currentChannel && !isArchivedView && (
           <InputArea
@@ -411,9 +429,6 @@ export function ChatLayout() {
             onSend={handleSend}
           />
         )}
-
-        {/* Mobile tab bar */}
-        {isMobile && <MobileTabBar />}
       </div>
 
       {/* Desktop thread panel */}

@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react";
-import { MessageSquare, GitBranch, Copy, X } from "lucide-react";
+import { MessageSquare, GitBranch, Copy } from "lucide-react";
 import type { Message } from "../../lib/types";
-import { cn } from "../../lib/utils";
 
 interface MobileActionSheetProps {
   message: Message | null;
@@ -11,54 +9,35 @@ interface MobileActionSheetProps {
 }
 
 export function MobileActionSheet({ message, onClose, onReply, onShowThread }: MobileActionSheetProps) {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (message) {
-      setVisible(true);
-    } else {
-      setVisible(false);
-    }
-  }, [message]);
-
   if (!message) return null;
+  const current = message;
 
   function handleReply() {
-    onReply(message);
+    onReply(current);
     onClose();
   }
 
   function handleThread() {
-    onShowThread(message);
+    onShowThread(current);
     onClose();
   }
 
   function handleCopy() {
-    navigator.clipboard.writeText(message.body).catch(() => {});
+    navigator.clipboard.writeText(current.body).catch(() => {});
     onClose();
   }
 
   return (
-    <div
-      className={cn(
-        "fixed inset-0 z-[60] flex flex-col justify-end transition-opacity duration-200",
-        visible ? "opacity-100" : "opacity-0 pointer-events-none"
-      )}
-    >
+    <div className="fixed inset-0 z-[60] flex flex-col justify-end transition-opacity duration-200 md:hidden opacity-100">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div
-        className={cn(
-          "relative bg-card rounded-t-2xl border-t border-border transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]",
-          visible ? "translate-y-0" : "translate-y-full"
-        )}
-      >
+      <div className="relative bg-card rounded-t-2xl border-t border-border transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] translate-y-0">
         <div className="flex justify-center pt-3 pb-1">
           <div className="w-10 h-1 rounded-full bg-border" />
         </div>
 
         <div className="px-4 pb-3 border-b border-border/60">
-          <p className="text-xs text-text-muted mb-1">@{message.author}</p>
-          <p className="text-sm text-foreground line-clamp-2">{message.body}</p>
+          <p className="text-xs text-text-muted mb-1">@{current.author}</p>
+          <p className="text-sm text-foreground line-clamp-2">{current.body}</p>
         </div>
 
         <div className="p-2 space-y-1">

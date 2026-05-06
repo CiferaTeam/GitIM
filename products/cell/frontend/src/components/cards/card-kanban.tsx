@@ -11,11 +11,9 @@ import {
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import { useIsMobile } from "@/hooks/use-media-query";
 import * as client from "@/lib/client";
 import type { Card, CardFilter, CardStatus } from "@/lib/types";
 import { MobileCardList } from "@/components/mobile/mobile-card-list";
-import { MobileTabBar } from "@/components/mobile/mobile-tab-bar";
 import { CardFilterBar, EMPTY_CARD_FILTER, type CardFilterState } from "./card-filter-bar";
 import { CardKanbanColumn } from "./card-kanban-column";
 import { CardCreateDialog } from "./card-create-dialog";
@@ -155,8 +153,6 @@ export function CardKanban() {
     !!filter.assignee ||
     filter.mineOnly;
 
-  const isMobile = useIsMobile();
-
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -218,9 +214,6 @@ export function CardKanban() {
           </div>
         </>
       )}
-
-      {isMobile && <MobileTabBar />}
-
       <CardCreateDialog
         open={createOpen}
         onOpenChange={setCreateOpen}

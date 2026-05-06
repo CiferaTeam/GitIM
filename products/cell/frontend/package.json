@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test": "vitest run src",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test e2e/sidebar-layout.spec.ts e2e/mobile-layout.spec.ts",
     "preview": "vite preview",
     "deploy": "tsc -b && vite build && wrangler pages deploy dist --project-name cell-gitim --commit-dirty=true"
   },

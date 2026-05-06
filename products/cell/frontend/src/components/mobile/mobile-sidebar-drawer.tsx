@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { X, Hash, AtSign, MessageSquare } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { cn } from "../../lib/utils";
@@ -10,7 +9,7 @@ function dmDisplayName(channel: Channel, currentUser: string): string {
   const [a, b] = parts;
   if (a === currentUser) return b;
   if (b === currentUser) return a;
-  return `${a} ↔ ${b}`;
+  return `${a} / ${b}`;
 }
 
 function isMyDm(channel: Channel, currentUser: string): boolean {
@@ -25,18 +24,9 @@ interface MobileSidebarDrawerProps {
 }
 
 export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSidebarDrawerProps) {
-  const [mounted, setMounted] = useState(open);
   const channels = useChatStore((s) => s.channels);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const currentUser = useChatStore((s) => s.currentUser);
-
-  useEffect(() => {
-    if (open) setMounted(true);
-    else {
-      const t = setTimeout(() => setMounted(false), 300);
-      return () => clearTimeout(t);
-    }
-  }, [open]);
 
   const regularChannels = channels.filter((c) => c.kind === "channel");
   const dmChannels = channels
@@ -49,7 +39,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
       return a.name.localeCompare(b.name);
     });
 
-  if (!mounted) return null;
+  if (!open) return null;
 
   function handleSelect(name: string) {
     onChannelSelect(name);
@@ -61,7 +51,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
       <div
         className={cn(
           "absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-300",
-          open ? "opacity-100" : "opacity-0"
+          "opacity-100"
         )}
         onClick={onClose}
       />
@@ -69,7 +59,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
         className={cn(
           "relative w-[85%] max-w-sm h-full bg-card border-r border-border flex flex-col",
           "transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]",
-          open ? "translate-x-0" : "-translate-x-full"
+          "translate-x-0"
         )}
       >
         <div className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0 bg-card/80">

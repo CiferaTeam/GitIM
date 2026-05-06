@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useMemo } from "react";
 import { X, MessageSquare, ArrowLeft } from "lucide-react";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
@@ -25,16 +25,6 @@ interface MobileThreadOverlayProps {
 }
 
 export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }: MobileThreadOverlayProps) {
-  const [mounted, setMounted] = useState(!!root);
-
-  useEffect(() => {
-    if (root) setMounted(true);
-    else {
-      const t = setTimeout(() => setMounted(false), 250);
-      return () => clearTimeout(t);
-    }
-  }, [root]);
-
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const msg of messages) {
@@ -43,14 +33,14 @@ export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }
     return map;
   }, [messages]);
 
-  if (!mounted || !root) return null;
+  if (!root) return null;
 
   return (
     <div
       className={cn(
         "fixed inset-0 z-50 bg-background flex flex-col md:hidden",
         "transition-transform duration-250 ease-[cubic-bezier(0.32,0.72,0,1)]",
-        root ? "translate-x-0" : "translate-x-full"
+        "translate-x-0"
       )}
     >
       <div className="h-14 border-b border-border flex items-center gap-3 px-4 shrink-0 bg-card/60">

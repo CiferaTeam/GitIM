@@ -98,6 +98,7 @@ export function MessageItem({
     setIsPressed(true);
     longPressTimer.current = setTimeout(() => {
       onActionSheet(message);
+      longPressTimer.current = null;
       setIsPressed(false);
     }, 500);
   }, [isPending, onActionSheet, message]);
@@ -130,7 +131,7 @@ export function MessageItem({
     <div
       data-line={message.line_number}
       className={cn(
-        "group relative rounded-lg px-3 py-2.5 transition-all duration-150 select-none",
+        "group relative rounded-lg px-3 py-2.5 transition-all duration-150 select-none md:select-text",
         "hover:bg-surface/40",
         isPressed && "bg-surface/60 scale-[0.99]",
         isPending && "opacity-40",
@@ -140,6 +141,7 @@ export function MessageItem({
       )}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
       onTouchMove={handleTouchMove}
       onContextMenu={(e) => {
         if (onActionSheet) {

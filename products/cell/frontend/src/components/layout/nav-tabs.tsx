@@ -1,4 +1,5 @@
 import { NavLink } from "react-router";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 
 const navItems = [
   { to: "/management", label: "Agents" },
@@ -7,9 +8,15 @@ const navItems = [
 ];
 
 export function NavTabs() {
+  const mode = useConnectionStore((s) => s.mode);
+  const items =
+    mode === "local"
+      ? navItems.filter((item) => item.to === "/chat")
+      : navItems;
+
   return (
     <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg border border-border/60">
-      {navItems.map((item) => (
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}

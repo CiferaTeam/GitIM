@@ -22,6 +22,7 @@ import { CreateWorkspaceForm } from "./components/workspace/create-workspace-for
 import { Toaster } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
+const LOCAL_POLL_INTERVAL_MS = 7000;
 
 // Consecutive connectivity failures (fetch-level) before we flip the
 // header dot red. At 3s cadence, 3 fails ≈ 9s of unreachability.
@@ -109,6 +110,8 @@ export default function App() {
   const addCardMessages = useCardStore((s) => s.addCardMessages);
   const resetCardsForSwitch = useCardStore((s) => s.resetForWorkspaceSwitch);
   const port = useConnectionStore((s) => s.port);
+  const mode = useConnectionStore((s) => s.mode);
+  const localReady = useConnectionStore((s) => s.localReady);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
 
@@ -131,7 +134,7 @@ export default function App() {
   const consecutiveWorkspaceFailuresRef = useRef(0);
 
   // Agent activity SSE is scoped to the active workspace
-  useAgentActivitySSE(activeSlug);
+  useAgentActivitySSE(mode === "remote" ? activeSlug : null);
 
   // Keep refs in sync with stores
   useEffect(() => {
@@ -147,9 +150,10 @@ export default function App() {
 
   // Fetch workspaces once the runtime is reachable.
   useEffect(() => {
-    if (!port) return;
+    if (mode === "remote" && !port) return;
+    if (mode === "local" && !localReady) return;
     fetchWorkspaces();
-  }, [port, fetchWorkspaces]);
+  }, [mode, port, localReady, fetchWorkspaces]);
 
   const markConnected = useCallback(() => {
     consecutiveTransportFailuresRef.current = 0;
@@ -295,10 +299,11 @@ export default function App() {
         }
       }
 
-      // Periodically refresh agents (real backend)
-      const agentsRes = await client.listAgents(slug);
-      if (agentsRes.ok && agentsRes.data) {
-        setAgents(agentsRes.data.agents as Agent[]);
+      if (mode === "remote") {
+        const agentsRes = await client.listAgents(slug);
+        if (agentsRes.ok && agentsRes.data) {
+          setAgents(agentsRes.data.agents as Agent[]);
+        }
       }
 
       // Periodically refresh the roster so DM/Create-Channel pickers see
@@ -340,12 +345,15 @@ export default function App() {
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,
+    mode,
   ]);
 
   // Init + poll loop — runs whenever port + activeSlug are both set, and
   // re-runs whenever activeSlug changes so state is refreshed on switch.
   useEffect(() => {
-    if (!port || !activeSlug) return;
+    if (!activeSlug) return;
+    if (mode === "remote" && !port) return;
+    if (mode === "local" && !localReady) return;
 
     // Reset per-workspace store slices on switch so stale data from the
     // previous workspace doesn't leak into the new one. Each store owns
@@ -373,7 +381,9 @@ export default function App() {
           client.me(slug),
           client.channels(slug),
           client.users(slug),
-          client.listAgents(slug),
+          mode === "remote"
+            ? client.listAgents(slug)
+            : Promise.resolve({ ok: true, data: { agents: [] } }),
           client.listCards(slug),
         ]);
 
@@ -410,6 +420,8 @@ export default function App() {
       // Recursive setTimeout instead of setInterval: ensures a single in-flight
       // poll at a time. With setInterval, a fetch that stalls past the 3s
       // cadence would pile concurrent callbacks on top of each other.
+      const pollInterval =
+        mode === "local" ? LOCAL_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
       const schedulePoll = () => {
         if (cancelled) return;
         pollHandle = setTimeout(async () => {
@@ -422,7 +434,7 @@ export default function App() {
             clearTimeout(timeoutHandle);
             schedulePoll();
           }
-        }, POLL_INTERVAL_MS);
+        }, pollInterval);
       };
       schedulePoll();
     });
@@ -433,6 +445,8 @@ export default function App() {
     };
   }, [
     port,
+    mode,
+    localReady,
     activeSlug,
     setCurrentUser,
     setChannels,
@@ -457,6 +471,8 @@ export default function App() {
   let gated: React.ReactNode;
   if (isDocsRoute) {
     gated = <DocsPage />;
+  } else if (mode === "local" && workspaces.length === 0) {
+    gated = <WorkspaceLoading />;
   } else if (workspacesLoading && workspaces.length === 0) {
     gated = <WorkspaceLoading />;
   } else if (workspaces.length === 0) {
@@ -471,13 +487,28 @@ export default function App() {
       gated = (
         <Routes>
           <Route element={<AppShell />}>
-            <Route index element={<Navigate to="/management" replace />} />
-            <Route path="/management" element={<ManagementPage />} />
-            <Route path="/management/:agentId" element={<AgentDetail />} />
+            <Route
+              index
+              element={
+                <Navigate
+                  to={mode === "local" ? "/chat" : "/management"}
+                  replace
+                />
+              }
+            />
+            {mode === "remote" && (
+              <>
+                <Route path="/management" element={<ManagementPage />} />
+                <Route path="/management/:agentId" element={<AgentDetail />} />
+                <Route path="/cards" element={<CardKanban />} />
+                <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
+              </>
+            )}
             <Route path="/chat" element={<ChatPage />} />
-            <Route path="/cards" element={<CardKanban />} />
-            <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
             <Route path="/docs" element={<DocsPage />} />
+            {mode === "local" && (
+              <Route path="*" element={<Navigate to="/chat" replace />} />
+            )}
           </Route>
         </Routes>
       );

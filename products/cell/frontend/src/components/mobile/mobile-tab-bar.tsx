@@ -1,17 +1,22 @@
 import { MessageSquare, LayoutGrid, Bot } from "lucide-react";
 import { useNavigate, useLocation } from "react-router";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 import { cn } from "../../lib/utils";
 
 export function MobileTabBar() {
   const navigate = useNavigate();
   const location = useLocation();
+  const mode = useConnectionStore((s) => s.mode);
   const path = location.pathname;
 
-  const tabs = [
-    { key: "/chat", label: "Chat", icon: MessageSquare },
-    { key: "/cards", label: "Cards", icon: LayoutGrid },
-    { key: "/management", label: "Agents", icon: Bot },
-  ];
+  const tabs =
+    mode === "local"
+      ? [{ key: "/chat", label: "Chat", icon: MessageSquare }]
+      : [
+          { key: "/chat", label: "Chat", icon: MessageSquare },
+          { key: "/cards", label: "Cards", icon: LayoutGrid },
+          { key: "/management", label: "Agents", icon: Bot },
+        ];
 
   return (
     <div className="shrink-0 h-16 border-t border-border bg-card/80 backdrop-blur-md flex items-center justify-around md:hidden">

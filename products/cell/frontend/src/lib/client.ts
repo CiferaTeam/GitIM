@@ -17,13 +17,25 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
+import type { Backend } from "./backend";
+import { HttpBackend } from "./backend";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+
+let activeBackend: Backend = new HttpBackend(() => baseUrl());
+
+export function setBackend(backend: Backend): void {
+  activeBackend = backend;
+}
 
 // --- Helpers ---
 
 function baseUrl(): string {
   return useConnectionStore.getState().baseUrl();
+}
+
+function isLocalMode(): boolean {
+  return useConnectionStore.getState().mode === "local";
 }
 
 function wsBase(slug: string): string {
@@ -41,6 +53,7 @@ function wsBase(slug: string): string {
 // `signal` lets the caller cap a single in-flight request so the poll loop
 // can move on if the old process is tearing down mid-fetch.
 export async function health(signal?: AbortSignal): Promise<ApiResponse> {
+  if (isLocalMode()) return activeBackend.health();
   const res = await fetch(`${baseUrl()}/health`, { cache: "no-store", signal });
   if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
   const data = await res.json();
@@ -62,6 +75,9 @@ export interface UpdateAndRestartData {
  * to poll `health()` to detect the transition.
  */
 export async function updateAndRestart(): Promise<ApiResponse<UpdateAndRestartData>> {
+  if (isLocalMode()) {
+    return { ok: false, error: "runtime update is unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${baseUrl()}/runtime/update-and-restart`, {
       method: "POST",
@@ -86,6 +102,23 @@ export async function updateAndRestart(): Promise<ApiResponse<UpdateAndRestartDa
 export async function listWorkspaces(): Promise<
   ApiResponse<{ workspaces: WorkspaceSummary[] }>
 > {
+  if (isLocalMode()) {
+    return {
+      ok: true,
+      data: {
+        workspaces: [
+          {
+            slug: "browser",
+            workspace_name: "Browser",
+            path: "indexeddb://gitim/browser",
+            provider: "github",
+            initialized: true,
+            agents_count: 0,
+          },
+        ],
+      },
+    };
+  }
   try {
     const res = await fetch(`${baseUrl()}/workspaces`);
     const data = await res.json();
@@ -101,6 +134,10 @@ export async function listWorkspaces(): Promise<
 export async function createWorkspace(
   req: CreateWorkspaceRequest,
 ): Promise<ApiResponse<{ slug: string; workspace_name: string; path: string; provider: string }>> {
+  if (isLocalMode()) {
+    void req;
+    return { ok: false, error: "workspace creation is unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${baseUrl()}/workspaces`, {
       method: "POST",
@@ -122,6 +159,18 @@ export async function createWorkspace(
 }
 
 export async function getWorkspace(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return {
+      ok: true,
+      data: {
+        slug,
+        workspace_name: "Browser",
+        path: "indexeddb://gitim/browser",
+        provider: "github",
+        initialized: true,
+      },
+    };
+  }
   try {
     const res = await fetch(wsBase(slug));
     const data = await res.json();
@@ -135,6 +184,10 @@ export async function getWorkspace(slug: string): Promise<ApiResponse> {
 }
 
 export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return { ok: false, error: "workspace deletion is unavailable in browser mode" };
+  }
   try {
     const res = await fetch(wsBase(slug), { method: "DELETE" });
     const data = await res.json().catch(() => ({}));
@@ -150,11 +203,20 @@ export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
 // --- IM methods: real runtime HTTP (all scoped to a workspace) ---
 
 export async function me(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return activeBackend.me();
+  }
   const res = await fetch(`${wsBase(slug)}/im/me`);
   return await res.json();
 }
 
 export async function poll(slug: string, since?: string, signal?: AbortSignal): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void signal;
+    return activeBackend.poll(since);
+  }
   const res = await fetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -165,6 +227,10 @@ export async function poll(slug: string, since?: string, signal?: AbortSignal): 
 }
 
 export async function channels(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return activeBackend.channels();
+  }
   const res = await fetch(`${wsBase(slug)}/im/channels`);
   return await res.json();
 }
@@ -176,6 +242,9 @@ export async function send(
   _author?: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return activeBackend.send(channel, body, _author, replyTo);
+  }
   const res = await fetch(`${wsBase(slug)}/im/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -191,6 +260,14 @@ export async function createChannel(
   introduction?: string,
   invitees?: string[],
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void name;
+    void displayName;
+    void introduction;
+    void invitees;
+    return { ok: false, error: "channel creation is unavailable in browser mode" };
+  }
   const payload: Record<string, unknown> = { name, display_name: displayName, introduction };
   if (invitees && invitees.length > 0) {
     payload.invitees = invitees;
@@ -208,6 +285,11 @@ export async function joinChannel(
   channel: string,
   targets?: string[],
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void targets;
+    return activeBackend.joinChannel(channel);
+  }
   const payload: Record<string, unknown> = { channel };
   if (targets && targets.length > 0) {
     payload.targets = targets;
@@ -225,6 +307,10 @@ export async function read(
   channel: string,
   limit?: number,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return activeBackend.read(channel, limit);
+  }
   const res = await fetch(`${wsBase(slug)}/im/read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -238,6 +324,10 @@ export async function thread(
   channel: string,
   line: number,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return activeBackend.thread(channel, line);
+  }
   const res = await fetch(`${wsBase(slug)}/im/thread`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -247,6 +337,10 @@ export async function thread(
 }
 
 export async function users(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return activeBackend.users();
+  }
   const res = await fetch(`${wsBase(slug)}/im/users`);
   return await res.json();
 }
@@ -294,6 +388,13 @@ export async function createCard(
   title: string,
   opts: CreateCardOpts = {},
 ): Promise<ApiResponse<{ channel: string; card_id: string; title: string }>> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void title;
+    void opts;
+    return { ok: false, error: "card creation is unavailable in browser mode" };
+  }
   const payload: Record<string, unknown> = { channel, title };
   if (opts.labels && opts.labels.length > 0) payload.labels = opts.labels;
   if (opts.assignee) payload.assignee = opts.assignee;
@@ -317,6 +418,11 @@ export async function listCards(
   slug: string,
   query: ListCardsQuery = {},
 ): Promise<ApiResponse<{ cards: Card[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    void query;
+    return { ok: true, data: { cards: [] } };
+  }
   const params = new URLSearchParams();
   if (query.channel) params.set("channel", query.channel);
   if (query.status) params.set("status", query.status);
@@ -341,6 +447,13 @@ export async function readCard(
   cardId: string,
   query: ReadCardQuery = {},
 ): Promise<ApiResponse<{ meta: Card; entries: Message[]; archived: boolean }>> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void cardId;
+    void query;
+    return { ok: false, error: "cards are unavailable in browser mode" };
+  }
   const params = new URLSearchParams();
   if (query.limit != null) params.set("limit", String(query.limit));
   if (query.since != null) params.set("since", String(query.since));
@@ -358,6 +471,14 @@ export async function sendCardMessage(
   body: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void cardId;
+    void body;
+    void replyTo;
+    return { ok: false, error: "cards are unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
     {
@@ -381,6 +502,13 @@ export async function updateCard(
   cardId: string,
   patch: UpdateCardPatch,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void cardId;
+    void patch;
+    return { ok: false, error: "cards are unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,
     {
@@ -399,6 +527,12 @@ export async function archiveCard(
   channel: string,
   cardId: string,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void cardId;
+    return { ok: false, error: "cards are unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/archive`,
     { method: "POST" },
@@ -411,6 +545,12 @@ export async function unarchiveCard(
   channel: string,
   cardId: string,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    void cardId;
+    return { ok: false, error: "cards are unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/unarchive`,
     { method: "POST" },
@@ -422,6 +562,11 @@ export async function listArchivedCards(
   slug: string,
   channel?: string,
 ): Promise<ApiResponse<{ cards: Card[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    void channel;
+    return { ok: true, data: { cards: [] } };
+  }
   const qs = channel ? `?channel=${encodeURIComponent(channel)}` : "";
   const res = await fetch(`${wsBase(slug)}/im/cards/archived${qs}`);
   return await res.json();
@@ -431,6 +576,11 @@ export async function archiveChannel(
   slug: string,
   name: string,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void name;
+    return { ok: false, error: "channel archive is unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/archive`,
     { method: "POST" },
@@ -442,6 +592,11 @@ export async function unarchiveChannel(
   slug: string,
   name: string,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void name;
+    return { ok: false, error: "channel archive is unavailable in browser mode" };
+  }
   const res = await fetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/unarchive`,
     { method: "POST" },
@@ -452,6 +607,10 @@ export async function unarchiveChannel(
 export async function listArchivedChannels(
   slug: string,
 ): Promise<ApiResponse<{ channels: Channel[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    return { ok: true, data: { channels: [] } };
+  }
   const res = await fetch(`${wsBase(slug)}/im/channels/archived`);
   return await res.json();
 }
@@ -461,6 +620,10 @@ export async function listArchivedChannels(
 export async function preflightProvider(
   provider: ProviderId,
 ): Promise<ApiResponse<PreflightResult>> {
+  if (isLocalMode()) {
+    void provider;
+    return { ok: false, error: "provider preflight is unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${baseUrl()}/preflight/${provider}`);
     const data = await res.json();
@@ -506,6 +669,10 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
 // --- Agent API: real runtime HTTP (all scoped to a workspace) ---
 
 export async function listAgents(slug: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return { ok: true, data: { agents: [] } };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents`);
     const data = await res.json();
@@ -518,6 +685,11 @@ export async function listAgents(slug: string): Promise<ApiResponse> {
 }
 
 export async function getAgent(slug: string, id: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void id;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents/${id}`);
     const data = await res.json();
@@ -536,6 +708,15 @@ export async function addAgent(
   model?: string,
   env?: Record<string, string>,
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void name;
+    void provider;
+    void systemPrompt;
+    void model;
+    void env;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const handler = toHandler(name);
     const res = await fetch(`${wsBase(slug)}/agents/add`, {
@@ -585,6 +766,12 @@ export async function updateAgent(
     dotenv?: string;
   },
 ): Promise<ApiResponse<{ agent: Agent }>> {
+  if (isLocalMode()) {
+    void slug;
+    void agentId;
+    void patch;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents/${agentId}`, {
       method: "PATCH",
@@ -604,6 +791,12 @@ export async function removeAgent(
   id: string,
   options: { hardDelete?: boolean } = {},
 ): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void id;
+    void options;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents/remove`, {
       method: "POST",
@@ -617,6 +810,11 @@ export async function removeAgent(
 }
 
 export async function startAgent(slug: string, id: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void id;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents/start`, {
       method: "POST",
@@ -632,6 +830,11 @@ export async function startAgent(slug: string, id: string): Promise<ApiResponse>
 }
 
 export async function stopAgent(slug: string, id: string): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void id;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
   try {
     const res = await fetch(`${wsBase(slug)}/agents/stop`, {
       method: "POST",

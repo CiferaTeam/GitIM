@@ -9,6 +9,7 @@ import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
 import { DonateDialog } from "../donate-dialog";
+import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
 
 interface AppShellProps {
@@ -91,6 +92,7 @@ export function AppShell({ children }: AppShellProps) {
       <main className="flex-1 overflow-hidden">
         {children ?? <Outlet />}
       </main>
+      <MobileTabBar />
     </div>
   );
 }
