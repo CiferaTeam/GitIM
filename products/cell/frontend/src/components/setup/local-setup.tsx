@@ -60,6 +60,13 @@ export function LocalSetup() {
 
     try {
       const backend = new LocalBackend(() => setCloneProgress(null));
+      setCloneProgress("Checking browser runtime...");
+      const preflight = await backend.preflight();
+      if (!preflight.ok) {
+        setError(preflight.error ?? "Browser runtime preflight failed");
+        return;
+      }
+
       setCloneProgress("Inferring identity...");
       const identity = await inferBrowserIdentity({
         remoteUrl: remoteUrl.trim(),

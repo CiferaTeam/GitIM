@@ -2,6 +2,12 @@ import git, { type AuthCallback, type ProgressCallback } from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { getFs } from "./storage";
 
+/** Exercise the git hashing stack without touching a repository. */
+export async function hashEmptyBlob(): Promise<string> {
+  const result = await git.hashBlob({ object: new Uint8Array() });
+  return result.oid;
+}
+
 /** Clone a remote repo into the IndexedDB filesystem. */
 export async function cloneRepo(
   url: string,

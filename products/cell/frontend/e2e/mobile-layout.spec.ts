@@ -212,3 +212,42 @@ test("fresh setup can switch to browser mode from the mode choice", async ({ pag
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByLabel("Git remote URL")).toBeVisible();
 });
+
+test("browser mode preflights worker dependencies before clone", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("gitim-connection-mode", "local");
+  });
+  await page.route("**/*", async (route) => {
+    const url = route.request().url();
+    if (url === "https://api.github.com/user") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
+      });
+      return;
+    }
+    if (url.startsWith("https://cors.isomorphic-git.org/")) {
+      await route.fulfill({
+        status: 500,
+        contentType: "text/plain",
+        body: "stubbed clone failure",
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Git remote URL").fill("https://github.com/flame4/room");
+  await page.getByLabel("Personal access token").fill("dummy-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  await expect(page.getByText("Signed in as @flame4")).toBeVisible();
+  await expect(page.getByText("HTTP Error: 500 Internal Server Error")).toBeVisible();
+  expect(pageErrors.join("\n")).not.toMatch(/Buffer|TextEncoder|createHash|crypto/);
+});

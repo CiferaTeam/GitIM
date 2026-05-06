@@ -152,6 +152,19 @@ export class LocalBackend implements Backend {
         }
       }
     };
+    this.worker.onerror = (event) => {
+      this.rejectPending(event.message || "browser worker failed");
+    };
+    this.worker.onmessageerror = () => {
+      this.rejectPending("browser worker sent an unreadable response");
+    };
+  }
+
+  private rejectPending(error: string): void {
+    for (const handler of this.pending.values()) {
+      handler.reject(new Error(error));
+    }
+    this.pending.clear();
   }
 
   private call(method: string, ...args: unknown[]): Promise<ApiResponse> {
@@ -161,6 +174,10 @@ export class LocalBackend implements Backend {
       const request: WorkerRequest = { id, method, args };
       this.worker.postMessage(request);
     });
+  }
+
+  preflight(): Promise<ApiResponse> {
+    return this.call("preflight");
   }
 
   async init(config: {

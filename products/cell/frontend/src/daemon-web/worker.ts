@@ -1,6 +1,7 @@
 // Web Worker entry point for daemon-web.
 // Receives RPC messages from LocalBackend, dispatches to handlers.
 
+import "./browser-polyfills";
 import * as handlers from "./handlers";
 import { startSyncLoop, stopSyncLoop } from "./sync";
 
@@ -25,6 +26,7 @@ const handler: Record<
   string,
   (...args: unknown[]) => Promise<unknown>
 > = {
+  preflight: () => handlers.preflight(),
   init: (config: unknown) =>
     handlers.init(
       config as {

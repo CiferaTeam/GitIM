@@ -15,14 +15,26 @@ export default defineConfig({
   optimizeDeps: {
     include: [
       '@isomorphic-git/lightning-fs',
+      'buffer',
       'isomorphic-git',
       'isomorphic-git/http/web',
     ],
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: [
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+      {
+        find: /^isomorphic-git$/,
+        replacement: path.resolve(__dirname, './node_modules/isomorphic-git/index.js'),
+      },
+      {
+        find: /^isomorphic-git\/http\/web$/,
+        replacement: path.resolve(
+          __dirname,
+          './node_modules/isomorphic-git/http/web/index.js',
+        ),
+      },
+    ],
   },
   build: {
     chunkSizeWarningLimit: 800,

@@ -2,7 +2,7 @@
 // Each function mirrors what gitim-runtime returns over HTTP.
 
 import * as gitOps from "./git";
-import { readFile, writeFile, readdir, exists, mkdir } from "./storage";
+import { readFile, writeFile, readdir, exists, mkdir, stat } from "./storage";
 import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
@@ -27,6 +27,21 @@ function ok(data: Record<string, unknown> = {}): ApiResponse {
 
 function err(error: string): ApiResponse {
   return { ok: false, error };
+}
+
+// --- Browser runtime preflight ---
+
+export async function preflight(): Promise<ApiResponse> {
+  try {
+    const oid = await gitOps.hashEmptyBlob();
+    if (oid !== "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391") {
+      return err("browser git hashing is unavailable");
+    }
+    await stat("/");
+    return ok({ runtime: "browser", storage: "ready", git: "ready" });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
 }
 
 // --- Init ---
