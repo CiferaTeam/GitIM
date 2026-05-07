@@ -733,6 +733,15 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
             started.elapsed().as_millis() as u64,
         );
     }
+    if let Err(e) = stdin.flush().await {
+        let _ = child.start_kill();
+        return PreflightResult::failure(
+            "pi",
+            ErrorKind::Other,
+            format!("failed to flush prompt to pi: {e}"),
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     // Keep stdin open so pi doesn't get SIGPIPE; we'll drop it after reading.
     let mut reader = BufReader::new(stdout).lines();
