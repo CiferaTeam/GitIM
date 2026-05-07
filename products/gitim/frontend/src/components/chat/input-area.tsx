@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { ApiResponse, Message } from "../../lib/types";
+import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
-import { CornerDownLeft, X } from "lucide-react";
+import { CornerDownLeft, SendHorizontal, X } from "lucide-react";
 
 interface InputAreaProps {
   /** Unique key for this input's scope — used for localStorage draft keying.
@@ -18,9 +19,19 @@ interface InputAreaProps {
 }
 
 const MAX_HEIGHT = 200;
+const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
 
 function draftKey(scopeKey: string) {
   return `gitim:draft:${scopeKey}`;
+}
+
+function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean) {
+  if (placeholder) {
+    return isMobile ? placeholder.replace(DESKTOP_ENTER_HINT, "") : placeholder;
+  }
+  return isMobile
+    ? "Type a message..."
+    : `Type a message...${DESKTOP_ENTER_HINT}`;
 }
 
 export function InputArea({
@@ -41,6 +52,7 @@ export function InputArea({
   const [mentionStart, setMentionStart] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isMobile = useIsMobile();
 
   // Restore draft when scope changes
   useEffect(() => {
@@ -62,6 +74,7 @@ export function InputArea({
   if (disabled || !scopeKey) return null;
   // After the guard above, scopeKey is non-null for the rest of render.
   const activeScopeKey: string = scopeKey;
+  const canSend = text.trim().length > 0 && !sending;
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
@@ -124,7 +137,7 @@ export function InputArea({
 
     if (mentionOpen) return;
 
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (!isMobile && e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void doSend();
     }
@@ -187,21 +200,33 @@ export function InputArea({
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           disabled={sending}
-          placeholder={
-            placeholder ??
-            "Type a message... (Enter to send, Shift+Enter for newline)"
-          }
-          className="w-full resize-none rounded-xl border border-border bg-background px-4 py-2.5 text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 disabled:opacity-50 transition-all overflow-y-auto pr-10"
+          placeholder={resolvedPlaceholder(placeholder, isMobile)}
+          enterKeyHint={isMobile ? "enter" : "send"}
+          className="w-full resize-none rounded-xl border border-border bg-background px-4 py-2.5 text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 disabled:opacity-50 transition-all overflow-y-auto pr-12 md:pr-10"
           style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />
 
-        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
-          {sending ? (
-            <span className="text-xs text-text-muted">Sending...</span>
-          ) : (
-            <CornerDownLeft className="size-3.5 text-text-faint" />
-          )}
-        </div>
+        {isMobile ? (
+          <button
+            type="button"
+            onClick={() => void doSend()}
+            onMouseDown={(e) => e.preventDefault()}
+            disabled={!canSend}
+            aria-label="Send message"
+            title="Send"
+            className="absolute right-2 bottom-2 flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 active:scale-95 disabled:bg-surface disabled:text-text-faint disabled:shadow-none"
+          >
+            <SendHorizontal className="size-4" />
+          </button>
+        ) : (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
+            {sending ? (
+              <span className="text-xs text-text-muted">Sending...</span>
+            ) : (
+              <CornerDownLeft className="size-3.5 text-text-faint" />
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
