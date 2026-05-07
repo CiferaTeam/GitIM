@@ -1632,7 +1632,7 @@ async fn agents_patch(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1649,10 +1649,7 @@ async fn agents_patch(
                 if req.model.is_some() && info.status == "running" {
                     return (
                         StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error": "stop the agent before changing model"
-                        })),
+                        Json(ErrorBody::new("stop the agent before changing model")),
                     )
                         .into_response();
                 }
@@ -1661,9 +1658,7 @@ async fn agents_patch(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("agent not found: {agent_id}")
-                    })),
+                    Json(ErrorBody::new(format!("agent not found: {agent_id}"))),
                 )
                     .into_response();
             }
@@ -1677,9 +1672,7 @@ async fn agents_patch(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false, "error": format!("read me.json failed: {e}")
-                })),
+                Json(ErrorBody::new(format!("read me.json failed: {e}"))),
             )
                 .into_response();
         }
@@ -1689,9 +1682,7 @@ async fn agents_patch(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false, "error": format!("parse me.json failed: {e}")
-                })),
+                Json(ErrorBody::new(format!("parse me.json failed: {e}"))),
             )
                 .into_response();
         }
@@ -1753,10 +1744,7 @@ async fn agents_patch(
             if !is_valid_env_key(key) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "ok": false,
-                        "error": format!("invalid env var name: {key}")
-                    })),
+                    Json(ErrorBody::new(format!("invalid env var name: {key}"))),
                 )
                     .into_response();
             }
@@ -1775,10 +1763,7 @@ async fn agents_patch(
         if contents.len() > DOTENV_MAX_BYTES {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "dotenv exceeds 64 KB limit"
-                })),
+                Json(ErrorBody::new("dotenv exceeds 64 KB limit")),
             )
                 .into_response();
         }
@@ -1787,9 +1772,7 @@ async fn agents_patch(
     if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false, "error": format!("write me.json failed: {e}")
-            })),
+            Json(ErrorBody::new(format!("write me.json failed: {e}"))),
         )
             .into_response();
     }
@@ -1802,9 +1785,7 @@ async fn agents_patch(
                 Err(e) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "ok": false, "error": format!("read agent state failed: {e}")
-                        })),
+                        Json(ErrorBody::new(format!("read agent state failed: {e}"))),
                     )
                         .into_response();
                 }
@@ -1813,9 +1794,7 @@ async fn agents_patch(
             if let Err(e) = agent_state.save(&repo_root) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("write agent state failed: {e}")
-                    })),
+                    Json(ErrorBody::new(format!("write agent state failed: {e}"))),
                 )
                     .into_response();
             }
@@ -1838,9 +1817,7 @@ async fn agents_patch(
                 if let Err(e) = std::fs::remove_file(&env_path) {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "ok": false, "error": format!("delete .env failed: {e}")
-                        })),
+                        Json(ErrorBody::new(format!("delete .env failed: {e}"))),
                     )
                         .into_response();
                 }
@@ -1849,9 +1826,7 @@ async fn agents_patch(
             if let Err(e) = std::fs::write(&env_path, contents) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("write .env failed: {e}")
-                    })),
+                    Json(ErrorBody::new(format!("write .env failed: {e}"))),
                 )
                     .into_response();
             }
@@ -1923,12 +1898,14 @@ async fn agents_patch(
     };
 
     match response {
-        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
+        Some(info) => Json(AgentDetailResponse {
+            ok: true,
+            agent: info,
+        })
+        .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "ok": false, "error": format!("agent not found: {agent_id}")
-            })),
+            Json(ErrorBody::new(format!("agent not found: {agent_id}"))),
         )
             .into_response(),
     }
