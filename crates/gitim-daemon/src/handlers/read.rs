@@ -73,14 +73,15 @@ pub async fn handle_read(
         entries = entries[start..].to_vec();
     }
 
-    let json_entries: Vec<serde_json::Value> =
+    let entries: Vec<serde_json::Value> =
         entries.iter().map(|entry| entry_to_json(entry)).collect();
 
-    Response::success(serde_json::json!({
-        "channel": channel,
-        "entries": json_entries,
-        "archived": is_archived,
-    }))
+    let payload = gitim_core::responses::ReadResponse {
+        channel,
+        entries,
+        archived: is_archived,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_list_channels(state: SharedState) -> Response {
