@@ -396,16 +396,14 @@ fn not_found_workspace() -> axum::response::Response {
         .into_response()
 }
 
-/// Used by every `/im/*` route that needs to talk to the per-workspace
-/// daemon. Maps to "workspace exists but `human_repo` not yet wired up
-/// (initial provisioning never finished)".
+/// Used by `/im/*` routes when the workspace exists but `human_repo`
+/// isn't wired up yet (initial provisioning never finished). Returns
+/// 200 with the standard daemon-error body shape — same convention as
+/// `api_response_to_json` for daemon-side `Response::error`s, so the
+/// WebUI can branch on `body.ok` without status-code-aware code.
 fn human_not_initialized() -> axum::response::Response {
     use axum::response::IntoResponse;
-    (
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorBody::new("human daemon not initialized")),
-    )
-        .into_response()
+    Json(ErrorBody::new("human daemon not initialized")).into_response()
 }
 
 fn with_workspace_snapshot<F, R>(
@@ -922,8 +920,19 @@ fn human_handler(
     slug: &str,
 ) -> Result<String, axum::response::Response> {
     use axum::response::IntoResponse;
+    // human_handler keeps the explicit 503 status — distinct from the
+    // /im/* proxy convention because it's only called from card/channel
+    // archive endpoints that want a hard failure if the workspace's daemon
+    // never came up. Was that way before the typed sweep; keeping it.
     let human_repo = with_workspace_snapshot(state, slug, |ctx| ctx.human_repo.clone())?
-        .ok_or_else(human_not_initialized)?;
+        .ok_or_else(|| {
+            use axum::response::IntoResponse;
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorBody::new("human daemon not initialized")),
+            )
+                .into_response()
+        })?;
     let me_path = human_repo.join(".gitim/me.json");
     let content = std::fs::read_to_string(&me_path).map_err(|e| {
         (
