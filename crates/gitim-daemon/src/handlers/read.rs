@@ -85,7 +85,8 @@ pub async fn handle_read(
 }
 
 pub async fn handle_list_channels(state: SharedState) -> Response {
-    let mut channels: Vec<serde_json::Value> = Vec::new();
+    use gitim_core::responses::{ChannelSummary, ListChannelsResponse};
+    let mut channels: Vec<ChannelSummary> = Vec::new();
 
     // 扫描 channels/*.meta.yaml — 读取 members 字段
     let ch_dir = state.repo_root.join("channels");
@@ -100,11 +101,11 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                         .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
                         .map(|m| m.members)
                         .unwrap_or_default();
-                    channels.push(serde_json::json!({
-                        "name": name,
-                        "kind": "channel",
-                        "members": members,
-                    }));
+                    channels.push(ChannelSummary {
+                        name,
+                        kind: "channel".to_string(),
+                        members,
+                    });
                 }
             }
         }
@@ -119,22 +120,23 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                 if fname.ends_with(".thread") {
                     let name = fname.trim_end_matches(".thread").to_string();
                     let members: Vec<String> = name.split("--").map(|s| s.to_string()).collect();
-                    channels.push(serde_json::json!({
-                        "name": name,
-                        "kind": "dm",
-                        "members": members,
-                    }));
+                    channels.push(ChannelSummary {
+                        name,
+                        kind: "dm".to_string(),
+                        members,
+                    });
                 }
             }
         }
     }
 
-    channels.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Response::success(serde_json::json!({ "channels": channels }))
+    channels.sort_by(|a, b| a.name.cmp(&b.name));
+    Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
 pub async fn handle_list_archived_channels(state: SharedState) -> Response {
-    let mut channels: Vec<serde_json::Value> = Vec::new();
+    use gitim_core::responses::{ChannelSummary, ListChannelsResponse};
+    let mut channels: Vec<ChannelSummary> = Vec::new();
 
     // 扫描 archive/channels/*.meta.yaml — 读取 members 字段
     let arch_ch_dir = state.repo_root.join("archive").join("channels");
@@ -149,25 +151,26 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
                         .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
                         .map(|m| m.members)
                         .unwrap_or_default();
-                    channels.push(serde_json::json!({
-                        "name": name,
-                        "kind": "archived_channel",
-                        "members": members,
-                    }));
+                    channels.push(ChannelSummary {
+                        name,
+                        kind: "archived_channel".to_string(),
+                        members,
+                    });
                 }
             }
         }
     }
 
-    channels.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Response::success(serde_json::json!({ "channels": channels }))
+    channels.sort_by(|a, b| a.name.cmp(&b.name));
+    Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
 pub async fn handle_list_users(state: SharedState) -> Response {
     let users = state.users.read().await;
     let mut sorted: Vec<String> = users.clone();
     sorted.sort();
-    Response::success(serde_json::json!({ "users": sorted }))
+    let payload = gitim_core::responses::ListUsersResponse { users: sorted };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
@@ -247,11 +250,12 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
     // Deduplicate (an entry could match both by line_number and point_to)
     thread_entries.dedup_by(|a, b| a["line_number"] == b["line_number"]);
 
-    Response::success(serde_json::json!({
-        "channel": channel,
-        "root_line": root_line,
-        "entries": thread_entries,
-    }))
+    let payload = gitim_core::responses::GetThreadResponse {
+        channel,
+        root_line,
+        entries: thread_entries,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_stop(state: SharedState) -> Response {

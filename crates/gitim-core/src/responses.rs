@@ -61,6 +61,39 @@ pub struct ReadResponse {
     pub archived: bool,
 }
 
+/// One row in a list-of-channels payload (active channels, archived
+/// channels, DMs). `kind` distinguishes them on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelSummary {
+    pub name: String,
+    /// Currently `"channel"`, `"dm"`, or `"archived_channel"`.
+    pub kind: String,
+    pub members: Vec<String>,
+}
+
+/// Response payload for `Request::ListChannels` and
+/// `Request::ListArchivedChannels` (both use the same row shape; only
+/// the `kind` discriminator differs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListChannelsResponse {
+    pub channels: Vec<ChannelSummary>,
+}
+
+/// Response payload for `Request::ListUsers`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListUsersResponse {
+    pub users: Vec<String>,
+}
+
+/// Response payload for `Request::GetThread`. `entries` keep the same
+/// `entry_to_json` shape as `ReadResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetThreadResponse {
+    pub channel: String,
+    pub root_line: u64,
+    pub entries: Vec<Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +177,55 @@ mod tests {
         assert_eq!(obj.len(), 3);
         assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("general"));
         assert_eq!(obj.get("archived").and_then(|v| v.as_bool()), Some(false));
+        assert!(obj.get("entries").unwrap().is_array());
+    }
+
+    #[test]
+    fn list_channels_response_wire_shape() {
+        let r = ListChannelsResponse {
+            channels: vec![ChannelSummary {
+                name: "general".to_string(),
+                kind: "channel".to_string(),
+                members: vec!["alice".to_string(), "bob".to_string()],
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let arr = v.get("channels").unwrap().as_array().unwrap();
+        let first = arr[0].as_object().unwrap();
+        assert_eq!(first.get("name").and_then(|v| v.as_str()), Some("general"));
+        assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("channel"));
+        assert_eq!(
+            first
+                .get("members")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+        );
+    }
+
+    #[test]
+    fn list_users_response_wire_shape() {
+        let r = ListUsersResponse {
+            users: vec!["alice".to_string(), "bob".to_string()],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let users = v.get("users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].as_str(), Some("alice"));
+    }
+
+    #[test]
+    fn get_thread_response_wire_shape() {
+        let r = GetThreadResponse {
+            channel: "general".to_string(),
+            root_line: 42,
+            entries: vec![],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("general"));
+        assert_eq!(obj.get("root_line").and_then(|v| v.as_u64()), Some(42));
         assert!(obj.get("entries").unwrap().is_array());
     }
 
