@@ -22,29 +22,13 @@ This repository holds the protocol implementation (Rust), the three shipped bina
 
 ## Install
 
-One-liner for macOS / Linux:
+The fastest path is **[gitim.io](https://gitim.io)** — open it in your browser and follow the guided onboarding. It detects your platform, downloads the runtime, and walks you through your first workspace. No terminal, no manual binary management.
 
-```sh
-curl -sSf https://raw.githubusercontent.com/CiferaTeam/GitIM/main/install.sh | sh
-```
-
-Three binaries land in `~/.gitim/bin`:
-
-| Binary          | Role                                                               |
-| --------------- | ------------------------------------------------------------------ |
-| `gitim`         | CLI — send/read messages, manage channels, operate the daemon      |
-| `gitim-daemon`  | Background process — owns Git state, serves CLI and Web UI         |
-| `gitim-runtime` | Agent runtime — provisions, polls, and orchestrates local agents   |
-
-The installer verifies every archive against `SHA256SUMS` published alongside the release. A tampered mirror aborts the install.
-
-### Supported platforms
-
-- macOS — Apple Silicon (`darwin-arm64`) and Intel (`darwin-x86_64`)
-- Linux — `linux-arm64` and `linux-x86_64` (static musl builds; glibc and Alpine both work)
-- Windows — via WSL2 (install the corresponding Linux build from inside WSL)
+> **Please use the official frontend if you can.** It needs no deployment, naturally supports distributed multi-node operation (each user runs a local runtime; the frontend just talks to localhost), and it generates an anonymous random UUID that pings a stats backend so [cell.gitim.io](https://cell.gitim.io) can display a live active-user count. Watching that number tick up is the single biggest motivation I have to keep building this.
 
 ### Build from source
+
+The three Rust binaries — `gitim` (CLI), `gitim-daemon` (Git / state service), `gitim-runtime` (agent orchestrator):
 
 ```sh
 git clone https://github.com/CiferaTeam/GitIM
@@ -52,35 +36,22 @@ cd GitIM
 ./install-from-source.sh
 ```
 
-Requires Rust stable (the workspace pins `rust-toolchain.toml` to `stable`) and Git 2.30+. The script builds and installs the three binaries into `~/.gitim/bin`.
-
-## Quick start
+The Cell webapp — only if you'd rather self-host the frontend instead of using `cell.gitim.io`:
 
 ```sh
-# Initialize a workspace against a GitHub repo
-gitim onboard <repo> <org> --token <ghp_xxx>
-
-# Send a message
-gitim send general "hello team"
-
-# Read a channel
-gitim read general
-
-# Search across all messages
-gitim search "rate limit"
+cd products/cell/frontend
+npm install
+npm run dev          # local dev server
+npm run build        # static bundle
 ```
 
-→ See [**The GitIM Protocol**](docs/gitim-protocol.md) for the full message format, file layout, command reference, and design rationale.
+Requires Rust stable, Node 20+, and Git 2.30+.
+
+→ For the full protocol — message format, file layout, command reference, design rationale — see [The GitIM Protocol](docs/gitim-protocol.md).
 
 ## Updates
 
-GitIM self-updates:
-
-```sh
-gitim update
-```
-
-If the gitim·cell Web UI is open, a yellow ⚠ badge in the top-right appears when a new version is available. One click updates and restarts.
+If you're on the official frontend (cell.gitim.io), a yellow ⚠ badge appears in the top-right when a new version is available — one click updates and restarts. For source builds, pull and rebuild, or run `gitim update`.
 
 ## Supported agents (gitim·cell)
 
@@ -95,30 +66,9 @@ Any code agent you already run locally can plug in:
 
 Wiring an agent in is a single command. You don't modify the agent itself.
 
-## Repository layout
-
-```
-crates/                          Rust workspace
-├── gitim-cli                    `gitim` CLI binary (clap)
-├── gitim-daemon                 `gitim-daemon` HTTP/IPC service
-├── gitim-runtime                `gitim-runtime` agent orchestrator
-├── gitim-core                   Shared types, parsing, validation
-├── gitim-sync                   Git sync loop, conflict resolution, line renumbering
-├── gitim-index                  SQLite FTS5 full-text search
-├── gitim-client                 IPC client library
-├── gitim-agent-provider         Provider adapters (Claude / Codex / Hermes / ...)
-└── gitim-updater                Shared self-update core
-products/cell/                   gitim·cell product
-├── frontend/                    React 19 + Vite + Tailwind + Zustand
-└── backend/                     Cloudflare Worker (Hono on Workers + KV + D1)
-docs/                            Protocol, design notes, release notes, plans
-install.sh                       Curl-installable installer
-release.sh                       Release pipeline (4-target cross-compile + SHA256SUMS)
-```
-
 ## Requirements
 
-- macOS 12+ or a recent Linux distribution
+- macOS 12+ / recent Linux / Windows via WSL2
 - Git 2.30+ on your `PATH`
 - (For agent use) at least one of Claude Code / Codex / opencode / Gemini CLI / Hermes installed
 
