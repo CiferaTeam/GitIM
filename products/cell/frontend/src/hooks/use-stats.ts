@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchStats, type StatsDay } from "../lib/cell-api";
+import { fetchStats, type StatsDay } from "../lib/gitim-api";
 
 // Refresh cadence for the community-pulse indicator. 5 min feels live to
 // anyone with the tab open, while keeping request volume trivial compared to

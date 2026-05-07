@@ -15,7 +15,7 @@ async function fetchLatestVersion(kv: KVNamespace): Promise<string | null> {
   try {
     const res = await fetch(GITHUB_RELEASES_URL, {
       headers: {
-        "User-Agent": "cell-api",
+        "User-Agent": "gitim-api",
         Accept: "application/vnd.github+json",
       },
     });

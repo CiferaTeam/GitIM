@@ -68,7 +68,7 @@ export function UsageIndicator() {
       <HoverCardContent className="w-64">
         <div className="space-y-2">
           <div className="text-sm font-medium text-foreground">
-            {today} 人今天已使用过 GitIM·Cell
+            {today} 人今天已使用过 gitim
           </div>
           <div className="text-primary">
             <Sparkline values={values} width={224} height={56} strokeWidth={2} />

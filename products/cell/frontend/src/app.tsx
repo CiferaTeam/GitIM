@@ -57,7 +57,7 @@ function FirstRunScreen() {
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
           <h1 className="text-2xl font-bold tracking-tight">
-            GitIM<span className="text-primary">·</span>Cell
+            gitim
           </h1>
           <p className="text-sm text-text-muted mt-1">
             Create your first workspace to get started.

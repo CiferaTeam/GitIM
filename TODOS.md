@@ -23,7 +23,7 @@
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` Perf P1。
 **Added:** 2026-04-17 via /plan-eng-review
 
-### cell-frontend 前端测试基建
+### gitim 前端测试基建
 **What:** `products/cell/frontend` 引入 vitest + 至少一个 MemberPicker 等组件的 unit test 范例。
 **Why:** 群聊邀请功能落地时发现前端缺少测试基建，只能靠 cargo test 覆盖后端。长期看前端逻辑（搜索过滤、多选、排除）应有单元测试。
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` 测试要点。

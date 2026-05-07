@@ -227,7 +227,7 @@ phase0 的 webui-v2/src/daemon-web/ 全部清空,按以下结构重写(沿用 ph
 - **命名最终化截止 Stage D 启动前**:Daemon mode / Browser-only mode 等内部叫法在此前定型
 
 ### Stage E — 部署形态决策(独立 design 阻塞 Stage C)
-Browser-only mode 的实际部署面 — 自托管 / cell.gitim.io / 纯静态 + GitHub Pages — 与产品/运营独立讨论,**但 Stage C 实施前必须有结论**:CORS proxy / token 管理 / 域名等会决定 runtime.ts 与 git.ts 的具体写法。本 doc 不强行定夺。
+Browser-only mode 的实际部署面 — 自托管 / gitim.io / 纯静态 + GitHub Pages — 与产品/运营独立讨论,**但 Stage C 实施前必须有结论**:CORS proxy / token 管理 / 域名等会决定 runtime.ts 与 git.ts 的具体写法。本 doc 不强行定夺。
 
 ## 待解开放问题
 
@@ -250,7 +250,7 @@ Browser-only mode 的实际部署面 — 自托管 / cell.gitim.io / 纯静态 +
 - 各 handler 的迁移顺序与依赖图(归 Stage B plan)
 - WebUI 模式切换的 UX/视觉设计
 - gitoxide vs isomorphic-git 的取舍(归 Stage C 实施前 spike)
-- cell.gitim.io 的产品/邀请/计费(归 cell launch plan)
+- gitim.io 的产品/邀请/计费(归 gitim launch plan)
 - Service Worker / PWA / 离线能力增强
 
 ## 成功标准
@@ -274,7 +274,7 @@ Browser-only mode 的实际部署面 — 自托管 / cell.gitim.io / 纯静态 +
 - `docs/plans/daemon-web-v2/handlers-refactor.md` — Stage B plan
 - `docs/plans/daemon-web-v2/browser-runtime.md` — Stage C plan
 - `docs/plans/daemon-web-v2/threat-model.md` — Browser-only mode 安全 design
-- `docs/plans/daemon-web-v2/deployment.md` — Stage E 部署形态决策(自托管 / cell.gitim.io / 静态托管 / CORS proxy 选型)
+- `docs/plans/daemon-web-v2/deployment.md` — Stage E 部署形态决策(自托管 / gitim.io / 静态托管 / CORS proxy 选型)
 
 ### 改动(Stage B)
 

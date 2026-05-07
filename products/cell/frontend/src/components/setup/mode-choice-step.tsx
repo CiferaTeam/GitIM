@@ -14,7 +14,7 @@ export function ModeChoiceStep({
     <SetupShell
       step={1}
       title="Choose Mode"
-      description="Pick how this browser connects to GitIM"
+      description="Pick how this browser connects to gitim"
       showSteps={false}
     >
       <div className="space-y-3">

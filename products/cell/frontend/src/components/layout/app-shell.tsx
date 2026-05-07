@@ -27,7 +27,7 @@ export function AppShell({ children }: AppShellProps) {
         {/* Left: logo + workspace switcher + connection status */}
         <div className="flex items-center gap-2 min-w-0">
           <span className="font-bold text-sm tracking-tight text-foreground shrink-0">
-            GitIM<span className="text-primary">·</span>Cell
+            gitim
           </span>
           <span
             className={[

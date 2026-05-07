@@ -66,7 +66,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
           <div className="flex items-center gap-2">
             <MessageSquare className="size-5 text-primary" />
             <span className="font-bold text-sm tracking-tight">
-              GitIM<span className="text-primary">·</span>Cell
+              gitim
             </span>
           </div>
           <button

@@ -1,5 +1,5 @@
 {
-  "name": "cell-frontend",
+  "name": "gitim-frontend",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,7 +10,7 @@
     "test": "vitest run src",
     "test:e2e": "playwright test e2e/sidebar-layout.spec.ts e2e/mobile-layout.spec.ts",
     "preview": "vite preview",
-    "deploy": "tsc -b && vite build && wrangler pages deploy dist --project-name cell-gitim --commit-dirty=true"
+    "deploy": "tsc -b && vite build && wrangler pages deploy dist --project-name gitim --commit-dirty=true"
   },
   "dependencies": {
     "@isomorphic-git/lightning-fs": "^4.6.2",

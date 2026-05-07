@@ -91,7 +91,7 @@ export function DocsPage() {
       content: (
         <div className="space-y-2">
           <p className="text-text-secondary text-sm leading-relaxed">
-            GitIM·Cell is a lightweight chat client that connects to a local GitIM daemon.
+            gitim is a lightweight chat client that connects to a local GitIM daemon.
             This guide walks you through the essentials to get up and running in minutes.
           </p>
 

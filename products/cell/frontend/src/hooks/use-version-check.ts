@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { getUUID } from "../lib/device";
-import { checkVersion } from "../lib/cell-api";
+import { checkVersion } from "../lib/gitim-api";
 import { health, updateAndRestart } from "../lib/client";
 import { useConnectionStore } from "./use-connection-store";
 
@@ -89,7 +89,7 @@ function isNewer(current: string | null, latest: string | null): boolean {
 }
 
 /**
- * Combines runtime `/health` with the Cell API `check-version` endpoint to
+ * Combines runtime `/health` with the gitim API `check-version` endpoint to
  * drive the self-update state machine (Task 8).
  *
  * Polling cadence:

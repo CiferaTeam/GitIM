@@ -1,4 +1,4 @@
-const API_URL = import.meta.env.VITE_CELL_API_URL ?? "";
+const API_URL = import.meta.env.VITE_GITIM_API_URL ?? "";
 
 interface VersionResult {
   ok: boolean;

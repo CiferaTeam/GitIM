@@ -39,7 +39,7 @@ export function SetupShell({
         {/* Logo */}
         <div className="text-center mb-8">
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            GitIM<span className="text-primary">·</span>Cell
+            gitim
           </h1>
           <p className="text-sm text-text-muted mt-1">AI-native IM over Git</p>
         </div>

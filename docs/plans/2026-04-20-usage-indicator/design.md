@@ -6,7 +6,7 @@
 
 ## Goal
 
-在 webui-v2 顶栏右侧加一个小型活跃用户指示器，给用户(包括 cell.gitim.io 访客)一个"社区还活着"的实时信号：
+在 webui-v2 顶栏右侧加一个小型活跃用户指示器，给用户(包括 gitim.io 访客)一个"社区还活着"的实时信号：
 
 - 显示今日 DAU 数字 + 30 天 sparkline 趋势
 - Hover 展开放大视图
@@ -118,8 +118,8 @@ export { app as statsRoutes };
 
 已有 cors middleware 覆盖所有路径。`origin` 白名单：
 - `localhost:*`（本地 runtime WebUI）
-- `cell.gitim.io`
-- `*.cell-gitim.pages.dev`
+- `gitim.io`
+- `*.gitim.pages.dev`
 
 新端点自动享受。无需改动。
 
@@ -197,7 +197,7 @@ export { app as statsRoutes };
 
 | 路径 | 职责 |
 |------|------|
-| `webui-v2/src/lib/cell-api.ts` (extend) | 加 `fetchStats()` |
+| `products/cell/frontend/src/lib/gitim-api.ts` (extend) | 加 `fetchStats()` |
 | `webui-v2/src/hooks/use-stats.ts` | mount 时拉一次，失败返回 null |
 | `webui-v2/src/components/ui/hover-card.tsx` | Radix HoverCard 封装（项目现无此组件） |
 | `webui-v2/src/components/usage-indicator.tsx` | 顶栏组件 |
@@ -242,7 +242,7 @@ export function useStats() {
 └──────────┘
    ↓ hover
 ┌────────────────────────────────┐
-│ 12 人正在使用 GitIM·Cell       │
+│ 12 人正在使用 gitim           │
 │ ┌────────────────────────────┐ │
 │ │   ╱╲    ╱╲╱                │ │ ← HoverCard 放大图 ~240×64
 │ │  ╱  ╲__╱                   │ │
@@ -260,7 +260,7 @@ export function useStats() {
 
 **HoverCard 内容**：
 
-- 标题：`{todayDau} 人正在使用 GitIM·Cell`
+- 标题：`{todayDau} 人正在使用 gitim`
 - 大 sparkline，同一 `<SparklinePath />` 组件尺寸参数变大
 - 脚注：`近 30 天 · 峰值 {max(dau)}`
 - `align="end" sideOffset={4}`，和 `UpdateIndicator` 的 popover 对齐
@@ -300,7 +300,7 @@ export function sparklinePath(values: number[], w: number, h: number): string {
 
 ## 5. 测试策略
 
-### Backend（Vitest + miniflare，沿用 cell-api 现有约定）
+### Backend（Vitest + miniflare，沿用 gitim-api 现有约定）
 
 | 场景 | 断言 |
 |------|------|
@@ -349,6 +349,6 @@ Hover 行为、Radix 弹层不测（信任 Radix）。
 以下全部列为 **v2+ 再说**：
 
 - `visits` 保留期 / 自动清理 → v1 不做，到 3 个月后再看体量
-- `/api/stats` 按 UA 过滤爬虫 / 机器人 → 当下访客源 = 真实 runtime + 极少数 cell.gitim.io 访客，机器人噪音低
+- `/api/stats` 按 UA 过滤爬虫 / 机器人 → 当下访客源 = 真实 runtime + 极少数 gitim.io 访客，机器人噪音低
 - 粘性指标暴露到公开端点 → v1 公开端点只给 `dau`，粘性留 admin
 - 多语言 UI → 不做

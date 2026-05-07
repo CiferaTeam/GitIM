@@ -81,7 +81,7 @@ export function SetupGate({ children }: SetupGateProps) {
       <SetupShell
         step={2}
         title="Connect Runtime"
-        description="Link GitIM·Cell to your local runtime daemon"
+        description="Link gitim to your local runtime daemon"
         loading
       />
     );

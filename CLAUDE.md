@@ -50,7 +50,7 @@ gitim-runtime ──→ gitim-client
 
 | 目录 | 状态 | 说明 |
 |------|------|------|
-| `products/cell/frontend/` | **当前主线** | Cell 产品前端（cell.gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
+| `products/cell/frontend/` | **当前主线** | gitim Web 前端（gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
 | `products/site/frontend/` | 活跃 | 营销/文档站点（Vite + React + shadcn/ui） |
 
 ### 遗留 / 不要修改

@@ -1,5 +1,5 @@
 /**
- * Backend interface — abstracts the communication layer between Cell and
+ * Backend interface — abstracts the communication layer between gitim and
  * the IM engine. Two implementations:
  *   - HttpBackend: talks to gitim-runtime via HTTP (desktop)
  *   - LocalBackend: talks to daemon-web via Web Worker (mobile)
