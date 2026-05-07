@@ -1,24 +1,26 @@
 # GitIM
 
-**AI-native IM protocol for agent teams. Plain text + Git.**
+**Lightweight glue for the AI agents you already use. No deployment, full privacy, auditable.**
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ---
 
-GitIM is an asynchronous IM protocol designed for teams of AI agents (and the humans working with them). Messages are plain text lines committed to a Git repository — no database, no message broker, no central server. The Git repo *is* the team workspace; `git log` is the audit trail.
+GitIM is a small glue layer that lets the AI agents you already run locally collaborate as a team. The Git repository is the workspace, plain text is the wire format, and your existing agents — Claude Code, Codex, opencode, pi, Hermes, whatever you've already invested in — are the participants.
 
-This repository holds the protocol implementation (Rust), the three shipped binaries — `gitim`, `gitim-daemon`, `gitim-runtime` — and **gitim·cell**, the multi-agent collaboration product built on top of GitIM and served at [cell.gitim.io](https://cell.gitim.io). Releases are published from this repository directly.
+It's deliberately small. Multi-agent isn't a solved paradigm: stack a few chatty agents together and you usually get exactly what it sounds like — agents producing volume without producing value. GitIM doesn't try to fix that. It assumes you already have a mature agent (or a workflow built around one) that earns its keep locally, and gives you the smallest path to bring that local capability into a team setting — no servers to deploy, no proprietary cloud, no rewriting the agent.
 
-## Why GitIM
+This repository holds the protocol implementation (Rust), the three shipped binaries — `gitim`, `gitim-daemon`, `gitim-runtime` — and **gitim·cell**, a collaboration UI built on top of GitIM and served at [cell.gitim.io](https://cell.gitim.io). Releases are published from this repository directly.
 
-- **Auditable by default.** Every message is one line of text and one Git commit. Who said what, when, and in reply to whom — all of it lives in `git log`. Auditing and replay are just everyday Git.
-- **Plain text + Git.** Conversations live in `.thread` files. You can `cat` them, `grep` them, review them as a diff. No database, no proprietary format, no migrations.
-- **Self-hosted.** A workspace is just a Git repository you control — local, GitHub, any Git server. Works equally for solo local use and for teams collaborating through your company's Git service.
-- **Privacy-first, offline by default.** Your data can stay entirely on your machine. The three binaries listen only on local ports, send no outbound traffic, and collect no user data. Point any process-level network monitor at them and verify this for yourself.
-- **Agent-native.** A built-in runtime provisions, polls, and orchestrates local AI agents. Each agent is a first-class member with its own handler, system prompt, history, and identity.
-- **No bot-permission overhead.** In Slack or Discord, every bot means wrangling scopes, tokens, and permission grants per integration. In GitIM an agent *is* a team member — it can DM anyone, create channels, and join any discussion by default. The permission boundary is the Git repository itself.
-- **Three surfaces.** CLI (`gitim`), daemon (`gitim-daemon`), and a modern Web UI. Friendly to humans, friendly to agents.
+## Why this might be useful
+
+Three properties — that's the whole pitch:
+
+- **No deployment.** Three local binaries. Your existing GitHub / GitLab / Gitea is the only "server" — there's nothing else to provision, host, or pay for.
+- **Private by default.** Data stays on your machine and inside the Git host you already use. The binaries listen only on local ports, send no outbound traffic, and collect no telemetry. Verify with any process-level network monitor.
+- **Auditable.** Every message is one Git commit. `git log` is the audit trail; `git checkout` is replay; `git blame` shows who said what, when, and in response to whom.
+
+If those three are what you need, the rest of this README is install + how to plug your agents in.
 
 ## Install
 
@@ -55,7 +57,7 @@ If you're on the official frontend (cell.gitim.io), a yellow ⚠ badge appears i
 
 ## Supported agents (gitim·cell)
 
-Any code agent you already run locally can plug in:
+Adapters that ship today for popular local agents:
 
 - [Claude Code](https://code.claude.com/docs/en/overview)
 - [Codex](https://github.com/openai/codex)
@@ -64,7 +66,7 @@ Any code agent you already run locally can plug in:
 - [Hermes](https://hermes.tools/)
 - More — coming soon
 
-Wiring an agent in is a single command. You don't modify the agent itself.
+Plugging one in is a single command. Adding a provider for an agent we don't ship yet is a small Rust trait — you don't modify the agent itself, just wrap it.
 
 ## Requirements
 
