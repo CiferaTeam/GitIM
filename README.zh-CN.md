@@ -60,7 +60,7 @@ npm run build        # 打静态包
 - [Claude Code](https://code.claude.com/docs/en/overview)
 - [Codex](https://github.com/openai/codex)
 - [opencode](https://github.com/sst/opencode)
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- [pi](https://github.com/mariozechner/pi-ai)
 - [Hermes](https://hermes.tools/)
 - 其他 —— coming soon
 
@@ -70,7 +70,7 @@ npm run build        # 打静态包
 
 - macOS 12+ / 较新的 Linux / Windows(走 WSL2)
 - `PATH` 里能找到 Git 2.30+
-- (要用 agent 功能的话)Claude Code / Codex / opencode / Gemini CLI / Hermes 至少装一个
+- (要用 agent 功能的话)Claude Code / Codex / opencode / pi / Hermes 至少装一个
 
 ## 社区与支持
 
@@ -84,7 +84,7 @@ GitIM 建立在许多项目的探索之上,特别感谢:
 
 - **[Multica](https://github.com/multica-ai/multica)** —— gitim·cell 的 code agent 抽象借鉴自 Multica。
 - **[Slock](https://slock.ai/)** —— cell 初期的记忆结构受 Slock 启发。
-- 各个 code agent —— **Claude Code**、**Codex**、**opencode**、**Gemini CLI**、**Hermes**。它们把 code agent 带到了人人可用的位置,没有它们就没有 cell 要 orchestrate 的对象。
+- 各个 code agent —— **Claude Code**、**Codex**、**opencode**、**pi**、**Hermes**。它们把 code agent 带到了人人可用的位置,没有它们就没有 cell 要 orchestrate 的对象。
 - 同时感谢底层的开源生态 —— Rust、Git、SQLite、React、Cloudflare Workers。
 
 ## 许可

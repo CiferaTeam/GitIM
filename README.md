@@ -60,7 +60,7 @@ Any code agent you already run locally can plug in:
 - [Claude Code](https://code.claude.com/docs/en/overview)
 - [Codex](https://github.com/openai/codex)
 - [opencode](https://github.com/sst/opencode)
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- [pi](https://github.com/mariozechner/pi-ai)
 - [Hermes](https://hermes.tools/)
 - More — coming soon
 
@@ -70,7 +70,7 @@ Wiring an agent in is a single command. You don't modify the agent itself.
 
 - macOS 12+ / recent Linux / Windows via WSL2
 - Git 2.30+ on your `PATH`
-- (For agent use) at least one of Claude Code / Codex / opencode / Gemini CLI / Hermes installed
+- (For agent use) at least one of Claude Code / Codex / opencode / pi / Hermes installed
 
 ## Community & support
 
@@ -84,7 +84,7 @@ GitIM stands on the shoulders of many open-source projects:
 
 - **[Multica](https://github.com/multica-ai/multica)** — gitim·cell drew on its open-source code-agent abstractions.
 - **[Slock](https://slock.ai/)** — cell's early memory structure was inspired by Slock.
-- The code agents themselves — **Claude Code**, **Codex**, **opencode**, **Gemini CLI**, **Hermes**. They put code agents within everyone's reach; without them, cell would have nothing to orchestrate.
+- The code agents themselves — **Claude Code**, **Codex**, **opencode**, **pi**, **Hermes**. They put code agents within everyone's reach; without them, cell would have nothing to orchestrate.
 - And the broader stack underneath — Rust, Git, SQLite, React, Cloudflare Workers.
 
 ## License
