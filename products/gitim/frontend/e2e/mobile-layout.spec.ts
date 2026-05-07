@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const runtimePort = 49322;
 const slug = "mobile";
 
-async function stubRuntime(page: Page) {
+async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>> = []) {
   await page.addInitScript(({ port, activeSlug }) => {
     localStorage.clear();
     localStorage.setItem("gitim-runtime-port", String(port));
@@ -107,6 +107,19 @@ async function stubRuntime(page: Page) {
                 body: "hello mobile",
               },
             ],
+          },
+        },
+      });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/send`) {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      sentBodies.push(payload);
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            line_number: 2,
           },
         },
       });
@@ -337,6 +350,7 @@ test("mobile runtime mode defaults to chat", async ({ page }) => {
 
   await expect(page).toHaveURL(/\/chat$/);
   await expect(page.getByText("hello mobile")).toBeVisible();
+  await expect(page.locator("header").getByText("@lewis", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
 });
 
@@ -361,6 +375,29 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await page.getByRole("button", { name: "Open conversations" }).click();
   await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+});
+
+test("mobile chat Enter inserts newline and send button sends", async ({ page }) => {
+  const sentBodies: Array<Record<string, unknown>> = [];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubRuntime(page, sentBodies);
+  await page.goto("/chat");
+
+  const input = page.getByPlaceholder("Type a message...");
+  await input.fill("hello");
+  await input.press("Enter");
+  await input.type("world");
+
+  await expect(input).toHaveValue("hello\nworld");
+  expect(sentBodies).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect.poll(() => sentBodies.length).toBe(1);
+  expect(sentBodies[0]).toMatchObject({
+    channel: "general",
+    body: "hello\nworld",
+  });
+  await expect(input).toHaveValue("");
 });
 
 test("mobile card detail uses the shared bottom tabs once", async ({ page }) => {
@@ -479,9 +516,9 @@ test("browser mode mobile cards can be created and discussed", async ({ page }) 
   await expect(page).toHaveURL(/\/cards\/general\/20260317-123456-abc$/);
   await expect(page.getByRole("heading", { name: "Browser card task" })).toBeVisible();
 
-  const noteInput = page.getByPlaceholder("Write a note (Enter to send, Shift+Enter for newline)");
+  const noteInput = page.getByPlaceholder("Write a note");
   await noteInput.fill("first browser note");
-  await noteInput.press("Enter");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("first browser note")).toBeVisible();
 
   await page.getByRole("button", { name: "Archive" }).click();

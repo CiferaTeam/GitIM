@@ -49,7 +49,7 @@ export function AppShell({ children }: AppShellProps) {
         </div>
 
         {/* Right: theme toggle + twitter + update indicator + help + current user */}
-        <div className="flex items-center justify-end gap-2 min-w-[140px]">
+        <div className="flex min-w-0 items-center justify-end gap-2 md:min-w-[140px]">
           <ThemeToggle />
           <a
             href="https://x.com/arknights60"
@@ -78,7 +78,10 @@ export function AppShell({ children }: AppShellProps) {
             <HelpCircle className="size-4" />
           </button>
           {currentUser ? (
-            <span className="text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border hidden md:inline-block">
+            <span
+              className="max-w-[36vw] truncate text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border md:max-w-none"
+              title={`Human handler: @${currentUser}`}
+            >
               @{currentUser}
             </span>
           ) : null}
