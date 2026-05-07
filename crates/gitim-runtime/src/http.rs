@@ -84,6 +84,90 @@ struct HealthResponse {
     workspaces_count: usize,
 }
 
+// -----------------------------------------------------------------------------
+// Phase 4 typed response shapes — see docs/plans/protocol-typing/plan.md
+//
+// One Response struct per success path; ErrorBody for every failure path
+// (the legacy `Json(serde_json::json!({"ok": false, "error": ...}))` shape).
+// Renaming a wire field anywhere in this section breaks the build at every
+// call site — that's the point.
+// -----------------------------------------------------------------------------
+
+/// Shared error response body. `ok` is always `false` — Serialize via a
+/// const associated function so callers can't construct an `ok: true` mistake.
+#[derive(Serialize)]
+struct ErrorBody {
+    ok: bool,
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+}
+
+impl ErrorBody {
+    fn new(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: error.into(),
+            error_code: None,
+        }
+    }
+
+    fn with_code(error: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: error.into(),
+            error_code: Some(code.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspacesListResponse {
+    workspaces: Vec<WorkspaceSummary>,
+}
+
+/// Single-workspace detail. Differs from `WorkspaceSummary` (which is the
+/// list-row shape) by adding `agents_count` and `human_repo`.
+#[derive(Serialize)]
+struct WorkspaceDetailResponse {
+    slug: String,
+    workspace_name: String,
+    path: String,
+    provider: GitProvider,
+    initialized: bool,
+    agents_count: usize,
+    human_repo: Option<String>,
+}
+
+/// `{"ok": true}` ack for `DELETE /workspaces/{slug}`.
+#[derive(Serialize)]
+struct OkAckResponse {
+    ok: bool,
+}
+
+/// `POST /workspaces` success body. Wire keeps `ok: true` inline because
+/// pre-typed callers parse `obj.get("slug")` from the same dict.
+#[derive(Serialize)]
+struct WorkspaceCreateResponse {
+    ok: bool,
+    slug: String,
+    workspace_name: String,
+    path: String,
+    provider: GitProvider,
+}
+
+/// 409 `workspace_path_exists` error — carries the slug of the live
+/// workspace already pinned to that path so the caller can show a useful
+/// message. Different shape from `ErrorBody` because it has the extra
+/// `existing_slug` field.
+#[derive(Serialize)]
+struct WorkspacePathExistsError {
+    ok: bool,
+    error_code: &'static str,
+    error: String,
+    existing_slug: String,
+}
+
 /// Real-time agent activity event, broadcast via SSE.
 ///
 /// `workspace_id` always carries the originating workspace's slug so SSE
@@ -2386,12 +2470,13 @@ fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSumma
     }
 }
 
-async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<WorkspacesListResponse> {
     let s = state.lock().unwrap();
-    let mut list: Vec<WorkspaceSummary> = s.workspaces.values().map(workspace_summary).collect();
+    let mut workspaces: Vec<WorkspaceSummary> =
+        s.workspaces.values().map(workspace_summary).collect();
     // Deterministic order makes the response stable for tests and WebUI.
-    list.sort_by(|a, b| a.slug.cmp(&b.slug));
-    Json(serde_json::json!({ "workspaces": list }))
+    workspaces.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Json(WorkspacesListResponse { workspaces })
 }
 
 async fn workspaces_get(
@@ -2409,20 +2494,23 @@ async fn workspaces_get(
                 .as_ref()
                 .map(|c| c.git.provider)
                 .unwrap_or(GitProvider::Local);
-            let body = serde_json::json!({
-                "slug": ctx.slug,
-                "workspace_name": ctx.workspace_name,
-                "path": ctx.path.to_string_lossy(),
-                "provider": provider,
-                "initialized": ctx.human_repo.is_some(),
-                "agents_count": ctx.agents.len(),
-                "human_repo": ctx.human_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            });
+            let body = WorkspaceDetailResponse {
+                slug: ctx.slug.clone(),
+                workspace_name: ctx.workspace_name.clone(),
+                path: ctx.path.to_string_lossy().into_owned(),
+                provider,
+                initialized: ctx.human_repo.is_some(),
+                agents_count: ctx.agents.len(),
+                human_repo: ctx
+                    .human_repo
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            };
             Json(body).into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+            Json(ErrorBody::new("unknown workspace")),
         )
             .into_response(),
     }
@@ -2447,7 +2535,7 @@ async fn workspaces_delete(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+                    Json(ErrorBody::new("unknown workspace")),
                 )
                     .into_response();
             }
@@ -2472,19 +2560,18 @@ async fn workspaces_delete(
             tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "config_write_failed",
-                    "error": format!(
+                Json(ErrorBody::with_code(
+                    format!(
                         "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
                     ),
-                })),
+                    "config_write_failed",
+                )),
             )
                 .into_response();
         }
     }
 
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 /// Best-effort rollback for a failed `POST /workspaces`. Kills any daemon the
@@ -2740,11 +2827,10 @@ async fn workspaces_create(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "cloud_sync_path_rejected",
-                "error": format!("workspace is inside {service} — refusing to store a token there"),
-            })),
+            Json(ErrorBody::with_code(
+                format!("workspace is inside {service} — refusing to store a token there"),
+                "cloud_sync_path_rejected",
+            )),
         )
             .into_response();
     }
@@ -2775,15 +2861,16 @@ async fn workspaces_create(
             let existing_slug = existing.slug.clone();
             return (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "workspace_path_exists",
-                    "error": format!(
+                Json(WorkspacePathExistsError {
+                    ok: false,
+                    error_code: "workspace_path_exists",
+                    error: format!(
                         "workspace at {} already registered as slug \"{}\"",
-                        workspace.display(), existing_slug,
+                        workspace.display(),
+                        existing_slug,
                     ),
-                    "existing_slug": existing_slug,
-                })),
+                    existing_slug,
+                }),
             )
                 .into_response();
         }
@@ -2795,11 +2882,10 @@ async fn workspaces_create(
         if s.workspaces.contains_key(&slug) {
             return (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "slug_conflict_unexpected",
-                    "error": format!("slug collision not resolved: {slug}"),
-                })),
+                Json(ErrorBody::with_code(
+                    format!("slug collision not resolved: {slug}"),
+                    "slug_conflict_unexpected",
+                )),
             )
                 .into_response();
         }
@@ -2825,11 +2911,10 @@ async fn workspaces_create(
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error_code": "missing_token",
-                            "error": "github mode requires a personal access token",
-                        })),
+                        Json(ErrorBody::with_code(
+                            "github mode requires a personal access token",
+                            "missing_token",
+                        )),
                     )
                         .into_response();
                 }
@@ -2841,11 +2926,10 @@ async fn workspaces_create(
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error_code": "missing_remote_url",
-                            "error": "github mode requires remote_url",
-                        })),
+                        Json(ErrorBody::with_code(
+                            "github mode requires remote_url",
+                            "missing_remote_url",
+                        )),
                     )
                         .into_response();
                 }
@@ -2856,11 +2940,10 @@ async fn workspaces_create(
             state.lock().unwrap().workspaces.remove(&slug);
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "provider_not_supported",
-                    "error": format!("provider not supported: {other}"),
-                })),
+                Json(ErrorBody::with_code(
+                    format!("provider not supported: {other}"),
+                    "provider_not_supported",
+                )),
             )
                 .into_response();
         }
@@ -2876,11 +2959,7 @@ async fn workspaces_create(
             // None are 500-class — the runtime itself is still fine.
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": error_code,
-                    "error": message,
-                })),
+                Json(ErrorBody::with_code(message, error_code)),
             )
                 .into_response();
         }
@@ -2902,11 +2981,10 @@ async fn workspaces_create(
                 cleanup_partial_workspace(&workspace);
                 return (
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "slug_conflict_unexpected",
-                        "error": "workspace slot disappeared during provisioning",
-                    })),
+                    Json(ErrorBody::with_code(
+                        "workspace slot disappeared during provisioning",
+                        "slug_conflict_unexpected",
+                    )),
                 )
                     .into_response();
             }
@@ -2926,24 +3004,23 @@ async fn workspaces_create(
         cleanup_partial_workspace(&workspace);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "config_write_failed",
-                "error": format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
-            })),
+            Json(ErrorBody::with_code(
+                format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
+                "config_write_failed",
+            )),
         )
             .into_response();
     }
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "ok": true,
-            "slug": slug,
-            "workspace_name": workspace_name,
-            "path": workspace.to_string_lossy(),
-            "provider": provider_for_response,
-        })),
+        Json(WorkspaceCreateResponse {
+            ok: true,
+            slug,
+            workspace_name,
+            path: workspace.to_string_lossy().into_owned(),
+            provider: provider_for_response,
+        }),
     )
         .into_response()
 }
