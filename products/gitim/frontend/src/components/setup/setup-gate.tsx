@@ -1,0 +1,112 @@
+import { useEffect, useState, type ReactNode } from "react";
+import { useConnectionStore } from "../../hooks/use-connection-store";
+import { ConnectForm } from "./connect-form";
+import { InstallStep } from "./install-step";
+import { LocalSetup } from "./local-setup";
+import { ModeChoiceStep } from "./mode-choice-step";
+import { SetupShell } from "./setup-shell";
+
+interface SetupGateProps {
+  children: ReactNode;
+}
+
+/**
+ * Blocks the app shell until the runtime is reachable.
+ *
+ * Workspace provisioning is handled downstream by `App` via
+ * `useWorkspaceStore`: if the runtime has zero workspaces, the app shows
+ * a first-run "create your first workspace" screen; otherwise the user
+ * switches between workspaces via the `WorkspaceSwitcher` in the header.
+ */
+export function SetupGate({ children }: SetupGateProps) {
+  const status = useConnectionStore((s) => s.status);
+  const mode = useConnectionStore((s) => s.mode);
+  const port = useConnectionStore((s) => s.port);
+  const localReady = useConnectionStore((s) => s.localReady);
+  const setMode = useConnectionStore((s) => s.setMode);
+  const setStatus = useConnectionStore((s) => s.setStatus);
+  const setRuntimeVersion = useConnectionStore((s) => s.setRuntimeVersion);
+
+  // First-time users land on the Install step; returning users (saved port)
+  // skip straight to Connect. Once the user clicks "continue" we remember it
+  // within this session so going back to edit the port does not re-show Install.
+  const [installAcknowledged, setInstallAcknowledged] = useState(
+    () => port != null,
+  );
+  const [modeSelected, setModeSelected] = useState(() => port != null || mode === "local");
+
+  // On mount: if we have a stored port, try to connect automatically.
+  useEffect(() => {
+    if (mode === "local") {
+      if (!localReady) setStatus("disconnected");
+      return;
+    }
+    if (status !== "checking") return;
+    if (!port) {
+      setStatus("disconnected");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function tryConnect() {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        const data = await res.json();
+        if (cancelled) return;
+
+        if (data.service === "gitim-runtime") {
+          if (data.version) setRuntimeVersion(data.version as string);
+          setStatus("ready");
+        } else {
+          setStatus("disconnected");
+        }
+      } catch {
+        if (!cancelled) setStatus("disconnected");
+      }
+    }
+
+    tryConnect();
+    return () => { cancelled = true; };
+  }, [mode, localReady, status, port, setStatus, setRuntimeVersion]);
+
+  if (mode === "local" && !localReady) {
+    return <LocalSetup />;
+  }
+
+  if (status === "checking") {
+    return (
+      <SetupShell
+        step={2}
+        title="Connect Runtime"
+        description="Link gitim to your local runtime daemon"
+        loading
+      />
+    );
+  }
+
+  if (status === "disconnected") {
+    if (!modeSelected) {
+      return (
+        <ModeChoiceStep
+          onUseRuntime={() => setModeSelected(true)}
+          onUseBrowserMode={() => setMode("local")}
+        />
+      );
+    }
+
+    if (!installAcknowledged) {
+      return (
+        <InstallStep
+          onContinue={() => setInstallAcknowledged(true)}
+          onBack={port == null ? () => setModeSelected(false) : undefined}
+        />
+      );
+    }
+    return <ConnectForm onBack={() => setInstallAcknowledged(false)} />;
+  }
+
+  return <>{children}</>;
+}

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, "../..");
-export const WEBUI_DIR = path.join(ROOT, "products/cell/frontend");
+export const WEBUI_DIR = path.join(ROOT, "products/gitim/frontend");
 
 export interface RuntimeEnv {
   runtimePort: number;

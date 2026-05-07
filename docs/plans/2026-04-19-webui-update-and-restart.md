@@ -30,7 +30,7 @@
 - **A1 cached canonical exe path**:runtime `run_shell` 启动时立刻 `std::env::current_exe()?.canonicalize()?` 存到 `RuntimeState`,install-dir strict check 和 fork-exec 目标路径都用这个缓存值
 - **A3 PID file write 挪到 `run_shell`**:现在 `bin/runtime.rs::daemonize` 里写 PID,restart 的 fork-exec 子进程不会走 daemonize → PID 不更新。必须把 PID write 移到 `run_shell()` 开头,所有入口统一
 - **Failure mode 防护**:`replace_binaries` 每个文件 unlink 前先 `rename → <name>.old` 备份;任一文件失败 → 回滚所有已替换;全成功 → 清理 `.old`
-- **T1 E2E test**:写 mock Cell API + mock release server 的集成测试,覆盖 "POST endpoint → 下载 → 替换 → fork-exec → 新进程 serve 新 /health" 全链路
+- **T1 E2E test**:写 mock gitim API + mock release server 的集成测试,覆盖 "POST endpoint → 下载 → 替换 → fork-exec → 新进程 serve 新 /health" 全链路
 
 ---
 
@@ -42,8 +42,8 @@
 |------|------|----------------|
 | Dev-mode 升级(非 `~/.gitim/bin/` 启动) | 会破坏 `cargo run` / `cargo install` 工作流 | 开发者在终端 `cargo build` 自己管 |
 | 自定义版本选择 / 降级 | UI 复杂度不划算 | 终端 `gitim update <version>` 绕过 |
-| Release notes 显示 | Cell API 不稳定提供 | 用户自己访问 GitHub releases 页 |
-| 真下载进度条 | Cell API 返回无 Content-Length 保证,scope 爆 | indeterminate spinner |
+| Release notes 显示 | gitim API 不稳定提供 | 用户自己访问 GitHub releases 页 |
+| 真下载进度条 | gitim API 返回无 Content-Length 保证,scope 爆 | indeterminate spinner |
 | 新 runtime 启动失败的自动 rollback | 需要 A/B binary slot + 握手机制 | 终端 `gitim runtime start` 手动恢复;plan 里记 future work |
 | 自动后台升级 | 只做用户主动触发 | — |
 | Windows 支持 | 与 `install.sh` 保持一致 | Mac / Linux 为第一优先级 |
@@ -63,8 +63,8 @@
 | `install.sh` | 根目录 | install dir `~/.gitim/bin/` 是 source of truth(strict check 基准) |
 | `release.sh` + `CiferaTeam/GitIM` | 根目录 + GitHub | 已有发布流程,plan 无需动 |
 | `GET /health` 返 `version` | `crates/gitim-runtime/src/http.rs` 约 L168-175 | 前端比较 current vs latest 用 |
-| `use-version-check` hook | `webui-v2/src/hooks/use-version-check.ts` | 当前只拉 Cell API 并丢弃结果,refactor 为完整比较 hook |
-| Cell API `/api/check-version` | `webui-v2/src/lib/cell-api.ts` | 返 `latest_version` 仍走现有契约 |
+| `use-version-check` hook | `products/gitim/frontend/src/hooks/use-version-check.ts` | 当前只拉 gitim API 并丢弃结果,refactor 为完整比较 hook |
+| gitim API `/api/check-version` | `products/gitim/frontend/src/lib/gitim-api.ts` | 返 `latest_version` 仍走现有契约 |
 | `daemonize()` / `run_shell()` | `crates/gitim-runtime/src/bin/runtime.rs` | fork-exec 模式参考;PID write 要从前者挪到后者 |
 | `recover_from_config` | `crates/gitim-runtime/src/http.rs` | 新 runtime 启动后自动 re-provision workspaces + daemons |
 | `kill_managed_daemons` | 同上 | 异步阶段调用,SIGTERM 现有的 daemon 关停逻辑复用 |
@@ -85,7 +85,7 @@
 - `crates/gitim-updater/tests/download_replace.rs` — mock HTTP + crafted tarball + replace_binaries + backup-restore
 - `crates/gitim-runtime/src/update.rs` — update endpoint 的 orchestrator(调用 updater crate helpers,编排 sync/async phase)
 - `crates/gitim-runtime/tests/update_handler.rs` — 同步阶段各错误路径 + 202 happy path
-- `crates/gitim-runtime/tests/update_e2e.rs` — full flow 集成测试(mock Cell API + mock release server + fake binaries)
+- `crates/gitim-runtime/tests/update_e2e.rs` — full flow 集成测试(mock gitim API + mock release server + fake binaries)
 - `webui-v2/src/components/update-indicator.tsx` — 黄色叹号 + HoverCard + Update button 的完整组件
 - `webui-v2/src/hooks/use-version-check.ts` 的测试(若 webui-v2 有测试基建,否则跳过 / 只做手工验证)
 
@@ -100,8 +100,8 @@
 - `crates/gitim-runtime/src/bin/runtime.rs` — (1) 把 PID file write 从 `daemonize()` 移到 `run_shell()` 开头;(2) `run_shell()` 启动时缓存 `current_exe().canonicalize()` 到 state;(3) 接受新的 arg `--restarted-from-update`(可选,仅用于日志标记)
 - `crates/gitim-client/src/daemon.rs` — `spawn_daemon` 先试 `current_exe().parent()/gitim-daemon`,不存在再退回 PATH 解析;加 unit tests
 - `webui-v2/src/lib/client.ts` — (1) 新增 `updateAndRestart()` API 调用;(2) 新增 `getHealth()` API 调用(已有则复用);(3) 在 `isUpdating` 期间静默 swallow fetch 错误(不弹网络错误 toast)
-- `webui-v2/src/lib/cell-api.ts` — 不改契约,只是现在有消费者了
-- `webui-v2/src/hooks/use-version-check.ts` — 重构为合并 hook:同时读 Cell API latest + runtime `/health` current,返回 `{ current, latest, hasUpdate, isUpdating, error }`;升级流程的状态机也在这里驱动
+- `products/gitim/frontend/src/lib/gitim-api.ts` — 不改契约,只是现在有消费者了
+- `products/gitim/frontend/src/hooks/use-version-check.ts` — 重构为合并 hook:同时读 gitim API latest + runtime `/health` current,返回 `{ current, latest, hasUpdate, isUpdating, error }`;升级流程的状态机也在这里驱动
 - `webui-v2/src/components/layout/app-shell.tsx` — 在 header 右侧 help 图标**左侧**嵌入 `<UpdateIndicator />` 组件
 - `webui-v2/src/store/connection.ts`(或等价的 zustand store)— 新增 `isUpdating: boolean` + `isRestarting: boolean` + setters
 
@@ -295,14 +295,14 @@
 - [ ] `client.ts` 的 fetch wrapper 新增:读 `isUpdating` / `isRestarting` store state,若为 true 则 fetch 错误 swallow(不弹 toast,只 log)
 - [ ] store 加 `isUpdating: boolean` + `isRestarting: boolean` + setters
 - [ ] `use-version-check.ts` 重构:
-  - 启动时并行 `getHealth` + Cell API `checkVersion` → 合并为 `{ current, latest, hasUpdate }`
+  - 启动时并行 `getHealth` + gitim API `checkVersion` → 合并为 `{ current, latest, hasUpdate }`
   - 保持 1h 轮询节奏 + on-mount 触发
   - 暴露 action `triggerUpdate()`:调 `updateAndRestart` → 成功 202 → set `isUpdating=true` → 开始 500ms 轮询 `getHealth` → 连接失败 → set `isRestarting=true` → 重连后 version 匹配 target → set 全 false + toast "Updated to v{x}" + 触发 workspace / channel 数据 refetch → 若 30s 超时未成功 → set 错误态 + toast "Update may have failed"
   - 返回 `{ current, latest, hasUpdate, isUpdating, isRestarting, error, triggerUpdate }`
 - [ ] 若 webui-v2 有 vitest/jest 基建,补 hook 的 happy / error / timeout 测试(若无,手工验)
 
 **验收:**
-- `useVersionCheck()` 在不同版本场景下(latest > current / latest == current / /health 失败 / Cell API 失败)返回正确 `hasUpdate`
+- `useVersionCheck()` 在不同版本场景下(latest > current / latest == current / /health 失败 / gitim API 失败)返回正确 `hasUpdate`
 - `triggerUpdate()` 的状态机走通完整流程;30s 超时有对应错误态
 - 升级期间其他页面的 API 调用不弹误导性错误 toast
 
@@ -327,7 +327,7 @@
 - [ ] `app-shell.tsx` 在 header 右侧(`justify-end` 那一块),help 图标**左侧**嵌入 `<UpdateIndicator />`
 - [ ] 视觉对齐:icon 大小匹配 help / user 的大小(参考现有 header 尺寸),间距跟随 header 现有 `gap-2`
 - [ ] 主题适配:light/dark mode 下 ⚠ 可见度都 OK(若项目只有 dark mode,按 dark 调)
-- [ ] 手工 smoke test:Vite dev server 起来,mock Cell API 返 fake latest(可临时改 env var),验证:
+- [ ] 手工 smoke test:Vite dev server 起来,mock gitim API 返 fake latest(可临时改 env var),验证:
   - 无更新 → icon 不显示
   - 有更新 → 黄色 ⚠ 显示,hover 出 HoverCard,按钮可点
   - 点按钮后显示 spinner
@@ -373,7 +373,7 @@
 - 用 `serial_test` 防并发端口冲突
 
 **不测但接受风险:**
-- Cell API 真实网络调用(mock 掉)
+- gitim API 真实网络调用(mock 掉)
 - GitHub Releases API 真实调用(mock 掉)
 - macOS code signing 验证(runtime 被替换后是否能启动 —— 假设 release tarball 里 binary 已签好,dev 场景已被 strict-mode block)
 
