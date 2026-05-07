@@ -185,6 +185,21 @@ pub struct SubscribeResponse {
     pub subscribed: bool,
 }
 
+/// Response payload for `Request::Onboard`. Two variants on the wire,
+/// chosen by the request — guest mode produces `{ "guest": true }`,
+/// authenticated mode produces `{ "handler": ..., "created": ... }`.
+/// Untagged because the daemon emits these literal shapes; clients can
+/// `parse_data::<OnboardResponse>()` and match on the enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum OnboardResponse {
+    /// Guest-mode onboard. Read-only identity, no commit author.
+    Guest { guest: bool },
+    /// Authenticated onboard. `created` is `true` when a fresh user
+    /// meta file was written; `false` on re-onboard of an existing user.
+    User { handler: String, created: bool },
+}
+
 // -- Card responses --
 
 /// One row in `ListCardsResponse.cards` / `ListArchivedCardsResponse.cards`.
@@ -666,6 +681,44 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v.get("cards").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn onboard_response_guest_variant_wire_shape() {
+        let r = OnboardResponse::Guest { guest: true };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj.get("guest").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn onboard_response_user_variant_wire_shape() {
+        let r = OnboardResponse::User {
+            handler: "alice".to_string(),
+            created: true,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(obj.get("created").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn onboard_response_round_trip_via_untagged() {
+        // Wire bytes the daemon sent in guest mode ...
+        let guest_wire = r#"{"guest":true}"#;
+        let parsed: OnboardResponse = serde_json::from_str(guest_wire).unwrap();
+        assert!(matches!(parsed, OnboardResponse::Guest { guest: true }));
+
+        // ... and the user-mode bytes pick the other variant.
+        let user_wire = r#"{"handler":"alice","created":false}"#;
+        let parsed: OnboardResponse = serde_json::from_str(user_wire).unwrap();
+        assert!(matches!(
+            parsed,
+            OnboardResponse::User { ref handler, created: false } if handler == "alice"
+        ));
     }
 
     #[test]

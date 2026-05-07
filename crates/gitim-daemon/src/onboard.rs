@@ -49,9 +49,8 @@ pub async fn handle_onboard(
             .is_guest
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        return Response::success(serde_json::json!({
-            "guest": true,
-        }));
+        let payload = gitim_core::responses::OnboardResponse::Guest { guest: true };
+        return Response::success(serde_json::to_value(payload).unwrap());
     }
 
     // --- Step A: Infer identity ---
@@ -152,10 +151,8 @@ pub async fn handle_onboard(
         .is_guest
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
-    Response::success(serde_json::json!({
-        "handler": handler,
-        "created": created,
-    }))
+    let payload = gitim_core::responses::OnboardResponse::User { handler, created };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 // ---------------------------------------------------------------------------
