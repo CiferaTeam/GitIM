@@ -1,3 +1,4 @@
+use gitim_core::auth_payload::AuthPayload;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,7 +116,10 @@ pub enum Request {
     #[serde(rename = "onboard")]
     Onboard {
         git_server: String,
-        auth: serde_json::Value,
+        /// Identity payload. Required for non-guest onboards. Guest mode
+        /// sends `null` (or omits the field) — daemon ignores it.
+        #[serde(default)]
+        auth: Option<AuthPayload>,
         #[serde(default)]
         admin: bool,
         #[serde(default)]

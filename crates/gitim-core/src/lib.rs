@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+pub mod auth_payload;
 pub mod dm;
 pub mod formatter;
 pub mod link;

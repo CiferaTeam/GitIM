@@ -1,6 +1,7 @@
 use crate::api::Response;
-use crate::identity::{AuthData, GitServer, InferredIdentity};
+use crate::identity::{GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
+use gitim_core::auth_payload::AuthPayload;
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{ChannelMeta, Handler, UserMeta};
 use gitim_sync::git::GitError;
@@ -12,12 +13,14 @@ const MAX_PUSH_RETRIES: u32 = 3;
 pub async fn handle_onboard(
     state: SharedState,
     git_server: String,
-    auth: serde_json::Value,
+    auth: Option<AuthPayload>,
     admin: bool,
     guest: bool,
 ) -> Response {
     // --- Guest mode: write me.json and start sync, skip everything else ---
     if guest {
+        // Guest mode never inspects auth — accept Some or None.
+        let _ = auth;
         if let Err(resp) = write_guest_me_json(&state) {
             return resp;
         }
@@ -52,7 +55,11 @@ pub async fn handle_onboard(
     }
 
     // --- Step A: Infer identity ---
-    let identity = match infer(git_server.clone(), auth) {
+    let auth_payload = match auth {
+        Some(a) => a,
+        None => return Response::error("onboard: missing auth payload (non-guest mode)"),
+    };
+    let identity = match infer(git_server.clone(), auth_payload) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -155,30 +162,12 @@ pub async fn handle_onboard(
 // Step A helpers
 // ---------------------------------------------------------------------------
 
-fn infer(git_server: String, auth: serde_json::Value) -> Result<InferredIdentity, Response> {
+fn infer(git_server: String, auth: AuthPayload) -> Result<InferredIdentity, Response> {
     let server: GitServer =
         serde_json::from_value(serde_json::Value::String(git_server.clone()))
             .map_err(|_| Response::error(format!("unknown git_server: {}", git_server)))?;
 
-    // Determine which AuthData variant to deserialize.
-    // If the auth payload contains handler + display_name (shared credential mode),
-    // route to the Git variant regardless of git_server — the identity is manually specified.
-    let mut auth_obj = auth;
-    if let Some(obj) = auth_obj.as_object_mut() {
-        let has_handler = obj.contains_key("handler") && obj.contains_key("display_name");
-        let auth_type = if has_handler { "git" } else { &git_server };
-        obj.insert(
-            "type".to_string(),
-            serde_json::Value::String(auth_type.to_string()),
-        );
-    } else {
-        return Err(Response::error("auth must be a JSON object"));
-    }
-
-    let auth_data: AuthData = serde_json::from_value(auth_obj)
-        .map_err(|e| Response::error(format!("invalid auth data: {}", e)))?;
-
-    crate::identity::infer_identity(server, auth_data)
+    crate::identity::infer_identity(server, auth)
         .map_err(|e| Response::error(format!("identity inference failed: {}", e)))
 }
 
@@ -522,42 +511,25 @@ mod tests {
         Arc::new(AppState::new(repo, Config::default(), event_tx, None))
     }
 
+    fn git_auth(handler: &str, display_name: &str) -> AuthPayload {
+        AuthPayload::Git {
+            handler: handler.to_string(),
+            display_name: display_name.to_string(),
+            github_email: None,
+        }
+    }
+
     #[test]
     fn infer_git_mode_ok() {
-        let auth = serde_json::json!({
-            "handler": "alice",
-            "display_name": "Alice"
-        });
-        let id = infer("git".to_string(), auth).unwrap();
+        let id = infer("git".to_string(), git_auth("alice", "Alice")).unwrap();
         assert_eq!(id.handler.as_str(), "alice");
         assert_eq!(id.display_name, "Alice");
     }
 
     #[test]
     fn infer_unknown_server_returns_error() {
-        let auth = serde_json::json!({"handler": "x", "display_name": "X"});
-        let result = infer("unknown".to_string(), auth);
+        let result = infer("unknown".to_string(), git_auth("x", "X"));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn infer_bad_auth_returns_error() {
-        // Missing required fields for github variant
-        let auth = serde_json::json!({});
-        let result = infer("github".to_string(), auth);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn infer_github_with_handler_routes_to_git_variant() {
-        // Shared credential mode: git_server=github but auth has handler+display_name
-        let auth = serde_json::json!({
-            "handler": "bot-1",
-            "display_name": "Bot One"
-        });
-        let id = infer("github".to_string(), auth).unwrap();
-        assert_eq!(id.handler.as_str(), "bot-1");
-        assert_eq!(id.display_name, "Bot One");
     }
 
     #[tokio::test]
@@ -736,11 +708,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let auth = serde_json::json!({
-            "handler": "alice",
-            "display_name": "Alice"
-        });
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, false, false).await;
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("alice", "Alice")),
+            false,
+            false,
+        )
+        .await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
 
         let data = resp.data.unwrap();
@@ -766,8 +741,14 @@ mod tests {
             .sync_started
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let auth2 = serde_json::json!({"handler": "alice", "display_name": "Alice"});
-        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth2, false, false).await;
+        let resp2 = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("alice", "Alice")),
+            false,
+            false,
+        )
+        .await;
         assert!(resp2.ok);
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
     }
@@ -847,7 +828,7 @@ mod tests {
         let resp_a = handle_onboard(
             state_a.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            Some(git_auth("bot-a", "Bot A")),
             false,
             false,
         )
@@ -859,7 +840,7 @@ mod tests {
         let resp_b = handle_onboard(
             state_b.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            Some(git_auth("bot-b", "Bot B")),
             false,
             false,
         )
@@ -871,7 +852,7 @@ mod tests {
         let resp_c = handle_onboard(
             state_c.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-c", "display_name": "Bot C"}),
+            Some(git_auth("bot-c", "Bot C")),
             false,
             false,
         )
@@ -1027,7 +1008,7 @@ mod tests {
         let resp_a = handle_onboard(
             state_a.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            Some(git_auth("bot-a", "Bot A")),
             false,
             false,
         )
@@ -1042,7 +1023,7 @@ mod tests {
         let resp_b = handle_onboard(
             state_b.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            Some(git_auth("bot-b", "Bot B")),
             false,
             false,
         )
@@ -1079,8 +1060,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let auth = serde_json::json!({"handler": "admin-user", "display_name": "Admin"});
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, true, false).await;
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("admin-user", "Admin")),
+            true,
+            false,
+        )
+        .await;
         assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
         assert!(
             state.is_admin.load(std::sync::atomic::Ordering::SeqCst),
@@ -1096,7 +1083,7 @@ mod tests {
         let resp = handle_onboard(
             state.clone(),
             "git".to_string(),
-            serde_json::json!({}),
+            None,
             false,
             true,
         )

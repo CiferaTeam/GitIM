@@ -2082,7 +2082,9 @@ async fn recover_single_workspace(
                 (
                     token_url,
                     "github".to_string(),
-                    serde_json::json!({ "type": "github", "token": token }),
+                    gitim_core::auth_payload::AuthPayload::GitHub {
+                        token: token.clone(),
+                    },
                 )
             }
             _ => {
@@ -2100,11 +2102,11 @@ async fn recover_single_workspace(
                 (
                     remote,
                     "git".to_string(),
-                    serde_json::json!({
-                        "type": "git",
-                        "handler": handler,
-                        "display_name": display_name,
-                    }),
+                    gitim_core::auth_payload::AuthPayload::Git {
+                        handler,
+                        display_name,
+                        github_email: None,
+                    },
                 )
             }
         };
@@ -2543,11 +2545,11 @@ async fn provision_local_workspace(
             h
         }
     };
-    let auth = serde_json::json!({
-        "type": "git",
-        "handler": handler,
-        "display_name": display_name,
-    });
+    let auth = gitim_core::auth_payload::AuthPayload::Git {
+        handler,
+        display_name,
+        github_email: None,
+    };
 
     let human_dir = provision_human(workspace, &remote_url, "git", auth)
         .await
@@ -2669,10 +2671,9 @@ async fn provision_github_workspace(
                 .output();
         }
 
-        let auth = serde_json::json!({
-            "type": "github",
-            "token": token,
-        });
+        let auth = gitim_core::auth_payload::AuthPayload::GitHub {
+            token: token.clone(),
+        };
         let final_human = provision_human(workspace, &remote_url, "github", auth)
             .await
             .map_err(|e| {

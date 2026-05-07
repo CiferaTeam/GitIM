@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use gitim_core::auth_payload::AuthPayload;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -143,7 +144,7 @@ impl GitimClient {
     pub async fn onboard(
         &self,
         git_server: &str,
-        auth: Value,
+        auth: Option<AuthPayload>,
         admin: bool,
         guest: bool,
     ) -> Result<ApiResponse, ClientError> {

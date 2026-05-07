@@ -717,6 +717,7 @@ dependencies = [
 name = "gitim-client"
 version = "0.5.5"
 dependencies = [
+ "gitim-core",
  "libc",
  "pretty_assertions",
  "serde",
