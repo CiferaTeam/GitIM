@@ -168,6 +168,26 @@ struct WorkspacePathExistsError {
     existing_slug: String,
 }
 
+#[derive(Serialize)]
+struct AgentsListResponse {
+    ok: bool,
+    agents: Vec<AgentInfo>,
+}
+
+#[derive(Serialize)]
+struct AgentDetailResponse {
+    ok: bool,
+    agent: AgentInfo,
+}
+
+/// `POST /agents/add` success — `id` is the agent handler that was
+/// created (echo of `req.handler`).
+#[derive(Serialize)]
+struct AgentAddResponse {
+    ok: bool,
+    id: String,
+}
+
 /// Real-time agent activity event, broadcast via SSE.
 ///
 /// `workspace_id` always carries the originating workspace's slug so SSE
@@ -361,7 +381,7 @@ fn not_found_workspace() -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         axum::http::StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+        Json(ErrorBody::new("unknown workspace")),
     )
         .into_response()
 }
@@ -1091,10 +1111,7 @@ async fn agents_add(
         other => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("unsupported provider: {other}"),
-                })),
+                Json(ErrorBody::new(format!("unsupported provider: {other}"))),
             )
                 .into_response();
         }
@@ -1112,11 +1129,10 @@ async fn agents_add(
     };
 
     if already_exists {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "handler_conflict",
-            "error": format!("agent already exists: {}", req.handler)
-        }))
+        return Json(ErrorBody::with_code(
+            format!("agent already exists: {}", req.handler),
+            "handler_conflict",
+        ))
         .into_response();
     }
 
@@ -1167,24 +1183,20 @@ async fn agents_add(
         .join("users")
         .join(format!("{}.meta.yaml", req.handler));
     if meta_path.exists() {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "handler_conflict",
-            "error": format!(
+        return Json(ErrorBody::with_code(
+            format!(
                 "handler @{} already registered in this workspace",
                 req.handler
-            )
-        }))
+            ),
+            "handler_conflict",
+        ))
         .into_response();
     }
 
     let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to create agents dir: {e}")
-        }))
-        .into_response();
+        return Json(ErrorBody::new(format!("failed to create agents dir: {e}")))
+            .into_response();
     }
 
     let remote_url = match git_provider {
@@ -1193,44 +1205,40 @@ async fn agents_add(
             let cfg = match workspace_config.as_ref() {
                 Some(c) => c,
                 None => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "config_missing",
-                        "error": "github mode requires workspace config with remote_url + token"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "github mode requires workspace config with remote_url + token",
+                        "config_missing",
+                    ))
                     .into_response();
                 }
             };
             let remote = match cfg.git.remote_url.as_deref() {
                 Some(u) if !u.is_empty() => u,
                 _ => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "missing_remote_url",
-                        "error": "workspace config lacks remote_url"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "workspace config lacks remote_url",
+                        "missing_remote_url",
+                    ))
                     .into_response();
                 }
             };
             let token = match cfg.git.token.as_deref() {
                 Some(t) if !t.is_empty() => t,
                 _ => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "missing_token",
-                        "error": "workspace config lacks token"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "workspace config lacks token",
+                        "missing_token",
+                    ))
                     .into_response();
                 }
             };
             let (owner, repo_name) = match parse_github_url(remote) {
                 Ok(t) => t,
                 Err(e) => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": github_error_code(&e),
-                        "error": redacted_url(&e.to_string())
-                    }))
+                    return Json(ErrorBody::with_code(
+                        redacted_url(&e.to_string()),
+                        github_error_code(&e),
+                    ))
                     .into_response();
                 }
             };
@@ -1265,10 +1273,10 @@ async fn agents_add(
                 let s = state.lock().unwrap();
                 if let Some(ctx) = s.workspaces.get(&slug) {
                     if ctx.agents.contains_key(&req.handler) {
-                        return Json(serde_json::json!({
-                            "ok": true,
-                            "id": req.handler,
-                        }))
+                        return Json(AgentAddResponse {
+                            ok: true,
+                            id: req.handler.clone(),
+                        })
                         .into_response();
                     }
                 }
@@ -1304,22 +1312,20 @@ async fn agents_add(
             if req.provider == "hermes" {
                 if !crate::hermes_profile::default_profile_ready() {
                     cleanup_agent_dir(&workspace, &req.handler);
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error": "Hermes default profile is not configured. \
+                    return Json(ErrorBody::with_code(
+                        "Hermes default profile is not configured. \
                             Run `hermes setup` in a terminal first to set up \
                             an LLM provider, then add the agent again.",
-                        "error_code": "hermes_not_setup",
-                    }))
+                        "hermes_not_setup",
+                    ))
                     .into_response();
                 }
                 if let Err(e) = crate::hermes_profile::ensure_profile(&req.handler).await {
                     cleanup_agent_dir(&workspace, &req.handler);
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error": format!("hermes profile create failed: {e}"),
-                        "error_code": "hermes_profile_create_failed",
-                    }))
+                    return Json(ErrorBody::with_code(
+                        format!("hermes profile create failed: {e}"),
+                        "hermes_profile_create_failed",
+                    ))
                     .into_response();
                 }
             }
@@ -1364,14 +1370,17 @@ async fn agents_add(
                 tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
             }
 
-            Json(serde_json::json!({ "ok": true, "id": req.handler })).into_response()
+            Json(AgentAddResponse {
+                ok: true,
+                id: req.handler.clone(),
+            })
+            .into_response()
         }
         Err(e) => {
             cleanup_agent_dir(&workspace, &req.handler);
-            Json(serde_json::json!({
-                "ok": false,
-                "error": redacted_url(&format!("provision_agent failed: {e}"))
-            }))
+            Json(ErrorBody::new(redacted_url(&format!(
+                "provision_agent failed: {e}"
+            ))))
             .into_response()
         }
     }
@@ -1403,7 +1412,7 @@ async fn agents_list(
     use axum::response::IntoResponse;
     match with_workspace_snapshot(&state, &slug, |ctx| {
         let agents: Vec<AgentInfo> = ctx.agents.values().cloned().collect();
-        Json(serde_json::json!({ "ok": true, "agents": agents }))
+        Json(AgentsListResponse { ok: true, agents })
     }) {
         Ok(j) => j.into_response(),
         Err(r) => r,
@@ -1537,10 +1546,11 @@ async fn agents_start(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentIdRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     match start_agent_loop(&state, &slug, &req.id) {
-        Ok(()) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+        Ok(()) => Json(OkAckResponse { ok: true }).into_response(),
+        Err(e) => Json(ErrorBody::new(e)).into_response(),
     }
 }
 
@@ -1554,7 +1564,7 @@ async fn agents_get(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1564,10 +1574,12 @@ async fn agents_get(
         None => return not_found_workspace(),
     };
     match ctx.agents.get(&id) {
-        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
-        None => {
-            Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response()
-        }
+        Some(info) => Json(AgentDetailResponse {
+            ok: true,
+            agent: info.clone(),
+        })
+        .into_response(),
+        None => Json(ErrorBody::new("agent not found")).into_response(),
     }
 }
 
@@ -1950,8 +1962,7 @@ async fn agents_remove(
                 )
             }
             None => {
-                return Json(serde_json::json!({ "ok": false, "error": "agent not found" }))
-                    .into_response();
+                return Json(ErrorBody::new("agent not found")).into_response();
             }
         }
     };
@@ -1965,7 +1976,7 @@ async fn agents_remove(
         if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "error": e })),
+                Json(ErrorBody::new(e)),
             )
                 .into_response();
         }
@@ -1988,7 +1999,7 @@ async fn agents_remove(
         None => return not_found_workspace(),
     };
     ctx.agents.remove(&req.id);
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 fn kill_agent_daemon(repo_path: &Path) {
@@ -2059,11 +2070,8 @@ async fn agents_stop(
         };
         match ctx.agents.get_mut(&req.id) {
             None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("agent not found: {}", req.id)
-                }))
-                .into_response();
+                return Json(ErrorBody::new(format!("agent not found: {}", req.id)))
+                    .into_response();
             }
             Some(info) => {
                 let handle = info.loop_handle.take();
@@ -2077,7 +2085,7 @@ async fn agents_stop(
         handle.abort();
     }
 
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 // -- /agents/events (SSE) --
