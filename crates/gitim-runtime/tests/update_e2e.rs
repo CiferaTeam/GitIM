@@ -1,4 +1,4 @@
-//! End-to-end tests for the self-update async phase (Task 7).
+//! End-to-end tests for the self-update async phase.
 //!
 //! ## Running these tests
 //!
@@ -506,35 +506,6 @@ async fn async_phase_fork_exec_failure_records_error() {
         .expect("update_last_error should be populated");
     assert!(last_err.contains("fork-exec"), "unexpected: {last_err}");
 }
-
-/// The full-pipeline E2E the plan asked for — POST `/runtime/update-and-restart`
-/// → 202 → poll `/health` for target version — is intentionally **not**
-/// implemented here. Two things make it unsafe to run inside `cargo test`:
-///
-/// 1. The handler's async task calls `std::process::exit(0)` on the happy
-///    path (production-critical: the child cannot bind the port otherwise).
-///    Running that inside a `tokio::spawn` kills the test harness along with
-///    the parent "runtime".
-/// 2. Even if we inserted a test-only exit hook, the spawned child process
-///    binds `state.listen_port`. Picking that port from inside an
-///    ephemeral-port dance is fine, but making the child's `/health`
-///    reachable requires either routing the test's existing reqwest client
-///    at the child's port (straightforward) or polling raw TCP (what
-///    `poll_health` does above).
-///
-/// The direct-call tests (`async_phase_replaces_and_forks_new_runtime` etc.)
-/// already exercise steps 1-4 of the plan's async phase via the exact
-/// function the handler's final `exit(0)` call sits behind. The sync phase
-/// is covered by `tests/update_handler.rs` (reject branches) and the
-/// in-module `#[tokio::test]`s (`sanity_check_*`). The end-to-end glue —
-/// "handler spawns async task after sync succeeds" — is two lines of code
-/// in the handler, easy to eyeball.
-///
-/// A manual reproduction script (run against a real dev install) lives in
-/// the implementation notes for Task 7; rerunning it before each release is
-/// cheaper than the test infrastructure a self-contained E2E would need.
-#[allow(dead_code)]
-fn _documentation_only_full_e2e_placeholder() {}
 
 // -- scopeguard ------------------------------------------------------------
 //

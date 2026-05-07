@@ -2,34 +2,12 @@
 //! branches against controlled fake binaries, plus an ignored end-to-end
 //! test against a real Codex CLI login.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use gitim_runtime::preflight::{preflight_codex, preflight_codex_with, ErrorKind};
 
-fn fixture(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests");
-    path.push("fixtures");
-    path.push(name);
-    path
-}
-
-/// Resolve `/bin/false` → `/usr/bin/false` fallback for macOS, where
-/// `/bin/false` doesn't exist but `/usr/bin/false` does.
-///
-/// Duplicated from `preflight_claude.rs` — integration test files are separate
-/// crates in Cargo and can't share free functions without a `common/` module.
-/// Keeping a tiny copy here is simpler than fitting this alongside the
-/// daemon-oriented `common/mod.rs`.
-fn resolve_stdbin(name: &str) -> String {
-    let a = format!("/bin/{name}");
-    if std::path::Path::new(&a).is_file() {
-        a
-    } else {
-        format!("/usr/bin/{name}")
-    }
-}
+mod common;
+use common::{fixture, resolve_stdbin};
 
 #[tokio::test]
 async fn test_preflight_codex_not_installed() {

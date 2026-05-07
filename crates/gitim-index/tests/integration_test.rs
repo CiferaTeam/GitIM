@@ -1,8 +1,14 @@
 use std::collections::HashMap;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
 
 fn make_msg(author: &str, line: u64, ts: &str, body: &str) -> String {
     format!("[L{:06}][P000000][@{}][{}] {}", line, author, ts, body)
+}
+
+fn open_temp_index() -> (TempDir, gitim_index::Index) {
+    let dir = tempdir().unwrap();
+    let index = gitim_index::Index::open(&dir.path().join("index.db")).unwrap();
+    (dir, index)
 }
 
 #[test]
@@ -31,7 +37,7 @@ fn test_full_rebuild_then_incremental_append() {
     .unwrap();
 
     // Full rebuild
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
     let count = index.rebuild(dir.path(), "commit_aaa").unwrap();
     assert_eq!(count, 3); // 2 channel + 1 dm
 
@@ -79,7 +85,7 @@ fn test_full_rebuild_then_incremental_append() {
 
 #[test]
 fn test_dm_visibility_across_channels() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     // Index multiple DMs and channels
     index
@@ -176,7 +182,7 @@ fn test_reindex_from_scratch() {
 
 #[test]
 fn test_pagination() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     // Insert 10 messages
     let content: Vec<String> = (1..=10)
@@ -228,7 +234,7 @@ fn test_pagination() {
 
 #[test]
 fn test_channel_filter() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     index
         .index_thread_content(
@@ -262,7 +268,7 @@ fn test_channel_filter() {
 
 #[test]
 fn search_excludes_cards_by_default() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     let mut diff = HashMap::new();
     diff.insert(
@@ -303,7 +309,7 @@ fn search_excludes_cards_by_default() {
 
 #[test]
 fn search_includes_cards_when_flag_set() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     let mut diff = HashMap::new();
     diff.insert(
@@ -344,7 +350,7 @@ fn search_includes_cards_when_flag_set() {
 
 #[test]
 fn search_with_channel_type_card_and_current_user() {
-    let index = gitim_index::Index::open_in_memory().unwrap();
+    let (_index_dir, index) = open_temp_index();
 
     let mut diff = HashMap::new();
     diff.insert(

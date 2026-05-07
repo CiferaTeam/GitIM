@@ -115,6 +115,7 @@ impl Index {
     }
 
     /// 创建内存索引，用于测试。
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, IndexError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA_SQL)?;
@@ -834,38 +835,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dm_visibility_filter() {
-        let idx = Index::open_in_memory().unwrap();
-        idx.index_thread_content(
-            "alice--bob",
-            &make_thread_content(&[("alice", 1, "20260323T100000Z", "secret to bob")]),
-        )
-        .unwrap();
-        idx.index_thread_content(
-            "alice--charlie",
-            &make_thread_content(&[("alice", 1, "20260323T100000Z", "secret to charlie")]),
-        )
-        .unwrap();
-
-        // bob 只能看到 alice--bob 的 DM
-        let result = idx
-            .search(SearchParams {
-                query: Some("secret".to_string()),
-                author: None,
-                channel: None,
-                channel_type: None,
-                current_user: Some("bob".to_string()),
-                limit: 50,
-                offset: 0,
-                include_cards: false,
-            })
-            .unwrap();
-
-        assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].channel, "alice--bob");
-    }
-
-    #[test]
     fn test_fts_escape_special_chars() {
         let idx = Index::open_in_memory().unwrap();
         let content =
@@ -913,26 +882,6 @@ mod tests {
         let count = idx.append_from_diff(&diff, "abc123").unwrap();
         assert_eq!(count, 1);
         assert_eq!(idx.get_commit_id().unwrap().unwrap(), "abc123");
-    }
-
-    #[test]
-    fn test_rebuild() {
-        let dir = tempfile::tempdir().unwrap();
-        let channels_dir = dir.path().join("channels");
-        std::fs::create_dir_all(&channels_dir).unwrap();
-        std::fs::write(
-            channels_dir.join("general.thread"),
-            make_thread_content(&[
-                ("alice", 1, "20260323T100000Z", "hello"),
-                ("bob", 2, "20260323T100001Z", "world"),
-            ]),
-        )
-        .unwrap();
-
-        let idx = Index::open_in_memory().unwrap();
-        let count = idx.rebuild(dir.path(), "def456").unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(idx.get_commit_id().unwrap().unwrap(), "def456");
     }
 
     #[test]
