@@ -224,14 +224,19 @@ export const useCardStore = create<CardState>((set) => ({
   markPendingCardSent: (pathKey, pendingId, lineNumber) =>
     set((state) => {
       const existing = state.cardMessagesByPath[pathKey] ?? [];
+      const realAlreadyArrived = existing.some(
+        (m) => !m._pendingId && m.line_number === lineNumber,
+      );
       return {
         cardMessagesByPath: {
           ...state.cardMessagesByPath,
-          [pathKey]: existing.map((m) =>
-            m._pendingId === pendingId
-              ? { ...m, _status: "sent", line_number: lineNumber }
-              : m,
-          ),
+          [pathKey]: realAlreadyArrived
+            ? existing.filter((m) => m._pendingId !== pendingId)
+            : existing.map((m) =>
+                m._pendingId === pendingId
+                  ? { ...m, _status: "sent", line_number: lineNumber }
+                  : m,
+              ),
         },
       };
     }),

@@ -186,13 +186,20 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => ({ messages: [...state.messages, m] })),
 
   markPendingSent: (pendingId, lineNumber) =>
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m._pendingId === pendingId
-          ? { ...m, _status: "sent", line_number: lineNumber }
-          : m
-      ),
-    })),
+    set((state) => {
+      const realAlreadyArrived = state.messages.some(
+        (m) => !m._pendingId && m.line_number === lineNumber
+      );
+      return {
+        messages: realAlreadyArrived
+          ? state.messages.filter((m) => m._pendingId !== pendingId)
+          : state.messages.map((m) =>
+              m._pendingId === pendingId
+                ? { ...m, _status: "sent", line_number: lineNumber }
+                : m
+            ),
+      };
+    }),
 
   markPendingFailed: (pendingId, lineNumber) =>
     set((state) => ({
