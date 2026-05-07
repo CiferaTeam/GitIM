@@ -94,6 +94,42 @@ pub struct GetThreadResponse {
     pub entries: Vec<Value>,
 }
 
+/// Response payload for `Request::CreateChannel`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateChannelResponse {
+    pub channel: String,
+    pub created_by: String,
+}
+
+/// Response payload for `Request::ArchiveChannel`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveChannelResponse {
+    pub channel: String,
+    pub archived_by: String,
+}
+
+/// Response payload for `Request::UnarchiveChannel`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveChannelResponse {
+    pub channel: String,
+    pub unarchived_by: String,
+}
+
+/// Shared response shape for `Request::JoinChannel` and
+/// `Request::LeaveChannel`. Both go through `write_channel_event` and
+/// emit identical wire fields; `event_type` discriminates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelEventResponse {
+    pub channel: String,
+    /// `"join"` or `"leave"`.
+    pub event_type: String,
+    pub author: String,
+    pub targets: Vec<String>,
+    pub line_number: u64,
+    /// Push outcome string, same conventions as `SendResponse::status`.
+    pub status: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +263,58 @@ mod tests {
         assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("general"));
         assert_eq!(obj.get("root_line").and_then(|v| v.as_u64()), Some(42));
         assert!(obj.get("entries").unwrap().is_array());
+    }
+
+    #[test]
+    fn create_channel_response_wire_shape() {
+        let r = CreateChannelResponse {
+            channel: "engineering".to_string(),
+            created_by: "alice".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("engineering"));
+        assert_eq!(obj.get("created_by").and_then(|v| v.as_str()), Some("alice"));
+    }
+
+    #[test]
+    fn channel_event_response_wire_shape() {
+        let r = ChannelEventResponse {
+            channel: "general".to_string(),
+            event_type: "join".to_string(),
+            author: "alice".to_string(),
+            targets: vec!["bob".to_string(), "carol".to_string()],
+            line_number: 17,
+            status: "pushed".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 6);
+        assert_eq!(obj.get("event_type").and_then(|v| v.as_str()), Some("join"));
+        assert_eq!(obj.get("line_number").and_then(|v| v.as_u64()), Some(17));
+        assert_eq!(
+            obj.get("targets").unwrap().as_array().map(|a| a.len()),
+            Some(2),
+        );
+    }
+
+    #[test]
+    fn archive_unarchive_response_distinct_fields() {
+        let a = serde_json::to_value(ArchiveChannelResponse {
+            channel: "ch".to_string(),
+            archived_by: "alice".to_string(),
+        })
+        .unwrap();
+        let u = serde_json::to_value(UnarchiveChannelResponse {
+            channel: "ch".to_string(),
+            unarchived_by: "alice".to_string(),
+        })
+        .unwrap();
+        assert!(a.as_object().unwrap().contains_key("archived_by"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(!u.as_object().unwrap().contains_key("archived_by"));
     }
 
     #[test]
