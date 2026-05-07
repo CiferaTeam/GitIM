@@ -95,11 +95,12 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
         Request::Status => {
             let is_guest = state.is_guest.load(std::sync::atomic::Ordering::SeqCst);
-            Response::success(serde_json::json!({
-                "version": "0.1.0",
-                "status": "running",
-                "guest": is_guest,
-            }))
+            let payload = gitim_core::responses::StatusResponse {
+                version: "0.1.0".to_string(),
+                status: "running".to_string(),
+                guest: is_guest,
+            };
+            Response::success(serde_json::to_value(payload).unwrap())
         }
         Request::Send {
             channel,
@@ -124,7 +125,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             channel,
             line_number,
         } => handle_get_thread(state, channel, line_number).await,
-        Request::Subscribe => Response::success(serde_json::json!({"subscribed": true})),
+        Request::Subscribe => {
+            let payload = gitim_core::responses::SubscribeResponse { subscribed: true };
+            Response::success(serde_json::to_value(payload).unwrap())
+        }
         Request::RegisterUser {
             handler,
             display_name,

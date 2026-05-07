@@ -14,7 +14,7 @@ app.use(
       // Allow any localhost port in development
       if (origin.match(/^http:\/\/localhost:\d+$/)) return origin;
       // Allow Cloudflare Pages (production + preview deploys)
-      if (origin === "https://gitim.io") return origin;
+      if (origin === "https://gitim.io" || origin === "https://www.gitim.io") return origin;
       if (origin.endsWith(".gitim.pages.dev") || origin === "https://gitim.pages.dev") return origin;
       return null;
     },

@@ -204,36 +204,40 @@ pub async fn handle_send(
     );
 
     // If has_remote, wake sync_loop and await push result
-    if let Some(rx) = push_rx {
+    use gitim_core::responses::SendResponse;
+    let payload = if let Some(rx) = push_rx {
         state.push_notify.notify_one();
         match rx.await {
-            Ok(PushResult::Pushed { commit_id }) => Response::success(serde_json::json!({
-                "line_number": next_line,
-                "channel": thread_name,
-                "status": "pushed",
-                "commit_id": commit_id,
-            })),
-            Ok(PushResult::Failed { reason }) => Response::success(serde_json::json!({
-                "line_number": next_line,
-                "channel": thread_name,
-                "status": "commit_only",
-                "error": reason,
-            })),
-            Err(_) => {
-                // Sender dropped — sync_loop may have been shut down
-                Response::success(serde_json::json!({
-                    "line_number": next_line,
-                    "channel": thread_name,
-                    "status": "commit_only",
-                    "error": "push result channel closed",
-                }))
-            }
+            Ok(PushResult::Pushed { commit_id }) => SendResponse {
+                line_number: next_line,
+                channel: thread_name,
+                status: "pushed".to_string(),
+                commit_id: Some(commit_id),
+                error: None,
+            },
+            Ok(PushResult::Failed { reason }) => SendResponse {
+                line_number: next_line,
+                channel: thread_name,
+                status: "commit_only".to_string(),
+                commit_id: None,
+                error: Some(reason),
+            },
+            Err(_) => SendResponse {
+                line_number: next_line,
+                channel: thread_name,
+                status: "commit_only".to_string(),
+                commit_id: None,
+                error: Some("push result channel closed".to_string()),
+            },
         }
     } else {
-        Response::success(serde_json::json!({
-            "line_number": next_line,
-            "channel": thread_name,
-            "status": commit_status,
-        }))
-    }
+        SendResponse {
+            line_number: next_line,
+            channel: thread_name,
+            status: commit_status.to_string(),
+            commit_id: None,
+            error: None,
+        }
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }

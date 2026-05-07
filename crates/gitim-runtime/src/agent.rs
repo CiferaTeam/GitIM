@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::json;
 use tracing::info;
 
 use gitim_client::{ensure_daemon_with_log, GitimClient};
+use gitim_core::auth_payload::AuthPayload;
 use gitim_sync::url_redact::redacted_url;
 
 use crate::daemon_log::daemon_log_path;
@@ -42,16 +42,17 @@ pub(crate) fn name_to_handler(name: &str) -> String {
 /// Provision the human clone: clone remote → start daemon → onboard → verify.
 ///
 /// The caller owns `remote_url` and `auth`: local mode passes the bare-repo
-/// path and `{type:"git", handler, display_name}`; github mode will pass an
-/// https URL and `{type:"github", token}`. Identity inference lives in the
-/// daemon — runtime forwards the auth payload unchanged.
+/// path and `AuthPayload::Git { handler, display_name, .. }`; github mode
+/// passes an https URL and `AuthPayload::GitHub { token }`. Identity
+/// inference lives in the daemon — runtime forwards the auth payload
+/// unchanged.
 ///
 /// Idempotent: if `.gitim-runtime/human/` already exists, skip the clone step.
 pub async fn provision_human(
     workspace: &Path,
     remote_url: &str,
     git_server: &str,
-    auth: serde_json::Value,
+    auth: AuthPayload,
 ) -> Result<PathBuf, RuntimeError> {
     let runtime_dir = workspace.join(".gitim-runtime");
     std::fs::create_dir_all(&runtime_dir)?;
@@ -88,7 +89,7 @@ pub async fn provision_human(
 
     let client = GitimClient::new(&human_dir);
     let onboard_resp = client
-        .onboard(git_server, auth, true, false)
+        .onboard(git_server, Some(auth), true, false)
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 
@@ -174,18 +175,15 @@ pub async fn provision_agent(
     // me.json, which the daemon's commit path reads via `author_for`. The
     // chain is how workspace-owner email reaches agent commits even though
     // the agent onboards via `git` rather than `github`.
-    let mut auth = json!({
-        "type": "git",
-        "handler": config.handler,
-        "display_name": config.display_name,
-    });
-    if let Some(email) = &config.github_email {
-        auth["github_email"] = json!(email);
-    }
+    let auth = AuthPayload::Git {
+        handler: config.handler.clone(),
+        display_name: config.display_name.clone(),
+        github_email: config.github_email.clone(),
+    };
 
     let client = GitimClient::new(&repo_root);
     let onboard_resp = client
-        .onboard("git", auth, false, false)
+        .onboard("git", Some(auth), false, false)
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 

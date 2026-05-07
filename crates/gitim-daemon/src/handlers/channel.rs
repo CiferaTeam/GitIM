@@ -171,10 +171,11 @@ pub async fn handle_create_channel(
     info!("channel '{}' created by @{}", name, author);
 
     // 10. Return success
-    Response::success(serde_json::json!({
-        "channel": name,
-        "created_by": author,
-    }))
+    let payload = gitim_core::responses::CreateChannelResponse {
+        channel: name,
+        created_by: author,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_archive_channel(
@@ -287,10 +288,11 @@ pub async fn handle_archive_channel(
     info!("channel '{}' archived by @{}", channel, author);
 
     // 10. Return success
-    Response::success(serde_json::json!({
-        "channel": channel,
-        "archived_by": author,
-    }))
+    let payload = gitim_core::responses::ArchiveChannelResponse {
+        channel,
+        archived_by: author,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_unarchive_channel(
@@ -439,10 +441,11 @@ pub async fn handle_unarchive_channel(
     info!("channel '{}' unarchived by @{}", channel, author);
 
     // 12. Return success
-    Response::success(serde_json::json!({
-        "channel": channel,
-        "unarchived_by": author,
-    }))
+    let payload = gitim_core::responses::UnarchiveChannelResponse {
+        channel,
+        unarchived_by: author,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub(super) async fn write_channel_event(
@@ -664,12 +667,13 @@ pub(super) async fn write_channel_event(
         "{} event in {} by @{} at L{:06} (targets: {:?})",
         event_type, channel, author, next_line, affected
     );
-    Response::success(serde_json::json!({
-        "channel": channel,
-        "event_type": event_type,
-        "author": author,
-        "targets": affected,
-        "line_number": next_line,
-        "status": commit_status,
-    }))
+    let payload = gitim_core::responses::ChannelEventResponse {
+        channel,
+        event_type: event_type.to_string(),
+        author,
+        targets: affected,
+        line_number: next_line,
+        status: commit_status.to_string(),
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }

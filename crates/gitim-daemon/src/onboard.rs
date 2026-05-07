@@ -1,6 +1,8 @@
 use crate::api::Response;
-use crate::identity::{AuthData, GitServer, InferredIdentity};
+use crate::identity::{GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
+use gitim_core::auth_payload::AuthPayload;
+use gitim_core::me_json::MeJson;
 use gitim_core::types::{ChannelMeta, Handler, UserMeta};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
@@ -11,12 +13,14 @@ const MAX_PUSH_RETRIES: u32 = 3;
 pub async fn handle_onboard(
     state: SharedState,
     git_server: String,
-    auth: serde_json::Value,
+    auth: Option<AuthPayload>,
     admin: bool,
     guest: bool,
 ) -> Response {
     // --- Guest mode: write me.json and start sync, skip everything else ---
     if guest {
+        // Guest mode never inspects auth — accept Some or None.
+        let _ = auth;
         if let Err(resp) = write_guest_me_json(&state) {
             return resp;
         }
@@ -45,13 +49,16 @@ pub async fn handle_onboard(
             .is_guest
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        return Response::success(serde_json::json!({
-            "guest": true,
-        }));
+        let payload = gitim_core::responses::OnboardResponse::Guest { guest: true };
+        return Response::success(serde_json::to_value(payload).unwrap());
     }
 
     // --- Step A: Infer identity ---
-    let identity = match infer(git_server.clone(), auth) {
+    let auth_payload = match auth {
+        Some(a) => a,
+        None => return Response::error("onboard: missing auth payload (non-guest mode)"),
+    };
+    let identity = match infer(git_server.clone(), auth_payload) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -144,40 +151,20 @@ pub async fn handle_onboard(
         .is_guest
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
-    Response::success(serde_json::json!({
-        "handler": handler,
-        "created": created,
-    }))
+    let payload = gitim_core::responses::OnboardResponse::User { handler, created };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 // ---------------------------------------------------------------------------
 // Step A helpers
 // ---------------------------------------------------------------------------
 
-fn infer(git_server: String, auth: serde_json::Value) -> Result<InferredIdentity, Response> {
+fn infer(git_server: String, auth: AuthPayload) -> Result<InferredIdentity, Response> {
     let server: GitServer =
         serde_json::from_value(serde_json::Value::String(git_server.clone()))
             .map_err(|_| Response::error(format!("unknown git_server: {}", git_server)))?;
 
-    // Determine which AuthData variant to deserialize.
-    // If the auth payload contains handler + display_name (shared credential mode),
-    // route to the Git variant regardless of git_server — the identity is manually specified.
-    let mut auth_obj = auth;
-    if let Some(obj) = auth_obj.as_object_mut() {
-        let has_handler = obj.contains_key("handler") && obj.contains_key("display_name");
-        let auth_type = if has_handler { "git" } else { &git_server };
-        obj.insert(
-            "type".to_string(),
-            serde_json::Value::String(auth_type.to_string()),
-        );
-    } else {
-        return Err(Response::error("auth must be a JSON object"));
-    }
-
-    let auth_data: AuthData = serde_json::from_value(auth_obj)
-        .map_err(|e| Response::error(format!("invalid auth data: {}", e)))?;
-
-    crate::identity::infer_identity(server, auth_data)
+    crate::identity::infer_identity(server, auth)
         .map_err(|e| Response::error(format!("identity inference failed: {}", e)))
 }
 
@@ -199,60 +186,39 @@ fn write_me_json(
     let me_path = gitim_dir.join("me.json");
 
     // Merge semantics: start from the existing file (if any) so fields this
-    // code path doesn't set — github_email, model, provider, etc. — aren't
-    // silently erased on re-onboard. Caller-provided fields below still take
-    // precedence.
-    let mut me = read_me_json_object(&me_path);
+    // code path doesn't set — github_email, provider, model, system_prompt,
+    // env, user-added extras — aren't silently erased on re-onboard.
+    let existing = read_existing_me(&me_path);
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let obj = me.as_object_mut().unwrap();
-    obj.insert(
-        "handler".to_string(),
-        serde_json::Value::String(handler.to_string()),
-    );
-    obj.insert(
-        "git_server".to_string(),
-        serde_json::Value::String(git_server.to_string()),
-    );
-    obj.insert(
-        "display_name".to_string(),
-        serde_json::Value::String(display_name.to_string()),
-    );
-    obj.insert("onboarded_at".to_string(), serde_json::Value::String(now));
-    // Caller-provided email overrides; absent → preserve whatever was there.
-    if let Some(email) = github_email {
-        obj.insert(
-            "github_email".to_string(),
-            serde_json::Value::String(email.to_string()),
-        );
-    }
-    // Guest flag is mutually exclusive with a real handler — clear stale value.
-    obj.remove("guest");
+    let patch = MeJson {
+        handler: Some(handler.to_string()),
+        display_name: Some(display_name.to_string()),
+        git_server: Some(git_server.to_string()),
+        onboarded_at: Some(now),
+        github_email: github_email.map(str::to_string),
+        ..Default::default()
+    };
 
-    let content = serde_json::to_string_pretty(&me).unwrap();
+    let mut merged = existing.merged_with(patch);
+    // Going from guest → real identity, drop any stale guest flag.
+    merged.clear_guest();
+
+    let content = serde_json::to_string_pretty(&merged).unwrap();
     std::fs::write(&me_path, &content)
         .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
 
     Ok(())
 }
 
-/// Read existing me.json as a JSON object. On missing / invalid / non-object
-/// content, return an empty object — callers rely on `as_object_mut()` always
-/// succeeding.
-fn read_me_json_object(me_path: &std::path::Path) -> serde_json::Value {
+/// Read existing me.json into a typed `MeJson`. Missing file / invalid JSON
+/// degrade to `MeJson::default()` so callers can always merge into something.
+fn read_existing_me(me_path: &std::path::Path) -> MeJson {
     let content = match std::fs::read_to_string(me_path) {
         Ok(s) => s,
-        Err(_) => return serde_json::json!({}),
+        Err(_) => return MeJson::default(),
     };
-    let parsed: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return serde_json::json!({}),
-    };
-    if parsed.is_object() {
-        parsed
-    } else {
-        serde_json::json!({})
-    }
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
 fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
@@ -261,11 +227,14 @@ fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
         .map_err(|e| Response::error(format!("failed to create .gitim dir: {}", e)))?;
 
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let me = serde_json::json!({
-        "handler": null,
-        "guest": true,
-        "onboarded_at": now,
-    });
+    // Guest mode intentionally does NOT merge with an existing me.json —
+    // entering guest clears prior identity (see handle_onboard guest branch).
+    let me = MeJson {
+        handler: None,
+        guest: Some(true),
+        onboarded_at: Some(now),
+        ..Default::default()
+    };
 
     let me_path = gitim_dir.join("me.json");
     let content = serde_json::to_string_pretty(&me).unwrap();
@@ -539,42 +508,25 @@ mod tests {
         Arc::new(AppState::new(repo, Config::default(), event_tx, None))
     }
 
+    fn git_auth(handler: &str, display_name: &str) -> AuthPayload {
+        AuthPayload::Git {
+            handler: handler.to_string(),
+            display_name: display_name.to_string(),
+            github_email: None,
+        }
+    }
+
     #[test]
     fn infer_git_mode_ok() {
-        let auth = serde_json::json!({
-            "handler": "alice",
-            "display_name": "Alice"
-        });
-        let id = infer("git".to_string(), auth).unwrap();
+        let id = infer("git".to_string(), git_auth("alice", "Alice")).unwrap();
         assert_eq!(id.handler.as_str(), "alice");
         assert_eq!(id.display_name, "Alice");
     }
 
     #[test]
     fn infer_unknown_server_returns_error() {
-        let auth = serde_json::json!({"handler": "x", "display_name": "X"});
-        let result = infer("unknown".to_string(), auth);
+        let result = infer("unknown".to_string(), git_auth("x", "X"));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn infer_bad_auth_returns_error() {
-        // Missing required fields for github variant
-        let auth = serde_json::json!({});
-        let result = infer("github".to_string(), auth);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn infer_github_with_handler_routes_to_git_variant() {
-        // Shared credential mode: git_server=github but auth has handler+display_name
-        let auth = serde_json::json!({
-            "handler": "bot-1",
-            "display_name": "Bot One"
-        });
-        let id = infer("github".to_string(), auth).unwrap();
-        assert_eq!(id.handler.as_str(), "bot-1");
-        assert_eq!(id.display_name, "Bot One");
     }
 
     #[tokio::test]
@@ -603,6 +555,49 @@ mod tests {
         assert_eq!(content["display_name"], "Alice W");
         assert_eq!(content["github_email"], "alice@example.com");
         assert!(content["onboarded_at"].as_str().is_some());
+    }
+
+    /// CLAUDE.md merge semantics: a re-onboard that doesn't pass
+    /// github_email must NOT erase the value written by an earlier onboard.
+    /// Same goes for any field this code path doesn't set (provider, model,
+    /// system_prompt — written by runtime add_agent on top).
+    #[tokio::test]
+    async fn write_me_json_preserves_existing_unrelated_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".gitim")).unwrap();
+        // Pre-existing me.json with a runtime-config field and an email
+        std::fs::write(
+            repo.join(".gitim/me.json"),
+            r#"{
+                "handler": "alice",
+                "display_name": "Alice W",
+                "git_server": "github",
+                "github_email": "alice@example.com",
+                "provider": "claude",
+                "model": "sonnet-4-6"
+            }"#,
+        )
+        .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
+
+        // Re-onboard without an email — simulates a token that no longer
+        // exposes the verified email.
+        write_me_json(&state, "alice", "Alice W", "github", None).unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(repo.join(".gitim/me.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            content["github_email"], "alice@example.com",
+            "github_email must survive re-onboard with None email"
+        );
+        assert_eq!(
+            content["provider"], "claude",
+            "runtime-only fields must survive re-onboard"
+        );
+        assert_eq!(content["model"], "sonnet-4-6");
     }
 
     #[tokio::test]
@@ -710,11 +705,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let auth = serde_json::json!({
-            "handler": "alice",
-            "display_name": "Alice"
-        });
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, false, false).await;
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("alice", "Alice")),
+            false,
+            false,
+        )
+        .await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
 
         let data = resp.data.unwrap();
@@ -740,8 +738,14 @@ mod tests {
             .sync_started
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let auth2 = serde_json::json!({"handler": "alice", "display_name": "Alice"});
-        let resp2 = handle_onboard(state.clone(), "git".to_string(), auth2, false, false).await;
+        let resp2 = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("alice", "Alice")),
+            false,
+            false,
+        )
+        .await;
         assert!(resp2.ok);
         assert!(!resp2.data.unwrap()["created"].as_bool().unwrap());
     }
@@ -821,7 +825,7 @@ mod tests {
         let resp_a = handle_onboard(
             state_a.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            Some(git_auth("bot-a", "Bot A")),
             false,
             false,
         )
@@ -833,7 +837,7 @@ mod tests {
         let resp_b = handle_onboard(
             state_b.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            Some(git_auth("bot-b", "Bot B")),
             false,
             false,
         )
@@ -845,7 +849,7 @@ mod tests {
         let resp_c = handle_onboard(
             state_c.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-c", "display_name": "Bot C"}),
+            Some(git_auth("bot-c", "Bot C")),
             false,
             false,
         )
@@ -1001,7 +1005,7 @@ mod tests {
         let resp_a = handle_onboard(
             state_a.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-a", "display_name": "Bot A"}),
+            Some(git_auth("bot-a", "Bot A")),
             false,
             false,
         )
@@ -1016,7 +1020,7 @@ mod tests {
         let resp_b = handle_onboard(
             state_b.clone(),
             "git".to_string(),
-            serde_json::json!({"handler": "bot-b", "display_name": "Bot B"}),
+            Some(git_auth("bot-b", "Bot B")),
             false,
             false,
         )
@@ -1053,8 +1057,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let auth = serde_json::json!({"handler": "admin-user", "display_name": "Admin"});
-        let resp = handle_onboard(state.clone(), "git".to_string(), auth, true, false).await;
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            Some(git_auth("admin-user", "Admin")),
+            true,
+            false,
+        )
+        .await;
         assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
         assert!(
             state.is_admin.load(std::sync::atomic::Ordering::SeqCst),
@@ -1070,7 +1080,7 @@ mod tests {
         let resp = handle_onboard(
             state.clone(),
             "git".to_string(),
-            serde_json::json!({}),
+            None,
             false,
             true,
         )

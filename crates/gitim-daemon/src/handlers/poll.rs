@@ -31,10 +31,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                 Ok(parent) => parent,
                 Err(_) => {
                     // No parent (initial commit) — return sync point with no changes
-                    return Response::success(serde_json::json!({
-                        "commit_id": current_commit,
-                        "changes": [],
-                    }));
+                    let payload = gitim_core::responses::PollResponse {
+                        commit_id: current_commit,
+                        changes: Vec::new(),
+                    };
+                    return Response::success(serde_json::to_value(payload).unwrap());
                 }
             }
         }
@@ -47,10 +48,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
 
     // Same cursor → no changes
     if since_commit == current_commit {
-        return Response::success(serde_json::json!({
-            "commit_id": current_commit,
-            "changes": [],
-        }));
+        let payload = gitim_core::responses::PollResponse {
+            commit_id: current_commit,
+            changes: Vec::new(),
+        };
+        return Response::success(serde_json::to_value(payload).unwrap());
     }
 
     // Compute diff
@@ -60,7 +62,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
     };
 
     // Parse changed files into entries
-    let mut changes: Vec<serde_json::Value> = Vec::new();
+    let mut changes: Vec<gitim_core::responses::PollChange> = Vec::new();
 
     let current_user_snapshot = state.current_user.read().await.clone();
     let is_admin = state.is_admin.load(std::sync::atomic::Ordering::SeqCst);
@@ -140,11 +142,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                         }
                         let card_key = format!("card:{}/{}", ch, card_id);
                         if file == "card.meta.yaml" {
-                            changes.push(serde_json::json!({
-                                "channel": card_key,
-                                "kind": "card_meta",
-                                "entries": [],
-                            }));
+                            changes.push(gitim_core::responses::PollChange {
+                                channel: card_key,
+                                kind: "card_meta".to_string(),
+                                entries: Vec::new(),
+                            });
                             continue;
                         }
                         if file == "discussion.thread" {
@@ -163,11 +165,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                                 .iter()
                                 .map(|entry| entry_to_json(entry))
                                 .collect();
-                            changes.push(serde_json::json!({
-                                "channel": card_key,
-                                "kind": "card_thread",
-                                "entries": entries,
-                            }));
+                            changes.push(gitim_core::responses::PollChange {
+                                channel: card_key,
+                                kind: "card_thread".to_string(),
+                                entries,
+                            });
                             continue;
                         }
                         // Other files inside the card dir are ignored.
@@ -190,11 +192,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                 if !skip_filter && !channel_membership.get(ch_name).copied().unwrap_or(true) {
                     continue;
                 }
-                changes.push(serde_json::json!({
-                    "channel": ch_name,
-                    "kind": "channel_meta",
-                    "entries": [],
-                }));
+                changes.push(gitim_core::responses::PollChange {
+                    channel: ch_name.to_string(),
+                    kind: "channel_meta".to_string(),
+                    entries: Vec::new(),
+                });
                 continue;
             } else {
                 continue;
@@ -218,11 +220,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                 .strip_suffix(".thread")
                 .or_else(|| name.strip_suffix(".meta.yaml"));
             if let Some(ch_name) = ch_name {
-                changes.push(serde_json::json!({
-                    "channel": ch_name,
-                    "kind": "channel_meta",
-                    "entries": [],
-                }));
+                changes.push(gitim_core::responses::PollChange {
+                    channel: ch_name.to_string(),
+                    kind: "channel_meta".to_string(),
+                    entries: Vec::new(),
+                });
             }
             continue;
         } else {
@@ -270,15 +272,16 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             .map(|entry| entry_to_json(entry))
             .collect();
 
-        changes.push(serde_json::json!({
-            "channel": channel,
-            "kind": kind,
-            "entries": entries,
-        }));
+        changes.push(gitim_core::responses::PollChange {
+            channel,
+            kind: kind.to_string(),
+            entries,
+        });
     }
 
-    Response::success(serde_json::json!({
-        "commit_id": current_commit,
-        "changes": changes,
-    }))
+    let payload = gitim_core::responses::PollResponse {
+        commit_id: current_commit,
+        changes,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }

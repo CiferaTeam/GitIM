@@ -27,6 +27,7 @@ use crate::github::{
 };
 use crate::gitignore::ensure_env_gitignored;
 use gitim_client::GitimClient;
+use gitim_core::me_json::MeJson;
 use gitim_sync::url_redact::redacted_url;
 
 /// Default TCP port for the runtime HTTP server. Shared between
@@ -81,6 +82,123 @@ struct HealthResponse {
     service: &'static str,
     version: &'static str,
     workspaces_count: usize,
+}
+
+// -----------------------------------------------------------------------------
+// Phase 4 typed response shapes — see docs/plans/protocol-typing/plan.md
+//
+// One Response struct per success path; ErrorBody for every failure path
+// (the legacy `Json(serde_json::json!({"ok": false, "error": ...}))` shape).
+// Renaming a wire field anywhere in this section breaks the build at every
+// call site — that's the point.
+// -----------------------------------------------------------------------------
+
+/// Shared error response body. `ok` is always `false` — Serialize via a
+/// const associated function so callers can't construct an `ok: true` mistake.
+#[derive(Serialize)]
+struct ErrorBody {
+    ok: bool,
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+}
+
+impl ErrorBody {
+    fn new(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: error.into(),
+            error_code: None,
+        }
+    }
+
+    fn with_code(error: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: error.into(),
+            error_code: Some(code.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspacesListResponse {
+    workspaces: Vec<WorkspaceSummary>,
+}
+
+/// Single-workspace detail. Differs from `WorkspaceSummary` (which is the
+/// list-row shape) by adding `agents_count` and `human_repo`.
+#[derive(Serialize)]
+struct WorkspaceDetailResponse {
+    slug: String,
+    workspace_name: String,
+    path: String,
+    provider: GitProvider,
+    initialized: bool,
+    agents_count: usize,
+    human_repo: Option<String>,
+}
+
+/// `{"ok": true}` ack for `DELETE /workspaces/{slug}`.
+#[derive(Serialize)]
+struct OkAckResponse {
+    ok: bool,
+}
+
+/// `POST /workspaces` success body. Wire keeps `ok: true` inline because
+/// pre-typed callers parse `obj.get("slug")` from the same dict.
+#[derive(Serialize)]
+struct WorkspaceCreateResponse {
+    ok: bool,
+    slug: String,
+    workspace_name: String,
+    path: String,
+    provider: GitProvider,
+}
+
+#[derive(Serialize)]
+struct ImMeData {
+    handler: String,
+    display_name: String,
+    guest: bool,
+}
+
+#[derive(Serialize)]
+struct ImMeResponse {
+    ok: bool,
+    data: ImMeData,
+}
+
+/// 409 `workspace_path_exists` error — carries the slug of the live
+/// workspace already pinned to that path so the caller can show a useful
+/// message. Different shape from `ErrorBody` because it has the extra
+/// `existing_slug` field.
+#[derive(Serialize)]
+struct WorkspacePathExistsError {
+    ok: bool,
+    error_code: &'static str,
+    error: String,
+    existing_slug: String,
+}
+
+#[derive(Serialize)]
+struct AgentsListResponse {
+    ok: bool,
+    agents: Vec<AgentInfo>,
+}
+
+#[derive(Serialize)]
+struct AgentDetailResponse {
+    ok: bool,
+    agent: AgentInfo,
+}
+
+/// `POST /agents/add` success — `id` is the agent handler that was
+/// created (echo of `req.handler`).
+#[derive(Serialize)]
+struct AgentAddResponse {
+    ok: bool,
+    id: String,
 }
 
 /// Real-time agent activity event, broadcast via SSE.
@@ -261,10 +379,7 @@ where
         crate::slug::validate(&slug).map_err(|e| {
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("invalid slug: {e}")
-                })),
+                Json(ErrorBody::new(format!("invalid slug: {e}"))),
             )
                 .into_response()
         })?;
@@ -276,9 +391,19 @@ fn not_found_workspace() -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         axum::http::StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+        Json(ErrorBody::new("unknown workspace")),
     )
         .into_response()
+}
+
+/// Used by `/im/*` routes when the workspace exists but `human_repo`
+/// isn't wired up yet (initial provisioning never finished). Returns
+/// 200 with the standard daemon-error body shape — same convention as
+/// `api_response_to_json` for daemon-side `Response::error`s, so the
+/// WebUI can branch on `body.ok` without status-code-aware code.
+fn human_not_initialized() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    Json(ErrorBody::new("human daemon not initialized")).into_response()
 }
 
 fn with_workspace_snapshot<F, R>(
@@ -381,17 +506,10 @@ fn human_client(
         Some(p) => Ok(GitimClient::new(p)),
         None if persistent_human_repo(&ctx.path).is_some() => Err((
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "human daemon unavailable"
-            })),
+            Json(ErrorBody::new("human daemon unavailable")),
         )
             .into_response()),
-        None => Err(Json(serde_json::json!({
-            "ok": false,
-            "error": "human daemon not initialized"
-        }))
-        .into_response()),
+        None => Err(human_not_initialized()),
     }
 }
 
@@ -400,17 +518,11 @@ fn api_response_to_json(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match result {
-        Ok(resp) => Json(serde_json::json!({
-            "ok": resp.ok,
-            "data": resp.data,
-            "error": resp.error,
-        }))
-        .into_response(),
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": e.to_string(),
-        }))
-        .into_response(),
+        // ApiResponse serializes with `skip_serializing_if = is_none` —
+        // matches the legacy hand-rolled shape (`null` was never emitted
+        // for absent data/error fields, only when callers explicitly set them).
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => Json(ErrorBody::new(e.to_string())).into_response(),
     }
 }
 
@@ -424,38 +536,31 @@ async fn im_me(
     let human_repo = match with_workspace_snapshot(&state, &slug, human_repo_path) {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": "human daemon not initialized"
-            }))
-            .into_response();
+            return human_not_initialized();
         }
         Err(r) => return r,
     };
 
     let me_path = human_repo.join(".gitim/me.json");
     match std::fs::read_to_string(&me_path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(me) => Json(serde_json::json!({
-                "ok": true,
-                "data": {
-                    "handler": me.get("handler").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                    "display_name": me.get("display_name").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-                    "guest": me.get("guest").and_then(|v| v.as_bool()).unwrap_or(false),
-                }
-            }))
+        Ok(content) => match serde_json::from_str::<MeJson>(&content) {
+            Ok(me) => Json(ImMeResponse {
+                ok: true,
+                data: ImMeData {
+                    handler: me
+                        .handler
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    display_name: me
+                        .display_name
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    guest: me.guest.unwrap_or(false),
+                },
+            })
             .into_response(),
-            Err(e) => Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to parse me.json: {e}")
-            }))
-            .into_response(),
+            Err(e) => Json(ErrorBody::new(format!("failed to parse me.json: {e}")))
+                .into_response(),
         },
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to read me.json: {e}")
-        }))
-        .into_response(),
+        Err(e) => Json(ErrorBody::new(format!("failed to read me.json: {e}"))).into_response(),
     }
 }
 
@@ -742,7 +847,7 @@ async fn im_read_card(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -769,7 +874,7 @@ async fn im_send_card_message(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -803,7 +908,7 @@ async fn im_update_card(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -840,13 +945,14 @@ fn human_handler(
     slug: &str,
 ) -> Result<String, axum::response::Response> {
     use axum::response::IntoResponse;
+    // human_handler keeps the explicit 503 status — distinct from the
+    // /im/* proxy convention because it's only called from card/channel
+    // archive endpoints that want a hard failure if the workspace's daemon
+    // never came up. Was that way before the typed sweep; keeping it.
     let human_repo = with_workspace_snapshot(state, slug, human_repo_path)?.ok_or_else(|| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "human daemon not initialized"
-            })),
+            Json(ErrorBody::new("human daemon not initialized")),
         )
             .into_response()
     })?;
@@ -854,36 +960,24 @@ fn human_handler(
     let content = std::fs::read_to_string(&me_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to read me.json: {e}")
-            })),
+            Json(ErrorBody::new(format!("failed to read me.json: {e}"))),
         )
             .into_response()
     })?;
-    let me: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+    let me: MeJson = serde_json::from_str(&content).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to parse me.json: {e}")
-            })),
+            Json(ErrorBody::new(format!("failed to parse me.json: {e}"))),
         )
             .into_response()
     })?;
-    me.get("handler")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "me.json missing handler field"
-                })),
-            )
-                .into_response()
-        })
+    me.handler.ok_or_else(|| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::new("me.json missing handler field")),
+        )
+            .into_response()
+    })
 }
 
 async fn im_card_archive(
@@ -894,7 +988,7 @@ async fn im_card_archive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -917,7 +1011,7 @@ async fn im_card_unarchive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -958,7 +1052,7 @@ async fn im_channel_archive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -977,7 +1071,7 @@ async fn im_channel_unarchive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1035,10 +1129,7 @@ async fn agents_add(
         other => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("unsupported provider: {other}"),
-                })),
+                Json(ErrorBody::new(format!("unsupported provider: {other}"))),
             )
                 .into_response();
         }
@@ -1056,11 +1147,10 @@ async fn agents_add(
     };
 
     if already_exists {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "handler_conflict",
-            "error": format!("agent already exists: {}", req.handler)
-        }))
+        return Json(ErrorBody::with_code(
+            format!("agent already exists: {}", req.handler),
+            "handler_conflict",
+        ))
         .into_response();
     }
 
@@ -1111,24 +1201,20 @@ async fn agents_add(
         .join("users")
         .join(format!("{}.meta.yaml", req.handler));
     if meta_path.exists() {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error_code": "handler_conflict",
-            "error": format!(
+        return Json(ErrorBody::with_code(
+            format!(
                 "handler @{} already registered in this workspace",
                 req.handler
-            )
-        }))
+            ),
+            "handler_conflict",
+        ))
         .into_response();
     }
 
     let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to create agents dir: {e}")
-        }))
-        .into_response();
+        return Json(ErrorBody::new(format!("failed to create agents dir: {e}")))
+            .into_response();
     }
 
     let remote_url = match git_provider {
@@ -1137,44 +1223,40 @@ async fn agents_add(
             let cfg = match workspace_config.as_ref() {
                 Some(c) => c,
                 None => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "config_missing",
-                        "error": "github mode requires workspace config with remote_url + token"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "github mode requires workspace config with remote_url + token",
+                        "config_missing",
+                    ))
                     .into_response();
                 }
             };
             let remote = match cfg.git.remote_url.as_deref() {
                 Some(u) if !u.is_empty() => u,
                 _ => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "missing_remote_url",
-                        "error": "workspace config lacks remote_url"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "workspace config lacks remote_url",
+                        "missing_remote_url",
+                    ))
                     .into_response();
                 }
             };
             let token = match cfg.git.token.as_deref() {
                 Some(t) if !t.is_empty() => t,
                 _ => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "missing_token",
-                        "error": "workspace config lacks token"
-                    }))
+                    return Json(ErrorBody::with_code(
+                        "workspace config lacks token",
+                        "missing_token",
+                    ))
                     .into_response();
                 }
             };
             let (owner, repo_name) = match parse_github_url(remote) {
                 Ok(t) => t,
                 Err(e) => {
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": github_error_code(&e),
-                        "error": redacted_url(&e.to_string())
-                    }))
+                    return Json(ErrorBody::with_code(
+                        redacted_url(&e.to_string()),
+                        github_error_code(&e),
+                    ))
                     .into_response();
                 }
             };
@@ -1209,30 +1291,35 @@ async fn agents_add(
                 let s = state.lock().unwrap();
                 if let Some(ctx) = s.workspaces.get(&slug) {
                     if ctx.agents.contains_key(&req.handler) {
-                        return Json(serde_json::json!({
-                            "ok": true,
-                            "id": req.handler,
-                        }))
+                        return Json(AgentAddResponse {
+                            ok: true,
+                            id: req.handler.clone(),
+                        })
                         .into_response();
                     }
                 }
             }
 
-            // Persist config to me.json
+            // Persist config to me.json. Empty env doesn't overwrite an
+            // existing env (None patch field = preserve).
             let me_path = handle.repo_root.join(".gitim/me.json");
             if let Ok(content) = std::fs::read_to_string(&me_path) {
-                if let Ok(mut me) = serde_json::from_str::<serde_json::Value>(&content) {
-                    me["provider"] = serde_json::Value::String(req.provider.clone());
-                    if let Some(model) = &req.model {
-                        me["model"] = serde_json::Value::String(model.clone());
-                    }
-                    if let Some(sp) = &req.system_prompt {
-                        me["system_prompt"] = serde_json::Value::String(sp.clone());
-                    }
-                    if !req.env.is_empty() {
-                        me["env"] = serde_json::to_value(&req.env).unwrap_or_default();
-                    }
-                    let _ = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap());
+                if let Ok(existing) = serde_json::from_str::<MeJson>(&content) {
+                    let env_patch = if req.env.is_empty() {
+                        None
+                    } else {
+                        Some(req.env.clone().into_iter().collect())
+                    };
+                    let patch = MeJson {
+                        provider: Some(req.provider.clone()),
+                        model: req.model.clone(),
+                        system_prompt: req.system_prompt.clone(),
+                        env: env_patch,
+                        ..Default::default()
+                    };
+                    let merged = existing.merged_with(patch);
+                    let _ =
+                        std::fs::write(&me_path, serde_json::to_string_pretty(&merged).unwrap());
                 }
             }
 
@@ -1243,22 +1330,20 @@ async fn agents_add(
             if req.provider == "hermes" {
                 if !crate::hermes_profile::default_profile_ready() {
                     cleanup_agent_dir(&workspace, &req.handler);
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error": "Hermes default profile is not configured. \
+                    return Json(ErrorBody::with_code(
+                        "Hermes default profile is not configured. \
                             Run `hermes setup` in a terminal first to set up \
                             an LLM provider, then add the agent again.",
-                        "error_code": "hermes_not_setup",
-                    }))
+                        "hermes_not_setup",
+                    ))
                     .into_response();
                 }
                 if let Err(e) = crate::hermes_profile::ensure_profile(&req.handler).await {
                     cleanup_agent_dir(&workspace, &req.handler);
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "error": format!("hermes profile create failed: {e}"),
-                        "error_code": "hermes_profile_create_failed",
-                    }))
+                    return Json(ErrorBody::with_code(
+                        format!("hermes profile create failed: {e}"),
+                        "hermes_profile_create_failed",
+                    ))
                     .into_response();
                 }
             }
@@ -1303,14 +1388,17 @@ async fn agents_add(
                 tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
             }
 
-            Json(serde_json::json!({ "ok": true, "id": req.handler })).into_response()
+            Json(AgentAddResponse {
+                ok: true,
+                id: req.handler.clone(),
+            })
+            .into_response()
         }
         Err(e) => {
             cleanup_agent_dir(&workspace, &req.handler);
-            Json(serde_json::json!({
-                "ok": false,
-                "error": redacted_url(&format!("provision_agent failed: {e}"))
-            }))
+            Json(ErrorBody::new(redacted_url(&format!(
+                "provision_agent failed: {e}"
+            ))))
             .into_response()
         }
     }
@@ -1342,7 +1430,7 @@ async fn agents_list(
     use axum::response::IntoResponse;
     match with_workspace_snapshot(&state, &slug, |ctx| {
         let agents: Vec<AgentInfo> = ctx.agents.values().cloned().collect();
-        Json(serde_json::json!({ "ok": true, "agents": agents }))
+        Json(AgentsListResponse { ok: true, agents })
     }) {
         Ok(j) => j.into_response(),
         Err(r) => r,
@@ -1476,10 +1564,11 @@ async fn agents_start(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<AgentIdRequest>,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     match start_agent_loop(&state, &slug, &req.id) {
-        Ok(()) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+        Ok(()) => Json(OkAckResponse { ok: true }).into_response(),
+        Err(e) => Json(ErrorBody::new(e)).into_response(),
     }
 }
 
@@ -1493,7 +1582,7 @@ async fn agents_get(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1503,10 +1592,12 @@ async fn agents_get(
         None => return not_found_workspace(),
     };
     match ctx.agents.get(&id) {
-        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
-        None => {
-            Json(serde_json::json!({ "ok": false, "error": "agent not found" })).into_response()
-        }
+        Some(info) => Json(AgentDetailResponse {
+            ok: true,
+            agent: info.clone(),
+        })
+        .into_response(),
+        None => Json(ErrorBody::new("agent not found")).into_response(),
     }
 }
 
@@ -1559,7 +1650,7 @@ async fn agents_patch(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1576,10 +1667,7 @@ async fn agents_patch(
                 if req.model.is_some() && info.status == "running" {
                     return (
                         StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error": "stop the agent before changing model"
-                        })),
+                        Json(ErrorBody::new("stop the agent before changing model")),
                     )
                         .into_response();
                 }
@@ -1588,9 +1676,7 @@ async fn agents_patch(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("agent not found: {agent_id}")
-                    })),
+                    Json(ErrorBody::new(format!("agent not found: {agent_id}"))),
                 )
                     .into_response();
             }
@@ -1604,21 +1690,17 @@ async fn agents_patch(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false, "error": format!("read me.json failed: {e}")
-                })),
+                Json(ErrorBody::new(format!("read me.json failed: {e}"))),
             )
                 .into_response();
         }
     };
-    let mut me: serde_json::Value = match serde_json::from_str(&me_content) {
+    let mut me: MeJson = match serde_json::from_str(&me_content) {
         Ok(v) => v,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false, "error": format!("parse me.json failed: {e}")
-                })),
+                Json(ErrorBody::new(format!("parse me.json failed: {e}"))),
             )
                 .into_response();
         }
@@ -1630,22 +1712,13 @@ async fn agents_patch(
     //   Some(Some(""))      → remove field
     //   Some(Some(s))       → set to s
     if let Some(sp_opt) = &req.system_prompt {
-        match sp_opt {
-            Some(s) if !s.is_empty() => {
-                me["system_prompt"] = serde_json::Value::String(s.clone());
-            }
-            _ => {
-                if let Some(obj) = me.as_object_mut() {
-                    obj.remove("system_prompt");
-                }
-            }
-        }
+        me.system_prompt = match sp_opt {
+            Some(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
     }
 
-    let old_model = me
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let old_model = me.model.clone();
     let mut model_changed = false;
 
     // Three-state semantics for model mirror system_prompt:
@@ -1659,16 +1732,7 @@ async fn agents_patch(
             _ => None,
         };
         model_changed = old_model != new_model;
-        match new_model {
-            Some(model) => {
-                me["model"] = serde_json::Value::String(model);
-            }
-            None => {
-                if let Some(obj) = me.as_object_mut() {
-                    obj.remove("model");
-                }
-            }
-        }
+        me.model = new_model;
     }
 
     // Env validation + whole-map replacement.
@@ -1680,21 +1744,16 @@ async fn agents_patch(
             if !is_valid_env_key(key) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "ok": false,
-                        "error": format!("invalid env var name: {key}")
-                    })),
+                    Json(ErrorBody::new(format!("invalid env var name: {key}"))),
                 )
                     .into_response();
             }
         }
-        if env_map.is_empty() {
-            if let Some(obj) = me.as_object_mut() {
-                obj.remove("env");
-            }
+        me.env = if env_map.is_empty() {
+            None
         } else {
-            me["env"] = serde_json::to_value(env_map).unwrap();
-        }
+            Some(env_map.clone().into_iter().collect())
+        };
     }
 
     // dotenv size cap — validated before any disk write for fail-fast.
@@ -1702,10 +1761,7 @@ async fn agents_patch(
         if contents.len() > DOTENV_MAX_BYTES {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "dotenv exceeds 64 KB limit"
-                })),
+                Json(ErrorBody::new("dotenv exceeds 64 KB limit")),
             )
                 .into_response();
         }
@@ -1714,9 +1770,7 @@ async fn agents_patch(
     if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false, "error": format!("write me.json failed: {e}")
-            })),
+            Json(ErrorBody::new(format!("write me.json failed: {e}"))),
         )
             .into_response();
     }
@@ -1729,9 +1783,7 @@ async fn agents_patch(
                 Err(e) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "ok": false, "error": format!("read agent state failed: {e}")
-                        })),
+                        Json(ErrorBody::new(format!("read agent state failed: {e}"))),
                     )
                         .into_response();
                 }
@@ -1740,9 +1792,7 @@ async fn agents_patch(
             if let Err(e) = agent_state.save(&repo_root) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("write agent state failed: {e}")
-                    })),
+                    Json(ErrorBody::new(format!("write agent state failed: {e}"))),
                 )
                     .into_response();
             }
@@ -1765,9 +1815,7 @@ async fn agents_patch(
                 if let Err(e) = std::fs::remove_file(&env_path) {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "ok": false, "error": format!("delete .env failed: {e}")
-                        })),
+                        Json(ErrorBody::new(format!("delete .env failed: {e}"))),
                     )
                         .into_response();
                 }
@@ -1776,9 +1824,7 @@ async fn agents_patch(
             if let Err(e) = std::fs::write(&env_path, contents) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "ok": false, "error": format!("write .env failed: {e}")
-                    })),
+                    Json(ErrorBody::new(format!("write .env failed: {e}"))),
                 )
                     .into_response();
             }
@@ -1850,12 +1896,14 @@ async fn agents_patch(
     };
 
     match response {
-        Some(info) => Json(serde_json::json!({ "ok": true, "agent": info })).into_response(),
+        Some(info) => Json(AgentDetailResponse {
+            ok: true,
+            agent: info,
+        })
+        .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "ok": false, "error": format!("agent not found: {agent_id}")
-            })),
+            Json(ErrorBody::new(format!("agent not found: {agent_id}"))),
         )
             .into_response(),
     }
@@ -1889,8 +1937,7 @@ async fn agents_remove(
                 )
             }
             None => {
-                return Json(serde_json::json!({ "ok": false, "error": "agent not found" }))
-                    .into_response();
+                return Json(ErrorBody::new("agent not found")).into_response();
             }
         }
     };
@@ -1904,7 +1951,7 @@ async fn agents_remove(
         if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "error": e })),
+                Json(ErrorBody::new(e)),
             )
                 .into_response();
         }
@@ -1927,7 +1974,7 @@ async fn agents_remove(
         None => return not_found_workspace(),
     };
     ctx.agents.remove(&req.id);
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 fn kill_agent_daemon(repo_path: &Path) {
@@ -1998,11 +2045,8 @@ async fn agents_stop(
         };
         match ctx.agents.get_mut(&req.id) {
             None => {
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("agent not found: {}", req.id)
-                }))
-                .into_response();
+                return Json(ErrorBody::new(format!("agent not found: {}", req.id)))
+                    .into_response();
             }
             Some(info) => {
                 let handle = info.loop_handle.take();
@@ -2016,7 +2060,7 @@ async fn agents_stop(
         handle.abort();
     }
 
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 // -- /agents/events (SSE) --
@@ -2105,7 +2149,9 @@ async fn recover_single_workspace(
                 (
                     token_url,
                     "github".to_string(),
-                    serde_json::json!({ "type": "github", "token": token }),
+                    gitim_core::auth_payload::AuthPayload::GitHub {
+                        token: token.clone(),
+                    },
                 )
             }
             _ => {
@@ -2123,11 +2169,11 @@ async fn recover_single_workspace(
                 (
                     remote,
                     "git".to_string(),
-                    serde_json::json!({
-                        "type": "git",
-                        "handler": handler,
-                        "display_name": display_name,
-                    }),
+                    gitim_core::auth_payload::AuthPayload::Git {
+                        handler,
+                        display_name,
+                        github_email: None,
+                    },
                 )
             }
         };
@@ -2343,10 +2389,7 @@ async fn preflight_handler(
         }
         _ => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "unknown provider",
-            })),
+            Json(ErrorBody::new("unknown provider")),
         )
             .into_response(),
     }
@@ -2407,12 +2450,13 @@ fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSumma
     }
 }
 
-async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<serde_json::Value> {
+async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<WorkspacesListResponse> {
     let s = state.lock().unwrap();
-    let mut list: Vec<WorkspaceSummary> = s.workspaces.values().map(workspace_summary).collect();
+    let mut workspaces: Vec<WorkspaceSummary> =
+        s.workspaces.values().map(workspace_summary).collect();
     // Deterministic order makes the response stable for tests and WebUI.
-    list.sort_by(|a, b| a.slug.cmp(&b.slug));
-    Json(serde_json::json!({ "workspaces": list }))
+    workspaces.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Json(WorkspacesListResponse { workspaces })
 }
 
 async fn workspaces_get(
@@ -2430,20 +2474,23 @@ async fn workspaces_get(
                 .as_ref()
                 .map(|c| c.git.provider)
                 .unwrap_or(GitProvider::Local);
-            let body = serde_json::json!({
-                "slug": ctx.slug,
-                "workspace_name": ctx.workspace_name,
-                "path": ctx.path.to_string_lossy(),
-                "provider": provider,
-                "initialized": workspace_initialized(ctx),
-                "agents_count": ctx.agents.len(),
-                "human_repo": ctx.human_repo.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            });
+            let body = WorkspaceDetailResponse {
+                slug: ctx.slug.clone(),
+                workspace_name: ctx.workspace_name.clone(),
+                path: ctx.path.to_string_lossy().into_owned(),
+                provider,
+                initialized: workspace_initialized(ctx),
+                agents_count: ctx.agents.len(),
+                human_repo: ctx
+                    .human_repo
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            };
             Json(body).into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+            Json(ErrorBody::new("unknown workspace")),
         )
             .into_response(),
     }
@@ -2468,7 +2515,7 @@ async fn workspaces_delete(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "ok": false, "error": "unknown workspace" })),
+                    Json(ErrorBody::new("unknown workspace")),
                 )
                     .into_response();
             }
@@ -2493,19 +2540,18 @@ async fn workspaces_delete(
             tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "config_write_failed",
-                    "error": format!(
+                Json(ErrorBody::with_code(
+                    format!(
                         "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
                     ),
-                })),
+                    "config_write_failed",
+                )),
             )
                 .into_response();
         }
     }
 
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkAckResponse { ok: true }).into_response()
 }
 
 /// Best-effort rollback for a failed `POST /workspaces`. Kills any daemon the
@@ -2566,11 +2612,11 @@ async fn provision_local_workspace(
             h
         }
     };
-    let auth = serde_json::json!({
-        "type": "git",
-        "handler": handler,
-        "display_name": display_name,
-    });
+    let auth = gitim_core::auth_payload::AuthPayload::Git {
+        handler,
+        display_name,
+        github_email: None,
+    };
 
     let human_dir = provision_human(workspace, &remote_url, "git", auth)
         .await
@@ -2692,10 +2738,9 @@ async fn provision_github_workspace(
                 .output();
         }
 
-        let auth = serde_json::json!({
-            "type": "github",
-            "token": token,
-        });
+        let auth = gitim_core::auth_payload::AuthPayload::GitHub {
+            token: token.clone(),
+        };
         let final_human = provision_human(workspace, &remote_url, "github", auth)
             .await
             .map_err(|e| {
@@ -2762,11 +2807,10 @@ async fn workspaces_create(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "cloud_sync_path_rejected",
-                "error": format!("workspace is inside {service} — refusing to store a token there"),
-            })),
+            Json(ErrorBody::with_code(
+                format!("workspace is inside {service} — refusing to store a token there"),
+                "cloud_sync_path_rejected",
+            )),
         )
             .into_response();
     }
@@ -2797,15 +2841,16 @@ async fn workspaces_create(
             let existing_slug = existing.slug.clone();
             return (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "workspace_path_exists",
-                    "error": format!(
+                Json(WorkspacePathExistsError {
+                    ok: false,
+                    error_code: "workspace_path_exists",
+                    error: format!(
                         "workspace at {} already registered as slug \"{}\"",
-                        workspace.display(), existing_slug,
+                        workspace.display(),
+                        existing_slug,
                     ),
-                    "existing_slug": existing_slug,
-                })),
+                    existing_slug,
+                }),
             )
                 .into_response();
         }
@@ -2817,11 +2862,10 @@ async fn workspaces_create(
         if s.workspaces.contains_key(&slug) {
             return (
                 StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "slug_conflict_unexpected",
-                    "error": format!("slug collision not resolved: {slug}"),
-                })),
+                Json(ErrorBody::with_code(
+                    format!("slug collision not resolved: {slug}"),
+                    "slug_conflict_unexpected",
+                )),
             )
                 .into_response();
         }
@@ -2847,11 +2891,10 @@ async fn workspaces_create(
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error_code": "missing_token",
-                            "error": "github mode requires a personal access token",
-                        })),
+                        Json(ErrorBody::with_code(
+                            "github mode requires a personal access token",
+                            "missing_token",
+                        )),
                     )
                         .into_response();
                 }
@@ -2863,11 +2906,10 @@ async fn workspaces_create(
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "ok": false,
-                            "error_code": "missing_remote_url",
-                            "error": "github mode requires remote_url",
-                        })),
+                        Json(ErrorBody::with_code(
+                            "github mode requires remote_url",
+                            "missing_remote_url",
+                        )),
                     )
                         .into_response();
                 }
@@ -2878,11 +2920,10 @@ async fn workspaces_create(
             state.lock().unwrap().workspaces.remove(&slug);
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": "provider_not_supported",
-                    "error": format!("provider not supported: {other}"),
-                })),
+                Json(ErrorBody::with_code(
+                    format!("provider not supported: {other}"),
+                    "provider_not_supported",
+                )),
             )
                 .into_response();
         }
@@ -2898,11 +2939,7 @@ async fn workspaces_create(
             // None are 500-class — the runtime itself is still fine.
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error_code": error_code,
-                    "error": message,
-                })),
+                Json(ErrorBody::with_code(message, error_code)),
             )
                 .into_response();
         }
@@ -2924,11 +2961,10 @@ async fn workspaces_create(
                 cleanup_partial_workspace(&workspace);
                 return (
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "ok": false,
-                        "error_code": "slug_conflict_unexpected",
-                        "error": "workspace slot disappeared during provisioning",
-                    })),
+                    Json(ErrorBody::with_code(
+                        "workspace slot disappeared during provisioning",
+                        "slug_conflict_unexpected",
+                    )),
                 )
                     .into_response();
             }
@@ -2948,24 +2984,23 @@ async fn workspaces_create(
         cleanup_partial_workspace(&workspace);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error_code": "config_write_failed",
-                "error": format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
-            })),
+            Json(ErrorBody::with_code(
+                format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
+                "config_write_failed",
+            )),
         )
             .into_response();
     }
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "ok": true,
-            "slug": slug,
-            "workspace_name": workspace_name,
-            "path": workspace.to_string_lossy(),
-            "provider": provider_for_response,
-        })),
+        Json(WorkspaceCreateResponse {
+            ok: true,
+            slug,
+            workspace_name,
+            path: workspace.to_string_lossy().into_owned(),
+            provider: provider_for_response,
+        }),
     )
         .into_response()
 }

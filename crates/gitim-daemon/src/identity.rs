@@ -1,3 +1,4 @@
+use gitim_core::auth_payload::AuthPayload;
 use gitim_core::identity::{
     gitea_identity_from_user_json, github_identity_from_user_json,
     gitlab_identity_from_user_json, IdentityParseError,
@@ -20,28 +21,6 @@ pub enum GitServer {
     Gitea,
     #[serde(rename = "gitlab")]
     GitLab,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-pub enum AuthData {
-    #[serde(rename = "git")]
-    Git {
-        handler: String,
-        display_name: String,
-        /// Optional — runtime injects this when provisioning an agent inside
-        /// a github-backed workspace, so the agent's commits attribute to
-        /// the workspace owner's GitHub account even though the agent
-        /// itself onboards via the `git` variant.
-        #[serde(default)]
-        github_email: Option<String>,
-    },
-    #[serde(rename = "github")]
-    GitHub { token: String },
-    #[serde(rename = "gitea")]
-    Gitea { token: String, url: String },
-    #[serde(rename = "gitlab")]
-    GitLab { token: String, url: String },
 }
 
 #[derive(Debug, Error)]
@@ -92,10 +71,10 @@ fn run_curl(args: &[&str]) -> Result<String, IdentityError> {
 /// For GitHub/Gitea/GitLab we shell out to curl to fetch the authenticated user.
 pub fn infer_identity(
     _git_server: GitServer,
-    auth_data: AuthData,
+    auth_data: AuthPayload,
 ) -> Result<InferredIdentity, IdentityError> {
     match auth_data {
-        AuthData::Git {
+        AuthPayload::Git {
             handler,
             display_name,
             github_email,
@@ -108,7 +87,7 @@ pub fn infer_identity(
             })
         }
 
-        AuthData::GitHub { token } => {
+        AuthPayload::GitHub { token } => {
             let auth_header = format!("Authorization: token {}", token);
             // E2E test seam mirroring the one in gitim-runtime: points at a
             // local stub so a compiled daemon binary can run the full onboard
@@ -120,14 +99,14 @@ pub fn infer_identity(
             Ok(github_identity_from_user_json(&body)?)
         }
 
-        AuthData::Gitea { token, url } => {
+        AuthPayload::Gitea { token, url } => {
             let auth_header = format!("Authorization: token {}", token);
             let api_url = format!("{}/api/v1/user", url.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &api_url])?;
             Ok(gitea_identity_from_user_json(&body)?)
         }
 
-        AuthData::GitLab { token, url } => {
+        AuthPayload::GitLab { token, url } => {
             let auth_header = format!("Authorization: Bearer {}", token);
             let api_url = format!("{}/api/v4/user", url.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &api_url])?;
@@ -147,7 +126,7 @@ mod tests {
     fn git_mode_returns_passed_values() {
         let result = infer_identity(
             GitServer::Git,
-            AuthData::Git {
+            AuthPayload::Git {
                 handler: "alice".to_string(),
                 display_name: "Alice Wonderland".to_string(),
                 github_email: None,
@@ -163,7 +142,7 @@ mod tests {
     fn git_mode_propagates_github_email() {
         let result = infer_identity(
             GitServer::Git,
-            AuthData::Git {
+            AuthPayload::Git {
                 handler: "alice".to_string(),
                 display_name: "Alice".to_string(),
                 github_email: Some("alice@example.com".to_string()),
@@ -177,7 +156,7 @@ mod tests {
     fn git_mode_empty_github_email_treated_as_none() {
         let result = infer_identity(
             GitServer::Git,
-            AuthData::Git {
+            AuthPayload::Git {
                 handler: "alice".to_string(),
                 display_name: "Alice".to_string(),
                 github_email: Some("".to_string()),
@@ -194,7 +173,7 @@ mod tests {
     fn git_mode_invalid_handler_returns_error() {
         let result = infer_identity(
             GitServer::Git,
-            AuthData::Git {
+            AuthPayload::Git {
                 handler: "INVALID_UPPER".to_string(),
                 display_name: "Bad".to_string(),
                 github_email: None,
@@ -207,7 +186,7 @@ mod tests {
     fn git_mode_reserved_handler_returns_error() {
         let result = infer_identity(
             GitServer::Git,
-            AuthData::Git {
+            AuthPayload::Git {
                 handler: "system".to_string(),
                 display_name: "System".to_string(),
                 github_email: None,
@@ -242,7 +221,7 @@ mod tests {
 
         let result = infer_identity(
             GitServer::GitHub,
-            AuthData::GitHub {
+            AuthPayload::GitHub {
                 token: "fake-token".to_string(),
             },
         )
@@ -267,12 +246,12 @@ mod tests {
         // http://127.0.0.1:1 which is always refused immediately.
         //
         // Note: the GitServer arg is intentionally ignored in the current implementation
-        // (routing is driven purely by AuthData variant), so we pass GitHub here.
+        // (routing is driven purely by AuthPayload variant), so we pass GitHub here.
         let result = infer_identity(
             GitServer::GitHub,
             // We can't override the GitHub URL from the outside, so test the Gitea/GitLab
             // variants instead which accept a url parameter.
-            AuthData::Gitea {
+            AuthPayload::Gitea {
                 token: "fake-token".to_string(),
                 url: "http://127.0.0.1:1".to_string(),
             },
@@ -288,7 +267,7 @@ mod tests {
     fn gitea_curl_failure_returns_error() {
         let result = infer_identity(
             GitServer::Gitea,
-            AuthData::Gitea {
+            AuthPayload::Gitea {
                 token: "fake-token".to_string(),
                 url: "http://127.0.0.1:1".to_string(),
             },
@@ -304,7 +283,7 @@ mod tests {
     fn gitlab_curl_failure_returns_error() {
         let result = infer_identity(
             GitServer::GitLab,
-            AuthData::GitLab {
+            AuthPayload::GitLab {
                 token: "fake-token".to_string(),
                 url: "http://127.0.0.1:1".to_string(),
             },

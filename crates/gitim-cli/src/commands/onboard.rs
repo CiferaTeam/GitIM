@@ -8,9 +8,10 @@ use std::thread;
 use std::time::Duration;
 
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
+use gitim_core::auth_payload::AuthPayload;
 
 /// Git server type for onboarding
 #[derive(Clone, Debug)]
@@ -90,33 +91,37 @@ fn validate_params(git_server: &GitServer, args: &OnboardArgs) {
     }
 }
 
-fn build_auth(git_server: &GitServer, args: &OnboardArgs) -> Value {
+fn build_auth(git_server: &GitServer, args: &OnboardArgs) -> AuthPayload {
     // If handler + display_name are provided, use Git-style auth
     // (works for both git and github modes with shared credentials)
     if let (Some(handler), Some(display_name)) = (&args.handler, &args.display_name) {
-        return json!({
-            "handler": handler,
-            "display_name": display_name,
-        });
+        return AuthPayload::Git {
+            handler: handler.clone(),
+            display_name: display_name.clone(),
+            github_email: None,
+        };
     }
 
     match git_server {
         GitServer::Git => {
             // validate_params guarantees handler+display_name for git mode
-            json!({
-                "handler": args.handler.as_ref().unwrap(),
-                "display_name": args.display_name.as_ref().unwrap(),
-            })
-        }
-        other => {
-            let mut auth = json!({ "token": args.token.as_ref().unwrap() });
-            if matches!(other, GitServer::Gitea | GitServer::Gitlab) {
-                if let Some(url) = &args.url {
-                    auth["url"] = json!(url);
-                }
+            AuthPayload::Git {
+                handler: args.handler.as_ref().unwrap().clone(),
+                display_name: args.display_name.as_ref().unwrap().clone(),
+                github_email: None,
             }
-            auth
         }
+        GitServer::Github => AuthPayload::GitHub {
+            token: args.token.as_ref().unwrap().clone(),
+        },
+        GitServer::Gitea => AuthPayload::Gitea {
+            token: args.token.as_ref().unwrap().clone(),
+            url: args.url.as_ref().unwrap().clone(),
+        },
+        GitServer::Gitlab => AuthPayload::GitLab {
+            token: args.token.as_ref().unwrap().clone(),
+            url: args.url.as_ref().unwrap().clone(),
+        },
     }
 }
 
@@ -425,9 +430,9 @@ pub async fn cmd_onboard(args: OnboardArgs) {
 
         let client = GitimClient::new(&cwd);
         let auth = if args.guest {
-            json!({})
+            None
         } else {
-            build_auth(&git_server, &args)
+            Some(build_auth(&git_server, &args))
         };
 
         match client
@@ -491,9 +496,9 @@ pub async fn cmd_onboard(args: OnboardArgs) {
 
     let client = GitimClient::new(&repo_dir);
     let auth = if args.guest {
-        json!({})
+        None
     } else {
-        build_auth(&git_server, &args)
+        Some(build_auth(&git_server, &args))
     };
 
     match client

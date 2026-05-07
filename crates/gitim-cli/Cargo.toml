@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gitim-client = { path = "../gitim-client" }
+gitim-core = { path = "../gitim-core" }
 gitim-updater = { path = "../gitim-updater" }
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
