@@ -9,6 +9,7 @@ import {
   exists,
   mkdir,
   stat,
+  removeFile,
   removeDir,
 } from "./storage";
 import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
@@ -255,6 +256,15 @@ export async function poll(since?: string): Promise<ApiResponse> {
         if (!dmName) continue;
         const entries = await readChannelEntries(dmName);
         changes.push({ channel: dmName, kind: "new_messages", entries });
+      } else if (fp.startsWith("archive/channels/")) {
+        const name = fp.replace("archive/channels/", "");
+        if (name.includes("/")) continue;
+        const channelName = name
+          .replace(".meta.yaml", "")
+          .replace(".thread", "");
+        if (validateChannelName(channelName)) continue;
+        changes.push({ channel: channelName, kind: "channel_meta" });
+        metaChanged = true;
       } else if (fp.includes("meta.yaml")) {
         metaChanged = true;
       }
@@ -311,9 +321,9 @@ export async function read(
   limit?: number,
 ): Promise<ApiResponse> {
   try {
-    const entries = await readChannelEntries(channel);
+    const { entries, archived } = await readChannelEntriesWithArchive(channel);
     const limited = limit ? entries.slice(-limit) : entries;
-    return ok({ channel, entries: limited, archived: false });
+    return ok({ channel, entries: limited, archived });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -503,6 +513,131 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
     const sync = await syncAfterCommit();
 
     return ok(sync);
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function archiveChannel(channel: string): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    const invalidChannel = validateChannelName(channel);
+    if (invalidChannel) return err(invalidChannel);
+
+    const metaRelPath = channelMetaPath(channel);
+    const metaAbsPath = `${s.repoDir}/${metaRelPath}`;
+    if (!(await exists(metaAbsPath))) {
+      return err(`channel '${channel}' does not exist`);
+    }
+
+    const meta = parseYaml(await readFile(metaAbsPath)) as unknown as ChannelMeta;
+    if (meta.created_by !== s.me.handler) {
+      return err("only channel creator can archive");
+    }
+
+    const archiveMetaPath = `${s.repoDir}/archive/channels/${channel}.meta.yaml`;
+    if (await exists(archiveMetaPath)) {
+      return err(`channel '${channel}' is already archived`);
+    }
+
+    await moveChannelFiles(
+      channel,
+      {
+        metaRelPath,
+        threadRelPath: `channels/${channel}.thread`,
+      },
+      {
+        metaRelPath: `archive/channels/${channel}.meta.yaml`,
+        threadRelPath: `archive/channels/${channel}.thread`,
+      },
+      `archive: #${channel} by @${s.me.handler}`,
+    );
+
+    await refreshChannelsCache();
+    const sync = await syncAfterCommit();
+    return ok({ channel, archived_by: s.me.handler, ...sync });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    const invalidChannel = validateChannelName(channel);
+    if (invalidChannel) return err(invalidChannel);
+
+    const archiveMetaRelPath = `archive/channels/${channel}.meta.yaml`;
+    const archiveMetaAbsPath = `${s.repoDir}/${archiveMetaRelPath}`;
+    if (!(await exists(archiveMetaAbsPath))) {
+      return err(`archive source does not exist for channel '${channel}'`);
+    }
+
+    const meta = parseYaml(await readFile(archiveMetaAbsPath)) as unknown as ChannelMeta;
+    if (meta.created_by !== s.me.handler) {
+      return err("only channel creator can unarchive");
+    }
+
+    const activeMetaRelPath = channelMetaPath(channel);
+    if (await exists(`${s.repoDir}/${activeMetaRelPath}`)) {
+      return err(`channel '${channel}' already exists in active location; unarchive aborted`);
+    }
+
+    await moveChannelFiles(
+      channel,
+      {
+        metaRelPath: archiveMetaRelPath,
+        threadRelPath: `archive/channels/${channel}.thread`,
+      },
+      {
+        metaRelPath: activeMetaRelPath,
+        threadRelPath: `channels/${channel}.thread`,
+      },
+      `unarchive: #${channel} by @${s.me.handler}`,
+    );
+
+    await refreshChannelsCache();
+    const sync = await syncAfterCommit();
+    return ok({ channel, unarchived_by: s.me.handler, ...sync });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function listArchivedChannels(): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    const archiveChannelsDir = `${s.repoDir}/archive/channels`;
+    if (!(await exists(archiveChannelsDir))) return ok({ channels: [] });
+
+    const items = await readdir(archiveChannelsDir);
+    const archivedChannels: Array<{
+      name: string;
+      kind: string;
+      members: string[];
+    }> = [];
+
+    for (const item of items) {
+      const channelName = channelNameFromMetaFile(item);
+      if (!channelName) continue;
+
+      const meta = parseYaml(
+        await readFile(`${archiveChannelsDir}/${item}`),
+      ) as unknown as ChannelMeta;
+      const members = meta.members ?? [];
+      if (members.length > 0 && !members.includes(s.me.handler)) {
+        continue;
+      }
+
+      archivedChannels.push({
+        name: channelName,
+        kind: "archived_channel",
+        members,
+      });
+    }
+
+    archivedChannels.sort((a, b) => a.name.localeCompare(b.name));
+    return ok({ channels: archivedChannels });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -835,15 +970,30 @@ export async function listArchivedCards(
 async function readChannelEntries(
   channel: string,
 ): Promise<ThreadEntry[]> {
+  return (await readChannelEntriesWithArchive(channel)).entries;
+}
+
+async function readChannelEntriesWithArchive(
+  channel: string,
+): Promise<{ entries: ThreadEntry[]; archived: boolean }> {
   const s = getState();
   const target = resolveThreadTarget(channel);
-  const absPath = `${s.repoDir}/${target.threadPath}`;
+  let absPath = `${s.repoDir}/${target.threadPath}`;
+  let archived = false;
 
-  if (!(await exists(absPath))) return [];
+  if (target.kind === "channel" && !(await exists(absPath))) {
+    const archivePath = `${s.repoDir}/archive/channels/${target.name}.thread`;
+    if (await exists(archivePath)) {
+      absPath = archivePath;
+      archived = true;
+    }
+  }
+
+  if (!(await exists(absPath))) return { entries: [], archived };
 
   const content = await readFile(absPath);
   const file = parseThread(content);
-  return file.entries;
+  return { entries: file.entries, archived };
 }
 
 async function readCardEntries(
@@ -961,11 +1111,60 @@ async function moveCardDirectory(
     s.me.handler,
   );
 
+  await removeTrackedFile(`${from.absDir}/card.meta.yaml`);
+  await removeTrackedFile(`${from.absDir}/discussion.thread`);
   try {
     await removeDir(from.absDir);
   } catch {
     // Empty directory cleanup is best-effort; git tracks files, not directories.
   }
+}
+
+async function moveChannelFiles(
+  channel: string,
+  from: { metaRelPath: string; threadRelPath: string },
+  to: { metaRelPath: string; threadRelPath: string },
+  message: string,
+): Promise<void> {
+  const s = getState();
+  const fromMetaAbsPath = `${s.repoDir}/${from.metaRelPath}`;
+  const fromThreadAbsPath = `${s.repoDir}/${from.threadRelPath}`;
+  const toMetaAbsPath = `${s.repoDir}/${to.metaRelPath}`;
+  const toThreadAbsPath = `${s.repoDir}/${to.threadRelPath}`;
+
+  const meta = await readFile(fromMetaAbsPath);
+  if (!(await exists(fromThreadAbsPath))) {
+    throw new Error(`thread file for channel '${channel}' does not exist`);
+  }
+  const thread = await readFile(fromThreadAbsPath);
+
+  await mkdirp(parentPath(toMetaAbsPath));
+  await writeFile(toMetaAbsPath, meta);
+  await writeFile(toThreadAbsPath, thread);
+
+  await gitOps.addRemoveAndCommit(
+    s.repoDir,
+    [to.metaRelPath, to.threadRelPath],
+    [from.metaRelPath, from.threadRelPath],
+    message,
+    s.me.handler,
+  );
+
+  await removeTrackedFile(fromMetaAbsPath);
+  await removeTrackedFile(fromThreadAbsPath);
+}
+
+async function removeTrackedFile(path: string): Promise<void> {
+  try {
+    await removeFile(path);
+  } catch {
+    // isomorphic-git stages deletion separately from storage cleanup.
+  }
+}
+
+function parentPath(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx <= 0 ? "/" : path.slice(0, idx);
 }
 
 function checkCardArchivePermission(

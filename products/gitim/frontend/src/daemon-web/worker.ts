@@ -59,6 +59,12 @@ const handler: Record<
   users: () => handlers.users(),
   joinChannel: (channel: unknown) =>
     handlers.joinChannel(channel as string),
+  archiveChannel: (channel: unknown) =>
+    handlers.archiveChannel(channel as string),
+  unarchiveChannel: (channel: unknown) =>
+    handlers.unarchiveChannel(channel as string),
+  listArchivedChannels: () =>
+    handlers.listArchivedChannels(),
   listCards: (query?: unknown) =>
     handlers.listCards((query ?? {}) as handlers.ListCardsQuery),
   createCard: (channel: unknown, title: unknown, opts?: unknown) =>

@@ -153,9 +153,11 @@ vi.mock("./sync", () => ({
 }));
 
 import {
+  archiveChannel,
   archiveCard,
   channels,
   createCard,
+  listArchivedChannels,
   listArchivedCards,
   listCards,
   poll,
@@ -164,6 +166,7 @@ import {
   send,
   sendCardMessage,
   thread,
+  unarchiveChannel,
   updateCard,
   joinChannel,
   unarchiveCard,
@@ -329,6 +332,130 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("archives active channels into archive/channels and removes them from active lists", async () => {
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    const res = await archiveChannel("general");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      channel: "general",
+      archived_by: "lewis",
+      status: "pushed",
+    });
+    expect(files.has("/repo/channels/general.meta.yaml")).toBe(false);
+    expect(files.has("/repo/channels/general.thread")).toBe(false);
+    expect(files.get("/repo/archive/channels/general.meta.yaml"))
+      .toContain("display_name: General");
+    expect(files.get("/repo/archive/channels/general.thread")).toBe(generalThread);
+    expect(commits.at(-1)).toEqual({
+      filepaths: [
+        "archive/channels/general.meta.yaml",
+        "archive/channels/general.thread",
+        "channels/general.meta.yaml",
+        "channels/general.thread",
+      ],
+      message: "archive: #general by @lewis",
+    });
+
+    const active = await channels();
+    expect(active.data?.channels).toEqual([
+      {
+        name: "alice--lewis",
+        kind: "dm",
+        unreadCount: 0,
+        members: ["alice", "lewis"],
+      },
+    ]);
+
+    const archived = await listArchivedChannels();
+    expect(archived.data?.channels).toEqual([
+      {
+        name: "general",
+        kind: "archived_channel",
+        members: ["alice", "lewis"],
+      },
+    ]);
+
+    const archivedRead = await read("general");
+    expect(archivedRead.data?.archived).toBe(true);
+    expect(archivedRead.data?.entries).toEqual([
+      expect.objectContaining({ body: "hello" }),
+      expect.objectContaining({ body: "reply" }),
+    ]);
+  });
+
+  it("restores archived channels into active lists", async () => {
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+    await archiveChannel("general");
+
+    const res = await unarchiveChannel("general");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      channel: "general",
+      unarchived_by: "lewis",
+      status: "pushed",
+    });
+    expect(files.get("/repo/channels/general.meta.yaml"))
+      .toContain("display_name: General");
+    expect(files.get("/repo/channels/general.thread")).toBe(generalThread);
+    expect(files.has("/repo/archive/channels/general.meta.yaml")).toBe(false);
+    expect(files.has("/repo/archive/channels/general.thread")).toBe(false);
+    expect(commits.at(-1)).toEqual({
+      filepaths: [
+        "channels/general.meta.yaml",
+        "channels/general.thread",
+        "archive/channels/general.meta.yaml",
+        "archive/channels/general.thread",
+      ],
+      message: "unarchive: #general by @lewis",
+    });
+
+    const active = await channels();
+    expect(active.data?.channels).toEqual([
+      {
+        name: "general",
+        kind: "channel",
+        unreadCount: 0,
+        members: ["alice", "lewis"],
+      },
+      {
+        name: "alice--lewis",
+        kind: "dm",
+        unreadCount: 0,
+        members: ["alice", "lewis"],
+      },
+    ]);
+
+    const archived = await listArchivedChannels();
+    expect(archived.data?.channels).toEqual([]);
+  });
+
   it("rejects invalid channel names before writing files", async () => {
     const res = await send("../evil", "bad");
 
@@ -483,6 +610,23 @@ describe("daemon-web handlers", () => {
         channel: "card:general/20260317-120000-abc",
         kind: "card_thread",
         entries: [expect.objectContaining({ line_number: 1, body: "card note" })],
+      },
+    ]);
+  });
+
+  it("reports archived channel changes from poll", async () => {
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      "archive/channels/general.meta.yaml",
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toEqual([
+      {
+        channel: "general",
+        kind: "channel_meta",
       },
     ]);
   });

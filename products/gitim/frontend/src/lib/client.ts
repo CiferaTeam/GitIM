@@ -17,7 +17,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
-import type { Backend, CardBackend } from "./backend";
+import type { Backend, CardBackend, ChannelArchiveBackend } from "./backend";
 import { HttpBackend } from "./backend";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -40,6 +40,10 @@ function isLocalMode(): boolean {
 
 function localCardBackend(): CardBackend {
   return activeBackend as Backend & CardBackend;
+}
+
+function localChannelArchiveBackend(): ChannelArchiveBackend {
+  return activeBackend as Backend & ChannelArchiveBackend;
 }
 
 function wsBase(slug: string): string {
@@ -567,8 +571,7 @@ export async function archiveChannel(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void name;
-    return { ok: false, error: "channel archive is unavailable in browser mode" };
+    return localChannelArchiveBackend().archiveChannel(name);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/archive`,
@@ -583,8 +586,7 @@ export async function unarchiveChannel(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void name;
-    return { ok: false, error: "channel archive is unavailable in browser mode" };
+    return localChannelArchiveBackend().unarchiveChannel(name);
   }
   const res = await fetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/unarchive`,
@@ -598,7 +600,9 @@ export async function listArchivedChannels(
 ): Promise<ApiResponse<{ channels: Channel[] }>> {
   if (isLocalMode()) {
     void slug;
-    return { ok: true, data: { channels: [] } };
+    return localChannelArchiveBackend().listArchivedChannels() as Promise<
+      ApiResponse<{ channels: Channel[] }>
+    >;
   }
   const res = await fetch(`${wsBase(slug)}/im/channels/archived`);
   return await res.json();

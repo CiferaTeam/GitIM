@@ -81,6 +81,12 @@ export interface CardBackend {
   listArchivedCards(channel?: string): Promise<ApiResponse>;
 }
 
+export interface ChannelArchiveBackend {
+  archiveChannel(channel: string): Promise<ApiResponse>;
+  unarchiveChannel(channel: string): Promise<ApiResponse>;
+  listArchivedChannels(): Promise<ApiResponse>;
+}
+
 export class HttpBackend implements Backend {
   private baseUrl: () => string;
 
@@ -277,6 +283,15 @@ export class LocalBackend implements Backend {
   }
   joinChannel(channel: string): Promise<ApiResponse> {
     return this.call("joinChannel", channel);
+  }
+  archiveChannel(channel: string): Promise<ApiResponse> {
+    return this.call("archiveChannel", channel);
+  }
+  unarchiveChannel(channel: string): Promise<ApiResponse> {
+    return this.call("unarchiveChannel", channel);
+  }
+  listArchivedChannels(): Promise<ApiResponse> {
+    return this.call("listArchivedChannels");
   }
   createCard(
     channel: string,
