@@ -234,11 +234,12 @@ pub async fn handle_create_card(
         card_id, channel, author
     );
 
-    Response::success(serde_json::json!({
-        "channel": ch_name.to_string(),
-        "card_id": card_id,
-        "title": title,
-    }))
+    let payload = gitim_core::responses::CreateCardResponse {
+        channel: ch_name.to_string(),
+        card_id,
+        title,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_archive_card(
@@ -359,11 +360,12 @@ pub async fn handle_archive_card(
     );
 
     // 13. Return success
-    Response::success(serde_json::json!({
-        "channel": ch_name.to_string(),
-        "card_id": card_id,
-        "archived_by": author,
-    }))
+    let payload = gitim_core::responses::ArchiveCardResponse {
+        channel: ch_name.to_string(),
+        card_id,
+        archived_by: author,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_unarchive_card(
@@ -491,11 +493,12 @@ pub async fn handle_unarchive_card(
     );
 
     // 13. Return success
-    Response::success(serde_json::json!({
-        "channel": ch_name.to_string(),
-        "card_id": card_id,
-        "unarchived_by": author,
-    }))
+    let payload = gitim_core::responses::UnarchiveCardResponse {
+        channel: ch_name.to_string(),
+        card_id,
+        unarchived_by: author,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_list_cards(
@@ -536,7 +539,7 @@ pub async fn handle_list_cards(
         }
     };
 
-    let mut cards: Vec<serde_json::Value> = Vec::new();
+    let mut cards: Vec<gitim_core::responses::CardSummary> = Vec::new();
     for ch in &channels_to_scan {
         let cards_dir = state.repo_root.join("channels").join(ch).join("cards");
         if !cards_dir.exists() {
@@ -573,31 +576,27 @@ pub async fn handle_list_cards(
                 }
             }
             let card_id = entry.file_name().to_string_lossy().to_string();
-            cards.push(serde_json::json!({
-                "card_id": card_id,
-                "channel": meta.channel,
-                "title": meta.title,
-                "status": meta.status.as_str(),
-                "labels": meta.labels,
-                "assignee": meta.assignee,
-                "created_by": meta.created_by,
-                "created_at": meta.created_at,
-                "updated_at": meta.updated_at,
-            }));
+            cards.push(gitim_core::responses::CardSummary {
+                card_id,
+                channel: meta.channel,
+                title: meta.title,
+                status: meta.status.as_str().to_string(),
+                labels: meta.labels,
+                assignee: meta.assignee,
+                created_by: meta.created_by,
+                created_at: meta.created_at,
+                updated_at: meta.updated_at,
+            });
         }
     }
 
     cards.sort_by(|a, b| {
-        let ca = a["channel"].as_str().unwrap_or("");
-        let cb = b["channel"].as_str().unwrap_or("");
-        ca.cmp(cb).then(
-            a["card_id"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["card_id"].as_str().unwrap_or("")),
-        )
+        a.channel
+            .cmp(&b.channel)
+            .then_with(|| a.card_id.cmp(&b.card_id))
     });
-    Response::success(serde_json::json!({ "cards": cards }))
+    let payload = gitim_core::responses::ListCardsResponse { cards };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_list_archived_cards(state: SharedState, channel: Option<String>) -> Response {
@@ -625,7 +624,7 @@ pub async fn handle_list_archived_cards(state: SharedState, channel: Option<Stri
         }
     };
 
-    let mut cards: Vec<serde_json::Value> = Vec::new();
+    let mut cards: Vec<gitim_core::responses::CardSummary> = Vec::new();
     for ch in &channels_to_scan {
         let cards_dir = arch_channels_dir.join(ch).join("cards");
         if !cards_dir.exists() {
@@ -650,31 +649,27 @@ pub async fn handle_list_archived_cards(state: SharedState, channel: Option<Stri
                 meta.channel, *ch,
                 "archived card meta.channel diverged from dir name for card {card_id}"
             );
-            cards.push(serde_json::json!({
-                "card_id": card_id,
-                "channel": meta.channel,
-                "title": meta.title,
-                "status": meta.status.as_str(),
-                "labels": meta.labels,
-                "assignee": meta.assignee,
-                "created_by": meta.created_by,
-                "created_at": meta.created_at,
-                "updated_at": meta.updated_at,
-            }));
+            cards.push(gitim_core::responses::CardSummary {
+                card_id,
+                channel: meta.channel,
+                title: meta.title,
+                status: meta.status.as_str().to_string(),
+                labels: meta.labels,
+                assignee: meta.assignee,
+                created_by: meta.created_by,
+                created_at: meta.created_at,
+                updated_at: meta.updated_at,
+            });
         }
     }
 
     cards.sort_by(|a, b| {
-        let ca = a["channel"].as_str().unwrap_or("");
-        let cb = b["channel"].as_str().unwrap_or("");
-        ca.cmp(cb).then(
-            a["card_id"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["card_id"].as_str().unwrap_or("")),
-        )
+        a.channel
+            .cmp(&b.channel)
+            .then_with(|| a.card_id.cmp(&b.card_id))
     });
-    Response::success(serde_json::json!({ "cards": cards }))
+    let payload = gitim_core::responses::ListCardsResponse { cards };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_read_card(
@@ -719,21 +714,22 @@ pub async fn handle_read_card(
         Ok(e) => e,
         Err(e) => return Response::error(e),
     };
-    Response::success(serde_json::json!({
-        "channel": ch_name.to_string(),
-        "card_id": card_id,
-        "archived": located.is_archived,
-        "meta": {
-            "title": meta.title,
-            "status": meta.status.as_str(),
-            "labels": meta.labels,
-            "assignee": meta.assignee,
-            "created_by": meta.created_by,
-            "created_at": meta.created_at,
-            "updated_at": meta.updated_at,
+    let payload = gitim_core::responses::ReadCardResponse {
+        channel: ch_name.to_string(),
+        card_id,
+        archived: located.is_archived,
+        meta: gitim_core::responses::CardMetaSummary {
+            title: meta.title,
+            status: meta.status.as_str().to_string(),
+            labels: meta.labels,
+            assignee: meta.assignee,
+            created_by: meta.created_by,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
         },
-        "entries": entries,
-    }))
+        entries,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_send_card_message(
@@ -849,39 +845,46 @@ pub async fn handle_send_card_message(
         ch_name, card_id, author, next_line
     );
 
-    if let Some(rx) = push_rx {
+    use gitim_core::responses::SendCardMessageResponse;
+    let payload = if let Some(rx) = push_rx {
         state.push_notify.notify_one();
         match rx.await {
-            Ok(PushResult::Pushed { commit_id }) => Response::success(serde_json::json!({
-                "line_number": next_line,
-                "channel": ch_name.to_string(),
-                "card_id": card_id,
-                "status": "pushed",
-                "commit_id": commit_id,
-            })),
-            Ok(PushResult::Failed { reason }) => Response::success(serde_json::json!({
-                "line_number": next_line,
-                "channel": ch_name.to_string(),
-                "card_id": card_id,
-                "status": "commit_only",
-                "error": reason,
-            })),
-            Err(_) => Response::success(serde_json::json!({
-                "line_number": next_line,
-                "channel": ch_name.to_string(),
-                "card_id": card_id,
-                "status": "commit_only",
-                "error": "push result channel closed",
-            })),
+            Ok(PushResult::Pushed { commit_id }) => SendCardMessageResponse {
+                line_number: next_line,
+                channel: ch_name.to_string(),
+                card_id,
+                status: "pushed".to_string(),
+                commit_id: Some(commit_id),
+                error: None,
+            },
+            Ok(PushResult::Failed { reason }) => SendCardMessageResponse {
+                line_number: next_line,
+                channel: ch_name.to_string(),
+                card_id,
+                status: "commit_only".to_string(),
+                commit_id: None,
+                error: Some(reason),
+            },
+            Err(_) => SendCardMessageResponse {
+                line_number: next_line,
+                channel: ch_name.to_string(),
+                card_id,
+                status: "commit_only".to_string(),
+                commit_id: None,
+                error: Some("push result channel closed".to_string()),
+            },
         }
     } else {
-        Response::success(serde_json::json!({
-            "line_number": next_line,
-            "channel": ch_name.to_string(),
-            "card_id": card_id,
-            "status": commit_status,
-        }))
-    }
+        SendCardMessageResponse {
+            line_number: next_line,
+            channel: ch_name.to_string(),
+            card_id,
+            status: commit_status.to_string(),
+            commit_id: None,
+            error: None,
+        }
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 pub async fn handle_update_card(
@@ -994,13 +997,14 @@ pub async fn handle_update_card(
         card_id, channel, author
     );
 
-    Response::success(serde_json::json!({
-        "channel": ch_name.to_string(),
-        "card_id": card_id,
-        "status": meta.status.as_str(),
-        "labels": meta.labels,
-        "assignee": meta.assignee,
-    }))
+    let payload = gitim_core::responses::UpdateCardResponse {
+        channel: ch_name.to_string(),
+        card_id,
+        status: meta.status.as_str().to_string(),
+        labels: meta.labels,
+        assignee: meta.assignee,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
 #[cfg(test)]

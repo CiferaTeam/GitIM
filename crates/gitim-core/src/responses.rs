@@ -177,6 +177,117 @@ pub struct StopResponse {
     pub status: String,
 }
 
+/// Response payload for `Request::Subscribe`. Just an ack — after
+/// sending this the connection switches into a stream of `Event`s
+/// (already typed; see `api::Event`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubscribeResponse {
+    pub subscribed: bool,
+}
+
+// -- Card responses --
+
+/// One row in `ListCardsResponse.cards` / `ListArchivedCardsResponse.cards`.
+/// Shared shape — distinction is which list the row came from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CardSummary {
+    pub card_id: String,
+    pub channel: String,
+    pub title: String,
+    /// `CardStatus::as_str()` value (e.g. `"open"`, `"in_progress"`,
+    /// `"done"`). Kept as String here so the wire schema doesn't depend
+    /// on the daemon's enum implementation.
+    pub status: String,
+    pub labels: Vec<String>,
+    /// `null` on the wire when no assignee is set.
+    pub assignee: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response payload for `Request::ListCards` and
+/// `Request::ListArchivedCards`. Both produce identical shape — caller
+/// disambiguates by which RPC they invoked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListCardsResponse {
+    pub cards: Vec<CardSummary>,
+}
+
+/// Response payload for `Request::CreateCard`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateCardResponse {
+    pub channel: String,
+    pub card_id: String,
+    pub title: String,
+}
+
+/// Response payload for `Request::ArchiveCard`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveCardResponse {
+    pub channel: String,
+    pub card_id: String,
+    pub archived_by: String,
+}
+
+/// Response payload for `Request::UnarchiveCard`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveCardResponse {
+    pub channel: String,
+    pub card_id: String,
+    pub unarchived_by: String,
+}
+
+/// Inner `meta` object embedded in `ReadCardResponse`. Same fields as
+/// `CardSummary` minus the redundant `card_id`/`channel` (those are on
+/// the outer `ReadCardResponse`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CardMetaSummary {
+    pub title: String,
+    pub status: String,
+    pub labels: Vec<String>,
+    pub assignee: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response payload for `Request::ReadCard`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadCardResponse {
+    pub channel: String,
+    pub card_id: String,
+    pub archived: bool,
+    pub meta: CardMetaSummary,
+    /// Card thread entries — same opaque per-entry shape as
+    /// ReadResponse / GetThreadResponse.
+    pub entries: Vec<Value>,
+}
+
+/// Response payload for `Request::SendCardMessage`. Same three runtime
+/// branches as `SendResponse`, plus the `card_id` it was sent into.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SendCardMessageResponse {
+    pub line_number: u64,
+    pub channel: String,
+    pub card_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response payload for `Request::UpdateCard`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateCardResponse {
+    pub channel: String,
+    pub card_id: String,
+    pub status: String,
+    pub labels: Vec<String>,
+    pub assignee: Option<String>,
+}
+
 /// One change entry in `PollResponse.changes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PollChange {
@@ -468,6 +579,93 @@ mod tests {
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 3);
         assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("channel"));
+    }
+
+    #[test]
+    fn create_card_response_wire_shape() {
+        let r = CreateCardResponse {
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            title: "Fix bug".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 3);
+    }
+
+    #[test]
+    fn read_card_response_wire_shape_with_null_assignee() {
+        let r = ReadCardResponse {
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            archived: false,
+            meta: CardMetaSummary {
+                title: "Fix bug".to_string(),
+                status: "open".to_string(),
+                labels: vec!["bug".to_string()],
+                assignee: None,
+                created_by: "alice".to_string(),
+                created_at: "20260507T100000Z".to_string(),
+                updated_at: "20260507T100000Z".to_string(),
+            },
+            entries: vec![],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 5);
+        let meta = obj.get("meta").unwrap().as_object().unwrap();
+        // assignee is preserved as null on wire (no skip_serializing_if)
+        assert_eq!(meta.get("assignee"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn send_card_message_response_pushed() {
+        let r = SendCardMessageResponse {
+            line_number: 7,
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            status: "pushed".to_string(),
+            commit_id: Some("hash".to_string()),
+            error: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 5, "pushed-case omits `error`");
+        assert!(obj.contains_key("commit_id"));
+    }
+
+    #[test]
+    fn update_card_response_keeps_null_assignee() {
+        let r = UpdateCardResponse {
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            status: "done".to_string(),
+            labels: vec![],
+            assignee: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        // assignee stays present as null — matches pre-typed json! shape
+        assert_eq!(obj.get("assignee"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn list_cards_response_with_summary() {
+        let r = ListCardsResponse {
+            cards: vec![CardSummary {
+                card_id: "c1".to_string(),
+                channel: "general".to_string(),
+                title: "T".to_string(),
+                status: "open".to_string(),
+                labels: vec![],
+                assignee: None,
+                created_by: "alice".to_string(),
+                created_at: "x".to_string(),
+                updated_at: "x".to_string(),
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v.get("cards").unwrap().as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -125,7 +125,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             channel,
             line_number,
         } => handle_get_thread(state, channel, line_number).await,
-        Request::Subscribe => Response::success(serde_json::json!({"subscribed": true})),
+        Request::Subscribe => {
+            let payload = gitim_core::responses::SubscribeResponse { subscribed: true };
+            Response::success(serde_json::to_value(payload).unwrap())
+        }
         Request::RegisterUser {
             handler,
             display_name,
