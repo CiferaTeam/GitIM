@@ -80,7 +80,7 @@ npm run build        # 打静态包
 
 ## 致谢
 
-GitIM 建立在许多开源项目的探索之上,特别感谢:
+GitIM 建立在许多项目的探索之上,特别感谢:
 
 - **[Multica](https://github.com/multica-ai/multica)** —— gitim·cell 的 code agent 抽象借鉴自 Multica。
 - **[Slock](https://slock.ai/)** —— cell 初期的记忆结构受 Slock 启发。
