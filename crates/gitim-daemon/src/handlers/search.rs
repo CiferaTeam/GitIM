@@ -33,25 +33,25 @@ pub async fn handle_search(
 
     match tokio::task::spawn_blocking(move || index.search(params)).await {
         Ok(Ok(result)) => {
-            let messages: Vec<serde_json::Value> = result
+            use gitim_core::responses::{SearchMessage, SearchResponse};
+            let messages: Vec<SearchMessage> = result
                 .messages
                 .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "channel": m.channel,
-                        "channel_type": m.channel_type,
-                        "line_number": m.line_number,
-                        "parent_line": m.parent_line,
-                        "author": m.author,
-                        "timestamp": m.timestamp,
-                        "body": m.body,
-                    })
+                .map(|m| SearchMessage {
+                    channel: m.channel.clone(),
+                    channel_type: m.channel_type.clone(),
+                    line_number: m.line_number,
+                    parent_line: m.parent_line,
+                    author: m.author.clone(),
+                    timestamp: m.timestamp.clone(),
+                    body: m.body.clone(),
                 })
                 .collect();
-            Response::success(serde_json::json!({
-                "messages": messages,
-                "total": result.total,
-            }))
+            let payload = SearchResponse {
+                messages,
+                total: result.total as u64,
+            };
+            Response::success(serde_json::to_value(payload).unwrap())
         }
         Ok(Err(gitim_index::IndexError::Rebuilding)) => Response::error("indexing_in_progress"),
         Ok(Err(gitim_index::IndexError::EmptySearch)) => {
@@ -78,10 +78,13 @@ pub async fn handle_reindex(state: SharedState) -> Response {
     };
 
     match tokio::task::spawn_blocking(move || index.reindex(&repo_root, &head)).await {
-        Ok(Ok(count)) => Response::success(serde_json::json!({
-            "status": "complete",
-            "messages_indexed": count,
-        })),
+        Ok(Ok(count)) => {
+            let payload = gitim_core::responses::ReindexResponse {
+                status: "complete".to_string(),
+                messages_indexed: count as u64,
+            };
+            Response::success(serde_json::to_value(payload).unwrap())
+        }
         Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
         Err(e) => Response::error(format!("reindex task failed: {}", e)),
     }

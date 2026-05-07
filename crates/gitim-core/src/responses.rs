@@ -130,6 +130,73 @@ pub struct ChannelEventResponse {
     pub status: String,
 }
 
+/// One row in `SearchResponse.messages`. Mirrors the `gitim_index`
+/// search hit projection that handler `handle_search` was building by
+/// hand from a `SearchHit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchMessage {
+    pub channel: String,
+    /// `"channel"` / `"dm"` / `"card"`.
+    pub channel_type: String,
+    pub line_number: u64,
+    /// `0` when the entry is itself a thread root.
+    pub parent_line: u64,
+    pub author: String,
+    pub timestamp: String,
+    pub body: String,
+}
+
+/// Response payload for `Request::Search`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchResponse {
+    pub messages: Vec<SearchMessage>,
+    pub total: u64,
+}
+
+/// Response payload for `Request::Reindex`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReindexResponse {
+    /// Currently always `"complete"` on success.
+    pub status: String,
+    pub messages_indexed: u64,
+}
+
+/// Response payload for `Request::RegisterUser`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RegisterUserResponse {
+    pub handler: String,
+    /// `true` if the user already had a meta file (idempotent re-register).
+    pub exists: bool,
+}
+
+/// Response payload for `Request::Stop`. Sent right before the daemon
+/// exits — clients should expect the connection to close shortly after.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StopResponse {
+    /// Currently always `"stopping"`.
+    pub status: String,
+}
+
+/// One change entry in `PollResponse.changes`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PollChange {
+    pub channel: String,
+    /// `"channel"` / `"dm"` / `"card"`, etc.
+    pub kind: String,
+    /// Same opaque per-entry shape as ReadResponse / GetThreadResponse.
+    pub entries: Vec<Value>,
+}
+
+/// Response payload for `Request::Poll`. Returns commits since the
+/// caller-supplied cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PollResponse {
+    /// 40-char hex of the latest commit at poll time. Use as the next
+    /// `since` cursor.
+    pub commit_id: String,
+    pub changes: Vec<PollChange>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +382,92 @@ mod tests {
         assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
         assert!(u.as_object().unwrap().contains_key("unarchived_by"));
         assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn search_response_wire_shape() {
+        let r = SearchResponse {
+            messages: vec![SearchMessage {
+                channel: "general".to_string(),
+                channel_type: "channel".to_string(),
+                line_number: 42,
+                parent_line: 0,
+                author: "alice".to_string(),
+                timestamp: "20260507T120000Z".to_string(),
+                body: "hello".to_string(),
+            }],
+            total: 1,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("total").and_then(|v| v.as_u64()), Some(1));
+        let msgs = obj.get("messages").unwrap().as_array().unwrap();
+        let m = msgs[0].as_object().unwrap();
+        assert_eq!(m.len(), 7);
+        assert_eq!(m.get("body").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(m.get("parent_line").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn reindex_response_wire_shape() {
+        let r = ReindexResponse {
+            status: "complete".to_string(),
+            messages_indexed: 12345,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(
+            obj.get("messages_indexed").and_then(|v| v.as_u64()),
+            Some(12345),
+        );
+    }
+
+    #[test]
+    fn register_user_response_wire_shape() {
+        let r = RegisterUserResponse {
+            handler: "alice".to_string(),
+            exists: false,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("exists").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[test]
+    fn stop_response_wire_shape() {
+        let r = StopResponse {
+            status: "stopping".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn poll_response_wire_shape_empty_changes() {
+        let r = PollResponse {
+            commit_id: "abcdef0123456789".to_string(),
+            changes: vec![],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert!(obj.get("changes").unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_change_wire_shape() {
+        let c = PollChange {
+            channel: "general".to_string(),
+            kind: "channel".to_string(),
+            entries: vec![serde_json::json!({"line_number": 1})],
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("channel"));
     }
 
     #[test]

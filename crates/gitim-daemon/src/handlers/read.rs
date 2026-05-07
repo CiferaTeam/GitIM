@@ -269,5 +269,8 @@ pub async fn handle_stop(state: SharedState) -> Response {
         std::process::exit(0);
     });
 
-    Response::success(serde_json::json!({ "status": "stopping" }))
+    let payload = gitim_core::responses::StopResponse {
+        status: "stopping".to_string(),
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }

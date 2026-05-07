@@ -25,10 +25,11 @@ pub async fn handle_register_user(
             users.push(handler.clone());
             users.sort();
         }
-        return Response::success(serde_json::json!({
-            "handler": handler,
-            "exists": true
-        }));
+        let payload = gitim_core::responses::RegisterUserResponse {
+            handler,
+            exists: true,
+        };
+        return Response::success(serde_json::to_value(payload).unwrap());
     }
 
     // Create meta file
@@ -60,8 +61,9 @@ pub async fn handle_register_user(
         Some((&author_name, &author_email)),
     );
 
-    Response::success(serde_json::json!({
-        "handler": handler,
-        "exists": false
-    }))
+    let payload = gitim_core::responses::RegisterUserResponse {
+        handler,
+        exists: false,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
