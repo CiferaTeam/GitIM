@@ -1103,7 +1103,7 @@ git commit -m "feat(webui): surface structured SHA errors in update indicator"
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-RELEASES_REPO="CiferaTeam/gitim-releases"
+RELEASES_REPO="CiferaTeam/GitIM"
 
 # ---------- Argument parsing ----------
 DRY_RUN=false

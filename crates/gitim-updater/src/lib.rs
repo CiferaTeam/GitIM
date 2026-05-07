@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// GitHub repo that hosts the release tarballs.
-pub const RELEASES_REPO: &str = "CiferaTeam/gitim-releases";
+pub const RELEASES_REPO: &str = "CiferaTeam/GitIM";
 
 /// Binaries shipped in every release tarball, in install order.
 pub const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
@@ -323,8 +323,8 @@ fn walkdir(dir: &Path) -> Vec<PathBuf> {
                 results.push(path);
             }
             // Symlinks are intentionally skipped — release tarballs from
-            // CiferaTeam/gitim-releases do not contain symlinks, and this
-            // guards against symlink loops if a malformed archive appears.
+            // CiferaTeam/GitIM do not contain symlinks, and this guards
+            // against symlink loops if a malformed archive appears.
         }
     }
     results

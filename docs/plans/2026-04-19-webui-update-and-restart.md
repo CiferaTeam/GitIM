@@ -61,7 +61,7 @@
 | 版本比较 | 同上 | `parse_version` + `is_newer` 迁入新 crate |
 | GitHub Release API URL 构造 | 同上 | `download_url` + `latest_release_api_url` 迁入新 crate |
 | `install.sh` | 根目录 | install dir `~/.gitim/bin/` 是 source of truth(strict check 基准) |
-| `release.sh` + `CiferaTeam/gitim-releases` | 根目录 + GitHub | 已有发布流程,plan 无需动 |
+| `release.sh` + `CiferaTeam/GitIM` | 根目录 + GitHub | 已有发布流程,plan 无需动 |
 | `GET /health` 返 `version` | `crates/gitim-runtime/src/http.rs` 约 L168-175 | 前端比较 current vs latest 用 |
 | `use-version-check` hook | `webui-v2/src/hooks/use-version-check.ts` | 当前只拉 Cell API 并丢弃结果,refactor 为完整比较 hook |
 | Cell API `/api/check-version` | `webui-v2/src/lib/cell-api.ts` | 返 `latest_version` 仍走现有契约 |
@@ -268,7 +268,7 @@
   3. spawn 新 runtime:`Command::new(&state.canonical_exe_path).args(["--port", &port]).spawn()`(port 从 state 读,当前绑定端口)。失败 → state 记录错误,老进程保持存活
   4. spawn 成功 → 清理 `.old` 备份 → 当前进程 `std::process::exit(0)`
 - [ ] `update_e2e.rs` 写完整 E2E 测试:
-  - 起 local mock server serve:`/repos/CiferaTeam/gitim-releases/releases/latest`(返 fake tag)+ tarball 下载 URL(返预制的 fake-binary tarball,里面三个 shell script 作为 fake binary,`gitim-runtime --version` 返特定字符串)
+  - 起 local mock server serve:`/repos/CiferaTeam/GitIM/releases/latest`(返 fake tag)+ tarball 下载 URL(返预制的 fake-binary tarball,里面三个 shell script 作为 fake binary,`gitim-runtime --version` 返特定字符串)
   - 起 runtime 实例,`canonical_exe_path` 指到 test temp install dir,install dir 放旧 fake-binary
   - 用 reqwest 发 `POST /runtime/update-and-restart` → 收 202
   - 轮询 `GET /health`,直到新进程响应且 `version` = target version(带 30s timeout)
@@ -381,7 +381,7 @@
 
 ## Known Risks & Future Work
 
-1. **CSRF / 跨源攻击面**:runtime 继承当前 `CorsLayer::permissive()`,本次 endpoint 同其它 endpoint 一样对 cross-origin 开放。不引入新攻击面类别(下载 URL 硬编码指向 `CiferaTeam/gitim-releases`,攻击者无法注入代码),但整站 CSRF / data-exfil 问题需**另立 issue** 整治。TL;DR:恶意本地站点能诱导用户 runtime 升到官方 latest,不能执行任意代码。
+1. **CSRF / 跨源攻击面**:runtime 继承当前 `CorsLayer::permissive()`,本次 endpoint 同其它 endpoint 一样对 cross-origin 开放。不引入新攻击面类别(下载 URL 硬编码指向 `CiferaTeam/GitIM`,攻击者无法注入代码),但整站 CSRF / data-exfil 问题需**另立 issue** 整治。TL;DR:恶意本地站点能诱导用户 runtime 升到官方 latest,不能执行任意代码。
 2. **新 runtime 启动失败无自动 fallback**:若替换后新 `gitim-runtime` 因 regression 起不来,老进程已退出、端口空、前端 30s 超时。用户必须终端 `gitim runtime start` 手动恢复。当前缓解:`replace_binaries` 用 `keep_backup=true` 在异步阶段保留 `.old` 备份到 spawn 成功后才清理,所以失败时文件系统上仍有旧 binary 可用;但没自动恢复机制。Future work:A/B binary slot + fork-exec 前对子进程握手(3s 内响应 `/health` 才真退出)。
 3. **前端错误态无 dismiss / retry**:error 状态下 UpdateIndicator 显示红色叹号 + 错误文字,但没有"重试"或"关闭"按钮。用户要么等 1 小时自动 re-check,要么刷新页面。v1 接受。
 4. **端口重绑定 race**:老 runtime `exit(0)` 和新 runtime bind 同端口之间有小窗口。已在 `run_shell` 里加 10×100ms retry(AddrInUse → 等 100ms 重试),实践上足够。如果仍有问题,后续可以考虑 `SO_REUSEPORT`。

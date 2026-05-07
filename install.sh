@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RELEASES_REPO="CiferaTeam/gitim-releases"
+RELEASES_REPO="CiferaTeam/GitIM"
 INSTALL_DIR="$HOME/.gitim/bin"
 
 # ---------- Detect platform ----------
