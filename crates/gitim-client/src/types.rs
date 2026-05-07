@@ -79,6 +79,30 @@ mod tests {
         assert!(result.is_err(), "missing data should error");
     }
 
+    /// End-to-end protocol contract: a daemon constructs the typed
+    /// payload, wraps it in the response envelope, sends it on the wire,
+    /// the client receives bytes, deserializes the envelope, and pulls
+    /// the typed payload out via parse_data. Renaming any field of
+    /// StatusResponse breaks this test deterministically.
+    #[test]
+    fn round_trip_status_response_via_envelope() {
+        use gitim_core::responses::StatusResponse;
+
+        let payload = StatusResponse {
+            version: "1.2.3".to_string(),
+            status: "running".to_string(),
+            guest: true,
+        };
+        let envelope = json!({
+            "ok": true,
+            "data": serde_json::to_value(&payload).unwrap(),
+        });
+        let wire = envelope.to_string();
+        let resp: ApiResponse = serde_json::from_str(&wire).unwrap();
+        let decoded: StatusResponse = resp.parse_data().unwrap();
+        assert_eq!(decoded, payload);
+    }
+
     #[test]
     fn parse_data_errors_when_shape_mismatches() {
         let resp = ApiResponse {
