@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -81,4 +83,21 @@ pub async fn stop_daemon(repo_root: &std::path::Path) {
     let client = GitimClient::new(repo_root);
     let _ = client.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
+pub fn fixture(name: &str) -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests");
+    path.push("fixtures");
+    path.push(name);
+    path
+}
+
+pub fn resolve_stdbin(name: &str) -> String {
+    let bin_path = format!("/bin/{name}");
+    if std::path::Path::new(&bin_path).is_file() {
+        bin_path
+    } else {
+        format!("/usr/bin/{name}")
+    }
 }

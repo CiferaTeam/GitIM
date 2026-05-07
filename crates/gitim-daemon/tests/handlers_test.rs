@@ -890,6 +890,10 @@ async fn test_create_channel_basic() {
     let thread = std::fs::read_to_string(state.repo_root.join("channels/random.thread")).unwrap();
     assert!(thread.contains("[E:join]"), "thread missing join event");
     assert!(thread.contains("@alice"), "thread missing author");
+    assert!(
+        !thread.contains("\"targets\""),
+        "empty invitees should not produce targets: {thread}"
+    );
 }
 
 #[tokio::test]
@@ -988,10 +992,6 @@ async fn test_create_channel_then_send() {
     );
 }
 
-// --- Task 2: create_channel invitees 测试（红阶段）---
-// Tests 1-4 are expected to FAIL until Task 3 implements invitees in handle_create_channel.
-// Test 5 is a regression guard and may PASS already.
-
 #[tokio::test]
 async fn test_create_channel_with_invitees() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1027,10 +1027,21 @@ async fn test_create_channel_with_invitees() {
         "members should be [author, invitees...] in order; got: {:?}",
         meta.members
     );
+
+    let thread = std::fs::read_to_string(state.repo_root.join("channels/team-alpha.thread"))
+        .expect("thread should exist");
+    assert!(
+        thread.contains("[@alice]") && thread.contains("[E:join]"),
+        "thread should contain creator's E:join event; got: {thread}"
+    );
+    assert!(
+        thread.contains("\"targets\":[\"bob\",\"carol\"]"),
+        "thread should carry invitees as targets in order; got: {thread}"
+    );
 }
 
 #[tokio::test]
-async fn test_create_channel_invitee_dedup_duplicates() {
+async fn test_create_channel_invitees_are_deduped() {
     let tmp = tempfile::tempdir().unwrap();
     let state = setup_test_state(tmp.path());
     register_test_user(&state, "alice").await;
@@ -1043,7 +1054,12 @@ async fn test_create_channel_invitee_dedup_duplicates() {
             display_name: None,
             introduction: None,
             author: Some("alice".to_string()),
-            invitees: vec!["bob".to_string(), "bob".to_string(), "carol".to_string()],
+            invitees: vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+            ],
         },
         state.clone(),
     )
@@ -1057,40 +1073,7 @@ async fn test_create_channel_invitee_dedup_duplicates() {
     assert_eq!(
         meta.members,
         vec!["alice".to_string(), "bob".to_string(), "carol".to_string()],
-        "duplicate invitees should be deduped; got: {:?}",
-        meta.members
-    );
-}
-
-#[tokio::test]
-async fn test_create_channel_invitee_dedup_self() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = setup_test_state(tmp.path());
-    register_test_user(&state, "alice").await;
-    register_test_user(&state, "bob").await;
-
-    // invitees contains the author themselves — author should not appear twice
-    let resp = handle_request(
-        Request::CreateChannel {
-            name: "self-dedup".to_string(),
-            display_name: None,
-            introduction: None,
-            author: Some("alice".to_string()),
-            invitees: vec!["alice".to_string(), "bob".to_string()],
-        },
-        state.clone(),
-    )
-    .await;
-    assert!(resp.ok, "create_channel failed: {:?}", resp.error);
-
-    let meta_str = std::fs::read_to_string(state.repo_root.join("channels/self-dedup.meta.yaml"))
-        .expect("meta.yaml should exist");
-    let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
-
-    assert_eq!(
-        meta.members,
-        vec!["alice".to_string(), "bob".to_string()],
-        "author in invitees should not cause duplicate; got: {:?}",
+        "invitees should be deduped while preserving first-seen order; got: {:?}",
         meta.members
     );
 }
@@ -1139,107 +1122,6 @@ async fn test_create_channel_invitee_unregistered_rejects() {
             .join("channels/ghost-channel.thread")
             .exists(),
         "thread file must NOT be created when an invitee is unregistered"
-    );
-}
-
-#[tokio::test]
-async fn test_create_channel_without_invitees() {
-    // Regression: empty invitees list must preserve the original "author only" behavior.
-    let tmp = tempfile::tempdir().unwrap();
-    let state = setup_test_state(tmp.path());
-    register_test_user(&state, "alice").await;
-
-    let resp = handle_request(
-        Request::CreateChannel {
-            name: "solo-channel".to_string(),
-            display_name: None,
-            introduction: None,
-            author: Some("alice".to_string()),
-            invitees: vec![],
-        },
-        state.clone(),
-    )
-    .await;
-    assert!(
-        resp.ok,
-        "create_channel without invitees failed: {:?}",
-        resp.error
-    );
-
-    let meta_str = std::fs::read_to_string(state.repo_root.join("channels/solo-channel.meta.yaml"))
-        .expect("meta.yaml should exist");
-    let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
-
-    assert_eq!(
-        meta.members,
-        vec!["alice".to_string()],
-        "no invitees → members should only contain author; got: {:?}",
-        meta.members
-    );
-}
-
-#[tokio::test]
-async fn test_create_channel_writes_invitees_as_join_targets() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = setup_test_state(tmp.path());
-    register_test_user(&state, "alice").await;
-    register_test_user(&state, "bob").await;
-    register_test_user(&state, "carol").await;
-
-    let resp = handle_request(
-        Request::CreateChannel {
-            name: "team-echo".to_string(),
-            display_name: None,
-            introduction: None,
-            author: Some("alice".to_string()),
-            invitees: vec!["bob".to_string(), "carol".to_string()],
-        },
-        state.clone(),
-    )
-    .await;
-    assert!(resp.ok, "create_channel failed: {:?}", resp.error);
-
-    let thread = std::fs::read_to_string(state.repo_root.join("channels/team-echo.thread"))
-        .expect("thread should exist");
-
-    assert!(
-        thread.contains("[@alice]") && thread.contains("[E:join]"),
-        "thread should contain creator's E:join event; got: {}",
-        thread
-    );
-    assert!(
-        thread.contains("\"targets\":[\"bob\",\"carol\"]"),
-        "thread should carry invitees as targets in order; got: {}",
-        thread
-    );
-}
-
-#[tokio::test]
-async fn test_create_channel_empty_invitees_has_no_targets() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = setup_test_state(tmp.path());
-    register_test_user(&state, "alice").await;
-
-    let resp = handle_request(
-        Request::CreateChannel {
-            name: "solo-echo".to_string(),
-            display_name: None,
-            introduction: None,
-            author: Some("alice".to_string()),
-            invitees: vec![],
-        },
-        state.clone(),
-    )
-    .await;
-    assert!(resp.ok, "create_channel failed: {:?}", resp.error);
-
-    let thread = std::fs::read_to_string(state.repo_root.join("channels/solo-echo.thread"))
-        .expect("thread should exist");
-
-    assert!(
-        !thread.contains("targets"),
-        "empty invitees should not produce a targets payload; got: {}",
-        thread
     );
 }
 
