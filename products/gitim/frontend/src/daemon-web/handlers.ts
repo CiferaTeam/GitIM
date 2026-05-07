@@ -201,7 +201,10 @@ export async function poll(since?: string): Promise<ApiResponse> {
 
     // If remote has new commits, fast-forward (sync handles conflicts separately)
     if (remoteHead !== localHead && localHead === s.headCommit) {
-      await gitOps.checkout(s.repoDir, remoteHead);
+      await gitOps.resetToRemote(
+        s.repoDir,
+        `refs/remotes/origin/${s.defaultBranch}`,
+      );
       setState({ headCommit: remoteHead });
     }
 

@@ -114,14 +114,26 @@ export async function push(
   dir: string,
   corsProxy: string,
   onAuth: AuthCallback,
+  ref?: string,
 ): Promise<void> {
+  const fs = getFs();
+  const pushRef = ref ?? await getCurrentBranch(dir);
+  const head = await git.resolveRef({ fs, dir, ref: "HEAD" });
+  await git.writeRef({
+    fs,
+    dir,
+    ref: pushRef.startsWith("refs/") ? pushRef : `refs/heads/${pushRef}`,
+    value: head,
+    force: true,
+  });
   await git.push({
-    fs: getFs(),
+    fs,
     http,
     dir,
     corsProxy,
     onAuth,
     remote: "origin",
+    ref: pushRef,
   });
 }
 

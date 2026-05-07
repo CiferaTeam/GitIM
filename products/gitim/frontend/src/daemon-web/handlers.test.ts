@@ -487,6 +487,24 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("fast-forwards poll by updating the local branch", async () => {
+    const git = vi.mocked(await import("./git"));
+    setState({ defaultBranch: "trunk", headCommit: "local-head" });
+    git.resolveRemoteHead.mockResolvedValueOnce("remote-head");
+    git.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("remote-head");
+
+    const res = await poll("local-head");
+
+    expect(res.ok).toBe(true);
+    expect(git.resetToRemote).toHaveBeenCalledWith(
+      "/repo",
+      "refs/remotes/origin/trunk",
+    );
+    expect(git.checkout).not.toHaveBeenCalled();
+  });
+
   it("archives active cards into archive/channels and removes them from active lists", async () => {
     const res = await archiveCard("general", "20260317-120000-abc");
 

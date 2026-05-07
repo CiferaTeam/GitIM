@@ -35,7 +35,7 @@ async function runSyncOnce(): Promise<void> {
 
     if (localHead !== s.headCommit) {
       try {
-        await gitOps.push(s.repoDir, s.corsProxy, onAuth);
+        await gitOps.push(s.repoDir, s.corsProxy, onAuth, s.defaultBranch);
         setState({ headCommit: localHead, syncStatus: "idle" });
         return;
       } catch (e: unknown) {
@@ -55,7 +55,10 @@ async function runSyncOnce(): Promise<void> {
 
     // 3. No local unpushed commits — fast-forward to remote
     if (localHead === s.headCommit) {
-      await gitOps.checkout(s.repoDir, remoteHead);
+      await gitOps.resetToRemote(
+        s.repoDir,
+        `refs/remotes/origin/${s.defaultBranch}`,
+      );
       setState({ headCommit: remoteHead, syncStatus: "idle" });
       postMessage({ type: "sync_reset" });
       return;
@@ -118,7 +121,7 @@ async function runSyncOnce(): Promise<void> {
     // Push with retry (max 3 attempts for concurrent-write races)
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await gitOps.push(s.repoDir, s.corsProxy, onAuth);
+        await gitOps.push(s.repoDir, s.corsProxy, onAuth, s.defaultBranch);
         break;
       } catch (e: unknown) {
         if (attempt === 2 || !isNonFastForward(e)) throw e;
