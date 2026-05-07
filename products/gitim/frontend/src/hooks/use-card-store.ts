@@ -59,7 +59,11 @@ interface CardState {
     pendingId: string,
     lineNumber: number,
   ) => void;
-  markPendingCardFailed: (pathKey: string, pendingId: string) => void;
+  markPendingCardFailed: (
+    pathKey: string,
+    pendingId: string,
+    lineNumber?: number,
+  ) => void;
   removePendingCardMessage: (pathKey: string, pendingId: string) => void;
   /** Clear all workspace-scoped card state. Called on workspace switch. */
   resetForWorkspaceSwitch: () => void;
@@ -232,14 +236,20 @@ export const useCardStore = create<CardState>((set) => ({
       };
     }),
 
-  markPendingCardFailed: (pathKey, pendingId) =>
+  markPendingCardFailed: (pathKey, pendingId, lineNumber) =>
     set((state) => {
       const existing = state.cardMessagesByPath[pathKey] ?? [];
       return {
         cardMessagesByPath: {
           ...state.cardMessagesByPath,
           [pathKey]: existing.map((m) =>
-            m._pendingId === pendingId ? { ...m, _status: "failed" } : m,
+            m._pendingId === pendingId
+              ? {
+                  ...m,
+                  _status: "failed",
+                  ...(lineNumber !== undefined && { line_number: lineNumber }),
+                }
+              : m,
           ),
         },
       };

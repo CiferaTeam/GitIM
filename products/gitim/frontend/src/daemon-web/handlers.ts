@@ -29,6 +29,7 @@ import {
   validateChannelName,
 } from "./paths";
 import type { Card, CardStatus } from "../lib/types";
+import { tokenAuth } from "./auth";
 
 type ApiResponse = {
   ok: boolean;
@@ -78,6 +79,19 @@ function err(error: string): ApiResponse {
   return { ok: false, error };
 }
 
+function errorMessage(e: unknown): string {
+  return String((e as Error).message ?? e);
+}
+
+async function syncAfterCommit(): Promise<{ status: "pushed" | "commit_only"; error?: string }> {
+  try {
+    await runSync({ forceNewCycle: true });
+    return { status: "pushed" };
+  } catch (e) {
+    return { status: "commit_only", error: errorMessage(e) };
+  }
+}
+
 async function ensureWasmReady(): Promise<void> {
   wasmReady ??= initWasm().then(() => undefined);
   await wasmReady;
@@ -109,10 +123,7 @@ export async function init(config: {
 }): Promise<ApiResponse> {
   const { initState } = await import("./state");
   const dir = "/repo";
-  const onAuth = () => ({
-    username: config.token,
-    password: "x-oauth-basic",
-  });
+  const onAuth = tokenAuth(config.token);
 
   try {
     // Clone the repo
@@ -180,7 +191,7 @@ export async function me(): Promise<ApiResponse> {
 
 export async function poll(since?: string): Promise<ApiResponse> {
   const s = getState();
-  const onAuth = () => ({ username: s.token, password: "x-oauth-basic" });
+  const onAuth = tokenAuth(s.token);
 
   try {
     // Fetch from remote
@@ -382,10 +393,9 @@ export async function send(
       s.me.handler,
     );
 
-    // Trigger sync
-    runSync().catch(console.error);
+    const sync = await syncAfterCommit();
 
-    return ok({ line_number: nextLine });
+    return ok({ line_number: nextLine, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -487,9 +497,9 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
     );
 
     await refreshChannelsCache();
-    runSync().catch(console.error);
+    const sync = await syncAfterCommit();
 
-    return ok();
+    return ok(sync);
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -590,8 +600,8 @@ export async function createCard(
       s.me.handler,
     );
 
-    runSync().catch(console.error);
-    return ok({ channel, card_id: cardId, title: card.title });
+    const sync = await syncAfterCommit();
+    return ok({ channel, card_id: cardId, title: card.title, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -656,8 +666,8 @@ export async function sendCardMessage(
       s.me.handler,
     );
 
-    runSync().catch(console.error);
-    return ok({ line_number: nextLine, channel, card_id: cardId, status: "committed" });
+    const sync = await syncAfterCommit();
+    return ok({ line_number: nextLine, channel, card_id: cardId, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -707,13 +717,15 @@ export async function updateCard(
       s.me.handler,
     );
 
-    runSync().catch(console.error);
+    const sync = await syncAfterCommit();
     return ok({
       channel,
       card_id: cardId,
       status: next.status,
       labels: next.labels,
       assignee: next.assignee,
+      sync_status: sync.status,
+      sync_error: sync.error,
     });
   } catch (e) {
     return err(String((e as Error).message ?? e));
@@ -740,8 +752,8 @@ export async function archiveCard(
       `card: archive ${cardId} in ${channel} by @${s.me.handler}`,
     );
 
-    runSync().catch(console.error);
-    return ok({ channel, card_id: cardId, archived_by: s.me.handler });
+    const sync = await syncAfterCommit();
+    return ok({ channel, card_id: cardId, archived_by: s.me.handler, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -772,8 +784,8 @@ export async function unarchiveCard(
       `card: unarchive ${cardId} in ${channel} by @${s.me.handler}`,
     );
 
-    runSync().catch(console.error);
-    return ok({ channel, card_id: cardId, unarchived_by: s.me.handler });
+    const sync = await syncAfterCommit();
+    return ok({ channel, card_id: cardId, unarchived_by: s.me.handler, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }

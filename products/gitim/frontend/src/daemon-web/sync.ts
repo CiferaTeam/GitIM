@@ -4,6 +4,11 @@
 
 import * as gitOps from "./git";
 import { getState, setState } from "./state";
+import { tokenAuth } from "./auth";
+
+interface RunSyncOptions {
+  forceNewCycle?: boolean;
+}
 
 function isNonFastForward(e: unknown): boolean {
   const msg = String(
@@ -16,13 +21,14 @@ function isNonFastForward(e: unknown): boolean {
   );
 }
 
-async function runSync(): Promise<void> {
+let syncInFlight: Promise<void> | null = null;
+
+async function runSyncOnce(): Promise<void> {
   const s = getState();
-  if (s.syncStatus === "syncing") return;
   setState({ syncStatus: "syncing" });
 
   try {
-    const onAuth = () => ({ username: s.token, password: "x-oauth-basic" });
+    const onAuth = tokenAuth(s.token);
 
     // 1. Try push first (fast path: no conflicts)
     const localHead = await gitOps.resolveHead(s.repoDir);
@@ -126,7 +132,36 @@ async function runSync(): Promise<void> {
   } catch (e) {
     setState({ syncStatus: "error" });
     console.error("[daemon-web] sync error:", e);
+    throw e;
   }
+}
+
+async function runSync(options: RunSyncOptions = {}): Promise<void> {
+  if (syncInFlight && !options.forceNewCycle) return syncInFlight;
+
+  const previous = syncInFlight;
+  const next = (async () => {
+    if (previous) {
+      try {
+        await previous;
+      } catch {
+        /* A fresh cycle below reports its own result. */
+      }
+    }
+    await runSyncOnce();
+  })();
+
+  syncInFlight = next;
+  next.then(
+    () => {
+      if (syncInFlight === next) syncInFlight = null;
+    },
+    () => {
+      if (syncInFlight === next) syncInFlight = null;
+    },
+  );
+
+  return next;
 }
 
 // --- Sync loop management ---

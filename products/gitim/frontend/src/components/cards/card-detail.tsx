@@ -25,6 +25,17 @@ type LoadStatus = "loading" | "ok" | "not_found" | "error";
 // so `?? []` would return a fresh array every call and loop useSyncExternalStore.
 const EMPTY_MESSAGES: Message[] = [];
 
+function syncFailure(data: Record<string, unknown> | undefined): string | null {
+  if (!data) return null;
+  const status = typeof data.status === "string" ? data.status : data.sync_status;
+  const error = typeof data.error === "string"
+    ? data.error
+    : typeof data.sync_error === "string"
+      ? data.sync_error
+      : null;
+  return status === "commit_only" || error ? error ?? "Sync failed" : null;
+}
+
 export function CardDetail() {
   const params = useParams();
   const navigate = useNavigate();
@@ -191,7 +202,14 @@ export function CardDetail() {
         pointTo || undefined,
       );
       if (res.ok && res.data) {
-        markPendingCardSent(pathKey, pendingId, res.data.line_number as number);
+        const lineNumber = res.data.line_number as number;
+        const syncError = syncFailure(res.data);
+        if (syncError) {
+          markPendingCardFailed(pathKey, pendingId, lineNumber);
+          toast.error(`Message saved locally, sync failed: ${syncError}`);
+        } else {
+          markPendingCardSent(pathKey, pendingId, lineNumber);
+        }
       } else {
         markPendingCardFailed(pathKey, pendingId);
       }

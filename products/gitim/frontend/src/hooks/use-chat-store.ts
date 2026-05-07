@@ -40,7 +40,7 @@ interface ChatState {
   addMessages: (m: Message[]) => void;
   addPendingMessage: (m: Message) => void;
   markPendingSent: (pendingId: string, lineNumber: number) => void;
-  markPendingFailed: (pendingId: string) => void;
+  markPendingFailed: (pendingId: string, lineNumber?: number) => void;
   removePendingMessage: (pendingId: string) => void;
   setReplyTo: (m: Message | null) => void;
   setHighlightLine: (line: number | null) => void;
@@ -194,10 +194,16 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
     })),
 
-  markPendingFailed: (pendingId) =>
+  markPendingFailed: (pendingId, lineNumber) =>
     set((state) => ({
       messages: state.messages.map((m) =>
-        m._pendingId === pendingId ? { ...m, _status: "failed" } : m
+        m._pendingId === pendingId
+          ? {
+              ...m,
+              _status: "failed",
+              ...(lineNumber !== undefined && { line_number: lineNumber }),
+            }
+          : m
       ),
     })),
 

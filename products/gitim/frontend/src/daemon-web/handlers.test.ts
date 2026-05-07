@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const files = vi.hoisted(() => new Map<string, string>());
 const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
+const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 function parentDir(path: string): string | null {
   const idx = path.lastIndexOf("/");
@@ -148,7 +149,7 @@ vi.mock("./git", () => ({
 }));
 
 vi.mock("./sync", () => ({
-  runSync: vi.fn(async () => undefined),
+  runSync: runSyncMock,
 }));
 
 import {
@@ -180,6 +181,8 @@ function seedState() {
   files.clear();
   dirs.clear();
   commits.length = 0;
+  runSyncMock.mockReset();
+  runSyncMock.mockResolvedValue(undefined);
 
   dirs.set("/repo/channels", ["general.meta.yaml", "general.thread"]);
   dirs.set("/repo/channels/general/cards", ["20260317-120000-abc"]);
@@ -334,6 +337,32 @@ describe("daemon-web handlers", () => {
     expect(files.has("/repo/channels/../evil.thread")).toBe(false);
   });
 
+  it("returns pushed status after send sync succeeds", async () => {
+    const res = await send("general", "from browser");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      line_number: 3,
+      status: "pushed",
+    });
+    expect(runSyncMock).toHaveBeenCalledWith({ forceNewCycle: true });
+  });
+
+  it("keeps the local line number and surfaces sync failure after send", async () => {
+    runSyncMock.mockRejectedValueOnce(new Error("HTTP Error: 401 Unauthorized"));
+
+    const res = await send("general", "from mobile");
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({
+      line_number: 3,
+      status: "commit_only",
+      error: "HTTP Error: 401 Unauthorized",
+    });
+    expect(files.get("/repo/channels/general.thread")).toContain("from mobile");
+    expect(commits.at(-1)?.message).toContain("L000003");
+  });
+
   it("lists cards from channels/<channel>/cards", async () => {
     const res = await listCards();
 
@@ -368,6 +397,7 @@ describe("daemon-web handlers", () => {
       channel: "general",
       card_id: "20260317-123456-abc",
       title: "New browser card",
+      status: "pushed",
     });
     expect(files.get("/repo/channels/general/cards/20260317-123456-abc/card.meta.yaml"))
       .toContain("title: New browser card");
@@ -465,6 +495,7 @@ describe("daemon-web handlers", () => {
       channel: "general",
       card_id: "20260317-120000-abc",
       archived_by: "lewis",
+      status: "pushed",
     });
     expect(files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
       .toBe(false);
@@ -508,6 +539,7 @@ describe("daemon-web handlers", () => {
       channel: "general",
       card_id: "20260317-120000-abc",
       unarchived_by: "lewis",
+      status: "pushed",
     });
     expect(files.get("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
       .toContain("title: Existing card");

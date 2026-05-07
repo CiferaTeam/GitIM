@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
+import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
@@ -25,6 +26,17 @@ function toApiChannel(displayName: string): string {
     return `dm:${parts.join(",")}`;
   }
   return displayName;
+}
+
+function syncFailure(data: Record<string, unknown> | undefined): string | null {
+  if (!data) return null;
+  const status = typeof data.status === "string" ? data.status : data.sync_status;
+  const error = typeof data.error === "string"
+    ? data.error
+    : typeof data.sync_error === "string"
+      ? data.sync_error
+      : null;
+  return status === "commit_only" || error ? error ?? "Sync failed" : null;
 }
 
 export function ChatLayout() {
@@ -173,7 +185,14 @@ export function ChatLayout() {
         pointTo
       );
       if (res.ok && res.data) {
-        markPendingSent(pendingId, res.data.line_number as number);
+        const lineNumber = res.data.line_number as number;
+        const syncError = syncFailure(res.data);
+        if (syncError) {
+          markPendingFailed(pendingId, lineNumber);
+          toast.error(`Message saved locally, sync failed: ${syncError}`);
+        } else {
+          markPendingSent(pendingId, lineNumber);
+        }
       } else {
         markPendingFailed(pendingId);
       }
