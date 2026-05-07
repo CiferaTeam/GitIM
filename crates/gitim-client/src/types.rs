@@ -1,13 +1,19 @@
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ClientError;
 
-#[derive(Debug, Deserialize, PartialEq)]
+/// Wire envelope for daemon IPC. Both halves of the protocol — the daemon's
+/// `Response` and the runtime's `/im/*` proxy passthroughs — serialize to
+/// the same shape, so the runtime can `Json(api_response)` directly without
+/// rebuilding the JSON by hand.
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct ApiResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 

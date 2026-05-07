@@ -156,6 +156,19 @@ struct WorkspaceCreateResponse {
     provider: GitProvider,
 }
 
+#[derive(Serialize)]
+struct ImMeData {
+    handler: String,
+    display_name: String,
+    guest: bool,
+}
+
+#[derive(Serialize)]
+struct ImMeResponse {
+    ok: bool,
+    data: ImMeData,
+}
+
 /// 409 `workspace_path_exists` error — carries the slug of the live
 /// workspace already pinned to that path so the caller can show a useful
 /// message. Different shape from `ErrorBody` because it has the extra
@@ -366,10 +379,7 @@ where
         crate::slug::validate(&slug).map_err(|e| {
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("invalid slug: {e}")
-                })),
+                Json(ErrorBody::new(format!("invalid slug: {e}"))),
             )
                 .into_response()
         })?;
@@ -382,6 +392,18 @@ fn not_found_workspace() -> axum::response::Response {
     (
         axum::http::StatusCode::NOT_FOUND,
         Json(ErrorBody::new("unknown workspace")),
+    )
+        .into_response()
+}
+
+/// Used by every `/im/*` route that needs to talk to the per-workspace
+/// daemon. Maps to "workspace exists but `human_repo` not yet wired up
+/// (initial provisioning never finished)".
+fn human_not_initialized() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorBody::new("human daemon not initialized")),
     )
         .into_response()
 }
@@ -460,16 +482,11 @@ fn human_client(
     state: &SharedRuntimeState,
     slug: &str,
 ) -> Result<GitimClient, axum::response::Response> {
-    use axum::response::IntoResponse;
     let s = state.lock().unwrap();
     let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
     match &ctx.human_repo {
         Some(p) => Ok(GitimClient::new(p)),
-        None => Err(Json(serde_json::json!({
-            "ok": false,
-            "error": "human daemon not initialized"
-        }))
-        .into_response()),
+        None => Err(human_not_initialized()),
     }
 }
 
@@ -478,17 +495,11 @@ fn api_response_to_json(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match result {
-        Ok(resp) => Json(serde_json::json!({
-            "ok": resp.ok,
-            "data": resp.data,
-            "error": resp.error,
-        }))
-        .into_response(),
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": e.to_string(),
-        }))
-        .into_response(),
+        // ApiResponse serializes with `skip_serializing_if = is_none` —
+        // matches the legacy hand-rolled shape (`null` was never emitted
+        // for absent data/error fields, only when callers explicitly set them).
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => Json(ErrorBody::new(e.to_string())).into_response(),
     }
 }
 
@@ -502,11 +513,7 @@ async fn im_me(
     let human_repo = match with_workspace_snapshot(&state, &slug, |ctx| ctx.human_repo.clone()) {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": "human daemon not initialized"
-            }))
-            .into_response();
+            return human_not_initialized();
         }
         Err(r) => return r,
     };
@@ -514,26 +521,23 @@ async fn im_me(
     let me_path = human_repo.join(".gitim/me.json");
     match std::fs::read_to_string(&me_path) {
         Ok(content) => match serde_json::from_str::<MeJson>(&content) {
-            Ok(me) => Json(serde_json::json!({
-                "ok": true,
-                "data": {
-                    "handler": me.handler.as_deref().unwrap_or("unknown"),
-                    "display_name": me.display_name.as_deref().unwrap_or("Unknown"),
-                    "guest": me.guest.unwrap_or(false),
-                }
-            }))
+            Ok(me) => Json(ImMeResponse {
+                ok: true,
+                data: ImMeData {
+                    handler: me
+                        .handler
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    display_name: me
+                        .display_name
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    guest: me.guest.unwrap_or(false),
+                },
+            })
             .into_response(),
-            Err(e) => Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to parse me.json: {e}")
-            }))
-            .into_response(),
+            Err(e) => Json(ErrorBody::new(format!("failed to parse me.json: {e}")))
+                .into_response(),
         },
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": format!("failed to read me.json: {e}")
-        }))
-        .into_response(),
+        Err(e) => Json(ErrorBody::new(format!("failed to read me.json: {e}"))).into_response(),
     }
 }
 
@@ -820,7 +824,7 @@ async fn im_read_card(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -847,7 +851,7 @@ async fn im_send_card_message(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -881,7 +885,7 @@ async fn im_update_card(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -919,44 +923,26 @@ fn human_handler(
 ) -> Result<String, axum::response::Response> {
     use axum::response::IntoResponse;
     let human_repo = with_workspace_snapshot(state, slug, |ctx| ctx.human_repo.clone())?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": "human daemon not initialized"
-                })),
-            )
-                .into_response()
-        })?;
+        .ok_or_else(human_not_initialized)?;
     let me_path = human_repo.join(".gitim/me.json");
     let content = std::fs::read_to_string(&me_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to read me.json: {e}")
-            })),
+            Json(ErrorBody::new(format!("failed to read me.json: {e}"))),
         )
             .into_response()
     })?;
     let me: MeJson = serde_json::from_str(&content).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": format!("failed to parse me.json: {e}")
-            })),
+            Json(ErrorBody::new(format!("failed to parse me.json: {e}"))),
         )
             .into_response()
     })?;
     me.handler.ok_or_else(|| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "me.json missing handler field"
-            })),
+            Json(ErrorBody::new("me.json missing handler field")),
         )
             .into_response()
     })
@@ -970,7 +956,7 @@ async fn im_card_archive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -993,7 +979,7 @@ async fn im_card_unarchive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1034,7 +1020,7 @@ async fn im_channel_archive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -1053,7 +1039,7 @@ async fn im_channel_unarchive(
     if let Err(e) = crate::slug::validate(&slug) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": format!("invalid slug: {e}") })),
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
         )
             .into_response();
     }
@@ -2391,10 +2377,7 @@ async fn preflight_handler(
         }
         _ => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "unknown provider",
-            })),
+            Json(ErrorBody::new("unknown provider")),
         )
             .into_response(),
     }
