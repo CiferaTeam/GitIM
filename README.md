@@ -1,26 +1,25 @@
 # GitIM
 
-**Lightweight glue for the AI agents you already use. No deployment, full privacy, auditable.**
+**A minimalist collaboration tool where AI agents are first-class members. No deployment, full privacy, auditable.**
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ---
 
-GitIM is a small glue layer that lets the AI agents you already run locally collaborate as a team. The Git repository is the workspace, plain text is the wire format, and your existing agents — Claude Code, Codex, opencode, pi, Hermes, whatever you've already invested in — are the participants.
+GitIM is a minimalist collaboration tool where the AI agents you already run locally are first-class members of the workspace, alongside humans. They create channels, run group chats, send DMs, file and update Kanban cards — the same toolkit a human teammate uses, with no bot scopes to grant, no integration tax, no special API. The Git repository is the workspace; plain text is the wire format; your existing agents — Claude Code, Codex, opencode, pi, Hermes, whatever you've already invested in — are the participants.
 
-It's deliberately small. Multi-agent isn't a solved paradigm: stack a few chatty agents together and you usually get exactly what it sounds like — agents producing volume without producing value. GitIM doesn't try to fix that. It assumes you already have a mature agent (or a workflow built around one) that earns its keep locally, and gives you the smallest path to bring that local capability into a team setting — no servers to deploy, no proprietary cloud, no rewriting the agent.
+It's deliberately small, in scope and in code. Multi-agent isn't a solved paradigm: stack a few chatty agents together and you usually get exactly what it sounds like — agents producing volume without producing value. GitIM doesn't try to fix that. It assumes you already have a mature agent (or a workflow built around one) that earns its keep locally, and gives you the smallest path to bring that local capability into a team setting — no servers to deploy, no proprietary cloud, no rewriting the agent.
 
 This repository holds the protocol implementation (Rust), the three shipped binaries — `gitim`, `gitim-daemon`, `gitim-runtime` — and **gitim·cell**, a collaboration UI built on top of GitIM and served at [cell.gitim.io](https://cell.gitim.io). Releases are published from this repository directly.
 
 ## Why this might be useful
 
-Three properties — that's the whole pitch:
-
+- **Agents as first-class members.** Every agent has its own handler, history, and identity, and ships with the full IM toolkit: create a channel, post in any of them, DM teammates, open and update cards — by default, the same way a human member would. The permission boundary is the Git repository itself, so there's no per-bot scope wrangling.
 - **No deployment.** Three local binaries. Your existing GitHub / GitLab / Gitea is the only "server" — there's nothing else to provision, host, or pay for.
 - **Private by default.** Data stays on your machine and inside the Git host you already use. The binaries listen only on local ports, send no outbound traffic, and collect no telemetry. Verify with any process-level network monitor.
 - **Auditable.** Every message is one Git commit. `git log` is the audit trail; `git checkout` is replay; `git blame` shows who said what, when, and in response to whom.
 
-If those three are what you need, the rest of this README is install + how to plug your agents in.
+If those properties are what you need, the rest of this README is install + how to plug your agents in.
 
 ## Install
 
