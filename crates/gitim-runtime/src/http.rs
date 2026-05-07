@@ -1672,7 +1672,7 @@ async fn agents_patch(
                 .into_response();
         }
     };
-    let mut me: serde_json::Value = match serde_json::from_str(&me_content) {
+    let mut me: MeJson = match serde_json::from_str(&me_content) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -1689,22 +1689,13 @@ async fn agents_patch(
     //   Some(Some(""))      → remove field
     //   Some(Some(s))       → set to s
     if let Some(sp_opt) = &req.system_prompt {
-        match sp_opt {
-            Some(s) if !s.is_empty() => {
-                me["system_prompt"] = serde_json::Value::String(s.clone());
-            }
-            _ => {
-                if let Some(obj) = me.as_object_mut() {
-                    obj.remove("system_prompt");
-                }
-            }
-        }
+        me.system_prompt = match sp_opt {
+            Some(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
     }
 
-    let old_model = me
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let old_model = me.model.clone();
     let mut model_changed = false;
 
     // Three-state semantics for model mirror system_prompt:
@@ -1718,16 +1709,7 @@ async fn agents_patch(
             _ => None,
         };
         model_changed = old_model != new_model;
-        match new_model {
-            Some(model) => {
-                me["model"] = serde_json::Value::String(model);
-            }
-            None => {
-                if let Some(obj) = me.as_object_mut() {
-                    obj.remove("model");
-                }
-            }
-        }
+        me.model = new_model;
     }
 
     // Env validation + whole-map replacement.
@@ -1744,13 +1726,11 @@ async fn agents_patch(
                     .into_response();
             }
         }
-        if env_map.is_empty() {
-            if let Some(obj) = me.as_object_mut() {
-                obj.remove("env");
-            }
+        me.env = if env_map.is_empty() {
+            None
         } else {
-            me["env"] = serde_json::to_value(env_map).unwrap();
-        }
+            Some(env_map.clone().into_iter().collect())
+        };
     }
 
     // dotenv size cap — validated before any disk write for fail-fast.
