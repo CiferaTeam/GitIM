@@ -45,7 +45,7 @@ function Tip({ children }: { children: React.ReactNode }) {
 
 /**
  * Screenshot slot. Swap `src="pending:..."` for a real path once the image
- * is dropped into `products/cell/frontend/public/docs-images/...`.
+ * is dropped into `products/gitim/frontend/public/docs-images/...`.
  */
 function Screenshot({ src, caption }: { src: string; caption: string }) {
   const pending = src.startsWith("pending:");

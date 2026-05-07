@@ -46,12 +46,12 @@ gitim-runtime ──→ gitim-client
 | `gitim-runtime` | Agent 生命周期管理、polling、HTTP API | `agent`（provision）, `agent_loop`（消息检测 → AI 处理 → 回复）, `poller`, `preflight`, `http`（WebUI API）|
 | `gitim-agent-provider` | AI 提供商抽象层 | `claude`（Claude CLI）, `codex`（Codex CLI，部分 stub）, `mock` |
 
-### 前端
+### 产品
 
 | 目录 | 状态 | 说明 |
 |------|------|------|
-| `products/cell/frontend/` | **当前主线** | gitim Web 前端（gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
-| `products/site/frontend/` | 活跃 | 营销/文档站点（Vite + React + shadcn/ui） |
+| `products/gitim/frontend/` | **当前主线** | gitim Web 前端（gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
+| `products/gitim/backend/` | **当前主线** | gitim API 后端 — Cloudflare Worker + D1/KV |
 
 ### 遗留 / 不要修改
 

@@ -39,7 +39,7 @@ cd GitIM
 gitim Web 前端 —— 仅当你想自托管前端、不用 `gitim.io` 时:
 
 ```sh
-cd products/cell/frontend
+cd products/gitim/frontend
 npm install
 npm run dev          # 本地开发 server
 npm run build        # 打静态包

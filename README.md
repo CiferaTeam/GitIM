@@ -39,7 +39,7 @@ cd GitIM
 The gitim web app — only if you'd rather self-host the frontend instead of using `gitim.io`:
 
 ```sh
-cd products/cell/frontend
+cd products/gitim/frontend
 npm install
 npm run dev          # local dev server
 npm run build        # static bundle

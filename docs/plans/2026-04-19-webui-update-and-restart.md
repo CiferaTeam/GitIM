@@ -63,8 +63,8 @@
 | `install.sh` | 根目录 | install dir `~/.gitim/bin/` 是 source of truth(strict check 基准) |
 | `release.sh` + `CiferaTeam/GitIM` | 根目录 + GitHub | 已有发布流程,plan 无需动 |
 | `GET /health` 返 `version` | `crates/gitim-runtime/src/http.rs` 约 L168-175 | 前端比较 current vs latest 用 |
-| `use-version-check` hook | `products/cell/frontend/src/hooks/use-version-check.ts` | 当前只拉 gitim API 并丢弃结果,refactor 为完整比较 hook |
-| gitim API `/api/check-version` | `products/cell/frontend/src/lib/gitim-api.ts` | 返 `latest_version` 仍走现有契约 |
+| `use-version-check` hook | `products/gitim/frontend/src/hooks/use-version-check.ts` | 当前只拉 gitim API 并丢弃结果,refactor 为完整比较 hook |
+| gitim API `/api/check-version` | `products/gitim/frontend/src/lib/gitim-api.ts` | 返 `latest_version` 仍走现有契约 |
 | `daemonize()` / `run_shell()` | `crates/gitim-runtime/src/bin/runtime.rs` | fork-exec 模式参考;PID write 要从前者挪到后者 |
 | `recover_from_config` | `crates/gitim-runtime/src/http.rs` | 新 runtime 启动后自动 re-provision workspaces + daemons |
 | `kill_managed_daemons` | 同上 | 异步阶段调用,SIGTERM 现有的 daemon 关停逻辑复用 |
@@ -100,8 +100,8 @@
 - `crates/gitim-runtime/src/bin/runtime.rs` — (1) 把 PID file write 从 `daemonize()` 移到 `run_shell()` 开头;(2) `run_shell()` 启动时缓存 `current_exe().canonicalize()` 到 state;(3) 接受新的 arg `--restarted-from-update`(可选,仅用于日志标记)
 - `crates/gitim-client/src/daemon.rs` — `spawn_daemon` 先试 `current_exe().parent()/gitim-daemon`,不存在再退回 PATH 解析;加 unit tests
 - `webui-v2/src/lib/client.ts` — (1) 新增 `updateAndRestart()` API 调用;(2) 新增 `getHealth()` API 调用(已有则复用);(3) 在 `isUpdating` 期间静默 swallow fetch 错误(不弹网络错误 toast)
-- `products/cell/frontend/src/lib/gitim-api.ts` — 不改契约,只是现在有消费者了
-- `products/cell/frontend/src/hooks/use-version-check.ts` — 重构为合并 hook:同时读 gitim API latest + runtime `/health` current,返回 `{ current, latest, hasUpdate, isUpdating, error }`;升级流程的状态机也在这里驱动
+- `products/gitim/frontend/src/lib/gitim-api.ts` — 不改契约,只是现在有消费者了
+- `products/gitim/frontend/src/hooks/use-version-check.ts` — 重构为合并 hook:同时读 gitim API latest + runtime `/health` current,返回 `{ current, latest, hasUpdate, isUpdating, error }`;升级流程的状态机也在这里驱动
 - `webui-v2/src/components/layout/app-shell.tsx` — 在 header 右侧 help 图标**左侧**嵌入 `<UpdateIndicator />` 组件
 - `webui-v2/src/store/connection.ts`(或等价的 zustand store)— 新增 `isUpdating: boolean` + `isRestarting: boolean` + setters
 

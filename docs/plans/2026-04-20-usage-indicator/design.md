@@ -1,7 +1,7 @@
 # Usage Indicator — Design
 
 **Date:** 2026-04-20
-**Scope:** `products/cell/backend/`、`webui-v2/`
+**Scope:** `products/gitim/backend/`、`webui-v2/`
 **Status:** Design approved via brainstorming, awaiting spec review
 
 ## Goal
@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_visits_day ON visits(day);
 
 ### 写入路径改动
 
-文件：`products/cell/backend/src/version.ts` 的 `recordVisitor` 函数。
+文件：`products/gitim/backend/src/version.ts` 的 `recordVisitor` 函数。
 
 在现有 `visitors` upsert 之后追加一句：
 
@@ -70,7 +70,7 @@ await db
 
 ## 2. 公开端点 `GET /api/stats`
 
-### 新文件 `products/cell/backend/src/stats.ts`
+### 新文件 `products/gitim/backend/src/stats.ts`
 
 ```ts
 import { Hono } from "hono";
@@ -112,7 +112,7 @@ export { app as statsRoutes };
 
 ### 挂载
 
-`products/cell/backend/src/index.ts`：`app.route("/", statsRoutes)`。
+`products/gitim/backend/src/index.ts`：`app.route("/", statsRoutes)`。
 
 ### CORS
 
@@ -197,7 +197,7 @@ export { app as statsRoutes };
 
 | 路径 | 职责 |
 |------|------|
-| `products/cell/frontend/src/lib/gitim-api.ts` (extend) | 加 `fetchStats()` |
+| `products/gitim/frontend/src/lib/gitim-api.ts` (extend) | 加 `fetchStats()` |
 | `webui-v2/src/hooks/use-stats.ts` | mount 时拉一次，失败返回 null |
 | `webui-v2/src/components/ui/hover-card.tsx` | Radix HoverCard 封装（项目现无此组件） |
 | `webui-v2/src/components/usage-indicator.tsx` | 顶栏组件 |
