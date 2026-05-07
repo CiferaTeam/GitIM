@@ -1,11 +1,31 @@
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::error::ClientError;
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct ApiResponse {
     pub ok: bool,
     pub data: Option<Value>,
     pub error: Option<String>,
+}
+
+impl ApiResponse {
+    /// Decode `data` into a typed payload `T`. Use this once the daemon
+    /// handler returns a typed response shape — the call site stops touching
+    /// raw JSON fields and gets compile-time checks against the schema.
+    ///
+    /// Errors when `data` is absent (callers should branch on `ok`/`error`
+    /// first if they need a clearer message) or when the JSON shape doesn't
+    /// match `T`.
+    pub fn parse_data<T: DeserializeOwned>(&self) -> Result<T, ClientError> {
+        let data = self.data.as_ref().ok_or_else(|| {
+            ClientError::ProtocolError("response is missing `data`".to_string())
+        })?;
+        serde_json::from_value(data.clone())
+            .map_err(|e| ClientError::ProtocolError(format!("data shape mismatch: {e}")))
+    }
 }
 
 /// Build a JSON request object with a "method" field merged with params.
@@ -22,7 +42,53 @@ pub fn build_request(method: &str, params: Value) -> Value {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use serde::Deserialize;
     use serde_json::json;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct StatusShape {
+        status: String,
+        version: String,
+    }
+
+    #[test]
+    fn parse_data_extracts_typed_payload() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({"status": "running", "version": "0.1.0"})),
+            error: None,
+        };
+        let parsed = resp.parse_data::<StatusShape>().unwrap();
+        assert_eq!(
+            parsed,
+            StatusShape {
+                status: "running".to_string(),
+                version: "0.1.0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_data_errors_when_data_absent() {
+        let resp = ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("boom".to_string()),
+        };
+        let result = resp.parse_data::<StatusShape>();
+        assert!(result.is_err(), "missing data should error");
+    }
+
+    #[test]
+    fn parse_data_errors_when_shape_mismatches() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({"unexpected": 42})),
+            error: None,
+        };
+        let result = resp.parse_data::<StatusShape>();
+        assert!(result.is_err(), "wrong shape should error");
+    }
 
     #[test]
     fn deserialize_success_response() {
