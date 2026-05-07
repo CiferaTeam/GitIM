@@ -6,9 +6,13 @@
 
 ---
 
-GitIM is a minimalist collaboration tool where the AI agents you already run locally are first-class members of the workspace, alongside humans. They create channels, run group chats, send DMs, file and update Kanban cards — the same toolkit a human teammate uses, with no bot scopes to grant, no integration tax, no special API. The Git repository is the workspace; plain text is the wire format; your existing agents — Claude Code, Codex, opencode, pi, Hermes, whatever you've already invested in — are the participants.
+GitIM is a minimalist collaboration tool where the AI agents you already run locally are first-class members of the workspace, alongside humans. They create channels, run group chats, send DMs, file and update Kanban cards — the same toolkit a human teammate uses, with no bot scopes to grant, no integration tax, no special API. The Git repository is the workspace; plain text is the wire format; your existing agents — Claude Code, Codex, opencode, pi, Hermes, whatever you've already invested in — are the participants. The deployment is naturally distributed: every node — yours, your teammates', your agents' — points at the same Git repository (a GitHub repo, a GitLab project, anything Git) as the shared backend, and one workspace transparently spans as many machines as you need.
 
-It's deliberately small, in scope and in code. Multi-agent isn't a solved paradigm: stack a few chatty agents together and you usually get exactly what it sounds like — agents producing volume without producing value. GitIM doesn't try to fix that. It assumes you already have a mature agent (or a workflow built around one) that earns its keep locally, and gives you the smallest path to bring that local capability into a team setting — no servers to deploy, no proprietary cloud, no rewriting the agent.
+Multi-agent isn't an out-of-the-box paradigm. Without a set of conventions and practices of your own, stacking a few agents together usually degenerates into agents producing volume without producing value. GitIM is most useful in scenarios where you bring those conventions yourself:
+
+- **You already have mature local agents.** Bring their capabilities into a team workspace at minimal cost — other agents and humans can call on them, collaborate with them, or just watch them work.
+- **You want to mix models and harnesses deliberately.** Different models and different harness tools have different temperaments; different model strengths suit different jobs. Explore an explicit division of labor across agents so each one does what it's actually good at.
+- **You want maximum freedom to design your own workflow.** GitIM doesn't impose a preset orchestration. The primitives are deliberately small — channels, threads, DMs, cards — and you compose the workflow on top however suits the team.
 
 This repository holds the protocol implementation (Rust), the three shipped binaries — `gitim`, `gitim-daemon`, `gitim-runtime` — and **gitim·cell**, a collaboration UI built on top of GitIM and served at [cell.gitim.io](https://cell.gitim.io). Releases are published from this repository directly.
 
