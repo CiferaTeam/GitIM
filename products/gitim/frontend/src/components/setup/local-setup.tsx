@@ -49,14 +49,14 @@ export function LocalSetup() {
     token?: string,
   ): Promise<boolean> {
     const sessionToken = token ?? loadSessionToken(record.id) ?? null;
-    if (!sessionToken) {
-      setView({ kind: "reconnect", record });
-      return false;
-    }
 
     setLoading(true);
     setError(null);
-    setCloneProgress("Opening browser workspace...");
+    setCloneProgress(
+      sessionToken
+        ? "Opening browser workspace..."
+        : "Opening cached browser workspace...",
+    );
 
     try {
       const activation = await activateBrowserWorkspace(record.slug, {
@@ -68,6 +68,9 @@ export function LocalSetup() {
       if (activation.error_code === "activation_superseded") return false;
       if (!activation.ok) {
         setError(activation.error ?? "Failed to activate browser workspace");
+        if (!sessionToken && activation.error_code === "reconnect_required") {
+          setView({ kind: "reconnect", record });
+        }
         return false;
       }
 
@@ -75,7 +78,12 @@ export function LocalSetup() {
       await fetchWorkspaces();
       setActive(record.slug);
       setLocalReady(true);
-      setStatus("ready");
+      if (activation.data?.needs_token === true) {
+        setStatus("disconnected");
+        setError("Reconnect token to sync this browser workspace.");
+      } else {
+        setStatus("ready");
+      }
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -239,15 +247,15 @@ export function LocalSetup() {
                 return (
                   <div
                     key={record.id}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background p-3"
+                    className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3 sm:flex-row sm:items-center sm:justify-between"
                   >
-                    <div className="min-w-0 space-y-1">
+                    <div className="w-full min-w-0 space-y-1">
                       <p className="truncate text-sm font-medium text-foreground">
                         {record.workspace_name}
                       </p>
                       <p className="truncate text-xs text-text-muted">{record.remoteUrl}</p>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                       <Button
                         type="button"
                         size="icon-sm"
@@ -275,16 +283,21 @@ export function LocalSetup() {
                         size="sm"
                         variant={hasToken ? "default" : "outline"}
                         disabled={rowBusy}
-                        onClick={() => {
-                          if (hasToken) {
-                            void openWorkspace(record);
-                          } else {
-                            setView({ kind: "reconnect", record });
-                          }
-                        }}
+                        onClick={() => void openWorkspace(record)}
                       >
-                        {hasToken ? "Open" : "Reconnect"}
+                        {hasToken ? "Open" : "Open cached"}
                       </Button>
+                      {!hasToken && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="default"
+                          disabled={rowBusy}
+                          onClick={() => setView({ kind: "reconnect", record })}
+                        >
+                          Reconnect
+                        </Button>
+                      )}
                     </div>
                   </div>
                 );

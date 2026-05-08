@@ -358,7 +358,7 @@ function WorkspaceRow({
               onReconnect();
             }}
             aria-label={`Reconnect workspace ${ws.workspace_name}`}
-            className="p-1.5 rounded-sm text-text-muted hover:text-foreground opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+            className="p-1.5 rounded-sm text-text-muted hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
           >
             <RefreshCcw className="size-3.5" />
           </button>
@@ -370,7 +370,7 @@ function WorkspaceRow({
               onResetCache();
             }}
             aria-label={`Reset cache for ${ws.workspace_name}`}
-            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
           >
             <RotateCcw className="size-3.5" />
           </button>
@@ -386,7 +386,7 @@ function WorkspaceRow({
               e.stopPropagation();
             }}
             aria-label={`Delete workspace ${ws.workspace_name}`}
-            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
           >
             <Trash2 className="size-3.5" />
           </button>

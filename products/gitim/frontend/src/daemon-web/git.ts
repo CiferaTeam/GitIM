@@ -169,6 +169,11 @@ export async function diffTrees(
     trees: [git.TREE({ ref: commitHash1 }), git.TREE({ ref: commitHash2 })],
     map: async (filepath, [entryA, entryB]) => {
       if (filepath === ".") return undefined;
+      const [typeA, typeB] = await Promise.all([
+        entryA?.type(),
+        entryB?.type(),
+      ]);
+      if (typeA === "tree" || typeB === "tree") return undefined;
 
       const [oidA, oidB] = await Promise.all([
         entryA?.oid(),
@@ -183,6 +188,27 @@ export async function diffTrees(
   });
 
   return changed;
+}
+
+export async function readFileAtCommit(
+  dir: string,
+  ref: string,
+  filepath: string,
+): Promise<string | null> {
+  try {
+    const { blob } = await git.readBlob({
+      fs: getFs(),
+      dir,
+      oid: ref,
+      filepath,
+    });
+    return new TextDecoder().decode(blob);
+  } catch (e) {
+    const code = (e as { code?: string; name?: string })?.code ??
+      (e as { code?: string; name?: string })?.name;
+    if (code === "NotFoundError") return null;
+    throw e;
+  }
 }
 
 /** Hard reset local HEAD and working tree to match a remote ref's commit. */

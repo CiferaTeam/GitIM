@@ -55,6 +55,8 @@ export function InputArea({
   const [mentionStart, setMentionStart] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const activeScopeRef = useRef({ workspaceKey, scopeKey });
+  activeScopeRef.current = { workspaceKey, scopeKey };
   const isMobile = useIsMobile();
 
   // Restore draft when scope changes
@@ -107,6 +109,13 @@ export function InputArea({
 
     const savedText = text;
     const savedReplyTo = replyTo;
+    const requestWorkspaceKey = activeWorkspaceKey;
+    const requestScopeKey = activeScopeKey;
+
+    function isCurrentSendScope() {
+      return activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
+        activeScopeRef.current.scopeKey === requestScopeKey;
+    }
 
     setText("");
     onReplyToChange(null);
@@ -117,19 +126,25 @@ export function InputArea({
     try {
       const res = await onSend(trimmed, savedReplyTo?.line_number ?? 0);
       if (!res.ok) {
-        setText(savedText);
-        onReplyToChange(savedReplyTo);
-        setError(res.error ?? "Send failed");
+        if (isCurrentSendScope()) {
+          setText(savedText);
+          onReplyToChange(savedReplyTo);
+          setError(res.error ?? "Send failed");
+        }
       } else {
         localStorage.removeItem(draftKey(activeWorkspaceKey, activeScopeKey));
       }
     } catch (err) {
-      setText(savedText);
-      onReplyToChange(savedReplyTo);
-      setError(err instanceof Error ? err.message : "Send failed");
+      if (isCurrentSendScope()) {
+        setText(savedText);
+        onReplyToChange(savedReplyTo);
+        setError(err instanceof Error ? err.message : "Send failed");
+      }
     } finally {
       setSending(false);
-      textareaRef.current?.focus();
+      if (isCurrentSendScope()) {
+        textareaRef.current?.focus();
+      }
     }
   }
 

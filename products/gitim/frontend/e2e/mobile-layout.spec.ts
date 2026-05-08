@@ -264,6 +264,12 @@ async function stubBrowserModeWorker(
       value: pollCalls,
     });
 
+    function workspaceMessage(workspaceId: string | undefined): string {
+      if (workspaceId === "ws_phone") return "hello phone cards";
+      if (workspaceId === "ws_tablet") return "hello tablet cards";
+      return "hello browser cards";
+    }
+
     function handleMethod(method: string, args: unknown[], request: RpcRequest): RpcResult {
       switch (method) {
         case "preflight":
@@ -315,7 +321,7 @@ async function stubBrowserModeWorker(
                   point_to: 0,
                   author: "flame4",
                   timestamp: "20260317T120000Z",
-                  body: "hello browser cards",
+                  body: workspaceMessage(request.workspaceId),
                 },
               ],
             },
@@ -636,13 +642,13 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
 
   await page.goto("/");
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello phone cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
 
   await page.getByTestId("workspace-switcher-trigger").click();
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
   await expect
     .poll(() =>
@@ -666,7 +672,7 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
 
   await page.reload();
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
   await expect
     .poll(() =>
@@ -713,7 +719,7 @@ test("browser mode does not poll the previous backend after activation fails", a
 
   await page.goto("/");
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello phone cards")).toBeVisible();
   await page.getByTestId("workspace-switcher-trigger").click();
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
@@ -768,11 +774,11 @@ test("browser mode opens cached data without polling when activation needs a tok
 
   await page.goto("/");
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello phone cards")).toBeVisible();
   await page.getByTestId("workspace-switcher-trigger").click();
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
-  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
   await expect(page.locator('[title="Disconnected"]')).toBeVisible();
   const pollCountAfterCachedActivation = await page.evaluate(() =>
@@ -814,6 +820,7 @@ test("browser mode asks to reconnect when registered workspace has no session to
 
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByText("Phone", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open cached" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reset cache for Phone" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Forget Phone" })).toBeVisible();
@@ -821,6 +828,49 @@ test("browser mode asks to reconnect when registered workspace has no session to
 
   await page.getByRole("button", { name: "Reconnect" }).click();
   await expect(page.getByLabel("Personal access token")).toBeVisible();
+});
+
+test("browser mode setup opens cached workspace without a session token", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone],
+    activeSlug: phone.slug,
+  });
+  await stubBrowserModeWorker(page);
+
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Open cached" }).click();
+
+  await expect(page.getByText("hello phone cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  const pollCountAfterCachedOpen = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterCachedOpen);
 });
 
 test("browser mode setup can forget cached workspace before activation", async ({ page }) => {

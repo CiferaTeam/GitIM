@@ -41,6 +41,20 @@ function syncFailure(data: Record<string, unknown> | undefined): string | null {
   return status === "commit_only" || error ? error ?? "Sync failed" : null;
 }
 
+function currentWorkspaceKey(): string | null {
+  const mode = useConnectionStore.getState().mode;
+  const { activeSlug, workspaces } = useWorkspaceStore.getState();
+  const activeWorkspace = activeSlug
+    ? workspaces.find((workspace) => workspace.slug === activeSlug)
+    : undefined;
+  return activeWorkspace ? workspaceIdentity(mode, activeWorkspace) : null;
+}
+
+function isCurrentWorkspaceRequest(slug: string, key: string | null): boolean {
+  return useWorkspaceStore.getState().activeSlug === slug &&
+    currentWorkspaceKey() === key;
+}
+
 export function ChatLayout() {
   const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -117,17 +131,24 @@ export function ChatLayout() {
   const handleChannelSelect = useCallback(
     async (name: string) => {
       if (!activeSlug) return;
+      const requestSlug = activeSlug;
+      const requestWorkspaceKey = workspaceKey;
       selectChannel(name);
       clearUnread(name);
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(activeSlug, apiChannel, 50);
-      if (res.ok && res.data && useChatStore.getState().currentChannel === name) {
+      const res = await client.read(requestSlug, apiChannel, 50);
+      if (
+        res.ok &&
+        res.data &&
+        isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) &&
+        useChatStore.getState().currentChannel === name
+      ) {
         setMessages(res.data.entries as Message[]);
       }
     },
-    [activeSlug, selectChannel, clearUnread, setMessages, setThreadRoot]
+    [activeSlug, workspaceKey, selectChannel, clearUnread, setMessages, setThreadRoot]
   );
 
   useEffect(() => {
@@ -140,18 +161,28 @@ export function ChatLayout() {
 
   const handleJoin = useCallback(async () => {
     if (!currentChannel || !activeSlug) return;
-    const res = await client.joinChannel(activeSlug, currentChannel);
+    const requestSlug = activeSlug;
+    const requestWorkspaceKey = workspaceKey;
+    const requestChannel = currentChannel;
+    const res = await client.joinChannel(requestSlug, requestChannel);
+    if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) return;
     if (!res.ok) return;
-    const chRes = await client.channels(activeSlug);
+    const chRes = await client.channels(requestSlug);
+    if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) return;
     if (chRes.ok && chRes.data) {
       setChannels(chRes.data.channels as Channel[]);
     }
-    const apiChannel = toApiChannel(currentChannel);
-    const readRes = await client.read(activeSlug, apiChannel, 50);
-    if (readRes.ok && readRes.data) {
+    const apiChannel = toApiChannel(requestChannel);
+    const readRes = await client.read(requestSlug, apiChannel, 50);
+    if (
+      readRes.ok &&
+      readRes.data &&
+      isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) &&
+      useChatStore.getState().currentChannel === requestChannel
+    ) {
       setMessages(readRes.data.entries as Message[]);
     }
-  }, [activeSlug, currentChannel, setChannels, setMessages]);
+  }, [activeSlug, workspaceKey, currentChannel, setChannels, setMessages]);
 
   const handleStartDm = useCallback(
     async (targetUser: string) => {
@@ -171,6 +202,9 @@ export function ChatLayout() {
     async (body: string, pointTo: number = 0) => {
       if (!currentChannel) return { ok: false, error: "No channel selected" };
       if (!activeSlug) return { ok: false, error: "No workspace selected" };
+      const requestSlug = activeSlug;
+      const requestWorkspaceKey = workspaceKey;
+      const requestChannel = currentChannel;
       const pendingId = `pending-${Date.now()}`;
       const pending: Message = {
         line_number: -1,
@@ -186,14 +220,17 @@ export function ChatLayout() {
       };
       addPendingMessage(pending);
 
-      const apiChannel = toApiChannel(currentChannel);
+      const apiChannel = toApiChannel(requestChannel);
       const res = await client.send(
-        activeSlug,
+        requestSlug,
         apiChannel,
         body,
         currentUser,
         pointTo
       );
+      if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) {
+        return res;
+      }
       if (res.ok && res.data) {
         const lineNumber = res.data.line_number as number;
         const syncError = syncFailure(res.data);
@@ -208,7 +245,7 @@ export function ChatLayout() {
       }
       return res;
     },
-    [activeSlug, currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
+    [activeSlug, workspaceKey, currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
   );
 
   const handleReply = useCallback(
@@ -221,16 +258,24 @@ export function ChatLayout() {
   const handleShowThread = useCallback(
     async (msg: Message) => {
       if (!currentChannel || !activeSlug) return;
-      const apiChannel = toApiChannel(currentChannel);
-      const res = await client.thread(activeSlug, apiChannel, msg.line_number);
-      if (res.ok && res.data) {
+      const requestSlug = activeSlug;
+      const requestWorkspaceKey = workspaceKey;
+      const requestChannel = currentChannel;
+      const apiChannel = toApiChannel(requestChannel);
+      const res = await client.thread(requestSlug, apiChannel, msg.line_number);
+      if (
+        res.ok &&
+        res.data &&
+        isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) &&
+        useChatStore.getState().currentChannel === requestChannel
+      ) {
         const entries = res.data.entries as Message[];
         const root = entries[0] ?? msg;
         setThreadRoot(root);
         setThreadMessages(entries);
       }
     },
-    [activeSlug, currentChannel, setThreadRoot, setThreadMessages]
+    [activeSlug, workspaceKey, currentChannel, setThreadRoot, setThreadMessages]
   );
 
   const handleMentionClick = useCallback(
@@ -278,20 +323,33 @@ export function ChatLayout() {
   const handleNavBack = useCallback(async () => {
     const entry = useChatStore.getState().popNav();
     if (!entry || !activeSlug) return;
+    const requestSlug = activeSlug;
+    const requestWorkspaceKey = workspaceKey;
     selectChannel(entry.channel);
     clearUnread(entry.channel);
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(activeSlug, apiChannel, 50);
-    if (res.ok && res.data && useChatStore.getState().currentChannel === entry.channel) {
+    const res = await client.read(requestSlug, apiChannel, 50);
+    if (
+      res.ok &&
+      res.data &&
+      isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) &&
+      useChatStore.getState().currentChannel === entry.channel
+    ) {
       setMessages(res.data.entries as Message[]);
     }
     requestAnimationFrame(() => {
+      if (
+        !isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) ||
+        useChatStore.getState().currentChannel !== entry.channel
+      ) {
+        return;
+      }
       const el = document.querySelector("[data-message-scroll]");
       if (el) el.scrollTop = entry.scrollTop;
     });
-  }, [activeSlug, selectChannel, clearUnread, setMessages, setThreadRoot]);
+  }, [activeSlug, workspaceKey, selectChannel, clearUnread, setMessages, setThreadRoot]);
 
   const handleCloseUserCard = useCallback(() => {
     setUserCardHandler(null);

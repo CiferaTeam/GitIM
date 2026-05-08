@@ -356,7 +356,6 @@ export async function poll(since?: string): Promise<ApiResponse> {
       await refreshUsersCache();
     }
 
-    setState({ headCommit: currentHead });
     return ok({ commit_id: currentHead, changes });
   } catch (e) {
     if (isAuthFailure(e)) {

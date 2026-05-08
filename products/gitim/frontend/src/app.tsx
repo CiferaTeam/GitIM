@@ -203,9 +203,14 @@ export default function App() {
 
   const runPoll = useCallback(async (signal?: AbortSignal) => {
     const slug = activeSlugRef.current;
-    if (!slug) return;
+    const requestWorkspaceKey = workspaceRef.current;
+    if (!slug || !requestWorkspaceKey) return;
+    const isCurrentPollTarget = () =>
+      slug === activeSlugRef.current &&
+      requestWorkspaceKey === workspaceRef.current;
     try {
       const pollRes = await client.poll(slug, sinceRef.current, signal);
+      if (!isCurrentPollTarget()) return;
 
       if (!pollRes.ok || !pollRes.data) {
         // Stale cursor recovery: discard and re-init
@@ -218,9 +223,7 @@ export default function App() {
       }
 
       sinceRef.current = pollRes.data.commit_id as string;
-      if (workspaceRef.current) {
-        saveCursor(workspaceRef.current, sinceRef.current);
-      }
+      saveCursor(requestWorkspaceKey, sinceRef.current);
       setHeadCommit(sinceRef.current);
 
       if (mode === "local" && pollRes.data.needs_token === true) {
@@ -297,6 +300,7 @@ export default function App() {
 
       if (needChannelRefresh) {
         const chRes = await client.channels(slug);
+        if (!isCurrentPollTarget()) return;
         if (chRes.ok && chRes.data) {
           setChannels(chRes.data.channels as Channel[]);
         }
@@ -304,6 +308,7 @@ export default function App() {
 
       if (needArchivedRefresh) {
         const arRes = await client.listArchivedChannels(slug);
+        if (!isCurrentPollTarget()) return;
         if (arRes.ok && arRes.data) {
           setArchivedChannels(arRes.data.channels as Channel[]);
         }
@@ -311,6 +316,7 @@ export default function App() {
 
       if (needCardRefresh) {
         const cardRes = await client.listCards(slug);
+        if (!isCurrentPollTarget()) return;
         if (cardRes.ok && cardRes.data) {
           // Merge, not replace — preserves in-flight optimistic patches so
           // the 3s poll cadence can't flicker the UI back before PATCH resolves.
@@ -320,6 +326,7 @@ export default function App() {
 
       if (mode === "remote") {
         const agentsRes = await client.listAgents(slug);
+        if (!isCurrentPollTarget()) return;
         if (agentsRes.ok && agentsRes.data) {
           setAgents(agentsRes.data.agents as Agent[]);
         }
@@ -332,6 +339,7 @@ export default function App() {
       // Daemon returns the list sorted → equal-length + index-wise equal
       // is a sufficient change check.
       const usersRes = await client.users(slug);
+      if (!isCurrentPollTarget()) return;
       if (usersRes.ok && usersRes.data) {
         const next = usersRes.data.users as string[];
         const current = useChatStore.getState().users;
@@ -415,8 +423,8 @@ export default function App() {
         if (cancelled) return false;
         if (activation.error_code === "activation_superseded") return false;
         if (!activation.ok) {
-          setConnectionError(activation.error ?? "Failed to activate browser workspace");
           setConnectionStatus("disconnected");
+          setConnectionError(activation.error ?? "Failed to activate browser workspace");
           setConnected(false);
           return false;
         }

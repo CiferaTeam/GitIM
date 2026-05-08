@@ -154,6 +154,7 @@ vi.mock("./git", () => ({
   getCurrentBranch: vi.fn(async () => "main"),
   getOriginUrl: vi.fn(async () => undefined),
   push: vi.fn(async () => undefined),
+  readFileAtCommit: vi.fn(async () => null),
   resetToRemote: vi.fn(async () => undefined),
   resolveHead: vi.fn(async () => "head"),
   resolveRemoteHead: vi.fn(async () => "head"),
@@ -882,6 +883,20 @@ describe("daemon-web handlers", () => {
       "refs/remotes/origin/trunk",
     );
     expect(git.checkout).not.toHaveBeenCalled();
+  });
+
+  it("does not mark local-ahead commits as synced during poll", async () => {
+    const git = vi.mocked(await import("./git"));
+    setState({ defaultBranch: "main", headCommit: "remote-base" });
+    git.resolveRemoteHead.mockResolvedValueOnce("remote-base");
+    git.resolveHead
+      .mockResolvedValueOnce("local-unsynced-head")
+      .mockResolvedValueOnce("local-unsynced-head");
+
+    const res = await poll("remote-base");
+
+    expect(res.ok).toBe(true);
+    expect(getState().headCommit).toBe("remote-base");
   });
 
   it("archives active cards into archive/channels and removes them from active lists", async () => {
