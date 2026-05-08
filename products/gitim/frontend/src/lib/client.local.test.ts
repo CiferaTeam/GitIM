@@ -370,11 +370,40 @@ describe("client local browser workspaces", () => {
 
     const res = await client.resetBrowserWorkspaceCache(record.slug);
 
-    expect(res).toEqual({ ok: true, data: {} });
+    expect(res).toEqual({ ok: true, data: { activeAffected: true } });
     expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
     expect(wipedFsNames).toEqual([record.storage.fsName]);
     expect(loadBrowserWorkspaces()).toEqual([expect.objectContaining({ id: record.id })]);
     expect(loadSessionToken(record.id)).toBe("github_pat_secret");
+  });
+
+  it("resets an inactive browser workspace cache without shutting down the active backend", async () => {
+    const { createBrowserWorkspace, loadBrowserWorkspaces } =
+      await import("./browser-workspaces");
+    const client = await import("./client");
+    const active = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/active",
+      workspaceName: "Active",
+    });
+    const inactive = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/inactive",
+      workspaceName: "Inactive",
+    });
+    await client.activateBrowserWorkspace(active.slug);
+
+    const res = await client.resetBrowserWorkspaceCache(inactive.slug);
+
+    expect(res).toEqual({ ok: true, data: { activeAffected: false } });
+    expect(localBackends[0].terminate).not.toHaveBeenCalled();
+    expect(wipedFsNames).toEqual([inactive.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toEqual([
+      expect.objectContaining({ id: active.id }),
+      expect.objectContaining({ id: inactive.id }),
+    ]);
+    await expect(client.me(active.slug)).resolves.toEqual({
+      ok: true,
+      data: { handler: "local" },
+    });
   });
 
   it("forgets a browser workspace and cache after shutting down the active backend", async () => {
@@ -390,11 +419,39 @@ describe("client local browser workspaces", () => {
 
     const res = await client.forgetBrowserWorkspaceAndCache(record.slug);
 
-    expect(res).toEqual({ ok: true, data: {} });
+    expect(res).toEqual({ ok: true, data: { activeAffected: true } });
     expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
     expect(wipedFsNames).toEqual([record.storage.fsName]);
     expect(loadBrowserWorkspaces()).toEqual([]);
     expect(loadSessionToken(record.id)).toBeUndefined();
+  });
+
+  it("forgets an inactive browser workspace and cache without shutting down the active backend", async () => {
+    const { createBrowserWorkspace, loadBrowserWorkspaces, loadSessionToken, saveSessionToken } =
+      await import("./browser-workspaces");
+    const client = await import("./client");
+    const active = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/active",
+      workspaceName: "Active",
+    });
+    const inactive = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/inactive",
+      workspaceName: "Inactive",
+    });
+    saveSessionToken(inactive.id, "github_pat_inactive");
+    await client.activateBrowserWorkspace(active.slug);
+
+    const res = await client.forgetBrowserWorkspaceAndCache(inactive.slug);
+
+    expect(res).toEqual({ ok: true, data: { activeAffected: false } });
+    expect(localBackends[0].terminate).not.toHaveBeenCalled();
+    expect(wipedFsNames).toEqual([inactive.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toEqual([expect.objectContaining({ id: active.id })]);
+    expect(loadSessionToken(inactive.id)).toBeUndefined();
+    await expect(client.me(active.slug)).resolves.toEqual({
+      ok: true,
+      data: { handler: "local" },
+    });
   });
 
   it("starts over by wiping all browser caches before clearing registry and tokens", async () => {
@@ -423,7 +480,7 @@ describe("client local browser workspaces", () => {
 
     const res = await client.startOverBrowserWorkspaces();
 
-    expect(res).toEqual({ ok: true, data: {} });
+    expect(res).toEqual({ ok: true, data: { activeAffected: true } });
     expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
     expect(wipedFsNames).toEqual([legacy.storage.fsName, record.storage.fsName]);
     expect(loadBrowserWorkspaces()).toEqual([]);

@@ -38,8 +38,13 @@ import { useConnectionStore } from "@/hooks/use-connection-store";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
+let activeBrowserWorkspaceId: string | null = null;
 let localGeneration = 0;
 let browserActivationAttempt = 0;
+
+interface BrowserCacheActionResult extends Record<string, unknown> {
+  activeAffected: boolean;
+}
 
 export function setBackend(backend: Backend): void {
   activeBackend = backend;
@@ -53,7 +58,7 @@ export function clearBrowserToken(workspaceId: string): void {
   clearSessionToken(workspaceId);
 }
 
-export function resetAllBrowserWorkspaces(): Promise<ApiResponse> {
+export function resetAllBrowserWorkspaces(): Promise<ApiResponse<BrowserCacheActionResult>> {
   return startOverBrowserWorkspaces();
 }
 
@@ -67,6 +72,7 @@ export function shutdownBrowserWorkspace(): void {
     activeBackend = new HttpBackend(() => baseUrl());
   }
   activeLocalBackend = null;
+  activeBrowserWorkspaceId = null;
 }
 
 export async function activateBrowserWorkspace(
@@ -128,6 +134,7 @@ export async function activateBrowserWorkspace(
   activeLocalBackend?.terminate();
   localGeneration = generation;
   activeLocalBackend = backend;
+  activeBrowserWorkspaceId = record.id;
   setBackend(backend);
 
   const data = result.data as Record<string, unknown> | undefined;
@@ -356,34 +363,45 @@ export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
   }
 }
 
-export async function resetBrowserWorkspaceCache(slug: string): Promise<ApiResponse> {
+export async function resetBrowserWorkspaceCache(
+  slug: string,
+): Promise<ApiResponse<BrowserCacheActionResult>> {
   const record = findBrowserWorkspace(slug);
   if (!record) {
     return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
   }
 
-  shutdownBrowserWorkspace();
+  const activeAffected = record.id === activeBrowserWorkspaceId;
+  if (activeAffected) {
+    shutdownBrowserWorkspace();
+  }
   await wipeBrowserWorkspaceCache(record.id);
-  return { ok: true, data: {} };
+  return { ok: true, data: { activeAffected } };
 }
 
-export async function forgetBrowserWorkspaceAndCache(slug: string): Promise<ApiResponse> {
+export async function forgetBrowserWorkspaceAndCache(
+  slug: string,
+): Promise<ApiResponse<BrowserCacheActionResult>> {
   const record = findBrowserWorkspace(slug);
   if (!record) {
     return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
   }
 
-  shutdownBrowserWorkspace();
+  const activeAffected = record.id === activeBrowserWorkspaceId;
+  if (activeAffected) {
+    shutdownBrowserWorkspace();
+  }
   await wipeBrowserWorkspaceCache(record.id);
   forgetBrowserWorkspace(record.id);
-  return { ok: true, data: {} };
+  return { ok: true, data: { activeAffected } };
 }
 
-export async function startOverBrowserWorkspaces(): Promise<ApiResponse> {
+export async function startOverBrowserWorkspaces(): Promise<ApiResponse<BrowserCacheActionResult>> {
+  const activeAffected = activeBrowserWorkspaceId !== null;
   shutdownBrowserWorkspace();
   await wipeAllBrowserWorkspaceCaches();
   clearAllBrowserWorkspaces();
-  return { ok: true, data: {} };
+  return { ok: true, data: { activeAffected } };
 }
 
 // --- IM methods: real runtime HTTP (all scoped to a workspace) ---

@@ -57,6 +57,7 @@ export function WorkspaceSwitcher() {
   const headCommit = useConnectionStore((s) => s.headCommit);
   const setLocalReady = useConnectionStore((s) => s.setLocalReady);
   const setStatus = useConnectionStore((s) => s.setStatus);
+  const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [reconnectRecord, setReconnectRecord] = useState<BrowserWorkspaceRecord | null>(null);
@@ -90,6 +91,12 @@ export function WorkspaceSwitcher() {
     return true;
   }
 
+  function demoteLocalBrowserConnection() {
+    setLocalReady(false);
+    setStatus("disconnected");
+    setHeadCommit(null);
+  }
+
   async function handleResetCache(ws: WorkspaceSummary) {
     const confirmed = window.confirm(
       `Reset cache for ${ws.workspace_name}? This clears this workspace's IndexedDB git cache and keeps the browser workspace entry and session token.`,
@@ -101,6 +108,9 @@ export function WorkspaceSwitcher() {
       toast.error(res.error ?? "Failed to reset browser workspace cache");
       return;
     }
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
+    }
     await fetchAll();
     toast.success(`Reset cache for ${ws.workspace_name}`);
   }
@@ -111,8 +121,8 @@ export function WorkspaceSwitcher() {
       toast.error(res.error ?? "Failed to forget browser workspace");
       return;
     }
-    if (ws.slug === activeSlug) {
-      setLocalReady(false);
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
     }
     await fetchAll();
     toast.success(`Forgot workspace ${ws.workspace_name}`);
@@ -129,7 +139,9 @@ export function WorkspaceSwitcher() {
       toast.error(res.error ?? "Failed to start over browser workspaces");
       return;
     }
-    setLocalReady(false);
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
+    }
     await fetchAll();
     toast.success("Cleared browser workspaces");
     setMenuOpen(false);
