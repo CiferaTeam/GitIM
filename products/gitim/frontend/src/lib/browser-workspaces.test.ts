@@ -1,4 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const wipedFsNames = vi.hoisted((): string[] => []);
+
+vi.mock("@isomorphic-git/lightning-fs", () => ({
+  default: class MockLightningFS {
+    constructor(name: string, options?: { wipe?: boolean }) {
+      if (options?.wipe) {
+        wipedFsNames.push(name);
+      }
+    }
+  },
+}));
+
 import {
   clearAllBrowserWorkspaces,
   createBrowserWorkspace,
@@ -9,12 +22,15 @@ import {
   loadSessionToken,
   migrateLegacyBrowserWorkspace,
   saveSessionToken,
+  wipeAllBrowserWorkspaceCaches,
+  wipeBrowserWorkspaceCache,
 } from "./browser-workspaces";
 
 describe("browser workspaces", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    wipedFsNames.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
   });
@@ -97,6 +113,52 @@ describe("browser workspaces", () => {
     expect(loadSessionToken(ws.id)).toBeUndefined();
   });
 
+  it("gets a browser workspace by id or slug", () => {
+    const ws = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/room",
+      workspaceName: "Phone",
+    });
+
+    expect(getBrowserWorkspace(ws.id)).toEqual(ws);
+    expect(getBrowserWorkspace(ws.slug)).toEqual(ws);
+  });
+
+  it("wipes one workspace cache without clearing registry or token state", async () => {
+    const ws = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/room",
+      workspaceName: "Phone",
+    });
+    const other = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/other",
+      workspaceName: "Other",
+    });
+    saveSessionToken(ws.id, "github_pat_secret");
+
+    await wipeBrowserWorkspaceCache(ws.slug);
+
+    expect(wipedFsNames).toEqual([ws.storage.fsName]);
+    expect(loadBrowserWorkspaces().map((workspace) => workspace.id)).toEqual([
+      ws.id,
+      other.id,
+    ]);
+    expect(loadSessionToken(ws.id)).toBe("github_pat_secret");
+  });
+
+  it("wipes all registered workspace caches and the legacy cache once", async () => {
+    const legacy = migrateLegacyBrowserWorkspaceFromConfig();
+    const ws = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/room",
+      workspaceName: "Phone",
+    });
+    saveSessionToken(ws.id, "github_pat_secret");
+
+    await wipeAllBrowserWorkspaceCaches();
+
+    expect(wipedFsNames).toEqual([legacy.storage.fsName, ws.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toHaveLength(2);
+    expect(loadSessionToken(ws.id)).toBe("github_pat_secret");
+  });
+
   it("clears all registry and token state", () => {
     const ws = createBrowserWorkspace({
       remoteUrl: "https://github.com/acme/room",
@@ -112,3 +174,16 @@ describe("browser workspaces", () => {
     expect(loadSessionToken(ws.id)).toBeUndefined();
   });
 });
+
+function migrateLegacyBrowserWorkspaceFromConfig() {
+  localStorage.setItem(
+    "gitim-local-config",
+    JSON.stringify({
+      remoteUrl: "https://github.com/acme/legacy",
+      corsProxy: "https://cors.isomorphic-git.org",
+    }),
+  );
+  const legacy = migrateLegacyBrowserWorkspace();
+  if (!legacy) throw new Error("expected legacy browser workspace");
+  return legacy;
+}

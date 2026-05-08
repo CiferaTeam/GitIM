@@ -5,6 +5,7 @@ const localBackends: MockLocalBackend[] = [];
 const httpBackends: MockHttpBackend[] = [];
 let nextLocalInitResult: ApiResponse | null = null;
 const nextLocalInitResponses: Array<ApiResponse | Promise<ApiResponse>> = [];
+const wipedFsNames = vi.hoisted((): string[] => []);
 
 class MockHttpBackend {
   baseUrl: () => string;
@@ -79,6 +80,16 @@ vi.mock("./backend", () => ({
   LocalBackend: MockLocalBackend,
 }));
 
+vi.mock("@isomorphic-git/lightning-fs", () => ({
+  default: class MockLightningFS {
+    constructor(name: string, options?: { wipe?: boolean }) {
+      if (options?.wipe) {
+        wipedFsNames.push(name);
+      }
+    }
+  },
+}));
+
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
   return {
@@ -127,6 +138,7 @@ describe("client local browser workspaces", () => {
     resetStorage();
     localBackends.length = 0;
     httpBackends.length = 0;
+    wipedFsNames.length = 0;
     nextLocalInitResult = null;
     nextLocalInitResponses.length = 0;
     vi.resetModules();
@@ -343,5 +355,78 @@ describe("client local browser workspaces", () => {
 
     expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
     expect(httpBackends).toHaveLength(2);
+  });
+
+  it("resets one browser workspace cache after shutting down the active backend", async () => {
+    const { createBrowserWorkspace, loadBrowserWorkspaces, loadSessionToken, saveSessionToken } =
+      await import("./browser-workspaces");
+    const client = await import("./client");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    saveSessionToken(record.id, "github_pat_secret");
+    await client.activateBrowserWorkspace(record.slug);
+
+    const res = await client.resetBrowserWorkspaceCache(record.slug);
+
+    expect(res).toEqual({ ok: true, data: {} });
+    expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
+    expect(wipedFsNames).toEqual([record.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toEqual([expect.objectContaining({ id: record.id })]);
+    expect(loadSessionToken(record.id)).toBe("github_pat_secret");
+  });
+
+  it("forgets a browser workspace and cache after shutting down the active backend", async () => {
+    const { createBrowserWorkspace, loadBrowserWorkspaces, loadSessionToken, saveSessionToken } =
+      await import("./browser-workspaces");
+    const client = await import("./client");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    saveSessionToken(record.id, "github_pat_secret");
+    await client.activateBrowserWorkspace(record.slug);
+
+    const res = await client.forgetBrowserWorkspaceAndCache(record.slug);
+
+    expect(res).toEqual({ ok: true, data: {} });
+    expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
+    expect(wipedFsNames).toEqual([record.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toEqual([]);
+    expect(loadSessionToken(record.id)).toBeUndefined();
+  });
+
+  it("starts over by wiping all browser caches before clearing registry and tokens", async () => {
+    const {
+      createBrowserWorkspace,
+      loadBrowserWorkspaces,
+      loadSessionToken,
+      migrateLegacyBrowserWorkspace,
+      saveSessionToken,
+    } = await import("./browser-workspaces");
+    const client = await import("./client");
+    localStorage.setItem(
+      "gitim-local-config",
+      JSON.stringify({
+        remoteUrl: "https://github.com/acme/legacy",
+      }),
+    );
+    const legacy = migrateLegacyBrowserWorkspace();
+    if (!legacy) throw new Error("expected legacy workspace");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    saveSessionToken(record.id, "github_pat_secret");
+    await client.activateBrowserWorkspace(record.slug);
+
+    const res = await client.startOverBrowserWorkspaces();
+
+    expect(res).toEqual({ ok: true, data: {} });
+    expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
+    expect(wipedFsNames).toEqual([legacy.storage.fsName, record.storage.fsName]);
+    expect(loadBrowserWorkspaces()).toEqual([]);
+    expect(loadSessionToken(record.id)).toBeUndefined();
   });
 });

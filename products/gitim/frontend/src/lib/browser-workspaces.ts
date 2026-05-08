@@ -1,4 +1,5 @@
 import type { WorkspaceSummary } from "./types";
+import { wipeFs } from "@/daemon-web/storage";
 
 export const BROWSER_REGISTRY_KEY = "gitim-browser-workspaces-v2";
 export const LEGACY_LOCAL_CONFIG_KEY = "gitim-local-config";
@@ -184,8 +185,10 @@ export function listBrowserWorkspaceSummaries(): WorkspaceSummary[] {
   }));
 }
 
-export function getBrowserWorkspace(workspaceId: string): BrowserWorkspaceRecord | undefined {
-  return loadBrowserWorkspaces().find((workspace) => workspace.id === workspaceId);
+export function getBrowserWorkspace(idOrSlug: string): BrowserWorkspaceRecord | undefined {
+  return loadBrowserWorkspaces().find(
+    (workspace) => workspace.id === idOrSlug || workspace.slug === idOrSlug,
+  );
 }
 
 export function createBrowserWorkspace(
@@ -264,4 +267,24 @@ export function clearAllBrowserWorkspaces(): void {
     }
   }
   localStorage.removeItem(BROWSER_REGISTRY_KEY);
+}
+
+export async function wipeBrowserWorkspaceCache(idOrSlug: string): Promise<void> {
+  const workspace = getBrowserWorkspace(idOrSlug);
+  if (!workspace) {
+    return;
+  }
+
+  wipeFs(workspace.storage.fsName);
+}
+
+export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
+  const fsNames = new Set<string>([
+    ...loadBrowserWorkspaces().map((workspace) => workspace.storage.fsName),
+    LEGACY_FS_NAME,
+  ]);
+
+  for (const fsName of fsNames) {
+    wipeFs(fsName);
+  }
 }
