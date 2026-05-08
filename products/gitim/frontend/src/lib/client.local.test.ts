@@ -30,7 +30,7 @@ class MockLocalBackend {
   config: Record<string, unknown>;
   initResult: ApiResponse = {
     ok: true,
-    data: { handler: "flame4", display_name: "Flame Four" },
+    data: { handler: "flame4", display_name: "Flame4" },
   };
   init = vi.fn<(config: Record<string, unknown>) => Promise<ApiResponse>>(() =>
     Promise.resolve(this.initResult),
@@ -222,7 +222,7 @@ describe("client local browser workspaces", () => {
         workspace: expect.objectContaining({
           id: record.id,
           handler: "flame4",
-          workspace_name: "Phone",
+          workspace_name: "Flame4",
         }),
       },
     });

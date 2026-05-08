@@ -126,7 +126,7 @@ export async function activateBrowserWorkspace(
     handler || displayName
       ? updateBrowserWorkspace(record.id, {
           handler: handler ?? record.handler,
-          workspaceName: record.workspace_name || displayName || handler,
+          workspaceName: displayName ?? handler ?? record.workspace_name,
         })
       : undefined;
 
