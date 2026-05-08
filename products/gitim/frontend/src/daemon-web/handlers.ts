@@ -175,6 +175,16 @@ export async function init(config: {
       const onAuth = tokenAuth(config.token);
       await gitOps.cloneRepo(config.remoteUrl, dir, config.corsProxy, onAuth);
     }
+    if (repoExists) {
+      const originUrl = await gitOps.getOriginUrl(dir);
+      if (originUrl && originUrl !== config.remoteUrl) {
+        configureFs(previousFsName);
+        return errCode(
+          "Cached browser workspace was cloned from a different remote. Reset this workspace cache or create a new browser workspace to use the new URL.",
+          "remote_mismatch",
+        );
+      }
+    }
 
     // Detect default branch
     const branch = await gitOps.getCurrentBranch(dir);

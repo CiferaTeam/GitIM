@@ -660,6 +660,30 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
       remoteUrl: tablet.remoteUrl,
       token: "tablet-token",
     });
+
+  await page.reload();
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserInitCalls?: Array<{
+              workspaceId?: string;
+              remoteUrl?: string;
+              token?: string | null;
+            }>;
+          }
+        ).__gitimBrowserInitCalls,
+      ),
+    )
+    .toContainEqual({
+      workspaceId: tablet.id,
+      remoteUrl: tablet.remoteUrl,
+      token: "tablet-token",
+    });
 });
 
 test("browser mode does not poll the previous backend after activation fails", async ({ page }) => {

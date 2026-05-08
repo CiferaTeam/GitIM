@@ -46,6 +46,18 @@ export async function fetchOrigin(
   });
 }
 
+export async function getOriginUrl(dir: string): Promise<string | undefined> {
+  try {
+    return await git.getConfig({
+      fs: getFs(),
+      dir,
+      path: "remote.origin.url",
+    }) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve HEAD to a commit SHA. */
 export async function resolveHead(dir: string): Promise<string> {
   return git.resolveRef({ fs: getFs(), dir, ref: "HEAD" });

@@ -1,7 +1,7 @@
 # Mobile WASM Workspaces Verification
 
 - `cd products/gitim/frontend && npm test -- src`
-  - Passed: 12 test files, 70 tests.
+  - Passed: 12 test files, 71 tests.
 - `cd products/gitim/frontend && npm run build`
   - Passed: `tsc -b && vite build`.
 - `cd products/gitim/frontend && npm run lint`
@@ -20,3 +20,6 @@
 - Drafts, pinned conversations, and known-agent sidebar state now use mode-aware workspace identity keys.
 - Browser setup list exposes reset cache, forget workspace, and start-over actions before activation.
 - Failed browser workspace activation no longer starts a poll loop against the previous active backend.
+- Cached browser workspaces reject reconnect attempts that change the remote URL without a cache reset.
+- Refresh restores the persisted active browser workspace when multiple session tokens are present.
+- Reconnect rollback restores the previous session token for existing workspaces.

@@ -152,6 +152,7 @@ vi.mock("./git", () => ({
   diffTrees: vi.fn(async () => []),
   fetchOrigin: vi.fn(async () => undefined),
   getCurrentBranch: vi.fn(async () => "main"),
+  getOriginUrl: vi.fn(async () => undefined),
   push: vi.fn(async () => undefined),
   resetToRemote: vi.fn(async () => undefined),
   resolveHead: vi.fn(async () => "head"),
@@ -289,6 +290,29 @@ describe("daemon-web handlers", () => {
       sync_enabled: false,
       needs_token: true,
     }));
+  });
+
+  it("rejects a cached browser repo when the requested remote changed", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.getOriginUrl.mockResolvedValueOnce("https://github.com/acme/old-room");
+    const cloneCallsBefore = git.cloneRepo.mock.calls.length;
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/new-room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Cached browser workspace was cloned from a different remote. Reset this workspace cache or create a new browser workspace to use the new URL.",
+      error_code: "remote_mismatch",
+    });
+    expect(git.cloneRepo.mock.calls).toHaveLength(cloneCallsBefore);
   });
 
   it("restores the previous fs name when init needs a token for an absent repo", async () => {

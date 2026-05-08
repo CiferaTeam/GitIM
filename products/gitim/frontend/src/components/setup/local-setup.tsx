@@ -14,6 +14,7 @@ import {
   loadSessionToken,
   type BrowserWorkspaceRecord,
 } from "../../lib/browser-workspaces";
+import { activeWorkspaceStorageKey } from "../../lib/workspace-key";
 import { BrowserWorkspaceForm } from "./browser-workspace-form";
 import { SetupShell } from "./setup-shell";
 
@@ -95,7 +96,15 @@ export function LocalSetup() {
 
   useEffect(() => {
     if (autoOpenAttempted.current) return;
-    const firstReady = workspaces.find((record) => loadSessionToken(record.id));
+    const storedActiveSlug = localStorage.getItem(activeWorkspaceStorageKey("local"));
+    const storedReady = storedActiveSlug
+      ? workspaces.find(
+          (record) =>
+            record.slug === storedActiveSlug && loadSessionToken(record.id),
+        )
+      : undefined;
+    const firstReady =
+      storedReady ?? workspaces.find((record) => loadSessionToken(record.id));
     if (!firstReady) return;
 
     autoOpenAttempted.current = true;

@@ -5,6 +5,7 @@ import {
   clearSessionToken,
   createBrowserWorkspace,
   forgetBrowserWorkspace,
+  loadSessionToken,
   loadBrowserWorkspaces,
   saveSessionToken,
   saveBrowserWorkspaces,
@@ -42,6 +43,7 @@ export function BrowserWorkspaceForm({
     setLoading(true);
     setError(null);
     let savedRecord: BrowserWorkspaceRecord | undefined;
+    const previousSessionToken = initial ? loadSessionToken(initial.id) : undefined;
 
     try {
       const identity = await inferBrowserIdentity({
@@ -68,11 +70,11 @@ export function BrowserWorkspaceForm({
       saveSessionToken(record.id, token.trim());
       const connected = await onConnected(record, token.trim());
       if (!connected) {
-        rollbackWorkspace(record, initial);
+        rollbackWorkspace(record, initial, previousSessionToken);
       }
     } catch (err) {
       if (savedRecord) {
-        rollbackWorkspace(savedRecord, initial);
+        rollbackWorkspace(savedRecord, initial, previousSessionToken);
       }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -185,14 +187,19 @@ export function BrowserWorkspaceForm({
 function rollbackWorkspace(
   record: BrowserWorkspaceRecord,
   previous?: BrowserWorkspaceRecord,
+  previousSessionToken?: string,
 ): void {
   if (!previous) {
     forgetBrowserWorkspace(record.id);
     return;
   }
 
-  clearSessionToken(record.id);
   restoreBrowserWorkspace(previous);
+  if (previousSessionToken !== undefined) {
+    saveSessionToken(record.id, previousSessionToken);
+  } else {
+    clearSessionToken(record.id);
+  }
 }
 
 function restoreBrowserWorkspace(record: BrowserWorkspaceRecord): void {
