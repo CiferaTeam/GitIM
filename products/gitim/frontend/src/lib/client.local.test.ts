@@ -82,6 +82,8 @@ vi.mock("./backend", () => ({
 
 vi.mock("@isomorphic-git/lightning-fs", () => ({
   default: class MockLightningFS {
+    promises = { stat: vi.fn(() => Promise.resolve({})) };
+
     constructor(name: string, options?: { wipe?: boolean }) {
       if (options?.wipe) {
         wipedFsNames.push(name);
@@ -243,13 +245,14 @@ describe("client local browser workspaces", () => {
 
     expect(res).toEqual({
       ok: true,
-      data: {
+      data: expect.objectContaining({
         workspace: expect.objectContaining({
           id: record.id,
           handler: "flame4",
-          workspace_name: "Flame4",
+          workspace_name: "Phone",
         }),
-      },
+        needs_token: false,
+      }),
     });
     expect(localBackends[0].config).toEqual({ workspaceId: record.id, generation: 1 });
     expect(localBackends[0].init).toHaveBeenCalledWith({
@@ -265,6 +268,36 @@ describe("client local browser workspaces", () => {
       ok: true,
       data: { handler: "local" },
     });
+  });
+
+  it("surfaces cached browser activation when the workspace needs a token", async () => {
+    const { createBrowserWorkspace } = await import("./browser-workspaces");
+    const client = await import("./client");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    nextLocalInitResult = {
+      ok: true,
+      data: {
+        handler: "flame4",
+        display_name: "Flame4",
+        needs_token: true,
+        sync_enabled: false,
+      },
+    };
+
+    const res = await client.activateBrowserWorkspace(record.slug);
+
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        workspace: expect.objectContaining({ id: record.id }),
+        needs_token: true,
+        sync_enabled: false,
+      },
+    });
+    expect(localBackends[0].startSync).not.toHaveBeenCalled();
   });
 
   it("keeps the previous backend active when activation fails", async () => {
@@ -324,7 +357,10 @@ describe("client local browser workspaces", () => {
     secondInit.resolve({ ok: true, data: { handler: "second", display_name: "Second" } });
     await expect(secondActivation).resolves.toEqual({
       ok: true,
-      data: { workspace: expect.objectContaining({ id: second.id }) },
+      data: expect.objectContaining({
+        workspace: expect.objectContaining({ id: second.id }),
+        needs_token: false,
+      }),
     });
 
     firstInit.resolve({ ok: true, data: { handler: "first", display_name: "First" } });

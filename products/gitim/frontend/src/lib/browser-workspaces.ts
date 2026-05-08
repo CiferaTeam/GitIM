@@ -263,6 +263,13 @@ export function forgetBrowserWorkspace(workspaceId: string): void {
   clearSessionToken(workspaceId);
 }
 
+export async function forgetBrowserWorkspaceAndWipeCache(
+  workspaceId: string,
+): Promise<void> {
+  await wipeBrowserWorkspaceCache(workspaceId);
+  forgetBrowserWorkspace(workspaceId);
+}
+
 export function clearAllBrowserWorkspaces(): void {
   for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
     const key = sessionStorage.key(index);
@@ -280,7 +287,7 @@ export async function wipeBrowserWorkspaceCache(idOrSlug: string): Promise<void>
     return;
   }
 
-  wipeFs(workspace.storage.fsName);
+  await wipeFs(workspace.storage.fsName);
 }
 
 export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
@@ -290,6 +297,6 @@ export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
   ]);
 
   for (const fsName of fsNames) {
-    wipeFs(fsName);
+    await wipeFs(fsName);
   }
 }

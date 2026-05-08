@@ -1,7 +1,7 @@
 # Mobile WASM Workspaces Verification
 
 - `cd products/gitim/frontend && npm test -- src`
-  - Passed: 12 test files, 71 tests.
+  - Passed: 12 test files, 75 tests.
 - `cd products/gitim/frontend && npm run build`
   - Passed: `tsc -b && vite build`.
 - `cd products/gitim/frontend && npm run lint`
@@ -9,7 +9,7 @@
 - `cd products/gitim/frontend && npm run dev -- --host 127.0.0.1`
   - Started Vite for Playwright, then stopped it after e2e verification.
 - `cd products/gitim/frontend && npm run test:e2e`
-  - Passed: 17 tests across `e2e/sidebar-layout.spec.ts` and `e2e/mobile-layout.spec.ts`.
+  - Passed: 18 tests across `e2e/sidebar-layout.spec.ts` and `e2e/mobile-layout.spec.ts`.
 - `git diff --check`
   - Passed with no whitespace errors.
 
@@ -23,3 +23,9 @@
 - Cached browser workspaces reject reconnect attempts that change the remote URL without a cache reset.
 - Refresh restores the persisted active browser workspace when multiple session tokens are present.
 - Reconnect rollback restores the previous session token for existing workspaces.
+- Cached browser workspace activation that needs a token now opens cached data in a disconnected state without scheduling local sync polling.
+- Stored active runtime slugs still initialize after the workspace list loads; the app depends on stable workspace identity instead of the full workspace array.
+- Browser cache reset/start-over now awaits LightningFS wipe activation before reporting success.
+- Browser reconnect now preserves the remote sync baseline when cached local commits are ahead, so auth-recovery sync pushes local commits instead of resetting them away.
+- Failed activation of a newly created browser workspace now wipes its IndexedDB cache before deleting the registry entry.
+- Browser workspace activation preserves user-provided workspace names while still filling the inferred handler.

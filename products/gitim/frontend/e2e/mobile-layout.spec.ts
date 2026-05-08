@@ -282,6 +282,9 @@ async function stubBrowserModeWorker(
               error_code: "reconnect_required",
             };
           }
+          if (!config?.token) {
+            return { ok: true, data: { needs_token: true, sync_enabled: false } };
+          }
           return { ok: true, data: {} };
         }
         case "startSync":
@@ -739,6 +742,59 @@ test("browser mode does not poll the previous backend after activation fails", a
       ),
     )
     .toBe(pollCountAfterFailedActivation);
+});
+
+test("browser mode opens cached data without polling when activation needs a token", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+  const tablet = browserWorkspaceRecord(
+    "ws_tablet",
+    "Tablet",
+    "https://github.com/flame4/tablet",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone, tablet],
+    activeSlug: phone.slug,
+    tokens: {
+      [phone.id]: "phone-token",
+    },
+  });
+  await stubBrowserModeWorker(page);
+
+  await page.goto("/");
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await page.getByTestId(`workspace-row-${tablet.slug}`).click();
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  const pollCountAfterCachedActivation = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterCachedActivation);
 });
 
 test("browser mode asks to reconnect when registered workspace has no session token", async ({ page }) => {

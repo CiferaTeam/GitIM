@@ -25,9 +25,10 @@ export function getFs(): LightningFS {
   return fs;
 }
 
-export function wipeFs(fsName: string): LightningFS {
+export async function wipeFs(fsName: string): Promise<void> {
   if (fsName === activeFsName) fs = null;
-  return new LightningFS(fsName, { wipe: true });
+  const wipedFs = new LightningFS(fsName, { wipe: true });
+  await wipedFs.promises.stat("/");
 }
 
 export async function readFile(path: string): Promise<string> {

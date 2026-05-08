@@ -24,6 +24,7 @@ import {
   clearSessionToken,
   createBrowserWorkspace,
   forgetBrowserWorkspace,
+  forgetBrowserWorkspaceAndWipeCache,
   getBrowserWorkspace,
   listBrowserWorkspaceSummaries,
   loadSessionToken,
@@ -81,7 +82,11 @@ export async function activateBrowserWorkspace(
     token?: string | null;
     onSyncReset?: () => void;
   } = {},
-): Promise<ApiResponse<{ workspace: BrowserWorkspaceRecord }>> {
+): Promise<ApiResponse<{
+  workspace: BrowserWorkspaceRecord;
+  needs_token?: boolean;
+  sync_enabled?: boolean;
+}>> {
   const attempt = browserActivationAttempt + 1;
   browserActivationAttempt = attempt;
   const record = findBrowserWorkspace(idOrSlug);
@@ -107,7 +112,11 @@ export async function activateBrowserWorkspace(
 
   if (!result.ok) {
     backend.terminate();
-    return result as ApiResponse<{ workspace: BrowserWorkspaceRecord }>;
+    return result as ApiResponse<{
+      workspace: BrowserWorkspaceRecord;
+      needs_token?: boolean;
+      sync_enabled?: boolean;
+    }>;
   }
 
   if (!isCurrentBrowserActivation(attempt)) {
@@ -141,15 +150,25 @@ export async function activateBrowserWorkspace(
   const handler = typeof data?.handler === "string" ? data.handler : undefined;
   const displayName =
     typeof data?.display_name === "string" ? data.display_name : undefined;
+  const shouldFillWorkspaceName = record.workspace_name.trim().length === 0;
   const updated =
-    handler || displayName
+    handler || shouldFillWorkspaceName
       ? updateBrowserWorkspace(record.id, {
           handler: handler ?? record.handler,
-          workspaceName: displayName ?? handler ?? record.workspace_name,
+          ...(shouldFillWorkspaceName
+            ? { workspaceName: displayName ?? handler ?? record.workspace_name }
+            : {}),
         })
       : undefined;
 
-  return { ok: true, data: { workspace: updated ?? record } };
+  return {
+    ok: true,
+    data: {
+      workspace: updated ?? record,
+      needs_token: data?.needs_token === true,
+      sync_enabled: data?.sync_enabled === true,
+    },
+  };
 }
 
 // --- Helpers ---
@@ -168,7 +187,11 @@ function isCurrentBrowserActivation(attempt: number): boolean {
 
 function supersedeBrowserActivation(
   backend: LocalBackend,
-): ApiResponse<{ workspace: BrowserWorkspaceRecord }> {
+): ApiResponse<{
+  workspace: BrowserWorkspaceRecord;
+  needs_token?: boolean;
+  sync_enabled?: boolean;
+}> {
   backend.terminate();
   return {
     ok: false,
@@ -391,8 +414,7 @@ export async function forgetBrowserWorkspaceAndCache(
   if (activeAffected) {
     shutdownBrowserWorkspace();
   }
-  await wipeBrowserWorkspaceCache(record.id);
-  forgetBrowserWorkspace(record.id);
+  await forgetBrowserWorkspaceAndWipeCache(record.id);
   return { ok: true, data: { activeAffected } };
 }
 

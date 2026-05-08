@@ -292,6 +292,25 @@ describe("daemon-web handlers", () => {
     }));
   });
 
+  it("preserves the remote sync baseline when cached local commits are ahead", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.resolveHead.mockResolvedValueOnce("local-unsynced-head");
+    git.resolveRemoteHead.mockResolvedValueOnce("remote-synced-head");
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(getState().headCommit).toBe("remote-synced-head");
+  });
+
   it("rejects a cached browser repo when the requested remote changed", async () => {
     const git = vi.mocked(await import("./git"));
     dirs.set("/repo/.git", []);

@@ -128,6 +128,14 @@ async function ensureWasmReady(): Promise<void> {
   await wasmReady;
 }
 
+async function resolveSyncBaseline(repoDir: string, localHead: string): Promise<string> {
+  try {
+    return await gitOps.resolveRemoteHead(repoDir);
+  } catch {
+    return localHead;
+  }
+}
+
 // --- Browser runtime preflight ---
 
 export async function preflight(): Promise<ApiResponse> {
@@ -199,6 +207,7 @@ export async function init(config: {
     }
 
     const head = await gitOps.resolveHead(dir);
+    const syncBaseline = await resolveSyncBaseline(dir, head);
     const s = initState({
       workspaceId,
       repoDir: dir,
@@ -211,7 +220,7 @@ export async function init(config: {
     });
     s.defaultBranch = branch;
 
-    setState({ headCommit: head });
+    setState({ headCommit: syncBaseline });
     await refreshChannelsCache();
     await refreshUsersCache();
 

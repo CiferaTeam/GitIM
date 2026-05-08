@@ -1,13 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const wipedFsNames = vi.hoisted((): string[] => []);
+const wipeControls = vi.hoisted(() => ({
+  hold: false,
+  pending: [] as Array<{ name: string; resolve: () => void }>,
+}));
 
 vi.mock("@isomorphic-git/lightning-fs", () => ({
   default: class MockLightningFS {
+    promises: { stat: () => Promise<unknown> };
+
     constructor(name: string, options?: { wipe?: boolean }) {
       if (options?.wipe) {
         wipedFsNames.push(name);
+        if (wipeControls.hold) {
+          let resolve!: () => void;
+          const promise = new Promise<void>((r) => {
+            resolve = r;
+          });
+          wipeControls.pending.push({ name, resolve });
+          this.promises = { stat: () => promise };
+          return;
+        }
       }
+      this.promises = { stat: () => Promise.resolve({}) };
     }
   },
 }));
@@ -16,6 +32,7 @@ import {
   clearAllBrowserWorkspaces,
   createBrowserWorkspace,
   forgetBrowserWorkspace,
+  forgetBrowserWorkspaceAndWipeCache,
   getBrowserWorkspace,
   listBrowserWorkspaceSummaries,
   loadBrowserWorkspaces,
@@ -31,6 +48,8 @@ describe("browser workspaces", () => {
     localStorage.clear();
     sessionStorage.clear();
     wipedFsNames.length = 0;
+    wipeControls.hold = false;
+    wipeControls.pending.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
   });
@@ -140,6 +159,20 @@ describe("browser workspaces", () => {
     expect(listBrowserWorkspaceSummaries()).toEqual([]);
   });
 
+  it("wipes a workspace cache before forgetting the registry entry", async () => {
+    const ws = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/room",
+      workspaceName: "Phone",
+    });
+    saveSessionToken(ws.id, "github_pat_secret");
+
+    await forgetBrowserWorkspaceAndWipeCache(ws.id);
+
+    expect(wipedFsNames).toEqual([ws.storage.fsName]);
+    expect(getBrowserWorkspace(ws.id)).toBeUndefined();
+    expect(loadSessionToken(ws.id)).toBeUndefined();
+  });
+
   it("gets a browser workspace by id or slug", () => {
     const ws = createBrowserWorkspace({
       remoteUrl: "https://github.com/acme/room",
@@ -169,6 +202,31 @@ describe("browser workspaces", () => {
       other.id,
     ]);
     expect(loadSessionToken(ws.id)).toBe("github_pat_secret");
+  });
+
+  it("waits for the LightningFS wipe activation before resolving", async () => {
+    const ws = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/room",
+      workspaceName: "Phone",
+    });
+    wipeControls.hold = true;
+    let resolved = false;
+
+    const wipe = wipeBrowserWorkspaceCache(ws.slug).then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+
+    expect(wipedFsNames).toEqual([ws.storage.fsName]);
+    expect(wipeControls.pending.map((pending) => pending.name)).toEqual([
+      ws.storage.fsName,
+    ]);
+    expect(resolved).toBe(false);
+
+    wipeControls.pending[0].resolve();
+    await wipe;
+
+    expect(resolved).toBe(true);
   });
 
   it("wipes all registered workspace caches and the legacy cache once", async () => {

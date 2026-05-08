@@ -4,7 +4,7 @@ import { inferBrowserIdentity } from "../../lib/browser-identity";
 import {
   clearSessionToken,
   createBrowserWorkspace,
-  forgetBrowserWorkspace,
+  forgetBrowserWorkspaceAndWipeCache,
   loadSessionToken,
   loadBrowserWorkspaces,
   saveSessionToken,
@@ -70,11 +70,11 @@ export function BrowserWorkspaceForm({
       saveSessionToken(record.id, token.trim());
       const connected = await onConnected(record, token.trim());
       if (!connected) {
-        rollbackWorkspace(record, initial, previousSessionToken);
+        await rollbackWorkspace(record, initial, previousSessionToken);
       }
     } catch (err) {
       if (savedRecord) {
-        rollbackWorkspace(savedRecord, initial, previousSessionToken);
+        await rollbackWorkspace(savedRecord, initial, previousSessionToken);
       }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -184,13 +184,13 @@ export function BrowserWorkspaceForm({
   );
 }
 
-function rollbackWorkspace(
+async function rollbackWorkspace(
   record: BrowserWorkspaceRecord,
   previous?: BrowserWorkspaceRecord,
   previousSessionToken?: string,
-): void {
+): Promise<void> {
   if (!previous) {
-    forgetBrowserWorkspace(record.id);
+    await forgetBrowserWorkspaceAndWipeCache(record.id);
     return;
   }
 

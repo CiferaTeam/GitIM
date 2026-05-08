@@ -99,6 +99,14 @@ function clonePinnedConversations(pins: PinnedConversations): PinnedConversation
   };
 }
 
+function equalStringSets(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}
+
 function sortPinnedFirst(items: Channel[], pinnedNames: Set<string>): Channel[] {
   return [...items].sort((a, b) => {
     const aPinned = pinnedNames.has(a.name);
@@ -203,8 +211,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       next.add(agent.id);
     }
     writeKnownAgentIds(activeWorkspaceKey, next);
-    setKnownAgentIds(next);
-  }, [activeWorkspaceKey, agents]);
+    if (!equalStringSets(knownAgentIds, next)) {
+      setKnownAgentIds(next);
+    }
+  }, [activeWorkspaceKey, agents, knownAgentIds]);
 
   useEffect(() => {
     setPinnedConversations(readPinnedConversations(activeWorkspaceKey));

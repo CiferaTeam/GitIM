@@ -123,6 +123,13 @@ export default function App() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const workspacesLoading = useWorkspaceStore((s) => s.loading);
   const fetchWorkspaces = useWorkspaceStore((s) => s.fetchAll);
+  const activeWorkspaceIdentity =
+    activeSlug == null
+      ? null
+      : (() => {
+          const workspace = workspaces.find((w) => w.slug === activeSlug);
+          return workspace ? workspaceIdentity(mode, workspace) : null;
+        })();
 
   // Mutable refs for poll loop — avoids stale closures
   const sinceRef = useRef<string | undefined>(undefined);
@@ -370,9 +377,8 @@ export default function App() {
     if (!activeSlug) return;
     if (mode === "remote" && !port) return;
     if (mode === "local" && !localReady) return;
-    const activeWorkspace = workspaces.find((w) => w.slug === activeSlug);
-    if (!activeWorkspace) return;
-    const workspaceKey = workspaceIdentity(mode, activeWorkspace);
+    if (!activeWorkspaceIdentity) return;
+    const workspaceKey = activeWorkspaceIdentity;
 
     // Reset per-workspace store slices on switch so stale data from the
     // previous workspace doesn't leak into the new one. Each store owns
@@ -395,6 +401,7 @@ export default function App() {
     let pollHandle: ReturnType<typeof setTimeout> | undefined;
 
     async function init(slug: string): Promise<boolean> {
+      let activationNeedsToken = false;
       if (mode === "local") {
         const activation = await client.activateBrowserWorkspace(slug, {
           onSyncReset: () => {
@@ -413,6 +420,7 @@ export default function App() {
           setConnected(false);
           return false;
         }
+        activationNeedsToken = activation.data?.needs_token === true;
       }
 
       const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
@@ -441,6 +449,14 @@ export default function App() {
         setAgents(agentsRes.data.agents as Agent[]);
       if (cardsRes.ok && cardsRes.data)
         setCards(cardsRes.data.cards as Card[]);
+
+      if (activationNeedsToken) {
+        setConnected(false);
+        setConnectionStatus("disconnected");
+        setConnectionError("Reconnect token to sync this browser workspace.");
+        await fetchWorkspaces();
+        return false;
+      }
 
       const bootstrapOk =
         meRes.ok &&
@@ -488,7 +504,7 @@ export default function App() {
     mode,
     localReady,
     activeSlug,
-    workspaces,
+    activeWorkspaceIdentity,
     setCurrentUser,
     setChannels,
     setUsers,
@@ -501,6 +517,7 @@ export default function App() {
     setConnected,
     setConnectionStatus,
     setConnectionError,
+    fetchWorkspaces,
     markConnected,
     runPoll,
   ]);
