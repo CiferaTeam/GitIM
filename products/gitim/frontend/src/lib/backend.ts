@@ -34,6 +34,8 @@ interface LegacyLocalInitConfig {
   handler: string;
 }
 
+const LOCAL_BACKEND_CLOSED_ERROR = "browser worker session closed";
+
 export interface Backend {
   health(): Promise<ApiResponse>;
   me(): Promise<ApiResponse>;
@@ -204,6 +206,7 @@ export class LocalBackend implements Backend {
   private onSyncReset?: () => void;
   private workspaceId: string;
   private generation: number;
+  private closed = false;
 
   constructor(config: LocalBackendConfig);
   constructor(onSyncReset?: () => void);
@@ -270,6 +273,13 @@ export class LocalBackend implements Backend {
   }
 
   private call(method: string, ...args: unknown[]): Promise<ApiResponse> {
+    if (this.closed) {
+      return Promise.resolve({
+        ok: false,
+        error: LOCAL_BACKEND_CLOSED_ERROR,
+      });
+    }
+
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
@@ -280,7 +290,15 @@ export class LocalBackend implements Backend {
         workspaceId: this.workspaceId,
         generation: this.generation,
       };
-      this.worker.postMessage(request);
+      try {
+        this.worker.postMessage(request);
+      } catch (error) {
+        this.pending.delete(id);
+        resolve({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     });
   }
 
@@ -382,7 +400,10 @@ export class LocalBackend implements Backend {
   }
 
   terminate(): void {
-    this.rejectPending("browser worker session closed");
+    if (this.closed) return;
+
+    this.closed = true;
+    this.rejectPending(LOCAL_BACKEND_CLOSED_ERROR);
     this.worker.terminate();
   }
 }

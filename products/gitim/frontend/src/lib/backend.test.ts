@@ -4,23 +4,27 @@ import type { WorkerEvent, WorkerResponse } from "../daemon-web/worker";
 
 class StubWorker {
   static instances: StubWorker[] = [];
+  postMessageError: Error | null = null;
 
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
   messages: unknown[] = [];
   terminated = false;
+  terminateCount = 0;
 
   constructor() {
     StubWorker.instances.push(this);
   }
 
   postMessage(message: unknown): void {
+    if (this.postMessageError) throw this.postMessageError;
     this.messages.push(message);
   }
 
   terminate(): void {
     this.terminated = true;
+    this.terminateCount += 1;
   }
 
   emit(message: WorkerResponse | WorkerEvent): void {
@@ -122,5 +126,64 @@ describe("LocalBackend", () => {
 
     expect(worker.terminated).toBe(true);
     await expect(result).rejects.toThrow("browser worker session closed");
+  });
+
+  it("returns a closed response for calls after terminate", async () => {
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+
+    backend.terminate();
+    backend.terminate();
+    const result = await backend.health();
+
+    expect(result).toEqual({
+      ok: false,
+      error: "browser worker session closed",
+    });
+    expect(worker.messages).toEqual([]);
+    expect(worker.terminated).toBe(true);
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("resolves cleanly when posting to the worker throws", async () => {
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+    worker.postMessageError = new Error("worker port closed");
+
+    const result = await backend.health();
+
+    expect(result).toEqual({
+      ok: false,
+      error: "worker port closed",
+    });
+    expect(worker.messages).toEqual([]);
+    worker.postMessageError = null;
+    worker.emit({
+      id: 1,
+      workspaceId: "ws_current",
+      generation: 2,
+      result: { ok: true, data: "late" },
+    });
+    const next = backend.channels();
+    expect(worker.messages[0]).toEqual({
+      id: 2,
+      method: "channels",
+      args: [],
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    worker.emit({
+      id: 2,
+      workspaceId: "ws_current",
+      generation: 2,
+      result: { ok: true, data: "next" },
+    });
+    await expect(next).resolves.toEqual({ ok: true, data: "next" });
   });
 });
