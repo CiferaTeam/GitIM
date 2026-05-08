@@ -4,6 +4,7 @@ import type { ApiResponse } from "./types";
 const localBackends: MockLocalBackend[] = [];
 const httpBackends: MockHttpBackend[] = [];
 let nextLocalInitResult: ApiResponse | null = null;
+const nextLocalInitResponses: Array<ApiResponse | Promise<ApiResponse>> = [];
 
 class MockHttpBackend {
   baseUrl: () => string;
@@ -28,7 +29,7 @@ class MockHttpBackend {
 
 class MockLocalBackend {
   config: Record<string, unknown>;
-  initResult: ApiResponse = {
+  initResult: ApiResponse | Promise<ApiResponse> = {
     ok: true,
     data: { handler: "flame4", display_name: "Flame4" },
   };
@@ -62,7 +63,10 @@ class MockLocalBackend {
 
   constructor(config: Record<string, unknown>) {
     this.config = config;
-    if (nextLocalInitResult) {
+    const nextResponse = nextLocalInitResponses.shift();
+    if (nextResponse) {
+      this.initResult = nextResponse;
+    } else if (nextLocalInitResult) {
       this.initResult = nextLocalInitResult;
       nextLocalInitResult = null;
     }
@@ -110,12 +114,21 @@ function resetStorage(): void {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe("client local browser workspaces", () => {
   beforeEach(async () => {
     resetStorage();
     localBackends.length = 0;
     httpBackends.length = 0;
     nextLocalInitResult = null;
+    nextLocalInitResponses.length = 0;
     vi.resetModules();
     const { useConnectionStore } = await import("@/hooks/use-connection-store");
     useConnectionStore.setState({ mode: "local", port: null });
@@ -272,6 +285,48 @@ describe("client local browser workspaces", () => {
     await expect(client.me(current.slug)).resolves.toEqual({
       ok: true,
       data: { handler: "local" },
+    });
+  });
+
+  it("keeps the newer backend active when an earlier activation resolves late", async () => {
+    const { createBrowserWorkspace } = await import("./browser-workspaces");
+    const client = await import("./client");
+    const first = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/first",
+      workspaceName: "First",
+    });
+    const second = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/second",
+      workspaceName: "Second",
+    });
+    const firstInit = deferred<ApiResponse>();
+    const secondInit = deferred<ApiResponse>();
+    nextLocalInitResponses.push(firstInit.promise, secondInit.promise);
+
+    const firstActivation = client.activateBrowserWorkspace(first.slug);
+    const secondActivation = client.activateBrowserWorkspace(second.slug);
+    expect(localBackends).toHaveLength(2);
+    localBackends[0].me.mockResolvedValue({ ok: true, data: { handler: "first" } });
+    localBackends[1].me.mockResolvedValue({ ok: true, data: { handler: "second" } });
+
+    secondInit.resolve({ ok: true, data: { handler: "second", display_name: "Second" } });
+    await expect(secondActivation).resolves.toEqual({
+      ok: true,
+      data: { workspace: expect.objectContaining({ id: second.id }) },
+    });
+
+    firstInit.resolve({ ok: true, data: { handler: "first", display_name: "First" } });
+    await expect(firstActivation).resolves.toEqual({
+      ok: false,
+      error: "Browser workspace activation was superseded.",
+      error_code: "activation_superseded",
+    });
+
+    expect(localBackends[0].terminate).toHaveBeenCalledTimes(1);
+    expect(localBackends[1].terminate).not.toHaveBeenCalled();
+    await expect(client.me(second.slug)).resolves.toEqual({
+      ok: true,
+      data: { handler: "second" },
     });
   });
 

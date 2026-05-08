@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, WorkspaceSummary } from "@/lib/types";
 
 let workspacesResponse: ApiResponse<{ workspaces: WorkspaceSummary[] }>;
+const workspacesResponses: Array<
+  ApiResponse<{ workspaces: WorkspaceSummary[] }> |
+  Promise<ApiResponse<{ workspaces: WorkspaceSummary[] }>>
+> = [];
 
 vi.mock("@/lib/client", () => ({
-  listWorkspaces: vi.fn(() => Promise.resolve(workspacesResponse)),
+  listWorkspaces: vi.fn(() => Promise.resolve(workspacesResponses.shift() ?? workspacesResponse)),
   createWorkspace: vi.fn(),
   deleteWorkspace: vi.fn(),
 }));
@@ -40,9 +44,18 @@ function resetStorage(): void {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe("useWorkspaceStore", () => {
   beforeEach(() => {
     resetStorage();
+    workspacesResponses.length = 0;
     vi.resetModules();
     workspacesResponse = {
       ok: true,
@@ -84,5 +97,57 @@ describe("useWorkspaceStore", () => {
     expect(useWorkspaceStore.getState().activeSlug).toBe("browser-3");
     expect(localStorage.getItem("gitim-active-workspace")).toBe("runtime-main");
     expect(localStorage.getItem("gitim-active-browser-workspace")).toBe("browser-3");
+  });
+
+  it("ignores a stale remote fetch after switching to local mode", async () => {
+    const remoteFetch = deferred<ApiResponse<{ workspaces: WorkspaceSummary[] }>>();
+    const localFetch = deferred<ApiResponse<{ workspaces: WorkspaceSummary[] }>>();
+    workspacesResponses.push(remoteFetch.promise, localFetch.promise);
+    const { useConnectionStore } = await import("./use-connection-store");
+    useConnectionStore.setState({ mode: "remote" });
+    const { useWorkspaceStore } = await import("./use-workspace-store");
+
+    const remoteRequest = useWorkspaceStore.getState().fetchAll();
+    useConnectionStore.setState({ mode: "local" });
+    const localRequest = useWorkspaceStore.getState().fetchAll();
+    localFetch.resolve({
+      ok: true,
+      data: {
+        workspaces: [
+          {
+            id: "ws_local",
+            slug: "browser-local",
+            workspace_name: "Local",
+            path: "indexeddb://gitim-ws-ws_local/repo",
+            provider: "github",
+            initialized: true,
+            browser: true,
+          },
+        ],
+      },
+    });
+    await localRequest;
+    localStorage.removeItem("gitim-active-browser-workspace");
+
+    remoteFetch.resolve({
+      ok: true,
+      data: {
+        workspaces: [
+          {
+            slug: "runtime-main",
+            workspace_name: "Runtime",
+            path: "/tmp/runtime",
+            provider: "local",
+            initialized: true,
+          },
+        ],
+      },
+    });
+    await remoteRequest;
+
+    expect(useWorkspaceStore.getState().workspaces).toEqual([
+      expect.objectContaining({ slug: "browser-local" }),
+    ]);
+    expect(localStorage.getItem("gitim-active-browser-workspace")).toBeNull();
   });
 });

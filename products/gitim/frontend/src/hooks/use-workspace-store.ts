@@ -8,15 +8,16 @@ function currentActiveKey(): string {
   return activeWorkspaceStorageKey(useConnectionStore.getState().mode);
 }
 
-function loadStoredSlug(): string | null {
-  return localStorage.getItem(currentActiveKey());
+function loadStoredSlug(key = currentActiveKey()): string | null {
+  return localStorage.getItem(key);
 }
 
-function persistSlug(slug: string | null) {
-  const key = currentActiveKey();
+function persistSlug(slug: string | null, key = currentActiveKey()) {
   if (slug) localStorage.setItem(key, slug);
   else localStorage.removeItem(key);
 }
+
+let fetchAllRequestId = 0;
 
 interface WorkspaceStore {
   workspaces: WorkspaceSummary[];
@@ -42,8 +43,15 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   clearError: () => set({ error: null, errorCode: null }),
 
   fetchAll: async () => {
+    const requestId = fetchAllRequestId + 1;
+    fetchAllRequestId = requestId;
+    const mode = useConnectionStore.getState().mode;
+    const activeKey = activeWorkspaceStorageKey(mode);
     set({ loading: true, error: null, errorCode: null });
     const res = await client.listWorkspaces();
+    if (requestId !== fetchAllRequestId || useConnectionStore.getState().mode !== mode) {
+      return;
+    }
     if (!res.ok || !res.data) {
       set({
         loading: false,
@@ -53,12 +61,12 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       return;
     }
     const workspaces = res.data.workspaces ?? [];
-    const current = loadStoredSlug();
+    const current = loadStoredSlug(activeKey);
     let nextActive = current;
     if (!current || !workspaces.some((w) => w.slug === current)) {
       nextActive = workspaces[0]?.slug ?? null;
     }
-    if (nextActive !== current) persistSlug(nextActive);
+    if (nextActive !== current) persistSlug(nextActive, activeKey);
     set({ workspaces, activeSlug: nextActive, loading: false });
   },
 

@@ -38,6 +38,7 @@ import { useConnectionStore } from "@/hooks/use-connection-store";
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
 let localGeneration = 0;
+let browserActivationAttempt = 0;
 
 export function setBackend(backend: Backend): void {
   activeBackend = backend;
@@ -57,6 +58,7 @@ export function resetAllBrowserWorkspaces(): void {
 }
 
 export function shutdownBrowserWorkspace(): void {
+  browserActivationAttempt += 1;
   const backend = activeLocalBackend;
   if (!backend) return;
 
@@ -74,6 +76,8 @@ export async function activateBrowserWorkspace(
     onSyncReset?: () => void;
   } = {},
 ): Promise<ApiResponse<{ workspace: BrowserWorkspaceRecord }>> {
+  const attempt = browserActivationAttempt + 1;
+  browserActivationAttempt = attempt;
   const record = findBrowserWorkspace(idOrSlug);
   if (!record) {
     return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
@@ -100,6 +104,10 @@ export async function activateBrowserWorkspace(
     return result as ApiResponse<{ workspace: BrowserWorkspaceRecord }>;
   }
 
+  if (!isCurrentBrowserActivation(attempt)) {
+    return supersedeBrowserActivation(backend);
+  }
+
   if (token) {
     saveSessionToken(record.id, token);
     try {
@@ -111,6 +119,10 @@ export async function activateBrowserWorkspace(
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  if (!isCurrentBrowserActivation(attempt)) {
+    return supersedeBrowserActivation(backend);
   }
 
   activeLocalBackend?.terminate();
@@ -141,6 +153,21 @@ function baseUrl(): string {
 
 function isLocalMode(): boolean {
   return useConnectionStore.getState().mode === "local";
+}
+
+function isCurrentBrowserActivation(attempt: number): boolean {
+  return attempt === browserActivationAttempt && isLocalMode();
+}
+
+function supersedeBrowserActivation(
+  backend: LocalBackend,
+): ApiResponse<{ workspace: BrowserWorkspaceRecord }> {
+  backend.terminate();
+  return {
+    ok: false,
+    error: "Browser workspace activation was superseded.",
+    error_code: "activation_superseded",
+  };
 }
 
 function findBrowserWorkspace(idOrSlug: string): BrowserWorkspaceRecord | undefined {
