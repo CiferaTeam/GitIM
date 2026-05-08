@@ -1,36 +1,20 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "../../hooks/use-connection-store";
-import { LocalBackend } from "../../lib/backend";
-import { inferBrowserIdentity } from "../../lib/browser-identity";
-import { setBackend } from "../../lib/client";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import { activateBrowserWorkspace } from "../../lib/client";
+import {
+  listBrowserWorkspaces,
+  loadSessionToken,
+  type BrowserWorkspaceRecord,
+} from "../../lib/browser-workspaces";
+import { BrowserWorkspaceForm } from "./browser-workspace-form";
 import { SetupShell } from "./setup-shell";
 
-const LOCAL_CONFIG_KEY = "gitim-local-config";
-
-interface LocalConfig {
-  remoteUrl: string;
-  corsProxy: string;
-  token: string;
-}
-
-function loadSavedConfig(): Partial<LocalConfig> {
-  try {
-    const raw = localStorage.getItem(LOCAL_CONFIG_KEY);
-    return raw ? (JSON.parse(raw) as Partial<LocalConfig>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveConfig(config: LocalConfig): void {
-  localStorage.setItem(
-    LOCAL_CONFIG_KEY,
-    JSON.stringify({
-      remoteUrl: config.remoteUrl,
-      corsProxy: config.corsProxy,
-    }),
-  );
-}
+type SetupView =
+  | { kind: "list" }
+  | { kind: "new" }
+  | { kind: "reconnect"; record: BrowserWorkspaceRecord };
 
 export function LocalSetup() {
   const setStatus = useConnectionStore((s) => s.setStatus);
@@ -40,69 +24,73 @@ export function LocalSetup() {
   const cloneProgress = useConnectionStore((s) => s.cloneProgress);
   const setCloneProgress = useConnectionStore((s) => s.setCloneProgress);
   const setMode = useConnectionStore((s) => s.setMode);
+  const fetchWorkspaces = useWorkspaceStore((s) => s.fetchAll);
+  const setActive = useWorkspaceStore((s) => s.setActive);
 
-  const saved = loadSavedConfig();
-  const [remoteUrl, setRemoteUrl] = useState(saved.remoteUrl ?? "");
-  const [corsProxy, setCorsProxy] = useState(
-    saved.corsProxy ?? "https://cors.isomorphic-git.org",
-  );
-  const [token, setToken] = useState("");
-  const [inferredHandler, setInferredHandler] = useState<string | null>(null);
+  const [workspaces, setWorkspaces] = useState(() => listBrowserWorkspaces());
+  const [view, setView] = useState<SetupView>({ kind: "list" });
   const [loading, setLoading] = useState(false);
+  const autoOpenAttempted = useRef(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!remoteUrl.trim() || !token.trim()) return;
+  async function openWorkspace(
+    record: BrowserWorkspaceRecord,
+    token?: string,
+  ): Promise<boolean> {
+    const sessionToken = token ?? loadSessionToken(record.id) ?? null;
+    if (!sessionToken) {
+      setView({ kind: "reconnect", record });
+      return false;
+    }
 
     setLoading(true);
     setError(null);
-    setCloneProgress("Connecting...");
+    setCloneProgress("Opening browser workspace...");
 
     try {
-      const backend = new LocalBackend(() => setCloneProgress(null));
-      setCloneProgress("Checking browser runtime...");
-      const preflight = await backend.preflight();
-      if (!preflight.ok) {
-        setError(preflight.error ?? "Browser runtime preflight failed");
-        return;
+      const activation = await activateBrowserWorkspace(record.slug, {
+        token: sessionToken,
+        onSyncReset: () => {
+          void fetchWorkspaces();
+        },
+      });
+      if (activation.error_code === "activation_superseded") return false;
+      if (!activation.ok) {
+        setError(activation.error ?? "Failed to activate browser workspace");
+        return false;
       }
 
-      setCloneProgress("Inferring identity...");
-      const identity = await inferBrowserIdentity({
-        remoteUrl: remoteUrl.trim(),
-        token,
-      });
-      setInferredHandler(identity.handler);
-
-      setCloneProgress("Cloning repository...");
-      const result = await backend.init({
-        remoteUrl: remoteUrl.trim(),
-        corsProxy: corsProxy.trim(),
-        token,
-        handler: identity.handler,
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Init failed");
-        return;
-      }
-
-      await backend.startSync();
-      setBackend(backend);
-      saveConfig({
-        remoteUrl: remoteUrl.trim(),
-        corsProxy: corsProxy.trim(),
-        token,
-      });
+      setWorkspaces(listBrowserWorkspaces());
+      await fetchWorkspaces();
+      setActive(record.slug);
       setLocalReady(true);
       setStatus("ready");
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setCloneProgress(null);
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (autoOpenAttempted.current) return;
+    const firstReady = workspaces.find((record) => loadSessionToken(record.id));
+    if (!firstReady) return;
+
+    autoOpenAttempted.current = true;
+    void openWorkspace(firstReady);
+  }, [workspaces]);
+
+  async function handleConnected(record: BrowserWorkspaceRecord, token: string) {
+    if (await openWorkspace(record, token)) {
+      setWorkspaces(listBrowserWorkspaces());
+    }
+  }
+
+  const formInitial = view.kind === "reconnect" ? view.record : undefined;
+  const showForm = view.kind === "new" || view.kind === "reconnect" || workspaces.length === 0;
 
   return (
     <SetupShell
@@ -110,7 +98,6 @@ export function LocalSetup() {
       title="Browser Mode"
       description="Clone a GitIM repository directly in this browser"
       error={error}
-      loading={loading}
       footer={
         <button
           type="button"
@@ -121,69 +108,66 @@ export function LocalSetup() {
         </button>
       }
     >
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="space-y-2">
-          <label htmlFor="local-remote-url" className="text-sm font-medium text-text-secondary">
-            Git remote URL
-          </label>
-          <input
-            id="local-remote-url"
-            type="url"
-            value={remoteUrl}
-            onChange={(e) => setRemoteUrl(e.target.value)}
-            placeholder="https://github.com/team/im-repo"
-            className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
-            required
+      <div className="space-y-5">
+        {showForm ? (
+          <BrowserWorkspaceForm
+            initial={formInitial}
+            submitLabel={formInitial ? "Reconnect" : "Connect"}
+            onConnected={handleConnected}
+            onCancel={workspaces.length > 0 ? () => setView({ kind: "list" }) : undefined}
           />
-        </div>
+        ) : (
+          <>
+            <div className="space-y-3">
+              {workspaces.map((record) => {
+                const hasToken = loadSessionToken(record.id) !== undefined;
+                return (
+                  <div
+                    key={record.id}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background p-3"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {record.workspace_name}
+                      </p>
+                      <p className="truncate text-xs text-text-muted">{record.remoteUrl}</p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={hasToken ? "default" : "outline"}
+                      disabled={loading}
+                      onClick={() => {
+                        if (hasToken) {
+                          void openWorkspace(record);
+                        } else {
+                          setView({ kind: "reconnect", record });
+                        }
+                      }}
+                    >
+                      {hasToken ? "Open" : "Reconnect"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
 
-        <div className="space-y-2">
-          <label htmlFor="local-token" className="text-sm font-medium text-text-secondary">
-            Personal access token
-          </label>
-          <input
-            id="local-token"
-            type="password"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="github_pat_..."
-            className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
-            required
-          />
-          <p className="text-xs text-text-muted">
-            The token stays in memory for this tab.
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <label htmlFor="local-cors-proxy" className="text-sm font-medium text-text-secondary">
-            CORS proxy
-          </label>
-          <input
-            id="local-cors-proxy"
-            type="url"
-            value={corsProxy}
-            onChange={(e) => setCorsProxy(e.target.value)}
-            placeholder="https://cors.isomorphic-git.org"
-            className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
-          />
-        </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              disabled={loading}
+              onClick={() => setView({ kind: "new" })}
+            >
+              New browser workspace
+            </Button>
+          </>
+        )}
 
         {cloneProgress && (
           <p className="text-sm text-text-muted animate-pulse">{cloneProgress}</p>
         )}
-        {inferredHandler && !cloneProgress && (
-          <p className="text-sm text-text-muted">Signed in as @{inferredHandler}</p>
-        )}
-
-        <button
-          type="submit"
-          disabled={loading || !remoteUrl.trim() || !token.trim()}
-          className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-primary/20"
-        >
-          {loading ? "Connecting..." : "Connect"}
-        </button>
-      </form>
+      </div>
     </SetupShell>
   );
 }
