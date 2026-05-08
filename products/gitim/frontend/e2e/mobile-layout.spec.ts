@@ -590,5 +590,23 @@ test("browser mode preflights worker dependencies before clone", async ({ page }
 
   await expect(page.getByText("Signed in as @flame4")).toBeVisible();
   await expect(page.getByText("HTTP Error: 500 Internal Server Error")).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const registry = JSON.parse(
+          localStorage.getItem("gitim-browser-workspaces-v2") ??
+            '{"workspaces":[]}',
+        ) as { workspaces?: unknown[] };
+        const tokenKeys = Array.from({ length: sessionStorage.length }, (_, index) =>
+          sessionStorage.key(index),
+        ).filter((key) => key?.startsWith("gitim-browser-token:"));
+
+        return {
+          workspaces: registry.workspaces?.length ?? 0,
+          tokenKeys: tokenKeys.length,
+        };
+      }),
+    )
+    .toEqual({ workspaces: 0, tokenKeys: 0 });
   expect(pageErrors.join("\n")).not.toMatch(/Buffer|TextEncoder|createHash|crypto/);
 });

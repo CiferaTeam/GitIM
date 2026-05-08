@@ -83,10 +83,15 @@ export function LocalSetup() {
     void openWorkspace(firstReady);
   }, [workspaces]);
 
-  async function handleConnected(record: BrowserWorkspaceRecord, token: string) {
+  async function handleConnected(
+    record: BrowserWorkspaceRecord,
+    token: string,
+  ): Promise<boolean> {
     if (await openWorkspace(record, token)) {
       setWorkspaces(listBrowserWorkspaces());
+      return true;
     }
+    return false;
   }
 
   const formInitial = view.kind === "reconnect" ? view.record : undefined;

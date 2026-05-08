@@ -2,8 +2,12 @@ import { type FormEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { inferBrowserIdentity } from "../../lib/browser-identity";
 import {
+  clearSessionToken,
   createBrowserWorkspace,
+  forgetBrowserWorkspace,
+  loadBrowserWorkspaces,
   saveSessionToken,
+  saveBrowserWorkspaces,
   updateBrowserWorkspace,
   type BrowserWorkspaceRecord,
 } from "../../lib/browser-workspaces";
@@ -11,7 +15,7 @@ import {
 interface BrowserWorkspaceFormProps {
   initial?: BrowserWorkspaceRecord;
   submitLabel?: string;
-  onConnected: (record: BrowserWorkspaceRecord, token: string) => Promise<void> | void;
+  onConnected: (record: BrowserWorkspaceRecord, token: string) => Promise<boolean> | boolean;
   onCancel?: () => void;
 }
 
@@ -37,6 +41,7 @@ export function BrowserWorkspaceForm({
 
     setLoading(true);
     setError(null);
+    let savedRecord: BrowserWorkspaceRecord | undefined;
 
     try {
       const identity = await inferBrowserIdentity({
@@ -58,10 +63,17 @@ export function BrowserWorkspaceForm({
       if (!record) {
         throw new Error("Browser workspace was not found");
       }
+      savedRecord = record;
 
       saveSessionToken(record.id, token.trim());
-      await onConnected(record, token.trim());
+      const connected = await onConnected(record, token.trim());
+      if (!connected) {
+        rollbackWorkspace(record, initial);
+      }
     } catch (err) {
+      if (savedRecord) {
+        rollbackWorkspace(savedRecord, initial);
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
@@ -167,5 +179,26 @@ export function BrowserWorkspaceForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function rollbackWorkspace(
+  record: BrowserWorkspaceRecord,
+  previous?: BrowserWorkspaceRecord,
+): void {
+  if (!previous) {
+    forgetBrowserWorkspace(record.id);
+    return;
+  }
+
+  clearSessionToken(record.id);
+  restoreBrowserWorkspace(previous);
+}
+
+function restoreBrowserWorkspace(record: BrowserWorkspaceRecord): void {
+  saveBrowserWorkspaces(
+    loadBrowserWorkspaces().map((workspace) =>
+      workspace.id === record.id ? record : workspace,
+    ),
   );
 }
