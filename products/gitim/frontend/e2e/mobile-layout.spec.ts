@@ -614,10 +614,6 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
   await expect(page.getByText("hello browser cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
 
-  await page.getByTestId("workspace-switcher-trigger").evaluate((trigger) => {
-    const wrapper = trigger.parentElement;
-    if (wrapper instanceof HTMLElement) wrapper.style.display = "block";
-  });
   await page.getByTestId("workspace-switcher-trigger").click();
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 

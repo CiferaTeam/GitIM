@@ -25,10 +25,10 @@ export function AppShell({ children }: AppShellProps) {
       className="h-screen flex flex-col bg-background text-foreground"
       style={{ height: "100dvh" }}
     >
-      {/* Top bar — desktop full, mobile minimal */}
-      <header className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
+      {/* Top bar */}
+      <header className="h-12 border-b border-border flex items-center px-2 sm:px-4 justify-between gap-2 shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
         {/* Left: logo + workspace switcher + connection status */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-1 items-center gap-1.5 min-w-0 md:flex-none md:gap-2">
           <span className="font-bold text-sm tracking-tight text-foreground shrink-0">
             gitim
           </span>
@@ -41,7 +41,7 @@ export function AppShell({ children }: AppShellProps) {
             ].join(" ")}
             title={connected ? "Connected" : "Disconnected"}
           />
-          <div className="ml-1 min-w-0 hidden md:block">
+          <div className="ml-0.5 min-w-0 flex-1 md:ml-1 md:flex-none">
             <WorkspaceSwitcher />
           </div>
         </div>
@@ -52,7 +52,7 @@ export function AppShell({ children }: AppShellProps) {
         </div>
 
         {/* Right: theme toggle + twitter + update indicator + help + current user */}
-        <div className="flex min-w-0 items-center justify-end gap-2 md:min-w-[140px]">
+        <div className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:min-w-[140px]">
           <ThemeToggle />
           <a
             href="https://x.com/arknights60"
@@ -82,7 +82,7 @@ export function AppShell({ children }: AppShellProps) {
           </button>
           {currentUser ? (
             <span
-              className="max-w-[36vw] truncate text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border md:max-w-none"
+              className="max-w-[22vw] truncate text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border md:max-w-none"
               title={`Human handler: @${currentUser}`}
             >
               @{currentUser}

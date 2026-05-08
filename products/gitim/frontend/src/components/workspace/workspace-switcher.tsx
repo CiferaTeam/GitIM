@@ -155,13 +155,13 @@ export function WorkspaceSwitcher() {
             variant="ghost"
             size="sm"
             data-testid="workspace-switcher-trigger"
-            className="gap-1.5 text-foreground hover:bg-surface-hover max-w-[240px]"
+            className="w-full min-w-0 gap-1.5 text-foreground hover:bg-surface-hover md:w-auto md:max-w-[240px]"
           >
             {active && <ProviderIcon provider={active.provider} />}
             <span className="truncate text-sm font-medium">{label}</span>
             {headCommit && (
               <span
-                className="text-[10px] text-text-muted font-mono shrink-0"
+                className="hidden text-[10px] text-text-muted font-mono shrink-0 sm:inline"
                 title={`HEAD ${headCommit}`}
               >
                 @{headCommit.slice(0, 7)}
