@@ -53,6 +53,7 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
             channels: [
               { name: "general", kind: "channel", members: ["lewis"] },
               { name: "alice--lewis", kind: "dm", members: ["alice", "lewis"] },
+              { name: "bob--carol", kind: "dm", members: ["bob", "carol"] },
             ],
           },
         },
@@ -60,7 +61,7 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/users`) {
-      await route.fulfill({ json: { ok: true, data: { users: ["lewis", "alice"] } } });
+      await route.fulfill({ json: { ok: true, data: { users: ["lewis", "alice", "bob", "carol"] } } });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/agents`) {
@@ -373,8 +374,11 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await expect(page.getByRole("dialog", { name: "Cards in #general" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Open conversations" }).click();
-  await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+  const drawer = page.locator(".fixed.inset-0.z-50").first();
+  await expect(drawer.getByRole("button", { name: "general", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+  await expect(drawer.getByText("Others", { exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "bob ↔ carol", exact: true })).toBeVisible();
 });
 
 test("mobile chat Enter inserts newline and send button sends", async ({ page }) => {

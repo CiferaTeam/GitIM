@@ -9,7 +9,7 @@ function dmDisplayName(channel: Channel, currentUser: string): string {
   const [a, b] = parts;
   if (a === currentUser) return b;
   if (b === currentUser) return a;
-  return `${a} / ${b}`;
+  return `${a} ↔ ${b}`;
 }
 
 function isMyDm(channel: Channel, currentUser: string): boolean {
@@ -38,12 +38,39 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
       if (!aMy && bMy) return 1;
       return a.name.localeCompare(b.name);
     });
+  const myDmChannels = dmChannels.filter((c) => isMyDm(c, currentUser));
+  const otherDmChannels = dmChannels.filter((c) => !isMyDm(c, currentUser));
 
   if (!open) return null;
 
   function handleSelect(name: string) {
     onChannelSelect(name);
     onClose();
+  }
+
+  function renderDmButton(ch: Channel) {
+    const label = dmDisplayName(ch, currentUser);
+    return (
+      <button
+        key={ch.name}
+        onClick={() => handleSelect(ch.name)}
+        className={cn(
+          "w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-colors active:scale-[0.98]",
+          currentChannel === ch.name
+            ? "bg-primary/15 text-primary font-medium"
+            : "text-text-secondary hover:bg-surface/60 hover:text-foreground",
+          ch.unreadCount > 0 && currentChannel !== ch.name && "text-foreground font-medium"
+        )}
+      >
+        <AtSign className="size-4 shrink-0" />
+        <span className="truncate flex-1 text-sm">{label}</span>
+        {ch.unreadCount > 0 && (
+          <span className="text-[11px] px-2 py-0.5 rounded-full font-mono shrink-0 bg-surface-hover text-foreground border border-border">
+            {ch.unreadCount}
+          </span>
+        )}
+      </button>
+    );
   }
 
   return (
@@ -117,30 +144,15 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
               Direct Messages
             </p>
             <div className="space-y-0.5">
-              {dmChannels.map((ch) => {
-                const label = dmDisplayName(ch, currentUser);
-                return (
-                  <button
-                    key={ch.name}
-                    onClick={() => handleSelect(ch.name)}
-                    className={cn(
-                      "w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-colors active:scale-[0.98]",
-                      currentChannel === ch.name
-                        ? "bg-primary/15 text-primary font-medium"
-                        : "text-text-secondary hover:bg-surface/60 hover:text-foreground",
-                      ch.unreadCount > 0 && currentChannel !== ch.name && "text-foreground font-medium"
-                    )}
-                  >
-                    <AtSign className="size-4 shrink-0" />
-                    <span className="truncate flex-1 text-sm">{label}</span>
-                    {ch.unreadCount > 0 && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full font-mono shrink-0 bg-surface-hover text-foreground border border-border">
-                        {ch.unreadCount}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+              {myDmChannels.map(renderDmButton)}
+              {otherDmChannels.length > 0 && myDmChannels.length > 0 && (
+                <div className="pt-2 pb-0.5 px-3">
+                  <p className="text-[10px] font-semibold uppercase text-text-faint tracking-wider">
+                    Others
+                  </p>
+                </div>
+              )}
+              {otherDmChannels.map(renderDmButton)}
             </div>
           </div>
         </div>

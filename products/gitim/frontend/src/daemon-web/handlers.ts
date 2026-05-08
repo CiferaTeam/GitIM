@@ -295,11 +295,6 @@ export async function channels(): Promise<ApiResponse> {
 
   for (const [name, meta] of s.channels) {
     const isDm = name.includes("--");
-    // For DMs, only show if current user is a participant
-    if (isDm) {
-      const parts = name.split("--");
-      if (!parts.includes(s.me.handler)) continue;
-    }
     // For channels, only show if current user is a member
     if (!isDm && meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
       continue;

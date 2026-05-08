@@ -193,7 +193,7 @@ function seedState() {
     "card.meta.yaml",
     "discussion.thread",
   ]);
-  dirs.set("/repo/dm", ["alice--lewis.thread"]);
+  dirs.set("/repo/dm", ["alice--lewis.thread", "cfo--flame4.thread"]);
   dirs.set("/repo/users", ["alice.meta.yaml", "lewis.meta.yaml"]);
 
   files.set(
@@ -238,6 +238,7 @@ function seedState() {
     "display_name: Lewis\nrole: member\nintroduction: hi\n",
   );
   files.set("/repo/dm/alice--lewis.thread", dmThread);
+  files.set("/repo/dm/cfo--flame4.thread", dmThread);
 
   initState({
     repoDir: "/repo",
@@ -268,6 +269,12 @@ describe("daemon-web handlers", () => {
         kind: "dm",
         unreadCount: 0,
         members: ["alice", "lewis"],
+      },
+      {
+        name: "cfo--flame4",
+        kind: "dm",
+        unreadCount: 0,
+        members: ["cfo", "flame4"],
       },
     ]);
   });
@@ -378,6 +385,12 @@ describe("daemon-web handlers", () => {
         unreadCount: 0,
         members: ["alice", "lewis"],
       },
+      {
+        name: "cfo--flame4",
+        kind: "dm",
+        unreadCount: 0,
+        members: ["cfo", "flame4"],
+      },
     ]);
 
     const archived = await listArchivedChannels();
@@ -449,6 +462,12 @@ describe("daemon-web handlers", () => {
         kind: "dm",
         unreadCount: 0,
         members: ["alice", "lewis"],
+      },
+      {
+        name: "cfo--flame4",
+        kind: "dm",
+        unreadCount: 0,
+        members: ["cfo", "flame4"],
       },
     ]);
 
