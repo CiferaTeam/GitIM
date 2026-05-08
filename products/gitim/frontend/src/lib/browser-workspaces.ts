@@ -168,6 +168,7 @@ export function migrateLegacyBrowserWorkspace(): BrowserWorkspaceRecord | undefi
 }
 
 export function listBrowserWorkspaces(): BrowserWorkspaceRecord[] {
+  migrateLegacyBrowserWorkspace();
   return loadBrowserWorkspaces();
 }
 
@@ -256,6 +257,9 @@ export function forgetBrowserWorkspace(workspaceId: string): void {
   saveBrowserWorkspaces(
     loadBrowserWorkspaces().filter((workspace) => workspace.id !== workspaceId),
   );
+  if (workspaceId === "legacy") {
+    localStorage.removeItem(LEGACY_LOCAL_CONFIG_KEY);
+  }
   clearSessionToken(workspaceId);
 }
 
@@ -267,6 +271,7 @@ export function clearAllBrowserWorkspaces(): void {
     }
   }
   localStorage.removeItem(BROWSER_REGISTRY_KEY);
+  localStorage.removeItem(LEGACY_LOCAL_CONFIG_KEY);
 }
 
 export async function wipeBrowserWorkspaceCache(idOrSlug: string): Promise<void> {
@@ -280,7 +285,7 @@ export async function wipeBrowserWorkspaceCache(idOrSlug: string): Promise<void>
 
 export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
   const fsNames = new Set<string>([
-    ...loadBrowserWorkspaces().map((workspace) => workspace.storage.fsName),
+    ...listBrowserWorkspaces().map((workspace) => workspace.storage.fsName),
     LEGACY_FS_NAME,
   ]);
 

@@ -19,6 +19,7 @@ import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
 import { runSync } from "./sync";
+import { isAuthFailure } from "./auth-errors";
 import initWasm, {
   parseCardMeta,
   stringifyCardMeta,
@@ -39,6 +40,7 @@ type ApiResponse = {
   ok: boolean;
   data?: Record<string, unknown>;
   error?: string;
+  error_code?: string;
 };
 
 type RawCardMeta = Omit<Card, "card_id">;
@@ -98,11 +100,25 @@ function errorMessage(e: unknown): string {
   return String((e as Error).message ?? e);
 }
 
-async function syncAfterCommit(): Promise<{ status: "pushed" | "commit_only"; error?: string }> {
+async function syncAfterCommit(): Promise<{
+  status: "pushed" | "commit_only";
+  error?: string;
+  error_code?: string;
+  needs_token?: boolean;
+}> {
   try {
     await runSync({ forceNewCycle: true });
     return { status: "pushed" };
   } catch (e) {
+    if (isAuthFailure(e)) {
+      setState({ token: null, syncStatus: "reconnect_required" });
+      return {
+        status: "commit_only",
+        error: errorMessage(e),
+        error_code: "reconnect_required",
+        needs_token: true,
+      };
+    }
     return { status: "commit_only", error: errorMessage(e) };
   }
 }
@@ -324,6 +340,19 @@ export async function poll(since?: string): Promise<ApiResponse> {
     setState({ headCommit: currentHead });
     return ok({ commit_id: currentHead, changes });
   } catch (e) {
+    if (isAuthFailure(e)) {
+      setState({ token: null, syncStatus: "reconnect_required" });
+      return {
+        ok: true,
+        data: {
+          commit_id: s.headCommit,
+          changes: [],
+          sync_enabled: false,
+          needs_token: true,
+        },
+        error_code: "reconnect_required",
+      };
+    }
     return err(String((e as Error).message ?? e));
   }
 }

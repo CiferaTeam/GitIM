@@ -5,6 +5,7 @@
 import * as gitOps from "./git";
 import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
+import { isAuthFailure } from "./auth-errors";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -137,7 +138,11 @@ async function runSyncOnce(): Promise<void> {
     setState({ headCommit: newHead, syncStatus: "idle" });
     postMessage({ type: "sync_reset" });
   } catch (e) {
-    setState({ syncStatus: "error" });
+    if (isAuthFailure(e)) {
+      setState({ token: null, syncStatus: "reconnect_required" });
+    } else {
+      setState({ syncStatus: "error" });
+    }
     console.error("[daemon-web] sync error:", e);
     throw e;
   }

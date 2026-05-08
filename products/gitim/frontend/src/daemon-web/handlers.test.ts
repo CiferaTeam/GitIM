@@ -400,6 +400,28 @@ describe("daemon-web handlers", () => {
     });
   });
 
+  it("turns auth failures during poll into cached reconnect state", async () => {
+    vi.mocked(await import("./git")).fetchOrigin.mockRejectedValueOnce(
+      new Error("HTTP Error: 401 Unauthorized"),
+    );
+    setState({ headCommit: "cached-head" });
+
+    const res = await poll("cached-head");
+
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        commit_id: "cached-head",
+        changes: [],
+        sync_enabled: false,
+        needs_token: true,
+      },
+      error_code: "reconnect_required",
+    });
+    expect(getState().token).toBeNull();
+    expect(getState().syncStatus).toBe("reconnect_required");
+  });
+
   it("lists channels from channels/*.meta.yaml and dms from dm/*.thread", async () => {
     const res = await channels();
 
@@ -651,7 +673,11 @@ describe("daemon-web handlers", () => {
       line_number: 3,
       status: "commit_only",
       error: "HTTP Error: 401 Unauthorized",
+      error_code: "reconnect_required",
+      needs_token: true,
     });
+    expect(getState().token).toBeNull();
+    expect(getState().syncStatus).toBe("reconnect_required");
     expect(files.get("/repo/channels/general.thread")).toContain("from mobile");
     expect(commits.at(-1)?.message).toContain("L000003");
   });

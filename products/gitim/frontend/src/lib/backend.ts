@@ -11,6 +11,7 @@ import type {
   WorkerResponse,
   WorkerEvent,
 } from "../daemon-web/worker";
+import { clearSessionToken } from "./browser-workspaces";
 
 interface LocalBackendConfig {
   workspaceId: string;
@@ -35,6 +36,15 @@ interface LegacyLocalInitConfig {
 }
 
 const LOCAL_BACKEND_CLOSED_ERROR = "browser worker session closed";
+
+function responseNeedsReconnect(response: ApiResponse): boolean {
+  const data = response.data as Record<string, unknown> | undefined;
+  return (
+    response.error_code === "reconnect_required" ||
+    data?.error_code === "reconnect_required" ||
+    data?.needs_token === true
+  );
+}
 
 export interface Backend {
   health(): Promise<ApiResponse>;
@@ -253,7 +263,11 @@ export class LocalBackend implements Backend {
         if (resp.error) {
           handler.resolve({ ok: false, error: resp.error });
         } else {
-          handler.resolve(resp.result as ApiResponse);
+          const result = resp.result as ApiResponse;
+          if (responseNeedsReconnect(result)) {
+            clearSessionToken(this.workspaceId);
+          }
+          handler.resolve(result);
         }
       }
     };

@@ -3,10 +3,12 @@ import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
+import { workspaceIdentity } from "../../lib/workspace-key";
 import { Button } from "../ui/button";
 import { ChannelCardDrawer } from "../cards/channel-card-drawer";
 import { MobileSidebarDrawer } from "../mobile/mobile-sidebar-drawer";
@@ -40,7 +42,9 @@ function syncFailure(data: Record<string, unknown> | undefined): string | null {
 }
 
 export function ChatLayout() {
+  const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
@@ -78,6 +82,12 @@ export function ChatLayout() {
 
   const currentChannelData = currentChannel
     ? channels.find((c) => c.name === currentChannel)
+    : null;
+  const activeWorkspace = activeSlug
+    ? workspaces.find((workspace) => workspace.slug === activeSlug)
+    : undefined;
+  const workspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
     : null;
   // An archived channel is one the user opens from the Archived section — it
   // never shows up in the active `channels` list. Read-only view: message
@@ -441,6 +451,7 @@ export function ChatLayout() {
         />
         {currentChannel && !isArchivedView && (
           <InputArea
+            workspaceKey={workspaceKey}
             scopeKey={currentChannel}
             replyTo={replyTo}
             onReplyToChange={setReplyTo}

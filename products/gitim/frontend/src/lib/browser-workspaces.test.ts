@@ -84,6 +84,23 @@ describe("browser workspaces", () => {
     expect(loadBrowserWorkspaces()).toHaveLength(1);
   });
 
+  it("lists legacy browser config through the v2 registry migration", () => {
+    localStorage.setItem(
+      "gitim-local-config",
+      JSON.stringify({
+        remoteUrl: "https://github.com/acme/legacy",
+      }),
+    );
+
+    expect(listBrowserWorkspaceSummaries()).toEqual([
+      expect.objectContaining({
+        id: "legacy",
+        slug: "browser-legacy",
+        path: "indexeddb://gitim/repo",
+      }),
+    ]);
+  });
+
   it("keeps session tokens outside the registry", () => {
     const ws = createBrowserWorkspace({
       remoteUrl: "https://github.com/acme/room",
@@ -111,6 +128,16 @@ describe("browser workspaces", () => {
 
     expect(getBrowserWorkspace(ws.id)).toBeUndefined();
     expect(loadSessionToken(ws.id)).toBeUndefined();
+  });
+
+  it("forgetting legacy removes the legacy config so it does not reappear", () => {
+    const legacy = migrateLegacyBrowserWorkspaceFromConfig();
+
+    forgetBrowserWorkspace(legacy.id);
+
+    expect(loadBrowserWorkspaces()).toEqual([]);
+    expect(localStorage.getItem("gitim-local-config")).toBeNull();
+    expect(listBrowserWorkspaceSummaries()).toEqual([]);
   });
 
   it("gets a browser workspace by id or slug", () => {
@@ -167,11 +194,16 @@ describe("browser workspaces", () => {
       workspaceName: "Phone",
     });
     saveSessionToken(ws.id, "github_pat_secret");
+    localStorage.setItem(
+      "gitim-local-config",
+      JSON.stringify({ remoteUrl: "https://github.com/acme/legacy" }),
+    );
 
     clearAllBrowserWorkspaces();
 
     expect(loadBrowserWorkspaces()).toEqual([]);
     expect(loadSessionToken(ws.id)).toBeUndefined();
+    expect(localStorage.getItem("gitim-local-config")).toBeNull();
   });
 });
 

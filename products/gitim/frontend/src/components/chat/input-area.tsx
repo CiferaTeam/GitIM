@@ -5,6 +5,8 @@ import { MentionPopup } from "./mention-popup";
 import { CornerDownLeft, SendHorizontal, X } from "lucide-react";
 
 interface InputAreaProps {
+  /** Workspace identity from workspaceIdentity(mode, activeWorkspace). */
+  workspaceKey: string | null;
   /** Unique key for this input's scope — used for localStorage draft keying.
    *  Channel scope: the channel display name.
    *  Card scope: "card:<channel>/<card_id>".
@@ -21,8 +23,8 @@ interface InputAreaProps {
 const MAX_HEIGHT = 200;
 const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
 
-function draftKey(scopeKey: string) {
-  return `gitim:draft:${scopeKey}`;
+function draftKey(workspaceKey: string, scopeKey: string) {
+  return `gitim:draft:${workspaceKey}:${scopeKey}`;
 }
 
 function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean) {
@@ -35,6 +37,7 @@ function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean)
 }
 
 export function InputArea({
+  workspaceKey,
   scopeKey,
   replyTo,
   onReplyToChange,
@@ -56,12 +59,12 @@ export function InputArea({
 
   // Restore draft when scope changes
   useEffect(() => {
-    if (!scopeKey) {
+    if (!workspaceKey || !scopeKey) {
       setText("");
       return;
     }
-    setText(localStorage.getItem(draftKey(scopeKey)) ?? "");
-  }, [scopeKey]);
+    setText(localStorage.getItem(draftKey(workspaceKey, scopeKey)) ?? "");
+  }, [workspaceKey, scopeKey]);
 
   // Auto-resize textarea up to MAX_HEIGHT
   useEffect(() => {
@@ -71,8 +74,9 @@ export function InputArea({
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
 
-  if (disabled || !scopeKey) return null;
-  // After the guard above, scopeKey is non-null for the rest of render.
+  if (disabled || !workspaceKey || !scopeKey) return null;
+  // After the guard above, workspaceKey and scopeKey are non-null for the rest of render.
+  const activeWorkspaceKey: string = workspaceKey;
   const activeScopeKey: string = scopeKey;
   const canSend = text.trim().length > 0 && !sending;
 
@@ -92,7 +96,7 @@ export function InputArea({
     const value = e.target.value;
     setText(value);
     setError(null);
-    localStorage.setItem(draftKey(activeScopeKey), value);
+    localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
@@ -117,7 +121,7 @@ export function InputArea({
         onReplyToChange(savedReplyTo);
         setError(res.error ?? "Send failed");
       } else {
-        localStorage.removeItem(draftKey(activeScopeKey));
+        localStorage.removeItem(draftKey(activeWorkspaceKey, activeScopeKey));
       }
     } catch (err) {
       setText(savedText);

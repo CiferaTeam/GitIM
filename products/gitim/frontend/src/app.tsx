@@ -216,6 +216,14 @@ export default function App() {
       }
       setHeadCommit(sinceRef.current);
 
+      if (mode === "local" && pollRes.data.needs_token === true) {
+        setConnected(false);
+        setConnectionStatus("disconnected");
+        setConnectionError("Reconnect token to sync this browser workspace.");
+        await fetchWorkspaces();
+        return;
+      }
+
       markConnected();
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
@@ -346,6 +354,10 @@ export default function App() {
     mergeCards,
     addCardMessages,
     setHeadCommit,
+    setConnected,
+    setConnectionStatus,
+    setConnectionError,
+    fetchWorkspaces,
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,

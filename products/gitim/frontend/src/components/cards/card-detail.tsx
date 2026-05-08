@@ -13,10 +13,12 @@ import {
   selectCardById,
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
+import { workspaceIdentity } from "@/lib/workspace-key";
 import { CardMetaBar } from "./card-meta-bar";
 
 type LoadStatus = "loading" | "ok" | "not_found" | "error";
@@ -42,7 +44,9 @@ export function CardDetail() {
   const channel = params.channel ?? "";
   const cardId = params.card_id ?? "";
 
+  const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
   const currentUser = useChatStore((s) => s.currentUser);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
@@ -68,6 +72,12 @@ export function CardDetail() {
 
   const pathKey = useMemo(() => cardPathKey(channel, cardId), [channel, cardId]);
   const scopeKey = useMemo(() => cardScopeKey(channel, cardId), [channel, cardId]);
+  const activeWorkspace = activeSlug
+    ? workspaces.find((workspace) => workspace.slug === activeSlug)
+    : undefined;
+  const workspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
+    : null;
 
   const messages = useCardStore(
     (s) => s.cardMessagesByPath[pathKey] ?? EMPTY_MESSAGES,
@@ -375,6 +385,7 @@ export function CardDetail() {
 
       {!archived && (
         <InputArea
+          workspaceKey={workspaceKey}
           scopeKey={scopeKey}
           replyTo={replyTo}
           onReplyToChange={setReplyTo}

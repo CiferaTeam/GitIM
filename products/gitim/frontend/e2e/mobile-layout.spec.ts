@@ -658,9 +658,39 @@ test("browser mode asks to reconnect when registered workspace has no session to
   await expect(page.getByText("Browser Mode")).toBeVisible();
   await expect(page.getByText("Phone", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reset cache for Phone" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Forget Phone" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start over" })).toBeVisible();
 
   await page.getByRole("button", { name: "Reconnect" }).click();
   await expect(page.getByLabel("Personal access token")).toBeVisible();
+});
+
+test("browser mode setup can forget cached workspace before activation", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone],
+    activeSlug: phone.slug,
+  });
+
+  await page.goto("/");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Forget Phone" }).click();
+
+  await expect(page.getByText("Phone", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Git remote URL")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => localStorage.getItem("gitim-browser-workspaces-v2")),
+    )
+    .toBe(JSON.stringify({ version: 2, workspaces: [] }));
 });
 
 test("browser mode mobile app keeps the Cards tab after connecting", async ({ page }) => {

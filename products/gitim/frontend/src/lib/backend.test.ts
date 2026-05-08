@@ -36,6 +36,8 @@ describe("LocalBackend", () => {
   beforeEach(() => {
     StubWorker.instances = [];
     vi.stubGlobal("Worker", StubWorker);
+    localStorage.clear();
+    sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -185,5 +187,43 @@ describe("LocalBackend", () => {
       result: { ok: true, data: "next" },
     });
     await expect(next).resolves.toEqual({ ok: true, data: "next" });
+  });
+
+  it("clears the session token when the worker reports reconnect required", async () => {
+    const { loadSessionToken, saveSessionToken } = await import("./browser-workspaces");
+    saveSessionToken("ws_current", "github_pat_stale");
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+
+    const result = backend.poll("old-head");
+
+    worker.emit({
+      id: 1,
+      workspaceId: "ws_current",
+      generation: 2,
+      result: {
+        ok: true,
+        data: {
+          commit_id: "old-head",
+          changes: [],
+          needs_token: true,
+        },
+        error_code: "reconnect_required",
+      },
+    });
+
+    await expect(result).resolves.toEqual({
+      ok: true,
+      data: {
+        commit_id: "old-head",
+        changes: [],
+        needs_token: true,
+      },
+      error_code: "reconnect_required",
+    });
+    expect(loadSessionToken("ws_current")).toBeUndefined();
   });
 });
