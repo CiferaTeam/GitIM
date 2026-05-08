@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
+import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
 import { Toaster } from "sonner";
@@ -115,6 +116,7 @@ export default function App() {
   const localReady = useConnectionStore((s) => s.localReady);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
+  const setConnectionError = useConnectionStore((s) => s.setError);
   const isMobile = useIsMobile();
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -356,6 +358,9 @@ export default function App() {
     if (!activeSlug) return;
     if (mode === "remote" && !port) return;
     if (mode === "local" && !localReady) return;
+    const activeWorkspace = workspaces.find((w) => w.slug === activeSlug);
+    if (!activeWorkspace) return;
+    const workspaceKey = workspaceIdentity(mode, activeWorkspace);
 
     // Reset per-workspace store slices on switch so stale data from the
     // previous workspace doesn't leak into the new one. Each store owns
@@ -378,6 +383,22 @@ export default function App() {
     let pollHandle: ReturnType<typeof setTimeout> | undefined;
 
     async function init(slug: string) {
+      if (mode === "local") {
+        const activation = await client.activateBrowserWorkspace(slug, {
+          onSyncReset: () => {
+            clearCursor(workspaceKey);
+            sinceRef.current = undefined;
+            resetChatForSwitch();
+            resetAgentsForSwitch();
+            resetCardsForSwitch();
+          },
+        });
+        if (!activation.ok) {
+          setConnectionError(activation.error ?? "Failed to activate browser workspace");
+          return;
+        }
+      }
+
       const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
           client.me(slug),
@@ -391,9 +412,9 @@ export default function App() {
 
       if (cancelled) return;
 
-      // Restore cursor from localStorage keyed by slug (stable identifier).
-      workspaceRef.current = slug;
-      sinceRef.current = loadCursor(slug);
+      // Restore cursor from localStorage keyed by runtime or browser workspace identity.
+      workspaceRef.current = workspaceKey;
+      sinceRef.current = loadCursor(workspaceKey);
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data)
@@ -450,6 +471,7 @@ export default function App() {
     mode,
     localReady,
     activeSlug,
+    workspaces,
     setCurrentUser,
     setChannels,
     setUsers,
@@ -459,6 +481,7 @@ export default function App() {
     resetChatForSwitch,
     resetAgentsForSwitch,
     resetCardsForSwitch,
+    setConnectionError,
     markConnected,
     runPoll,
   ]);

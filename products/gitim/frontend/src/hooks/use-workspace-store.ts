@@ -1,16 +1,21 @@
 import { create } from "zustand";
 import * as client from "@/lib/client";
+import { activeWorkspaceStorageKey } from "@/lib/workspace-key";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import type { CreateWorkspaceRequest, WorkspaceSummary } from "@/lib/types";
 
-const ACTIVE_SLUG_KEY = "gitim-active-workspace";
+function currentActiveKey(): string {
+  return activeWorkspaceStorageKey(useConnectionStore.getState().mode);
+}
 
 function loadStoredSlug(): string | null {
-  return localStorage.getItem(ACTIVE_SLUG_KEY);
+  return localStorage.getItem(currentActiveKey());
 }
 
 function persistSlug(slug: string | null) {
-  if (slug) localStorage.setItem(ACTIVE_SLUG_KEY, slug);
-  else localStorage.removeItem(ACTIVE_SLUG_KEY);
+  const key = currentActiveKey();
+  if (slug) localStorage.setItem(key, slug);
+  else localStorage.removeItem(key);
 }
 
 interface WorkspaceStore {
@@ -48,7 +53,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       return;
     }
     const workspaces = res.data.workspaces ?? [];
-    const current = get().activeSlug;
+    const current = loadStoredSlug();
     let nextActive = current;
     if (!current || !workspaces.some((w) => w.slug === current)) {
       nextActive = workspaces[0]?.slug ?? null;
