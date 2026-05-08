@@ -12,6 +12,7 @@ import {
   removeFile,
   removeDir,
   configureFs,
+  getActiveFsName,
   type StorageConfig,
 } from "./storage";
 import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
@@ -141,11 +142,13 @@ export async function init(config: {
   const storage = config.storage ?? { fsName: "gitim", repoDir: "/repo" as const };
   const workspaceId = config.workspaceId ?? "local";
   const dir = storage.repoDir;
+  const previousFsName = getActiveFsName();
   configureFs(storage.fsName);
 
   try {
     const repoExists = await exists(`${dir}/.git`);
     if (!repoExists && !config.token) {
+      configureFs(previousFsName);
       return errCode(
         "Reconnect token to clone this browser workspace.",
         "reconnect_required",
@@ -168,6 +171,7 @@ export async function init(config: {
       if (meta.display_name) displayName = meta.display_name as string;
     }
 
+    const head = await gitOps.resolveHead(dir);
     const s = initState({
       workspaceId,
       repoDir: dir,
@@ -180,8 +184,6 @@ export async function init(config: {
     });
     s.defaultBranch = branch;
 
-    // Cache initial state
-    const head = await gitOps.resolveHead(dir);
     setState({ headCommit: head });
     await refreshChannelsCache();
     await refreshUsersCache();
@@ -193,6 +195,7 @@ export async function init(config: {
       needs_token: !config.token,
     });
   } catch (e) {
+    configureFs(previousFsName);
     return err(String((e as Error).message ?? e));
   }
 }

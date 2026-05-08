@@ -4,6 +4,7 @@ const files = vi.hoisted(() => new Map<string, string>());
 const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
 const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
+const activeFsName = vi.hoisted(() => ({ value: "gitim" }));
 
 function parentDir(path: string): string | null {
   const idx = path.lastIndexOf("/");
@@ -117,7 +118,10 @@ vi.mock("./storage", () => ({
     dirs.delete(path);
     unregisterPath(path);
   }),
-  configureFs: vi.fn(() => undefined),
+  configureFs: vi.fn((fsName: string) => {
+    activeFsName.value = fsName;
+  }),
+  getActiveFsName: vi.fn(() => activeFsName.value),
 }));
 
 vi.mock("./git", () => ({
@@ -174,6 +178,7 @@ import {
   unarchiveCard,
 } from "./handlers";
 import { initState, setState } from "./state";
+import { getActiveFsName } from "./storage";
 
 const generalThread =
   "[L000001][P000000][@alice][20260317T120000Z] hello\n" +
@@ -186,6 +191,7 @@ function seedState() {
   files.clear();
   dirs.clear();
   commits.length = 0;
+  activeFsName.value = "gitim";
   runSyncMock.mockReset();
   runSyncMock.mockResolvedValue(undefined);
 
@@ -277,6 +283,26 @@ describe("daemon-web handlers", () => {
       sync_enabled: false,
       needs_token: true,
     }));
+  });
+
+  it("restores the previous fs name when init needs a token for an absent repo", async () => {
+    activeFsName.value = "gitim-ws-existing";
+
+    const res = await init({
+      workspaceId: "ws_absent",
+      remoteUrl: "https://github.com/acme/absent",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-absent", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Reconnect token to clone this browser workspace.",
+      error_code: "reconnect_required",
+    });
+    expect(getActiveFsName()).toBe("gitim-ws-existing");
   });
 
   it("requires reconnect token before browser send when token is missing", async () => {
