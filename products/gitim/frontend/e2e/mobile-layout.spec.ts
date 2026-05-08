@@ -141,7 +141,13 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
 
 async function stubBrowserModeWorker(page: Page) {
   await page.addInitScript(() => {
-    type RpcRequest = { id: number; method: string; args: unknown[] };
+    type RpcRequest = {
+      id: number;
+      method: string;
+      args: unknown[];
+      workspaceId?: string;
+      generation?: number;
+    };
     type RpcResult = { ok: boolean; data?: unknown; error?: string };
     type Card = {
       card_id: string;
@@ -325,7 +331,12 @@ async function stubBrowserModeWorker(page: Page) {
         queueMicrotask(() => {
           this.onmessage?.(
             new MessageEvent("message", {
-              data: { id: request.id, result },
+              data: {
+                id: request.id,
+                result,
+                workspaceId: request.workspaceId,
+                generation: request.generation,
+              },
             }),
           );
         });
