@@ -350,6 +350,11 @@ test("mobile runtime mode defaults to chat", async ({ page }) => {
   await page.goto("/");
 
   await expect(page).toHaveURL(/\/chat$/);
+  await expect
+    .poll(() =>
+      page.locator("body > div > div").evaluate((el) => (el as HTMLElement).style.height),
+    )
+    .toBe("100dvh");
   await expect(page.getByText("hello mobile")).toBeVisible();
   await expect(page.locator("header").getByText("@lewis", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);

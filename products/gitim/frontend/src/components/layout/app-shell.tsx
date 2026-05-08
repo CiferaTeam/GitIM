@@ -21,7 +21,10 @@ export function AppShell({ children }: AppShellProps) {
   const currentUser = useChatStore((s) => s.currentUser);
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground">
+    <div
+      className="h-screen flex flex-col bg-background text-foreground"
+      style={{ height: "100dvh" }}
+    >
       {/* Top bar — desktop full, mobile minimal */}
       <header className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/80 backdrop-blur-md shadow-[0_1px_0_rgba(0,0,0,0.2)]">
         {/* Left: logo + workspace switcher + connection status */}
