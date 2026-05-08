@@ -393,6 +393,8 @@ export default function App() {
             resetCardsForSwitch();
           },
         });
+        if (cancelled) return;
+        if (activation.error_code === "activation_superseded") return;
         if (!activation.ok) {
           setConnectionError(activation.error ?? "Failed to activate browser workspace");
           return;
