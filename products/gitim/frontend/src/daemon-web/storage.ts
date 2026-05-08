@@ -1,12 +1,33 @@
 import LightningFS from "@isomorphic-git/lightning-fs";
 
-let fs: LightningFS;
+export interface StorageConfig {
+  fsName: string;
+  repoDir: "/repo";
+}
+
+let fs: LightningFS | null = null;
+let activeFsName = "gitim";
+
+export function configureFs(fsName: string): void {
+  if (fs && activeFsName === fsName) return;
+  activeFsName = fsName;
+  fs = null;
+}
+
+export function getActiveFsName(): string {
+  return activeFsName;
+}
 
 export function getFs(): LightningFS {
   if (!fs) {
-    fs = new LightningFS("gitim");
+    fs = new LightningFS(activeFsName);
   }
   return fs;
+}
+
+export function wipeFs(fsName: string): LightningFS {
+  if (fsName === activeFsName) fs = null;
+  return new LightningFS(fsName, { wipe: true });
 }
 
 export async function readFile(path: string): Promise<string> {

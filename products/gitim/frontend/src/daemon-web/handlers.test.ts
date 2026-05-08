@@ -117,6 +117,7 @@ vi.mock("./storage", () => ({
     dirs.delete(path);
     unregisterPath(path);
   }),
+  configureFs: vi.fn(() => undefined),
 }));
 
 vi.mock("./git", () => ({
@@ -157,6 +158,7 @@ import {
   archiveCard,
   channels,
   createCard,
+  init,
   listArchivedChannels,
   listArchivedCards,
   listCards,
@@ -241,7 +243,10 @@ function seedState() {
   files.set("/repo/dm/cfo--flame4.thread", dmThread);
 
   initState({
+    workspaceId: "ws_default",
     repoDir: "/repo",
+    remoteUrl: "https://github.com/acme/room",
+    fsName: "gitim",
     corsProxy: "",
     token: "token",
     handler: "lewis",
@@ -252,6 +257,76 @@ function seedState() {
 
 describe("daemon-web handlers", () => {
   beforeEach(seedState);
+
+  it("initializes an existing cached repo without a token", async () => {
+    dirs.set("/repo/.git", []);
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      display_name: "Lewis",
+      sync_enabled: false,
+      needs_token: true,
+    }));
+  });
+
+  it("requires reconnect token before browser send when token is missing", async () => {
+    initState({
+      workspaceId: "ws_cached",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/room",
+      fsName: "gitim-ws-ws_cached",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "base" });
+
+    const res = await send("general", "from offline cache");
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Reconnect token to send from this browser workspace.",
+      error_code: "reconnect_required",
+    });
+    expect(commits).toHaveLength(0);
+  });
+
+  it("returns cached poll state without network when token is missing", async () => {
+    initState({
+      workspaceId: "ws_cached",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/room",
+      fsName: "gitim-ws-ws_cached",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "cached-head" });
+
+    const res = await poll("cached-head");
+
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        commit_id: "cached-head",
+        changes: [],
+        sync_enabled: false,
+        needs_token: true,
+      },
+    });
+  });
 
   it("lists channels from channels/*.meta.yaml and dms from dm/*.thread", async () => {
     const res = await channels();

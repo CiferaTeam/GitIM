@@ -25,6 +25,10 @@ let syncInFlight: Promise<void> | null = null;
 
 async function runSyncOnce(): Promise<void> {
   const s = getState();
+  if (!s.token) {
+    setState({ syncStatus: "reconnect_required" });
+    return;
+  }
   setState({ syncStatus: "syncing" });
 
   try {

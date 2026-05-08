@@ -11,6 +11,8 @@ import {
   stat,
   removeFile,
   removeDir,
+  configureFs,
+  type StorageConfig,
 } from "./storage";
 import { getState, setState, type ChannelMeta, type UserMeta } from "./state";
 import { parseThread, type ThreadEntry } from "./parser";
@@ -80,6 +82,17 @@ function err(error: string): ApiResponse {
   return { ok: false, error };
 }
 
+function errCode(error: string, error_code: string): ApiResponse & { error_code: string } {
+  return { ok: false, error, error_code };
+}
+
+function reconnectRequired(): ApiResponse & { error_code: string } {
+  return errCode(
+    "Reconnect token to send from this browser workspace.",
+    "reconnect_required",
+  );
+}
+
 function errorMessage(e: unknown): string {
   return String((e as Error).message ?? e);
 }
@@ -117,19 +130,29 @@ export async function preflight(): Promise<ApiResponse> {
 // --- Init ---
 
 export async function init(config: {
+  workspaceId?: string;
   remoteUrl: string;
   corsProxy: string;
-  token: string;
+  token: string | null;
   handler: string;
+  storage?: StorageConfig;
 }): Promise<ApiResponse> {
   const { initState } = await import("./state");
-  const dir = "/repo";
-  const onAuth = tokenAuth(config.token);
+  const storage = config.storage ?? { fsName: "gitim", repoDir: "/repo" as const };
+  const workspaceId = config.workspaceId ?? "local";
+  const dir = storage.repoDir;
+  configureFs(storage.fsName);
 
   try {
-    // Clone the repo
     const repoExists = await exists(`${dir}/.git`);
-    if (!repoExists) {
+    if (!repoExists && !config.token) {
+      return errCode(
+        "Reconnect token to clone this browser workspace.",
+        "reconnect_required",
+      );
+    }
+    if (!repoExists && config.token) {
+      const onAuth = tokenAuth(config.token);
       await gitOps.cloneRepo(config.remoteUrl, dir, config.corsProxy, onAuth);
     }
 
@@ -146,7 +169,10 @@ export async function init(config: {
     }
 
     const s = initState({
+      workspaceId,
       repoDir: dir,
+      remoteUrl: config.remoteUrl,
+      fsName: storage.fsName,
       corsProxy: config.corsProxy,
       token: config.token,
       handler: config.handler,
@@ -160,7 +186,12 @@ export async function init(config: {
     await refreshChannelsCache();
     await refreshUsersCache();
 
-    return ok({ handler: config.handler, display_name: displayName });
+    return ok({
+      handler: config.handler,
+      display_name: displayName,
+      sync_enabled: !!config.token,
+      needs_token: !config.token,
+    });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -170,11 +201,13 @@ export async function init(config: {
 
 export async function health(): Promise<ApiResponse> {
   try {
-    getState();
+    const s = getState();
     return ok({
       service: "daemon-web",
       initialized: true,
-      workspace: "local",
+      workspace: s.workspaceId,
+      sync_enabled: !!s.token,
+      needs_token: !s.token,
     });
   } catch {
     return ok({ service: "daemon-web", initialized: false });
@@ -192,6 +225,14 @@ export async function me(): Promise<ApiResponse> {
 
 export async function poll(since?: string): Promise<ApiResponse> {
   const s = getState();
+  if (!s.token) {
+    return ok({
+      commit_id: s.headCommit,
+      changes: [],
+      sync_enabled: false,
+      needs_token: true,
+    });
+  }
   const onAuth = tokenAuth(s.token);
 
   try {
@@ -332,6 +373,7 @@ export async function send(
 ): Promise<ApiResponse> {
   try {
     const s = getState();
+    if (!s.token) return reconnectRequired();
     const target = resolveThreadTarget(channel);
     const filePath = target.threadPath;
     const absPath = `${s.repoDir}/${filePath}`;
@@ -445,6 +487,7 @@ export async function users(): Promise<ApiResponse> {
 
 export async function joinChannel(channel: string): Promise<ApiResponse> {
   const s = getState();
+  if (!s.token) return reconnectRequired();
   const invalidChannel = validateChannelName(channel);
   if (invalidChannel) return err(invalidChannel);
   const metaPath = `${s.repoDir}/${channelMetaPath(channel)}`;
@@ -516,6 +559,7 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
 export async function archiveChannel(channel: string): Promise<ApiResponse> {
   try {
     const s = getState();
+    if (!s.token) return reconnectRequired();
     const invalidChannel = validateChannelName(channel);
     if (invalidChannel) return err(invalidChannel);
 
@@ -559,6 +603,7 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
 export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
   try {
     const s = getState();
+    if (!s.token) return reconnectRequired();
     const invalidChannel = validateChannelName(channel);
     if (invalidChannel) return err(invalidChannel);
 
@@ -688,8 +733,9 @@ export async function createCard(
   opts: CreateCardOptions = {},
 ): Promise<ApiResponse> {
   try {
-    await ensureWasmReady();
     const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
     const invalidChannel = validateChannelName(channel);
     if (invalidChannel) return err(invalidChannel);
 
@@ -770,6 +816,7 @@ export async function sendCardMessage(
 ): Promise<ApiResponse> {
   try {
     const s = getState();
+    if (!s.token) return reconnectRequired();
     const located = await locateActiveCard(channel, cardId);
     const threadPath = `${located.absDir}/discussion.thread`;
     const existing = (await exists(threadPath)) ? await readFile(threadPath) : "";
@@ -812,8 +859,9 @@ export async function updateCard(
   patch: UpdateCardPatch,
 ): Promise<ApiResponse> {
   try {
-    await ensureWasmReady();
     const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
     const located = await locateActiveCard(channel, cardId);
     if (
       patch.status === undefined &&
@@ -870,8 +918,9 @@ export async function archiveCard(
   cardId: string,
 ): Promise<ApiResponse> {
   try {
-    await ensureWasmReady();
     const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
     const located = await locateActiveCard(channel, cardId);
     const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
     const permissionError = checkCardArchivePermission(card, s.me.handler, "archive");
@@ -897,8 +946,9 @@ export async function unarchiveCard(
   cardId: string,
 ): Promise<ApiResponse> {
   try {
-    await ensureWasmReady();
     const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
     const located = await locateCard(channel, cardId);
     if (!located.archived) return err(`card '${cardId}' is not archived`);
     const channelMeta = `${s.repoDir}/${channelMetaPath(channel)}`;
