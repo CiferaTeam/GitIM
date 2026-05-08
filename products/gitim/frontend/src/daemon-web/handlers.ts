@@ -138,11 +138,12 @@ export async function init(config: {
   handler: string;
   storage?: StorageConfig;
 }): Promise<ApiResponse> {
-  const { initState } = await import("./state");
+  const { initState, restoreState, snapshotState } = await import("./state");
   const storage = config.storage ?? { fsName: "gitim", repoDir: "/repo" as const };
   const workspaceId = config.workspaceId ?? "local";
   const dir = storage.repoDir;
   const previousFsName = getActiveFsName();
+  const previousState = snapshotState();
   configureFs(storage.fsName);
 
   try {
@@ -196,6 +197,7 @@ export async function init(config: {
     });
   } catch (e) {
     configureFs(previousFsName);
+    restoreState(previousState);
     return err(String((e as Error).message ?? e));
   }
 }

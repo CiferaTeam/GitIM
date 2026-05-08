@@ -5,6 +5,7 @@ const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
 const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
 const activeFsName = vi.hoisted(() => ({ value: "gitim" }));
+const readdirFailures = vi.hoisted(() => new Map<string, string>());
 
 function parentDir(path: string): string | null {
   const idx = path.lastIndexOf("/");
@@ -105,7 +106,11 @@ vi.mock("./storage", () => ({
     files.set(path, content);
     registerFile(path);
   }),
-  readdir: vi.fn(async (path: string) => dirs.get(path) ?? []),
+  readdir: vi.fn(async (path: string) => {
+    const failure = readdirFailures.get(path);
+    if (failure) throw new Error(failure);
+    return dirs.get(path) ?? [];
+  }),
   exists: vi.fn(async (path: string) => files.has(path) || dirs.has(path)),
   mkdir: vi.fn(async (path: string) => {
     registerDir(path);
@@ -177,7 +182,7 @@ import {
   joinChannel,
   unarchiveCard,
 } from "./handlers";
-import { initState, setState } from "./state";
+import { getState, initState, setState } from "./state";
 import { getActiveFsName } from "./storage";
 
 const generalThread =
@@ -192,6 +197,7 @@ function seedState() {
   dirs.clear();
   commits.length = 0;
   activeFsName.value = "gitim";
+  readdirFailures.clear();
   runSyncMock.mockReset();
   runSyncMock.mockResolvedValue(undefined);
 
@@ -303,6 +309,46 @@ describe("daemon-web handlers", () => {
       error_code: "reconnect_required",
     });
     expect(getActiveFsName()).toBe("gitim-ws-existing");
+  });
+
+  it("restores previous fs and state when init fails after publishing state", async () => {
+    activeFsName.value = "gitim-ws-existing";
+    initState({
+      workspaceId: "ws_existing",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/existing",
+      fsName: "gitim-ws-existing",
+      corsProxy: "https://proxy.example",
+      token: "existing-token",
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "existing-head" });
+    dirs.set("/repo/.git", []);
+    readdirFailures.set("/repo/channels", "late init cache failure");
+
+    const res = await init({
+      workspaceId: "ws_new",
+      remoteUrl: "https://github.com/acme/new",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "alice",
+      storage: { fsName: "gitim-ws-new", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "late init cache failure",
+    });
+    expect(getActiveFsName()).toBe("gitim-ws-existing");
+    expect(getState()).toEqual(expect.objectContaining({
+      workspaceId: "ws_existing",
+      remoteUrl: "https://github.com/acme/existing",
+      fsName: "gitim-ws-existing",
+      token: "existing-token",
+      headCommit: "existing-head",
+      me: { handler: "lewis", display_name: "Lewis" },
+    }));
   });
 
   it("requires reconnect token before browser send when token is missing", async () => {

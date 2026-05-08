@@ -32,9 +32,26 @@ export interface DaemonWebState {
 
 let state: DaemonWebState | null = null;
 
+function cloneState(s: DaemonWebState): DaemonWebState {
+  return {
+    ...s,
+    me: { ...s.me },
+    channels: new Map(s.channels),
+    users: new Map(s.users),
+  };
+}
+
 export function getState(): DaemonWebState {
   if (!state) throw new Error("daemon-web not initialized");
   return state;
+}
+
+export function snapshotState(): DaemonWebState | null {
+  return state ? cloneState(state) : null;
+}
+
+export function restoreState(snapshot: DaemonWebState | null): void {
+  state = snapshot ? cloneState(snapshot) : null;
 }
 
 export function initState(config: {
