@@ -72,8 +72,8 @@ export function SetupGate({ children }: SetupGateProps) {
     return () => { cancelled = true; };
   }, [mode, localReady, status, port, setStatus, setRuntimeVersion]);
 
-  if (mode === "local" && !localReady) {
-    return <LocalSetup />;
+  if (mode === "local") {
+    return localReady ? <>{children}</> : <LocalSetup />;
   }
 
   if (status === "checking") {

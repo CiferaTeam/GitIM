@@ -394,7 +394,7 @@ export default function App() {
     let cancelled = false;
     let pollHandle: ReturnType<typeof setTimeout> | undefined;
 
-    async function init(slug: string) {
+    async function init(slug: string): Promise<boolean> {
       if (mode === "local") {
         const activation = await client.activateBrowserWorkspace(slug, {
           onSyncReset: () => {
@@ -405,11 +405,13 @@ export default function App() {
             resetCardsForSwitch();
           },
         });
-        if (cancelled) return;
-        if (activation.error_code === "activation_superseded") return;
+        if (cancelled) return false;
+        if (activation.error_code === "activation_superseded") return false;
         if (!activation.ok) {
           setConnectionError(activation.error ?? "Failed to activate browser workspace");
-          return;
+          setConnectionStatus("disconnected");
+          setConnected(false);
+          return false;
         }
       }
 
@@ -424,7 +426,7 @@ export default function App() {
           client.listCards(slug),
         ]);
 
-      if (cancelled) return;
+      if (cancelled) return false;
 
       // Restore cursor from localStorage keyed by runtime or browser workspace identity.
       workspaceRef.current = workspaceKey;
@@ -449,10 +451,11 @@ export default function App() {
       if (bootstrapOk) {
         markConnected();
       }
+      return true;
     }
 
-    init(activeSlug).then(() => {
-      if (cancelled) return;
+    init(activeSlug).then((readyToPoll) => {
+      if (cancelled || !readyToPoll) return;
 
       // Recursive setTimeout instead of setInterval: ensures a single in-flight
       // poll at a time. With setInterval, a fetch that stalls past the 3s
@@ -495,6 +498,8 @@ export default function App() {
     resetChatForSwitch,
     resetAgentsForSwitch,
     resetCardsForSwitch,
+    setConnected,
+    setConnectionStatus,
     setConnectionError,
     markConnected,
     runPoll,

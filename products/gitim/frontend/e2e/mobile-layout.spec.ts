@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const runtimePort = 49322;
 const slug = "mobile";
+const localPollIntervalMs = 7000;
 
 interface BrowserWorkspaceRecordFixture {
   id: string;
@@ -207,8 +208,11 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
   });
 }
 
-async function stubBrowserModeWorker(page: Page) {
-  await page.addInitScript(() => {
+async function stubBrowserModeWorker(
+  page: Page,
+  options: { failInitWithoutToken?: boolean } = {},
+) {
+  await page.addInitScript(({ failInitWithoutToken }) => {
     type InitCall = {
       workspaceId?: string;
       remoteUrl?: string;
@@ -221,7 +225,12 @@ async function stubBrowserModeWorker(page: Page) {
       workspaceId?: string;
       generation?: number;
     };
-    type RpcResult = { ok: boolean; data?: unknown; error?: string };
+    type RpcResult = {
+      ok: boolean;
+      data?: unknown;
+      error?: string;
+      error_code?: string;
+    };
     type Card = {
       card_id: string;
       channel: string;
@@ -245,12 +254,17 @@ async function stubBrowserModeWorker(page: Page) {
     const archivedCards: Card[] = [];
     const messagesByCard = new Map<string, Message[]>();
     const initCalls: InitCall[] = [];
+    const pollCalls: Array<{ workspaceId?: string }> = [];
     Object.defineProperty(window, "__gitimBrowserInitCalls", {
       configurable: true,
       value: initCalls,
     });
+    Object.defineProperty(window, "__gitimBrowserPollCalls", {
+      configurable: true,
+      value: pollCalls,
+    });
 
-    function handleMethod(method: string, args: unknown[]): RpcResult {
+    function handleMethod(method: string, args: unknown[], request: RpcRequest): RpcResult {
       switch (method) {
         case "preflight":
           return { ok: true, data: { runtime: "browser", storage: "ready", git: "ready" } };
@@ -261,6 +275,13 @@ async function stubBrowserModeWorker(page: Page) {
             remoteUrl: config?.remoteUrl,
             token: config?.token,
           });
+          if (failInitWithoutToken && !config?.token) {
+            return {
+              ok: false,
+              error: "Reconnect token to clone this browser workspace.",
+              error_code: "reconnect_required",
+            };
+          }
           return { ok: true, data: {} };
         }
         case "startSync":
@@ -297,6 +318,7 @@ async function stubBrowserModeWorker(page: Page) {
             },
           };
         case "poll":
+          pollCalls.push({ workspaceId: request.workspaceId });
           return { ok: true, data: { commit_id: "browser-1", changes: [] } };
         case "thread":
           return { ok: true, data: { entries: [] } };
@@ -412,7 +434,7 @@ async function stubBrowserModeWorker(page: Page) {
 
       postMessage(raw: unknown): void {
         const request = raw as RpcRequest;
-        const result = handleMethod(request.method, request.args);
+        const result = handleMethod(request.method, request.args, request);
         queueMicrotask(() => {
           this.onmessage?.(
             new MessageEvent("message", {
@@ -437,7 +459,7 @@ async function stubBrowserModeWorker(page: Page) {
       writable: true,
       value: StubWorker,
     });
-  });
+  }, options);
 }
 
 test("mobile runtime mode defaults to chat", async ({ page }) => {
@@ -638,6 +660,61 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
       remoteUrl: tablet.remoteUrl,
       token: "tablet-token",
     });
+});
+
+test("browser mode does not poll the previous backend after activation fails", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+  const tablet = browserWorkspaceRecord(
+    "ws_tablet",
+    "Tablet",
+    "https://github.com/flame4/tablet",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone, tablet],
+    activeSlug: phone.slug,
+    tokens: {
+      [phone.id]: "phone-token",
+    },
+  });
+  await stubBrowserModeWorker(page, { failInitWithoutToken: true });
+
+  await page.goto("/");
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await page.getByTestId(`workspace-row-${tablet.slug}`).click();
+
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await expect(page.getByTestId(`workspace-reconnect-${tablet.slug}`)).toBeVisible();
+  await page.keyboard.press("Escape");
+  const pollCountAfterFailedActivation = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterFailedActivation);
 });
 
 test("browser mode asks to reconnect when registered workspace has no session token", async ({ page }) => {
