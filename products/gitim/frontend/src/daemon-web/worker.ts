@@ -9,10 +9,14 @@ export interface WorkerRequest {
   id: number;
   method: string;
   args: unknown[];
+  workspaceId: string;
+  generation: number;
 }
 
 export interface WorkerResponse {
   id: number;
+  workspaceId: string;
+  generation: number;
   result?: unknown;
   error?: string;
 }
@@ -20,7 +24,36 @@ export interface WorkerResponse {
 // Also used for unsolicited messages from sync
 export interface WorkerEvent {
   type: "sync_reset" | "sync_error";
+  workspaceId: string;
+  generation: number;
 }
+
+let currentWorkspaceId = "";
+let currentGeneration = 0;
+const postWorkerMessage = self.postMessage.bind(self);
+
+function isUnscopedWorkerEvent(
+  message: unknown,
+): message is { type: WorkerEvent["type"] } {
+  if (!message || typeof message !== "object") return false;
+  const data = message as Record<string, unknown>;
+  return (
+    (data.type === "sync_reset" || data.type === "sync_error") &&
+    (typeof data.workspaceId !== "string" ||
+      typeof data.generation !== "number")
+  );
+}
+
+self.postMessage = ((message: unknown) => {
+  const scopedMessage = isUnscopedWorkerEvent(message)
+    ? {
+        ...message,
+        workspaceId: currentWorkspaceId,
+        generation: currentGeneration,
+      }
+    : message;
+  postWorkerMessage(scopedMessage);
+}) as typeof self.postMessage;
 
 const handler: Record<
   string,
@@ -30,10 +63,12 @@ const handler: Record<
   init: (config: unknown) =>
     handlers.init(
       config as {
+        workspaceId: string;
         remoteUrl: string;
         corsProxy: string;
-        token: string;
+        token: string | null;
         handler: string;
+        storage: { fsName: string; repoDir: "/repo" };
       },
     ),
   health: () => handlers.health(),
@@ -114,12 +149,16 @@ const handler: Record<
 };
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
-  const { id, method, args } = event.data;
+  const { id, method, args, workspaceId, generation } = event.data;
+  currentWorkspaceId = workspaceId;
+  currentGeneration = generation;
 
   const fn = handler[method];
   if (!fn) {
     const response: WorkerResponse = {
       id,
+      workspaceId,
+      generation,
       error: `unknown method: ${method}`,
     };
     self.postMessage(response);
@@ -128,11 +167,13 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
   try {
     const result = await fn(...args);
-    const response: WorkerResponse = { id, result };
+    const response: WorkerResponse = { id, workspaceId, generation, result };
     self.postMessage(response);
   } catch (e) {
     const response: WorkerResponse = {
       id,
+      workspaceId,
+      generation,
       error: String((e as Error).message ?? e),
     };
     self.postMessage(response);

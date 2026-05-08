@@ -4,6 +4,8 @@ const files = vi.hoisted(() => new Map<string, string>());
 const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
 const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
+const activeFsName = vi.hoisted(() => ({ value: "gitim" }));
+const readdirFailures = vi.hoisted(() => new Map<string, string>());
 
 function parentDir(path: string): string | null {
   const idx = path.lastIndexOf("/");
@@ -104,7 +106,11 @@ vi.mock("./storage", () => ({
     files.set(path, content);
     registerFile(path);
   }),
-  readdir: vi.fn(async (path: string) => dirs.get(path) ?? []),
+  readdir: vi.fn(async (path: string) => {
+    const failure = readdirFailures.get(path);
+    if (failure) throw new Error(failure);
+    return dirs.get(path) ?? [];
+  }),
   exists: vi.fn(async (path: string) => files.has(path) || dirs.has(path)),
   mkdir: vi.fn(async (path: string) => {
     registerDir(path);
@@ -117,6 +123,10 @@ vi.mock("./storage", () => ({
     dirs.delete(path);
     unregisterPath(path);
   }),
+  configureFs: vi.fn((fsName: string) => {
+    activeFsName.value = fsName;
+  }),
+  getActiveFsName: vi.fn(() => activeFsName.value),
 }));
 
 vi.mock("./git", () => ({
@@ -142,7 +152,9 @@ vi.mock("./git", () => ({
   diffTrees: vi.fn(async () => []),
   fetchOrigin: vi.fn(async () => undefined),
   getCurrentBranch: vi.fn(async () => "main"),
+  getOriginUrl: vi.fn(async () => undefined),
   push: vi.fn(async () => undefined),
+  readFileAtCommit: vi.fn(async () => null),
   resetToRemote: vi.fn(async () => undefined),
   resolveHead: vi.fn(async () => "head"),
   resolveRemoteHead: vi.fn(async () => "head"),
@@ -157,6 +169,7 @@ import {
   archiveCard,
   channels,
   createCard,
+  init,
   listArchivedChannels,
   listArchivedCards,
   listCards,
@@ -171,7 +184,8 @@ import {
   joinChannel,
   unarchiveCard,
 } from "./handlers";
-import { initState, setState } from "./state";
+import { getState, initState, setState } from "./state";
+import { getActiveFsName } from "./storage";
 
 const generalThread =
   "[L000001][P000000][@alice][20260317T120000Z] hello\n" +
@@ -184,6 +198,8 @@ function seedState() {
   files.clear();
   dirs.clear();
   commits.length = 0;
+  activeFsName.value = "gitim";
+  readdirFailures.clear();
   runSyncMock.mockReset();
   runSyncMock.mockResolvedValue(undefined);
 
@@ -241,7 +257,10 @@ function seedState() {
   files.set("/repo/dm/cfo--flame4.thread", dmThread);
 
   initState({
+    workspaceId: "ws_default",
     repoDir: "/repo",
+    remoteUrl: "https://github.com/acme/room",
+    fsName: "gitim",
     corsProxy: "",
     token: "token",
     handler: "lewis",
@@ -252,6 +271,200 @@ function seedState() {
 
 describe("daemon-web handlers", () => {
   beforeEach(seedState);
+
+  it("initializes an existing cached repo without a token", async () => {
+    dirs.set("/repo/.git", []);
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      display_name: "Lewis",
+      sync_enabled: false,
+      needs_token: true,
+    }));
+  });
+
+  it("preserves the remote sync baseline when cached local commits are ahead", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.resolveHead.mockResolvedValueOnce("local-unsynced-head");
+    git.resolveRemoteHead.mockResolvedValueOnce("remote-synced-head");
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(getState().headCommit).toBe("remote-synced-head");
+  });
+
+  it("rejects a cached browser repo when the requested remote changed", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.getOriginUrl.mockResolvedValueOnce("https://github.com/acme/old-room");
+    const cloneCallsBefore = git.cloneRepo.mock.calls.length;
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/new-room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Cached browser workspace was cloned from a different remote. Reset this workspace cache or create a new browser workspace to use the new URL.",
+      error_code: "remote_mismatch",
+    });
+    expect(git.cloneRepo.mock.calls).toHaveLength(cloneCallsBefore);
+  });
+
+  it("restores the previous fs name when init needs a token for an absent repo", async () => {
+    activeFsName.value = "gitim-ws-existing";
+
+    const res = await init({
+      workspaceId: "ws_absent",
+      remoteUrl: "https://github.com/acme/absent",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-absent", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Reconnect token to clone this browser workspace.",
+      error_code: "reconnect_required",
+    });
+    expect(getActiveFsName()).toBe("gitim-ws-existing");
+  });
+
+  it("restores previous fs and state when init fails after publishing state", async () => {
+    activeFsName.value = "gitim-ws-existing";
+    initState({
+      workspaceId: "ws_existing",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/existing",
+      fsName: "gitim-ws-existing",
+      corsProxy: "https://proxy.example",
+      token: "existing-token",
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "existing-head" });
+    dirs.set("/repo/.git", []);
+    readdirFailures.set("/repo/channels", "late init cache failure");
+
+    const res = await init({
+      workspaceId: "ws_new",
+      remoteUrl: "https://github.com/acme/new",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "alice",
+      storage: { fsName: "gitim-ws-new", repoDir: "/repo" },
+    });
+
+    expect(res).toEqual({
+      ok: false,
+      error: "late init cache failure",
+    });
+    expect(getActiveFsName()).toBe("gitim-ws-existing");
+    expect(getState()).toEqual(expect.objectContaining({
+      workspaceId: "ws_existing",
+      remoteUrl: "https://github.com/acme/existing",
+      fsName: "gitim-ws-existing",
+      token: "existing-token",
+      headCommit: "existing-head",
+      me: { handler: "lewis", display_name: "Lewis" },
+    }));
+  });
+
+  it("requires reconnect token before browser send when token is missing", async () => {
+    initState({
+      workspaceId: "ws_cached",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/room",
+      fsName: "gitim-ws-ws_cached",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "base" });
+
+    const res = await send("general", "from offline cache");
+
+    expect(res).toEqual({
+      ok: false,
+      error: "Reconnect token to send from this browser workspace.",
+      error_code: "reconnect_required",
+    });
+    expect(commits).toHaveLength(0);
+  });
+
+  it("returns cached poll state without network when token is missing", async () => {
+    initState({
+      workspaceId: "ws_cached",
+      repoDir: "/repo",
+      remoteUrl: "https://github.com/acme/room",
+      fsName: "gitim-ws-ws_cached",
+      corsProxy: "https://proxy.example",
+      token: null,
+      handler: "lewis",
+      displayName: "Lewis",
+    });
+    setState({ defaultBranch: "main", headCommit: "cached-head" });
+
+    const res = await poll("cached-head");
+
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        commit_id: "cached-head",
+        changes: [],
+        sync_enabled: false,
+        needs_token: true,
+      },
+    });
+  });
+
+  it("turns auth failures during poll into cached reconnect state", async () => {
+    vi.mocked(await import("./git")).fetchOrigin.mockRejectedValueOnce(
+      new Error("HTTP Error: 401 Unauthorized"),
+    );
+    setState({ headCommit: "cached-head" });
+
+    const res = await poll("cached-head");
+
+    expect(res).toEqual({
+      ok: true,
+      data: {
+        commit_id: "cached-head",
+        changes: [],
+        sync_enabled: false,
+        needs_token: true,
+      },
+      error_code: "reconnect_required",
+    });
+    expect(getState().token).toBeNull();
+    expect(getState().syncStatus).toBe("reconnect_required");
+  });
 
   it("lists channels from channels/*.meta.yaml and dms from dm/*.thread", async () => {
     const res = await channels();
@@ -504,7 +717,11 @@ describe("daemon-web handlers", () => {
       line_number: 3,
       status: "commit_only",
       error: "HTTP Error: 401 Unauthorized",
+      error_code: "reconnect_required",
+      needs_token: true,
     });
+    expect(getState().token).toBeNull();
+    expect(getState().syncStatus).toBe("reconnect_required");
     expect(files.get("/repo/channels/general.thread")).toContain("from mobile");
     expect(commits.at(-1)?.message).toContain("L000003");
   });
@@ -666,6 +883,20 @@ describe("daemon-web handlers", () => {
       "refs/remotes/origin/trunk",
     );
     expect(git.checkout).not.toHaveBeenCalled();
+  });
+
+  it("does not mark local-ahead commits as synced during poll", async () => {
+    const git = vi.mocked(await import("./git"));
+    setState({ defaultBranch: "main", headCommit: "remote-base" });
+    git.resolveRemoteHead.mockResolvedValueOnce("remote-base");
+    git.resolveHead
+      .mockResolvedValueOnce("local-unsynced-head")
+      .mockResolvedValueOnce("local-unsynced-head");
+
+    const res = await poll("remote-base");
+
+    expect(res.ok).toBe(true);
+    expect(getState().headCommit).toBe("remote-base");
   });
 
   it("archives active cards into archive/channels and removes them from active lists", async () => {

@@ -3,9 +3,11 @@ import { Hash, AtSign, ArchiveRestore, ChevronRight, Pin, Plus, Search } from "l
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
+import { workspaceIdentity } from "../../lib/workspace-key";
 import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -33,18 +35,18 @@ interface PinnedConversations {
   dms: Set<string>;
 }
 
-function knownAgentStorageKey(slug: string): string {
-  return `${KNOWN_AGENT_STORAGE_PREFIX}${slug}`;
+function knownAgentStorageKey(workspaceKey: string): string {
+  return `${KNOWN_AGENT_STORAGE_PREFIX}${workspaceKey}`;
 }
 
-function pinnedConversationsStorageKey(slug: string): string {
-  return `${PINNED_CONVERSATIONS_STORAGE_PREFIX}${slug}`;
+function pinnedConversationsStorageKey(workspaceKey: string): string {
+  return `${PINNED_CONVERSATIONS_STORAGE_PREFIX}${workspaceKey}`;
 }
 
-function readKnownAgentIds(slug: string | null): Set<string> {
-  if (!slug) return new Set();
+function readKnownAgentIds(workspaceKey: string | null): Set<string> {
+  if (!workspaceKey) return new Set();
   try {
-    const raw = localStorage.getItem(knownAgentStorageKey(slug));
+    const raw = localStorage.getItem(knownAgentStorageKey(workspaceKey));
     const parsed = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : []);
   } catch {
@@ -52,18 +54,18 @@ function readKnownAgentIds(slug: string | null): Set<string> {
   }
 }
 
-function writeKnownAgentIds(slug: string, ids: Set<string>) {
-  localStorage.setItem(knownAgentStorageKey(slug), JSON.stringify([...ids].sort()));
+function writeKnownAgentIds(workspaceKey: string, ids: Set<string>) {
+  localStorage.setItem(knownAgentStorageKey(workspaceKey), JSON.stringify([...ids].sort()));
 }
 
 function emptyPinnedConversations(): PinnedConversations {
   return { channels: new Set(), dms: new Set() };
 }
 
-function readPinnedConversations(slug: string | null): PinnedConversations {
-  if (!slug) return emptyPinnedConversations();
+function readPinnedConversations(workspaceKey: string | null): PinnedConversations {
+  if (!workspaceKey) return emptyPinnedConversations();
   try {
-    const raw = localStorage.getItem(pinnedConversationsStorageKey(slug));
+    const raw = localStorage.getItem(pinnedConversationsStorageKey(workspaceKey));
     const parsed = raw ? (JSON.parse(raw) as unknown) : {};
     const record =
       parsed && typeof parsed === "object"
@@ -80,9 +82,9 @@ function readPinnedConversations(slug: string | null): PinnedConversations {
   }
 }
 
-function writePinnedConversations(slug: string, pins: PinnedConversations) {
+function writePinnedConversations(workspaceKey: string, pins: PinnedConversations) {
   localStorage.setItem(
-    pinnedConversationsStorageKey(slug),
+    pinnedConversationsStorageKey(workspaceKey),
     JSON.stringify({
       channels: [...pins.channels].sort(),
       dms: [...pins.dms].sort(),
@@ -95,6 +97,14 @@ function clonePinnedConversations(pins: PinnedConversations): PinnedConversation
     channels: new Set(pins.channels),
     dms: new Set(pins.dms),
   };
+}
+
+function equalStringSets(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
 }
 
 function sortPinnedFirst(items: Channel[], pinnedNames: Set<string>): Channel[] {
@@ -141,7 +151,9 @@ function shouldHideDmChannel(
 }
 
 export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
+  const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
   const agents = useAgentStore((s) => s.agents);
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
@@ -151,14 +163,20 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const setChannels = useChatStore((s) => s.setChannels);
   const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
+  const activeWorkspace = activeSlug
+    ? workspaces.find((workspace) => workspace.slug === activeSlug)
+    : undefined;
+  const activeWorkspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
+    : null;
 
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [archivedLoading, setArchivedLoading] = useState(false);
   const [knownAgentIds, setKnownAgentIds] = useState<Set<string>>(
-    () => readKnownAgentIds(activeSlug),
+    () => readKnownAgentIds(activeWorkspaceKey),
   );
   const [pinnedConversations, setPinnedConversations] = useState<PinnedConversations>(
-    () => readPinnedConversations(activeSlug),
+    () => readPinnedConversations(activeWorkspaceKey),
   );
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
@@ -184,21 +202,23 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   useEffect(() => {
-    if (!activeSlug) {
+    if (!activeWorkspaceKey) {
       setKnownAgentIds(new Set());
       return;
     }
-    const next = readKnownAgentIds(activeSlug);
+    const next = readKnownAgentIds(activeWorkspaceKey);
     for (const agent of agents) {
       next.add(agent.id);
     }
-    writeKnownAgentIds(activeSlug, next);
-    setKnownAgentIds(next);
-  }, [activeSlug, agents]);
+    writeKnownAgentIds(activeWorkspaceKey, next);
+    if (!equalStringSets(knownAgentIds, next)) {
+      setKnownAgentIds(next);
+    }
+  }, [activeWorkspaceKey, agents, knownAgentIds]);
 
   useEffect(() => {
-    setPinnedConversations(readPinnedConversations(activeSlug));
-  }, [activeSlug]);
+    setPinnedConversations(readPinnedConversations(activeWorkspaceKey));
+  }, [activeWorkspaceKey]);
 
   async function handleCreateChannel() {
     if (!activeSlug) {
@@ -316,7 +336,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   function handleTogglePinnedConversation(channel: Channel) {
-    if (!activeSlug) return;
+    if (!activeWorkspaceKey) return;
     setPinnedConversations((prev) => {
       const next = clonePinnedConversations(prev);
       const ids = channel.kind === "dm" ? next.dms : next.channels;
@@ -325,7 +345,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       } else {
         ids.add(channel.name);
       }
-      writePinnedConversations(activeSlug, next);
+      writePinnedConversations(activeWorkspaceKey, next);
       return next;
     });
   }

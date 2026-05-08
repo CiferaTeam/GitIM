@@ -11,6 +11,40 @@ import type {
   WorkerResponse,
   WorkerEvent,
 } from "../daemon-web/worker";
+import { clearSessionToken } from "./browser-workspaces";
+
+interface LocalBackendConfig {
+  workspaceId: string;
+  generation: number;
+  onSyncReset?: () => void;
+}
+
+interface LocalInitConfig {
+  workspaceId: string;
+  remoteUrl: string;
+  corsProxy: string;
+  token: string | null;
+  handler: string;
+  storage: { fsName: string; repoDir: "/repo" };
+}
+
+interface LegacyLocalInitConfig {
+  remoteUrl: string;
+  corsProxy: string;
+  token: string;
+  handler: string;
+}
+
+const LOCAL_BACKEND_CLOSED_ERROR = "browser worker session closed";
+
+function responseNeedsReconnect(response: ApiResponse): boolean {
+  const data = response.data as Record<string, unknown> | undefined;
+  return (
+    response.error_code === "reconnect_required" ||
+    data?.error_code === "reconnect_required" ||
+    data?.needs_token === true
+  );
+}
 
 export interface Backend {
   health(): Promise<ApiResponse>;
@@ -180,15 +214,37 @@ export class LocalBackend implements Backend {
     { resolve: (v: ApiResponse) => void; reject: (e: Error) => void }
   >();
   private onSyncReset?: () => void;
+  private workspaceId: string;
+  private generation: number;
+  private closed = false;
 
-  constructor(onSyncReset?: () => void) {
-    this.onSyncReset = onSyncReset;
+  constructor(config: LocalBackendConfig);
+  constructor(onSyncReset?: () => void);
+  constructor(config: LocalBackendConfig | (() => void) = {
+    workspaceId: "legacy",
+    generation: 0,
+  }) {
+    if (typeof config === "function") {
+      this.workspaceId = "legacy";
+      this.generation = 0;
+      this.onSyncReset = config;
+    } else {
+      this.workspaceId = config.workspaceId;
+      this.generation = config.generation;
+      this.onSyncReset = config.onSyncReset;
+    }
     this.worker = new Worker(
       new URL("../daemon-web/worker.ts", import.meta.url),
       { type: "module" },
     );
     this.worker.onmessage = (event: MessageEvent) => {
       const data = event.data as WorkerResponse | WorkerEvent;
+      if (
+        data.workspaceId !== this.workspaceId ||
+        data.generation !== this.generation
+      ) {
+        return;
+      }
 
       // Unsolicited events from sync loop
       if ("type" in data && data.type === "sync_reset") {
@@ -207,7 +263,11 @@ export class LocalBackend implements Backend {
         if (resp.error) {
           handler.resolve({ ok: false, error: resp.error });
         } else {
-          handler.resolve(resp.result as ApiResponse);
+          const result = resp.result as ApiResponse;
+          if (responseNeedsReconnect(result)) {
+            clearSessionToken(this.workspaceId);
+          }
+          handler.resolve(result);
         }
       }
     };
@@ -227,11 +287,32 @@ export class LocalBackend implements Backend {
   }
 
   private call(method: string, ...args: unknown[]): Promise<ApiResponse> {
+    if (this.closed) {
+      return Promise.resolve({
+        ok: false,
+        error: LOCAL_BACKEND_CLOSED_ERROR,
+      });
+    }
+
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
-      const request: WorkerRequest = { id, method, args };
-      this.worker.postMessage(request);
+      const request: WorkerRequest = {
+        id,
+        method,
+        args,
+        workspaceId: this.workspaceId,
+        generation: this.generation,
+      };
+      try {
+        this.worker.postMessage(request);
+      } catch (error) {
+        this.pending.delete(id);
+        resolve({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     });
   }
 
@@ -239,12 +320,9 @@ export class LocalBackend implements Backend {
     return this.call("preflight");
   }
 
-  async init(config: {
-    remoteUrl: string;
-    corsProxy: string;
-    token: string;
-    handler: string;
-  }): Promise<ApiResponse> {
+  async init(config: LocalInitConfig): Promise<ApiResponse>;
+  async init(config: LegacyLocalInitConfig): Promise<ApiResponse>;
+  async init(config: LocalInitConfig | LegacyLocalInitConfig): Promise<ApiResponse> {
     return this.call("init", config);
   }
 
@@ -336,6 +414,10 @@ export class LocalBackend implements Backend {
   }
 
   terminate(): void {
+    if (this.closed) return;
+
+    this.closed = true;
+    this.rejectPending(LOCAL_BACKEND_CLOSED_ERROR);
     this.worker.terminate();
   }
 }

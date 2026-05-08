@@ -18,14 +18,157 @@ import type {
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
 import type { Backend, CardBackend, ChannelArchiveBackend } from "./backend";
-import { HttpBackend } from "./backend";
+import { HttpBackend, LocalBackend } from "./backend";
+import {
+  clearAllBrowserWorkspaces,
+  clearSessionToken,
+  createBrowserWorkspace,
+  forgetBrowserWorkspace,
+  forgetBrowserWorkspaceAndWipeCache,
+  getBrowserWorkspace,
+  listBrowserWorkspaceSummaries,
+  loadSessionToken,
+  saveSessionToken,
+  updateBrowserWorkspace,
+  wipeAllBrowserWorkspaceCaches,
+  wipeBrowserWorkspaceCache,
+  type BrowserWorkspaceRecord,
+} from "./browser-workspaces";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
+let activeLocalBackend: LocalBackend | null = null;
+let activeBrowserWorkspaceId: string | null = null;
+let localGeneration = 0;
+let browserActivationAttempt = 0;
+
+interface BrowserCacheActionResult extends Record<string, unknown> {
+  activeAffected: boolean;
+}
 
 export function setBackend(backend: Backend): void {
   activeBackend = backend;
+}
+
+export function rememberBrowserToken(workspaceId: string, token: string): void {
+  saveSessionToken(workspaceId, token);
+}
+
+export function clearBrowserToken(workspaceId: string): void {
+  clearSessionToken(workspaceId);
+}
+
+export function resetAllBrowserWorkspaces(): Promise<ApiResponse<BrowserCacheActionResult>> {
+  return startOverBrowserWorkspaces();
+}
+
+export function shutdownBrowserWorkspace(): void {
+  browserActivationAttempt += 1;
+  const backend = activeLocalBackend;
+  if (!backend) return;
+
+  backend.terminate();
+  if (activeBackend === backend) {
+    activeBackend = new HttpBackend(() => baseUrl());
+  }
+  activeLocalBackend = null;
+  activeBrowserWorkspaceId = null;
+}
+
+export async function activateBrowserWorkspace(
+  idOrSlug: string,
+  options: {
+    token?: string | null;
+    onSyncReset?: () => void;
+  } = {},
+): Promise<ApiResponse<{
+  workspace: BrowserWorkspaceRecord;
+  needs_token?: boolean;
+  sync_enabled?: boolean;
+}>> {
+  const attempt = browserActivationAttempt + 1;
+  browserActivationAttempt = attempt;
+  const record = findBrowserWorkspace(idOrSlug);
+  if (!record) {
+    return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
+  }
+
+  const generation = localGeneration + 1;
+  const backend = new LocalBackend({
+    workspaceId: record.id,
+    generation,
+    onSyncReset: options.onSyncReset,
+  });
+  const token = options.token ?? loadSessionToken(record.id) ?? null;
+  const result = await backend.init({
+    workspaceId: record.id,
+    remoteUrl: record.remoteUrl,
+    corsProxy: record.corsProxy ?? "",
+    token,
+    handler: record.handler ?? "",
+    storage: record.storage as { fsName: string; repoDir: "/repo" },
+  });
+
+  if (!result.ok) {
+    backend.terminate();
+    return result as ApiResponse<{
+      workspace: BrowserWorkspaceRecord;
+      needs_token?: boolean;
+      sync_enabled?: boolean;
+    }>;
+  }
+
+  if (!isCurrentBrowserActivation(attempt)) {
+    return supersedeBrowserActivation(backend);
+  }
+
+  if (token) {
+    saveSessionToken(record.id, token);
+    try {
+      await backend.startSync();
+    } catch (error) {
+      backend.terminate();
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  if (!isCurrentBrowserActivation(attempt)) {
+    return supersedeBrowserActivation(backend);
+  }
+
+  activeLocalBackend?.terminate();
+  localGeneration = generation;
+  activeLocalBackend = backend;
+  activeBrowserWorkspaceId = record.id;
+  setBackend(backend);
+
+  const data = result.data as Record<string, unknown> | undefined;
+  const handler = typeof data?.handler === "string" ? data.handler : undefined;
+  const displayName =
+    typeof data?.display_name === "string" ? data.display_name : undefined;
+  const shouldFillWorkspaceName = record.workspace_name.trim().length === 0;
+  const updated =
+    handler || shouldFillWorkspaceName
+      ? updateBrowserWorkspace(record.id, {
+          handler: handler ?? record.handler,
+          ...(shouldFillWorkspaceName
+            ? { workspaceName: displayName ?? handler ?? record.workspace_name }
+            : {}),
+        })
+      : undefined;
+
+  return {
+    ok: true,
+    data: {
+      workspace: updated ?? record,
+      needs_token: data?.needs_token === true,
+      sync_enabled: data?.sync_enabled === true,
+    },
+  };
 }
 
 // --- Helpers ---
@@ -36,6 +179,29 @@ function baseUrl(): string {
 
 function isLocalMode(): boolean {
   return useConnectionStore.getState().mode === "local";
+}
+
+function isCurrentBrowserActivation(attempt: number): boolean {
+  return attempt === browserActivationAttempt && isLocalMode();
+}
+
+function supersedeBrowserActivation(
+  backend: LocalBackend,
+): ApiResponse<{
+  workspace: BrowserWorkspaceRecord;
+  needs_token?: boolean;
+  sync_enabled?: boolean;
+}> {
+  backend.terminate();
+  return {
+    ok: false,
+    error: "Browser workspace activation was superseded.",
+    error_code: "activation_superseded",
+  };
+}
+
+function findBrowserWorkspace(idOrSlug: string): BrowserWorkspaceRecord | undefined {
+  return getBrowserWorkspace(idOrSlug);
 }
 
 function localCardBackend(): CardBackend {
@@ -111,21 +277,7 @@ export async function listWorkspaces(): Promise<
   ApiResponse<{ workspaces: WorkspaceSummary[] }>
 > {
   if (isLocalMode()) {
-    return {
-      ok: true,
-      data: {
-        workspaces: [
-          {
-            slug: "browser",
-            workspace_name: "Browser",
-            path: "indexeddb://gitim/browser",
-            provider: "github",
-            initialized: true,
-            agents_count: 0,
-          },
-        ],
-      },
-    };
+    return { ok: true, data: { workspaces: listBrowserWorkspaceSummaries() } };
   }
   try {
     const res = await fetch(`${baseUrl()}/workspaces`);
@@ -143,8 +295,30 @@ export async function createWorkspace(
   req: CreateWorkspaceRequest,
 ): Promise<ApiResponse<{ slug: string; workspace_name: string; path: string; provider: string }>> {
   if (isLocalMode()) {
-    void req;
-    return { ok: false, error: "workspace creation is unavailable in browser mode" };
+    if (req.git.provider !== "github") {
+      return {
+        ok: false,
+        error: "Browser workspaces require a GitHub remote",
+        error_code: "unsupported_provider",
+      };
+    }
+
+    const record = createBrowserWorkspace({
+      remoteUrl: req.git.remote_url,
+      corsProxy: "https://cors.isomorphic-git.org",
+      handler: "",
+      workspaceName: req.workspace_name,
+    });
+    saveSessionToken(record.id, req.git.token);
+    return {
+      ok: true,
+      data: {
+        slug: record.slug,
+        workspace_name: record.workspace_name,
+        path: `indexeddb://${record.storage.fsName}${record.storage.repoDir}`,
+        provider: "github",
+      },
+    };
   }
   try {
     const res = await fetch(`${baseUrl()}/workspaces`, {
@@ -193,8 +367,12 @@ export async function getWorkspace(slug: string): Promise<ApiResponse> {
 
 export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
   if (isLocalMode()) {
-    void slug;
-    return { ok: false, error: "workspace deletion is unavailable in browser mode" };
+    const record = findBrowserWorkspace(slug);
+    if (!record) {
+      return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
+    }
+    forgetBrowserWorkspace(record.id);
+    return { ok: true, data: {} };
   }
   try {
     const res = await fetch(wsBase(slug), { method: "DELETE" });
@@ -206,6 +384,46 @@ export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+export async function resetBrowserWorkspaceCache(
+  slug: string,
+): Promise<ApiResponse<BrowserCacheActionResult>> {
+  const record = findBrowserWorkspace(slug);
+  if (!record) {
+    return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
+  }
+
+  const activeAffected = record.id === activeBrowserWorkspaceId;
+  if (activeAffected) {
+    shutdownBrowserWorkspace();
+  }
+  await wipeBrowserWorkspaceCache(record.id);
+  return { ok: true, data: { activeAffected } };
+}
+
+export async function forgetBrowserWorkspaceAndCache(
+  slug: string,
+): Promise<ApiResponse<BrowserCacheActionResult>> {
+  const record = findBrowserWorkspace(slug);
+  if (!record) {
+    return { ok: false, error: "Browser workspace not found", error_code: "not_found" };
+  }
+
+  const activeAffected = record.id === activeBrowserWorkspaceId;
+  if (activeAffected) {
+    shutdownBrowserWorkspace();
+  }
+  await forgetBrowserWorkspaceAndWipeCache(record.id);
+  return { ok: true, data: { activeAffected } };
+}
+
+export async function startOverBrowserWorkspaces(): Promise<ApiResponse<BrowserCacheActionResult>> {
+  const activeAffected = activeBrowserWorkspaceId !== null;
+  shutdownBrowserWorkspace();
+  await wipeAllBrowserWorkspaceCaches();
+  clearAllBrowserWorkspaces();
+  return { ok: true, data: { activeAffected } };
 }
 
 // --- IM methods: real runtime HTTP (all scoped to a workspace) ---

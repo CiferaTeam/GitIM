@@ -16,40 +16,66 @@ export interface UserMeta {
 }
 
 export interface DaemonWebState {
+  workspaceId: string;
   repoDir: string;
+  remoteUrl: string;
+  fsName: string;
   corsProxy: string;
-  token: string;
+  token: string | null;
   me: { handler: string; display_name: string };
   channels: Map<string, ChannelMeta>;
   users: Map<string, UserMeta>;
   headCommit: string;
-  syncStatus: "idle" | "syncing" | "error";
+  syncStatus: "idle" | "syncing" | "error" | "reconnect_required";
   defaultBranch: string;
 }
 
 let state: DaemonWebState | null = null;
+
+function cloneState(s: DaemonWebState): DaemonWebState {
+  return {
+    ...s,
+    me: { ...s.me },
+    channels: new Map(s.channels),
+    users: new Map(s.users),
+  };
+}
 
 export function getState(): DaemonWebState {
   if (!state) throw new Error("daemon-web not initialized");
   return state;
 }
 
+export function snapshotState(): DaemonWebState | null {
+  return state ? cloneState(state) : null;
+}
+
+export function restoreState(snapshot: DaemonWebState | null): void {
+  state = snapshot ? cloneState(snapshot) : null;
+}
+
 export function initState(config: {
+  workspaceId: string;
   repoDir: string;
+  remoteUrl: string;
+  fsName: string;
   corsProxy: string;
-  token: string;
+  token: string | null;
   handler: string;
   displayName: string;
 }): DaemonWebState {
   state = {
+    workspaceId: config.workspaceId,
     repoDir: config.repoDir,
+    remoteUrl: config.remoteUrl,
+    fsName: config.fsName,
     corsProxy: config.corsProxy,
     token: config.token,
     me: { handler: config.handler, display_name: config.displayName },
     channels: new Map(),
     users: new Map(),
     headCommit: "",
-    syncStatus: "idle",
+    syncStatus: config.token ? "idle" : "reconnect_required",
     defaultBranch: "main",
   };
   return state;

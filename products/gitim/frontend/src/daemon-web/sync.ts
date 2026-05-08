@@ -5,6 +5,7 @@
 import * as gitOps from "./git";
 import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
+import { isAuthFailure } from "./auth-errors";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -25,6 +26,10 @@ let syncInFlight: Promise<void> | null = null;
 
 async function runSyncOnce(): Promise<void> {
   const s = getState();
+  if (!s.token) {
+    setState({ syncStatus: "reconnect_required" });
+    return;
+  }
   setState({ syncStatus: "syncing" });
 
   try {
@@ -65,7 +70,9 @@ async function runSyncOnce(): Promise<void> {
     }
 
     // 4. Conflict: local changes AND new remote commits.
-    //    Collect local additions, reset to remote, then re-apply with renumbering.
+    //    Collect append-only thread additions, reset to remote, then re-apply
+    //    with renumbering. Non-thread conflicts fail safe: keep local commits
+    //    in place and surface sync error instead of silently dropping changes.
     const changedFiles = await gitOps.diffTrees(
       s.repoDir,
       s.headCommit,
@@ -73,12 +80,31 @@ async function runSyncOnce(): Promise<void> {
     );
 
     const { readFile } = await import("./storage");
+    const { extractThreadAdditions } = await import("./conflict");
     const localAdditions: Record<string, string> = {};
+    const remoteContents: Record<string, string> = {};
     for (const fp of changedFiles) {
       try {
-        localAdditions[fp] = await readFile(`${s.repoDir}/${fp}`);
+        const [localContent, baseContent, remoteContent] = await Promise.all([
+          readFile(`${s.repoDir}/${fp}`),
+          gitOps.readFileAtCommit(s.repoDir, s.headCommit, fp),
+          gitOps.readFileAtCommit(s.repoDir, remoteHead, fp),
+        ]);
+        if (baseContent !== null && remoteContent === null) {
+          throw new Error("remote file missing");
+        }
+        if (
+          baseContent !== null &&
+          remoteContent !== null &&
+          !remoteContent.startsWith(baseContent)
+        ) {
+          throw new Error("remote file changed outside append-only shape");
+        }
+        const additions = extractThreadAdditions(fp, localContent, baseContent);
+        if (additions.trim()) localAdditions[fp] = additions;
+        if (remoteContent !== null) remoteContents[fp] = remoteContent;
       } catch {
-        /* file deleted locally, skip */
+        throw new Error(`Cannot auto-merge local browser sync change: ${fp}`);
       }
     }
 
@@ -87,16 +113,6 @@ async function runSyncOnce(): Promise<void> {
       s.repoDir,
       `refs/remotes/origin/${s.defaultBranch}`,
     );
-
-    // Read remote versions for conflict resolution
-    const remoteContents: Record<string, string> = {};
-    for (const fp of changedFiles) {
-      try {
-        remoteContents[fp] = await readFile(`${s.repoDir}/${fp}`);
-      } catch {
-        /* new file on local side only */
-      }
-    }
 
     // Resolve via parser-based renumbering
     const { resolveConflicts } = await import("./conflict");
@@ -133,7 +149,11 @@ async function runSyncOnce(): Promise<void> {
     setState({ headCommit: newHead, syncStatus: "idle" });
     postMessage({ type: "sync_reset" });
   } catch (e) {
-    setState({ syncStatus: "error" });
+    if (isAuthFailure(e)) {
+      setState({ token: null, syncStatus: "reconnect_required" });
+    } else {
+      setState({ syncStatus: "error" });
+    }
     console.error("[daemon-web] sync error:", e);
     throw e;
   }

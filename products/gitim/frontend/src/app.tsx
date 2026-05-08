@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
+import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
 import { Toaster } from "sonner";
@@ -115,12 +116,20 @@ export default function App() {
   const localReady = useConnectionStore((s) => s.localReady);
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
+  const setConnectionError = useConnectionStore((s) => s.setError);
   const isMobile = useIsMobile();
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const workspacesLoading = useWorkspaceStore((s) => s.loading);
   const fetchWorkspaces = useWorkspaceStore((s) => s.fetchAll);
+  const activeWorkspaceIdentity =
+    activeSlug == null
+      ? null
+      : (() => {
+          const workspace = workspaces.find((w) => w.slug === activeSlug);
+          return workspace ? workspaceIdentity(mode, workspace) : null;
+        })();
 
   // Mutable refs for poll loop — avoids stale closures
   const sinceRef = useRef<string | undefined>(undefined);
@@ -194,9 +203,14 @@ export default function App() {
 
   const runPoll = useCallback(async (signal?: AbortSignal) => {
     const slug = activeSlugRef.current;
-    if (!slug) return;
+    const requestWorkspaceKey = workspaceRef.current;
+    if (!slug || !requestWorkspaceKey) return;
+    const isCurrentPollTarget = () =>
+      slug === activeSlugRef.current &&
+      requestWorkspaceKey === workspaceRef.current;
     try {
       const pollRes = await client.poll(slug, sinceRef.current, signal);
+      if (!isCurrentPollTarget()) return;
 
       if (!pollRes.ok || !pollRes.data) {
         // Stale cursor recovery: discard and re-init
@@ -209,10 +223,16 @@ export default function App() {
       }
 
       sinceRef.current = pollRes.data.commit_id as string;
-      if (workspaceRef.current) {
-        saveCursor(workspaceRef.current, sinceRef.current);
-      }
+      saveCursor(requestWorkspaceKey, sinceRef.current);
       setHeadCommit(sinceRef.current);
+
+      if (mode === "local" && pollRes.data.needs_token === true) {
+        setConnected(false);
+        setConnectionStatus("disconnected");
+        setConnectionError("Reconnect token to sync this browser workspace.");
+        await fetchWorkspaces();
+        return;
+      }
 
       markConnected();
 
@@ -280,6 +300,7 @@ export default function App() {
 
       if (needChannelRefresh) {
         const chRes = await client.channels(slug);
+        if (!isCurrentPollTarget()) return;
         if (chRes.ok && chRes.data) {
           setChannels(chRes.data.channels as Channel[]);
         }
@@ -287,6 +308,7 @@ export default function App() {
 
       if (needArchivedRefresh) {
         const arRes = await client.listArchivedChannels(slug);
+        if (!isCurrentPollTarget()) return;
         if (arRes.ok && arRes.data) {
           setArchivedChannels(arRes.data.channels as Channel[]);
         }
@@ -294,6 +316,7 @@ export default function App() {
 
       if (needCardRefresh) {
         const cardRes = await client.listCards(slug);
+        if (!isCurrentPollTarget()) return;
         if (cardRes.ok && cardRes.data) {
           // Merge, not replace — preserves in-flight optimistic patches so
           // the 3s poll cadence can't flicker the UI back before PATCH resolves.
@@ -303,6 +326,7 @@ export default function App() {
 
       if (mode === "remote") {
         const agentsRes = await client.listAgents(slug);
+        if (!isCurrentPollTarget()) return;
         if (agentsRes.ok && agentsRes.data) {
           setAgents(agentsRes.data.agents as Agent[]);
         }
@@ -315,6 +339,7 @@ export default function App() {
       // Daemon returns the list sorted → equal-length + index-wise equal
       // is a sufficient change check.
       const usersRes = await client.users(slug);
+      if (!isCurrentPollTarget()) return;
       if (usersRes.ok && usersRes.data) {
         const next = usersRes.data.users as string[];
         const current = useChatStore.getState().users;
@@ -344,6 +369,10 @@ export default function App() {
     mergeCards,
     addCardMessages,
     setHeadCommit,
+    setConnected,
+    setConnectionStatus,
+    setConnectionError,
+    fetchWorkspaces,
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,
@@ -356,6 +385,8 @@ export default function App() {
     if (!activeSlug) return;
     if (mode === "remote" && !port) return;
     if (mode === "local" && !localReady) return;
+    if (!activeWorkspaceIdentity) return;
+    const workspaceKey = activeWorkspaceIdentity;
 
     // Reset per-workspace store slices on switch so stale data from the
     // previous workspace doesn't leak into the new one. Each store owns
@@ -377,7 +408,29 @@ export default function App() {
     let cancelled = false;
     let pollHandle: ReturnType<typeof setTimeout> | undefined;
 
-    async function init(slug: string) {
+    async function init(slug: string): Promise<boolean> {
+      let activationNeedsToken = false;
+      if (mode === "local") {
+        const activation = await client.activateBrowserWorkspace(slug, {
+          onSyncReset: () => {
+            clearCursor(workspaceKey);
+            sinceRef.current = undefined;
+            resetChatForSwitch();
+            resetAgentsForSwitch();
+            resetCardsForSwitch();
+          },
+        });
+        if (cancelled) return false;
+        if (activation.error_code === "activation_superseded") return false;
+        if (!activation.ok) {
+          setConnectionStatus("disconnected");
+          setConnectionError(activation.error ?? "Failed to activate browser workspace");
+          setConnected(false);
+          return false;
+        }
+        activationNeedsToken = activation.data?.needs_token === true;
+      }
+
       const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
         await Promise.all([
           client.me(slug),
@@ -389,11 +442,11 @@ export default function App() {
           client.listCards(slug),
         ]);
 
-      if (cancelled) return;
+      if (cancelled) return false;
 
-      // Restore cursor from localStorage keyed by slug (stable identifier).
-      workspaceRef.current = slug;
-      sinceRef.current = loadCursor(slug);
+      // Restore cursor from localStorage keyed by runtime or browser workspace identity.
+      workspaceRef.current = workspaceKey;
+      sinceRef.current = loadCursor(workspaceKey);
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data)
@@ -405,6 +458,14 @@ export default function App() {
       if (cardsRes.ok && cardsRes.data)
         setCards(cardsRes.data.cards as Card[]);
 
+      if (activationNeedsToken) {
+        setConnected(false);
+        setConnectionStatus("disconnected");
+        setConnectionError("Reconnect token to sync this browser workspace.");
+        await fetchWorkspaces();
+        return false;
+      }
+
       const bootstrapOk =
         meRes.ok &&
         channelsRes.ok &&
@@ -414,10 +475,11 @@ export default function App() {
       if (bootstrapOk) {
         markConnected();
       }
+      return true;
     }
 
-    init(activeSlug).then(() => {
-      if (cancelled) return;
+    init(activeSlug).then((readyToPoll) => {
+      if (cancelled || !readyToPoll) return;
 
       // Recursive setTimeout instead of setInterval: ensures a single in-flight
       // poll at a time. With setInterval, a fetch that stalls past the 3s
@@ -450,6 +512,7 @@ export default function App() {
     mode,
     localReady,
     activeSlug,
+    activeWorkspaceIdentity,
     setCurrentUser,
     setChannels,
     setUsers,
@@ -459,6 +522,10 @@ export default function App() {
     resetChatForSwitch,
     resetAgentsForSwitch,
     resetCardsForSwitch,
+    setConnected,
+    setConnectionStatus,
+    setConnectionError,
+    fetchWorkspaces,
     markConnected,
     runPoll,
   ]);

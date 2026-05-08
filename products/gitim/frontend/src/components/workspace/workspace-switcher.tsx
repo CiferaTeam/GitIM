@@ -1,5 +1,14 @@
 import { useState } from "react";
-import { Check, ChevronsUpDown, Cloud, GitBranch, Plus, Trash2 } from "lucide-react";
+import {
+  Check,
+  ChevronsUpDown,
+  Cloud,
+  GitBranch,
+  Plus,
+  RefreshCcw,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,7 +28,15 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import {
+  activateBrowserWorkspace,
+  forgetBrowserWorkspaceAndCache,
+  resetBrowserWorkspaceCache,
+  startOverBrowserWorkspaces,
+} from "@/lib/client";
+import { getBrowserWorkspace, type BrowserWorkspaceRecord } from "@/lib/browser-workspaces";
 import type { WorkspaceSummary } from "@/lib/types";
+import { BrowserWorkspaceForm } from "@/components/setup/browser-workspace-form";
 import { CreateWorkspaceForm } from "./create-workspace-form";
 
 function ProviderIcon({ provider }: { provider: "local" | "github" }) {
@@ -35,13 +52,100 @@ export function WorkspaceSwitcher() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const setActive = useWorkspaceStore((s) => s.setActive);
   const remove = useWorkspaceStore((s) => s.remove);
+  const fetchAll = useWorkspaceStore((s) => s.fetchAll);
+  const mode = useConnectionStore((s) => s.mode);
   const headCommit = useConnectionStore((s) => s.headCommit);
+  const setLocalReady = useConnectionStore((s) => s.setLocalReady);
+  const setStatus = useConnectionStore((s) => s.setStatus);
+  const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [reconnectRecord, setReconnectRecord] = useState<BrowserWorkspaceRecord | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const active = workspaces.find((w) => w.slug === activeSlug);
   const label = active?.workspace_name || active?.slug || "No workspace";
+  const isLocalMode = mode === "local";
+
+  async function handleBrowserConnected(
+    record: BrowserWorkspaceRecord,
+    token: string,
+  ): Promise<boolean> {
+    const activation = await activateBrowserWorkspace(record.slug, {
+      token,
+      onSyncReset: () => {
+        void fetchAll();
+      },
+    });
+    if (!activation.ok) {
+      toast.error(activation.error ?? "Failed to open browser workspace");
+      return false;
+    }
+
+    await fetchAll();
+    setActive(record.slug);
+    setLocalReady(true);
+    setStatus("ready");
+    setCreateOpen(false);
+    setReconnectRecord(null);
+    return true;
+  }
+
+  function demoteLocalBrowserConnection() {
+    setLocalReady(false);
+    setStatus("disconnected");
+    setHeadCommit(null);
+  }
+
+  async function handleResetCache(ws: WorkspaceSummary) {
+    const confirmed = window.confirm(
+      `Reset cache for ${ws.workspace_name}? This clears this workspace's IndexedDB git cache and keeps the browser workspace entry and session token.`,
+    );
+    if (!confirmed) return;
+
+    const res = await resetBrowserWorkspaceCache(ws.slug);
+    if (!res.ok) {
+      toast.error(res.error ?? "Failed to reset browser workspace cache");
+      return;
+    }
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
+    }
+    await fetchAll();
+    toast.success(`Reset cache for ${ws.workspace_name}`);
+  }
+
+  async function handleForgetBrowserWorkspace(ws: WorkspaceSummary) {
+    const res = await forgetBrowserWorkspaceAndCache(ws.slug);
+    if (!res.ok) {
+      toast.error(res.error ?? "Failed to forget browser workspace");
+      return;
+    }
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
+    }
+    await fetchAll();
+    toast.success(`Forgot workspace ${ws.workspace_name}`);
+  }
+
+  async function handleStartOver() {
+    const confirmed = window.confirm(
+      "Start over browser workspaces? This clears all browser workspace entries, session tokens, and IndexedDB git caches for this origin.",
+    );
+    if (!confirmed) return;
+
+    const res = await startOverBrowserWorkspaces();
+    if (!res.ok) {
+      toast.error(res.error ?? "Failed to start over browser workspaces");
+      return;
+    }
+    if (res.data?.activeAffected) {
+      demoteLocalBrowserConnection();
+    }
+    await fetchAll();
+    toast.success("Cleared browser workspaces");
+    setMenuOpen(false);
+  }
 
   return (
     <>
@@ -51,13 +155,13 @@ export function WorkspaceSwitcher() {
             variant="ghost"
             size="sm"
             data-testid="workspace-switcher-trigger"
-            className="gap-1.5 text-foreground hover:bg-surface-hover max-w-[240px]"
+            className="w-full min-w-0 gap-1.5 text-foreground hover:bg-surface-hover md:w-auto md:max-w-[240px]"
           >
             {active && <ProviderIcon provider={active.provider} />}
             <span className="truncate text-sm font-medium">{label}</span>
             {headCommit && (
               <span
-                className="text-[10px] text-text-muted font-mono shrink-0"
+                className="hidden text-[10px] text-text-muted font-mono shrink-0 sm:inline"
                 title={`HEAD ${headCommit}`}
               >
                 @{headCommit.slice(0, 7)}
@@ -83,23 +187,57 @@ export function WorkspaceSwitcher() {
               key={ws.slug}
               ws={ws}
               active={ws.slug === activeSlug}
+              localMode={isLocalMode}
               onSelect={() => {
                 setActive(ws.slug);
                 setMenuOpen(false);
               }}
+              onReconnect={() => {
+                const record = getBrowserWorkspace(ws.slug);
+                if (!record) {
+                  toast.error("Browser workspace not found");
+                  return;
+                }
+                setMenuOpen(false);
+                setReconnectRecord(record);
+              }}
+              onResetCache={() => {
+                setMenuOpen(false);
+                void handleResetCache(ws);
+              }}
               onRemove={async () => {
-                const ok = await remove(ws.slug);
-                if (ok) {
-                  toast.success(`Removed workspace ${ws.workspace_name}`);
+                if (isLocalMode) {
+                  await handleForgetBrowserWorkspace(ws);
                 } else {
-                  const s = useWorkspaceStore.getState();
-                  toast.error(s.error ?? "Failed to remove workspace");
+                  const ok = await remove(ws.slug);
+                  if (ok) {
+                    toast.success(`Removed workspace ${ws.workspace_name}`);
+                  } else {
+                    const s = useWorkspaceStore.getState();
+                    toast.error(s.error ?? "Failed to remove workspace");
+                  }
                 }
               }}
             />
           ))}
 
           <DropdownMenuSeparator />
+          {isLocalMode && (
+            <>
+              <DropdownMenuItem
+                data-testid="workspace-switcher-start-over"
+                onSelect={(e) => {
+                  e.preventDefault();
+                  void handleStartOver();
+                }}
+                className="gap-2 cursor-pointer text-destructive focus:text-destructive"
+              >
+                <RotateCcw className="size-3.5" />
+                <span>Start over</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
           <DropdownMenuItem
             data-testid="workspace-switcher-new"
             onSelect={(e) => {
@@ -120,13 +258,49 @@ export function WorkspaceSwitcher() {
           <DialogHeader>
             <DialogTitle>New workspace</DialogTitle>
           </DialogHeader>
-          <CreateWorkspaceForm
-            onCreated={(ws) => {
-              setCreateOpen(false);
-              toast.success(`Created workspace ${ws.workspace_name}`);
-            }}
-            onCancel={() => setCreateOpen(false)}
-          />
+          {isLocalMode ? (
+            <BrowserWorkspaceForm
+              onConnected={async (record, token) => {
+                const connected = await handleBrowserConnected(record, token);
+                if (connected) toast.success(`Created workspace ${record.workspace_name}`);
+                return connected;
+              }}
+              onCancel={() => setCreateOpen(false)}
+            />
+          ) : (
+            <CreateWorkspaceForm
+              onCreated={(ws) => {
+                setCreateOpen(false);
+                toast.success(`Created workspace ${ws.workspace_name}`);
+              }}
+              onCancel={() => setCreateOpen(false)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={reconnectRecord !== null}
+        onOpenChange={(open) => {
+          if (!open) setReconnectRecord(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reconnect workspace</DialogTitle>
+          </DialogHeader>
+          {reconnectRecord && (
+            <BrowserWorkspaceForm
+              initial={reconnectRecord}
+              submitLabel="Reconnect"
+              onConnected={async (record, token) => {
+                const connected = await handleBrowserConnected(record, token);
+                if (connected) toast.success(`Reconnected workspace ${record.workspace_name}`);
+                return connected;
+              }}
+              onCancel={() => setReconnectRecord(null)}
+            />
+          )}
         </DialogContent>
       </Dialog>
     </>
@@ -136,11 +310,22 @@ export function WorkspaceSwitcher() {
 interface WorkspaceRowProps {
   ws: WorkspaceSummary;
   active: boolean;
+  localMode: boolean;
   onSelect: () => void;
+  onReconnect: () => void;
+  onResetCache: () => void;
   onRemove: () => void | Promise<void>;
 }
 
-function WorkspaceRow({ ws, active, onSelect, onRemove }: WorkspaceRowProps) {
+function WorkspaceRow({
+  ws,
+  active,
+  localMode,
+  onSelect,
+  onReconnect,
+  onResetCache,
+  onRemove,
+}: WorkspaceRowProps) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   return (
@@ -163,6 +348,35 @@ function WorkspaceRow({ ws, active, onSelect, onRemove }: WorkspaceRowProps) {
         {active && <Check className="size-3.5 text-primary shrink-0" />}
       </button>
 
+      {localMode && (
+        <>
+          <button
+            type="button"
+            data-testid={`workspace-reconnect-${ws.slug}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onReconnect();
+            }}
+            aria-label={`Reconnect workspace ${ws.workspace_name}`}
+            className="p-1.5 rounded-sm text-text-muted hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
+          >
+            <RefreshCcw className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            data-testid={`workspace-reset-cache-${ws.slug}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onResetCache();
+            }}
+            aria-label={`Reset cache for ${ws.workspace_name}`}
+            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
+          >
+            <RotateCcw className="size-3.5" />
+          </button>
+        </>
+      )}
+
       <Popover open={confirmOpen} onOpenChange={setConfirmOpen}>
         <PopoverTrigger asChild>
           <button
@@ -172,19 +386,20 @@ function WorkspaceRow({ ws, active, onSelect, onRemove }: WorkspaceRowProps) {
               e.stopPropagation();
             }}
             aria-label={`Delete workspace ${ws.workspace_name}`}
-            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+            className="p-1.5 rounded-sm text-text-muted hover:text-destructive opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
           >
             <Trash2 className="size-3.5" />
           </button>
         </PopoverTrigger>
         <PopoverContent side="right" align="start" className="w-64 p-3 space-y-2">
           <p className="text-xs">
-            Delete workspace{" "}
+            {localMode ? "Forget workspace " : "Delete workspace "}
             <span className="font-semibold">{ws.workspace_name}</span>?
           </p>
           <p className="text-[11px] text-text-muted">
-            This stops any running agents and unregisters the workspace from
-            the runtime. Files on disk are not removed.
+            {localMode
+              ? "This removes the browser workspace entry, clears its session token, and clears its local browser cache."
+              : "This stops any running agents and unregisters the workspace from the runtime. Files on disk are not removed."}
           </p>
           <div className="flex justify-end gap-2 pt-1">
             <Button
@@ -205,7 +420,7 @@ function WorkspaceRow({ ws, active, onSelect, onRemove }: WorkspaceRowProps) {
                 await onRemove();
               }}
             >
-              Delete
+              {localMode ? "Forget" : "Delete"}
             </Button>
           </div>
         </PopoverContent>

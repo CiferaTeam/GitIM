@@ -47,15 +47,16 @@ async function stubRuntime(page: Page) {
       ],
     };
 
+    const workspaceKey = `runtime:${activeSlug}`;
     const pinnedConversations = localStorage.getItem(
-      `gitim-pinned-conversations:${activeSlug}`,
+      `gitim-pinned-conversations:${workspaceKey}`,
     );
     localStorage.clear();
     localStorage.setItem("gitim-runtime-port", String(port));
     localStorage.setItem("gitim-active-workspace", activeSlug);
     if (pinnedConversations) {
       localStorage.setItem(
-        `gitim-pinned-conversations:${activeSlug}`,
+        `gitim-pinned-conversations:${workspaceKey}`,
         pinnedConversations,
       );
     }
@@ -64,7 +65,7 @@ async function stubRuntime(page: Page) {
       JSON.stringify({ state: { activities, lastSlug: activeSlug }, version: 0 }),
     );
     localStorage.setItem(
-      `gitim-known-agents:${activeSlug}`,
+      `gitim-known-agents:${workspaceKey}`,
       JSON.stringify(["agent-01", "agent-04", "agent-20", "agent-30"]),
     );
   }, { port: runtimePort, activeSlug: slug });
@@ -248,7 +249,7 @@ test("chat sidebar pins channels and direct messages per workspace", async ({ pa
   await expect
     .poll(() =>
       page.evaluate(() =>
-        localStorage.getItem("gitim-pinned-conversations:layout"),
+        localStorage.getItem("gitim-pinned-conversations:runtime:layout"),
       ),
     )
     .toBe(JSON.stringify({ channels: ["ops"], dms: ["alice--lewis"] }));

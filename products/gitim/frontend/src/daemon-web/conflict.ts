@@ -10,6 +10,22 @@ export interface ResolveResult {
   commitMessage: string;
 }
 
+export function extractThreadAdditions(
+  filePath: string,
+  localContent: string,
+  baseContent: string | null,
+): string {
+  if (!filePath.endsWith(".thread")) {
+    throw new Error(`Cannot auto-merge non-thread browser sync conflict: ${filePath}`);
+  }
+  if (!baseContent) return localContent;
+  if (localContent === baseContent) return "";
+  if (!localContent.startsWith(baseContent)) {
+    throw new Error(`Cannot auto-merge non-append thread conflict: ${filePath}`);
+  }
+  return localContent.slice(baseContent.length);
+}
+
 export function resolveConflicts(
   localAdditions: Record<string, string>,
   remoteContents: Record<string, string>,

@@ -2,6 +2,75 @@ import { expect, test, type Page } from "@playwright/test";
 
 const runtimePort = 49322;
 const slug = "mobile";
+const localPollIntervalMs = 7000;
+
+interface BrowserWorkspaceRecordFixture {
+  id: string;
+  slug: string;
+  workspace_name: string;
+  remoteUrl: string;
+  corsProxy: string;
+  handler: string;
+  storage: { fsName: string; repoDir: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+function browserWorkspaceRecord(
+  id: string,
+  workspaceName: string,
+  remoteUrl: string,
+): BrowserWorkspaceRecordFixture {
+  const timestamp = "2026-05-08T12:00:00.000Z";
+  return {
+    id,
+    slug: `browser-${id}`,
+    workspace_name: workspaceName,
+    remoteUrl,
+    corsProxy: "https://cors.isomorphic-git.org",
+    handler: "flame4",
+    storage: { fsName: `gitim-ws-${id}`, repoDir: "/repo" },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+async function preloadBrowserWorkspaces(
+  page: Page,
+  options: {
+    workspaces: BrowserWorkspaceRecordFixture[];
+    activeSlug?: string;
+    tokens?: Record<string, string>;
+  },
+) {
+  await page.addInitScript(({ workspaces, activeSlug, tokens }) => {
+    if (sessionStorage.getItem("gitim-e2e-browser-workspaces-preloaded")) return;
+    localStorage.clear();
+    sessionStorage.clear();
+    localStorage.setItem("gitim-connection-mode", "local");
+    localStorage.setItem(
+      "gitim-browser-workspaces-v2",
+      JSON.stringify({ version: 2, workspaces }),
+    );
+    if (activeSlug) {
+      localStorage.setItem("gitim-active-browser-workspace", activeSlug);
+    }
+    for (const [workspaceId, token] of Object.entries(tokens ?? {})) {
+      sessionStorage.setItem(`gitim-browser-token:${workspaceId}`, token);
+    }
+    sessionStorage.setItem("gitim-e2e-browser-workspaces-preloaded", "1");
+  }, options);
+}
+
+async function stubGitHubIdentity(page: Page) {
+  await page.route("https://api.github.com/user", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
+    });
+  });
+}
 
 async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>> = []) {
   await page.addInitScript(({ port, activeSlug }) => {
@@ -139,10 +208,29 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
   });
 }
 
-async function stubBrowserModeWorker(page: Page) {
-  await page.addInitScript(() => {
-    type RpcRequest = { id: number; method: string; args: unknown[] };
-    type RpcResult = { ok: boolean; data?: unknown; error?: string };
+async function stubBrowserModeWorker(
+  page: Page,
+  options: { failInitWithoutToken?: boolean } = {},
+) {
+  await page.addInitScript(({ failInitWithoutToken }) => {
+    type InitCall = {
+      workspaceId?: string;
+      remoteUrl?: string;
+      token?: string | null;
+    };
+    type RpcRequest = {
+      id: number;
+      method: string;
+      args: unknown[];
+      workspaceId?: string;
+      generation?: number;
+    };
+    type RpcResult = {
+      ok: boolean;
+      data?: unknown;
+      error?: string;
+      error_code?: string;
+    };
     type Card = {
       card_id: string;
       channel: string;
@@ -165,13 +253,46 @@ async function stubBrowserModeWorker(page: Page) {
     const cards: Card[] = [];
     const archivedCards: Card[] = [];
     const messagesByCard = new Map<string, Message[]>();
+    const initCalls: InitCall[] = [];
+    const pollCalls: Array<{ workspaceId?: string }> = [];
+    Object.defineProperty(window, "__gitimBrowserInitCalls", {
+      configurable: true,
+      value: initCalls,
+    });
+    Object.defineProperty(window, "__gitimBrowserPollCalls", {
+      configurable: true,
+      value: pollCalls,
+    });
 
-    function handleMethod(method: string, args: unknown[]): RpcResult {
+    function workspaceMessage(workspaceId: string | undefined): string {
+      if (workspaceId === "ws_phone") return "hello phone cards";
+      if (workspaceId === "ws_tablet") return "hello tablet cards";
+      return "hello browser cards";
+    }
+
+    function handleMethod(method: string, args: unknown[], request: RpcRequest): RpcResult {
       switch (method) {
         case "preflight":
           return { ok: true, data: { runtime: "browser", storage: "ready", git: "ready" } };
-        case "init":
-          return { ok: true, data: { handler: "flame4", display_name: "Flame4" } };
+        case "init": {
+          const config = args[0] as InitCall | undefined;
+          initCalls.push({
+            workspaceId: config?.workspaceId,
+            remoteUrl: config?.remoteUrl,
+            token: config?.token,
+          });
+          if (failInitWithoutToken && !config?.token) {
+            return {
+              ok: false,
+              error: "Reconnect token to clone this browser workspace.",
+              error_code: "reconnect_required",
+            };
+          }
+          if (!config?.token) {
+            return { ok: true, data: { needs_token: true, sync_enabled: false } };
+          }
+          return { ok: true, data: {} };
+        }
         case "startSync":
           return { ok: true };
         case "health":
@@ -200,12 +321,13 @@ async function stubBrowserModeWorker(page: Page) {
                   point_to: 0,
                   author: "flame4",
                   timestamp: "20260317T120000Z",
-                  body: "hello browser cards",
+                  body: workspaceMessage(request.workspaceId),
                 },
               ],
             },
           };
         case "poll":
+          pollCalls.push({ workspaceId: request.workspaceId });
           return { ok: true, data: { commit_id: "browser-1", changes: [] } };
         case "thread":
           return { ok: true, data: { entries: [] } };
@@ -321,11 +443,16 @@ async function stubBrowserModeWorker(page: Page) {
 
       postMessage(raw: unknown): void {
         const request = raw as RpcRequest;
-        const result = handleMethod(request.method, request.args);
+        const result = handleMethod(request.method, request.args, request);
         queueMicrotask(() => {
           this.onmessage?.(
             new MessageEvent("message", {
-              data: { id: request.id, result },
+              data: {
+                id: request.id,
+                result,
+                workspaceId: request.workspaceId,
+                generation: request.generation,
+              },
             }),
           );
         });
@@ -341,7 +468,7 @@ async function stubBrowserModeWorker(page: Page) {
       writable: true,
       value: StubWorker,
     });
-  });
+  }, options);
 }
 
 test("mobile runtime mode defaults to chat", async ({ page }) => {
@@ -464,6 +591,315 @@ test("fresh setup can switch to browser mode from the mode choice", async ({ pag
   await expect(page.getByLabel("Git remote URL")).toBeVisible();
 });
 
+test("browser mode refresh reopens the same workspace from session token", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem("gitim-e2e-browser-refresh-ready")) return;
+    localStorage.clear();
+    sessionStorage.clear();
+    localStorage.setItem("gitim-connection-mode", "local");
+    sessionStorage.setItem("gitim-e2e-browser-refresh-ready", "1");
+  });
+  await stubBrowserModeWorker(page);
+  await stubGitHubIdentity(page);
+
+  await page.goto("/");
+  await page.getByLabel("Workspace name").fill("Phone");
+  await page.getByLabel("Git remote URL").fill("https://github.com/flame4/phone");
+  await page.getByLabel("Personal access token").fill("dummy-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await page.reload();
+
+  await expect(page.getByText("hello browser cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
+  await expect(page.getByLabel("Personal access token")).toHaveCount(0);
+});
+
+test("browser mode can switch between registered mobile workspaces", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+  const tablet = browserWorkspaceRecord(
+    "ws_tablet",
+    "Tablet",
+    "https://github.com/flame4/tablet",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone, tablet],
+    activeSlug: phone.slug,
+    tokens: {
+      [phone.id]: "phone-token",
+      [tablet.id]: "tablet-token",
+    },
+  });
+  await stubBrowserModeWorker(page);
+
+  await page.goto("/");
+
+  await expect(page.getByText("hello phone cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
+
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await page.getByTestId(`workspace-row-${tablet.slug}`).click();
+
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserInitCalls?: Array<{
+              workspaceId?: string;
+              remoteUrl?: string;
+              token?: string | null;
+            }>;
+          }
+        ).__gitimBrowserInitCalls,
+      ),
+    )
+    .toContainEqual({
+      workspaceId: tablet.id,
+      remoteUrl: tablet.remoteUrl,
+      token: "tablet-token",
+    });
+
+  await page.reload();
+
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserInitCalls?: Array<{
+              workspaceId?: string;
+              remoteUrl?: string;
+              token?: string | null;
+            }>;
+          }
+        ).__gitimBrowserInitCalls,
+      ),
+    )
+    .toContainEqual({
+      workspaceId: tablet.id,
+      remoteUrl: tablet.remoteUrl,
+      token: "tablet-token",
+    });
+});
+
+test("browser mode does not poll the previous backend after activation fails", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+  const tablet = browserWorkspaceRecord(
+    "ws_tablet",
+    "Tablet",
+    "https://github.com/flame4/tablet",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone, tablet],
+    activeSlug: phone.slug,
+    tokens: {
+      [phone.id]: "phone-token",
+    },
+  });
+  await stubBrowserModeWorker(page, { failInitWithoutToken: true });
+
+  await page.goto("/");
+
+  await expect(page.getByText("hello phone cards")).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await page.getByTestId(`workspace-row-${tablet.slug}`).click();
+
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await expect(page.getByTestId(`workspace-reconnect-${tablet.slug}`)).toBeVisible();
+  await page.keyboard.press("Escape");
+  const pollCountAfterFailedActivation = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterFailedActivation);
+});
+
+test("browser mode opens cached data without polling when activation needs a token", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+  const tablet = browserWorkspaceRecord(
+    "ws_tablet",
+    "Tablet",
+    "https://github.com/flame4/tablet",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone, tablet],
+    activeSlug: phone.slug,
+    tokens: {
+      [phone.id]: "phone-token",
+    },
+  });
+  await stubBrowserModeWorker(page);
+
+  await page.goto("/");
+
+  await expect(page.getByText("hello phone cards")).toBeVisible();
+  await page.getByTestId("workspace-switcher-trigger").click();
+  await page.getByTestId(`workspace-row-${tablet.slug}`).click();
+
+  await expect(page.getByText("hello tablet cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  const pollCountAfterCachedActivation = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterCachedActivation);
+});
+
+test("browser mode asks to reconnect when registered workspace has no session token", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone],
+    activeSlug: phone.slug,
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("Browser Mode")).toBeVisible();
+  await expect(page.getByText("Phone", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open cached" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reset cache for Phone" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Forget Phone" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start over" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await expect(page.getByLabel("Personal access token")).toBeVisible();
+});
+
+test("browser mode setup opens cached workspace without a session token", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone],
+    activeSlug: phone.slug,
+  });
+  await stubBrowserModeWorker(page);
+
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Open cached" }).click();
+
+  await expect(page.getByText("hello phone cards")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
+  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  const pollCountAfterCachedOpen = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+      }
+    ).__gitimBrowserPollCalls?.length ?? 0,
+  );
+  await page.waitForTimeout(localPollIntervalMs + 250);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserPollCalls?: Array<{ workspaceId?: string }>;
+          }
+        ).__gitimBrowserPollCalls?.length ?? 0,
+      ),
+    )
+    .toBe(pollCountAfterCachedOpen);
+});
+
+test("browser mode setup can forget cached workspace before activation", async ({ page }) => {
+  const phone = browserWorkspaceRecord(
+    "ws_phone",
+    "Phone",
+    "https://github.com/flame4/phone",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preloadBrowserWorkspaces(page, {
+    workspaces: [phone],
+    activeSlug: phone.slug,
+  });
+
+  await page.goto("/");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Forget Phone" }).click();
+
+  await expect(page.getByText("Phone", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Git remote URL")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => localStorage.getItem("gitim-browser-workspaces-v2")),
+    )
+    .toBe(JSON.stringify({ version: 2, workspaces: [] }));
+});
+
 test("browser mode mobile app keeps the Cards tab after connecting", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
@@ -471,13 +907,7 @@ test("browser mode mobile app keeps the Cards tab after connecting", async ({ pa
     localStorage.setItem("gitim-connection-mode", "local");
   });
   await stubBrowserModeWorker(page);
-  await page.route("https://api.github.com/user", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
-    });
-  });
+  await stubGitHubIdentity(page);
 
   await page.goto("/");
   await page.getByLabel("Git remote URL").fill("https://github.com/flame4/room");
@@ -503,13 +933,7 @@ test("browser mode mobile cards can be created and discussed", async ({ page }) 
     localStorage.setItem("gitim-connection-mode", "local");
   });
   await stubBrowserModeWorker(page);
-  await page.route("https://api.github.com/user", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ login: "flame4", name: "Flame4", email: null }),
-    });
-  });
+  await stubGitHubIdentity(page);
 
   await page.goto("/");
   await page.getByLabel("Git remote URL").fill("https://github.com/flame4/room");
@@ -579,5 +1003,23 @@ test("browser mode preflights worker dependencies before clone", async ({ page }
 
   await expect(page.getByText("Signed in as @flame4")).toBeVisible();
   await expect(page.getByText("HTTP Error: 500 Internal Server Error")).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const registry = JSON.parse(
+          localStorage.getItem("gitim-browser-workspaces-v2") ??
+            '{"workspaces":[]}',
+        ) as { workspaces?: unknown[] };
+        const tokenKeys = Array.from({ length: sessionStorage.length }, (_, index) =>
+          sessionStorage.key(index),
+        ).filter((key) => key?.startsWith("gitim-browser-token:"));
+
+        return {
+          workspaces: registry.workspaces?.length ?? 0,
+          tokenKeys: tokenKeys.length,
+        };
+      }),
+    )
+    .toEqual({ workspaces: 0, tokenKeys: 0 });
   expect(pageErrors.join("\n")).not.toMatch(/Buffer|TextEncoder|createHash|crypto/);
 });
