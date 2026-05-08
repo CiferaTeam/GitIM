@@ -80,12 +80,16 @@ export interface ApiResponse<T = Record<string, unknown>> {
 export type WorkspaceProvider = "local" | "github";
 
 export interface WorkspaceSummary {
+  id?: string;
   slug: string;
   workspace_name: string;
   path: string;
   provider: WorkspaceProvider;
   initialized: boolean;
   agents_count?: number;
+  browser?: boolean;
+  remote_url?: string;
+  needs_token?: boolean;
 }
 
 export type CreateWorkspaceGit =
