@@ -43,6 +43,7 @@ async function preloadBrowserWorkspaces(
   },
 ) {
   await page.addInitScript(({ workspaces, activeSlug, tokens }) => {
+    if (sessionStorage.getItem("gitim-e2e-browser-workspaces-preloaded")) return;
     localStorage.clear();
     sessionStorage.clear();
     localStorage.setItem("gitim-connection-mode", "local");
@@ -56,6 +57,7 @@ async function preloadBrowserWorkspaces(
     for (const [workspaceId, token] of Object.entries(tokens ?? {})) {
       sessionStorage.setItem(`gitim-browser-token:${workspaceId}`, token);
     }
+    sessionStorage.setItem("gitim-e2e-browser-workspaces-preloaded", "1");
   }, options);
 }
 
@@ -207,6 +209,11 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
 
 async function stubBrowserModeWorker(page: Page) {
   await page.addInitScript(() => {
+    type InitCall = {
+      workspaceId?: string;
+      remoteUrl?: string;
+      token?: string | null;
+    };
     type RpcRequest = {
       id: number;
       method: string;
@@ -237,13 +244,25 @@ async function stubBrowserModeWorker(page: Page) {
     const cards: Card[] = [];
     const archivedCards: Card[] = [];
     const messagesByCard = new Map<string, Message[]>();
+    const initCalls: InitCall[] = [];
+    Object.defineProperty(window, "__gitimBrowserInitCalls", {
+      configurable: true,
+      value: initCalls,
+    });
 
     function handleMethod(method: string, args: unknown[]): RpcResult {
       switch (method) {
         case "preflight":
           return { ok: true, data: { runtime: "browser", storage: "ready", git: "ready" } };
-        case "init":
+        case "init": {
+          const config = args[0] as InitCall | undefined;
+          initCalls.push({
+            workspaceId: config?.workspaceId,
+            remoteUrl: config?.remoteUrl,
+            token: config?.token,
+          });
           return { ok: true, data: {} };
+        }
         case "startSync":
           return { ok: true };
         case "health":
@@ -542,7 +561,7 @@ test("fresh setup can switch to browser mode from the mode choice", async ({ pag
 });
 
 test("browser mode refresh reopens the same workspace from session token", async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 844 });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
     if (sessionStorage.getItem("gitim-e2e-browser-refresh-ready")) return;
     localStorage.clear();
@@ -579,7 +598,7 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
     "https://github.com/flame4/tablet",
   );
 
-  await page.setViewportSize({ width: 900, height: 844 });
+  await page.setViewportSize({ width: 390, height: 844 });
   await preloadBrowserWorkspaces(page, {
     workspaces: [phone, tablet],
     activeSlug: phone.slug,
@@ -595,11 +614,34 @@ test("browser mode can switch between registered mobile workspaces", async ({ pa
   await expect(page.getByText("hello browser cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
 
+  await page.getByTestId("workspace-switcher-trigger").evaluate((trigger) => {
+    const wrapper = trigger.parentElement;
+    if (wrapper instanceof HTMLElement) wrapper.style.display = "block";
+  });
   await page.getByTestId("workspace-switcher-trigger").click();
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
   await expect(page.getByText("hello browser cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __gitimBrowserInitCalls?: Array<{
+              workspaceId?: string;
+              remoteUrl?: string;
+              token?: string | null;
+            }>;
+          }
+        ).__gitimBrowserInitCalls,
+      ),
+    )
+    .toContainEqual({
+      workspaceId: tablet.id,
+      remoteUrl: tablet.remoteUrl,
+      token: "tablet-token",
+    });
 });
 
 test("browser mode asks to reconnect when registered workspace has no session token", async ({ page }) => {
