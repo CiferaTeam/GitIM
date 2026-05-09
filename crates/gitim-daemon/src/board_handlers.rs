@@ -194,20 +194,18 @@ fn publish_board(
     let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
     let rel = board_path(author).map_err(|e| Response::error(e.to_string()))?;
 
-    let doc = match content {
+    let mut doc = match content {
         Some(content) => parse_board_markdown(&content)
             .map_err(|e| Response::error(format!("invalid board: {}", e)))?,
         None => {
             let content = read_board_content(state, &rel, author)?;
-            let mut doc = parse_board_markdown(&content)
-                .map_err(|e| Response::error(format!("invalid board: {}", e)))?;
-            validate_board_for_handler(&doc, author).map_err(|e| Response::error(e.to_string()))?;
-            doc.meta.updated_at = current_timestamp();
-            doc
+            parse_board_markdown(&content)
+                .map_err(|e| Response::error(format!("invalid board: {}", e)))?
         }
     };
 
     validate_board_for_handler(&doc, author).map_err(|e| Response::error(e.to_string()))?;
+    doc.meta.updated_at = current_timestamp();
     commit_board_document_locked(state, author, doc, "board: update")
 }
 

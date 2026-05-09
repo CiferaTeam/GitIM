@@ -349,6 +349,17 @@ where
             }
         }
 
+        let changed_board_files = repo
+            .changed_files_unpushed("showboards/*/board.md")
+            .unwrap_or_default();
+        let mut local_boards: HashMap<PathBuf, String> = HashMap::new();
+        for rel_path in &changed_board_files {
+            let abs_path = repo.root().join(rel_path);
+            if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                local_boards.insert(rel_path.clone(), content);
+            }
+        }
+
         // Rebase + optional conflict resolution mutates the local commit
         // tree; hold commit_lock across the whole block so handler writes
         // never interleave with it. Push happens *after* the guard drops so
@@ -391,9 +402,9 @@ where
             }
             Err(_) => {
                 // Rebase failed — use thread-aware + meta conflict resolution
-                if local_additions.is_empty() && local_metas.is_empty() {
+                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty() {
                     let _ = repo.discard_unpushed();
-                    warn!("sync: non-thread/meta rebase conflict, aborted");
+                    warn!("sync: non-thread/meta/board rebase conflict, aborted");
                     return SyncOutcome::Normal;
                 }
 
@@ -428,6 +439,25 @@ where
                 } else {
                     Vec::new()
                 };
+
+                for (rel_path, local_content) in &local_boards {
+                    let abs_path = repo.root().join(rel_path);
+                    if let Some(parent) = abs_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            warn!(
+                                "sync: failed to create board dir {}: {}",
+                                parent.display(),
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&abs_path, local_content) {
+                        warn!("sync: failed to write back local board: {}", e);
+                        continue;
+                    }
+                    modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
+                }
 
                 // Meta resolution
                 for (rel_path, local_content) in &local_metas {
@@ -497,6 +527,10 @@ where
                     let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
                     let commit_msg = if !thread_mappings.is_empty() {
                         build_rebase_commit_msg(&thread_mappings, &local_additions)
+                    } else if !local_boards.is_empty() && local_metas.is_empty() {
+                        "board: sync after rebase".to_string()
+                    } else if !local_boards.is_empty() {
+                        "sync: board/meta after rebase".to_string()
                     } else {
                         "meta: sync after rebase".to_string()
                     };

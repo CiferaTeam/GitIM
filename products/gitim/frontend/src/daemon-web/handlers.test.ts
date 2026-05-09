@@ -870,6 +870,22 @@ describe("daemon-web handlers", () => {
     expect(commits).toHaveLength(0);
   });
 
+  it("refreshes browser board publish content timestamp", async () => {
+    vi.setSystemTime(new Date("2026-03-17T12:34:56Z"));
+    const stale = boardMarkdown("lewis").replace(
+      "updated_at: 20260509T120000Z",
+      "updated_at: 20200101T000000Z",
+    );
+
+    const res = await publishBoard(stale);
+
+    expect(res.ok).toBe(true);
+    const written = files.get("/repo/showboards/lewis/board.md");
+    expect(written).toContain("handler: lewis");
+    expect(written).toContain("updated_at: 20260317T123456Z");
+    expect(written).not.toContain("updated_at: 20200101T000000Z");
+  });
+
   it("mutates browser board fields and sections through wasm helpers", async () => {
     dirs.set("/repo/showboards", ["lewis"]);
     dirs.set("/repo/showboards/lewis", ["board.md"]);

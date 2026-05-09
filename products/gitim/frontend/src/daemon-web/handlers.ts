@@ -848,10 +848,11 @@ export async function publishBoard(content?: string): Promise<ApiResponse> {
     const handler = s.me.handler;
     const path = boardPath(handler);
     const board = content == null
-      ? await readCurrentBoard(handler, path, true)
+      ? await readCurrentBoard(handler, path, false)
       : parseBoardMarkdown(content) as BoardDocument;
 
     validateBoardForHandler(board, handler);
+    board.meta.updated_at = utcTimestamp();
     return await commitBoardDocument(handler, board, "board: update");
   } catch (e) {
     return err(String((e as Error).message ?? e));

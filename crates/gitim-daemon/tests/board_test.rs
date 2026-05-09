@@ -160,6 +160,31 @@ async fn board_publish_rejects_handler_mismatch() {
 }
 
 #[tokio::test]
+async fn board_publish_stdin_refreshes_updated_at() {
+    let (_tmp, state) = setup().await;
+    let content = "---\nversion: 1\nhandler: alice\nupdated_at: 20200101T000000Z\nstatus: working\nsummary: stale\ntags: []\n---\n## 当前状态\n\nfrom stdin\n";
+
+    let resp = handle_request(
+        Request::BoardPublish {
+            content: Some(content.to_string()),
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+
+    assert!(resp.ok, "board_publish failed: {:?}", resp.error);
+    let persisted =
+        std::fs::read_to_string(state.repo_root.join("showboards/alice/board.md")).unwrap();
+    assert!(persisted.contains("handler: alice"));
+    assert!(persisted.contains("from stdin"));
+    assert!(
+        !persisted.contains("updated_at: 20200101T000000Z"),
+        "publish --stdin should stamp the protocol update time"
+    );
+}
+
+#[tokio::test]
 async fn board_show_reads_other_handlers() {
     let (_tmp, state) = setup().await;
     let resp = handle_request(
