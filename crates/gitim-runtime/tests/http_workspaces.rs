@@ -379,6 +379,21 @@ async fn create_workspace_rejects_nonexistent_path() {
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
+async fn get_workspace_invalid_slug_returns_400() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let (status, body) = send(router, "GET", "/workspaces/UPPER", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("invalid slug"),
+        "expected invalid-slug error, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
 async fn get_workspace_unknown_returns_404() {
     let _home = HomeGuard::install();
     let (router, _state) = create_router();
@@ -412,6 +427,21 @@ async fn get_workspace_happy_path() {
 }
 
 // -- 11. DELETE unknown → 404 ---------------------------------------------
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn delete_workspace_invalid_slug_returns_400() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let (status, body) = send(router, "DELETE", "/workspaces/UPPER", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("invalid slug"),
+        "expected invalid-slug error, got: {err}"
+    );
+}
 
 #[tokio::test]
 #[serial(http_workspaces_home)]

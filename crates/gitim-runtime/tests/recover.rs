@@ -36,6 +36,10 @@ fn fresh_state_with_ws(slug: &str, path: &Path) -> SharedRuntimeState {
     state
 }
 
+fn empty_state() -> SharedRuntimeState {
+    Arc::new(Mutex::new(RuntimeState::default()))
+}
+
 #[tokio::test]
 async fn test_recover_missing_provider_marks_error() {
     let tmp = TempDir::new().unwrap();
@@ -147,6 +151,28 @@ async fn test_recover_missing_provider_broadcasts_error_event() {
         event.detail
     );
     assert!(!event.timestamp.is_empty(), "timestamp should be set");
+}
+
+#[tokio::test]
+async fn test_recover_missing_workspace_context_skips_agent_scan() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "no-prov",
+        serde_json::json!({
+            "handler": "no-prov",
+            "display_name": "No Provider",
+        }),
+    );
+
+    let state = empty_state();
+    recover_agents_for_workspace(state.clone(), "missing-ws", tmp.path()).await;
+
+    let s = state.lock().unwrap();
+    assert!(
+        s.workspaces.is_empty(),
+        "agent recovery should not create a workspace context"
+    );
 }
 
 // Note: a `test_recover_valid_provider_starts_normally` case would need to

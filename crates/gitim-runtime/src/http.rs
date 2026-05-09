@@ -7,7 +7,7 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -564,18 +564,13 @@ async fn im_me(
             Ok(me) => Json(ImMeResponse {
                 ok: true,
                 data: ImMeData {
-                    handler: me
-                        .handler
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    display_name: me
-                        .display_name
-                        .unwrap_or_else(|| "Unknown".to_string()),
+                    handler: me.handler.unwrap_or_else(|| "unknown".to_string()),
+                    display_name: me.display_name.unwrap_or_else(|| "Unknown".to_string()),
                     guest: me.guest.unwrap_or(false),
                 },
             })
             .into_response(),
-            Err(e) => Json(ErrorBody::new(format!("failed to parse me.json: {e}")))
-                .into_response(),
+            Err(e) => Json(ErrorBody::new(format!("failed to parse me.json: {e}"))).into_response(),
         },
         Err(e) => Json(ErrorBody::new(format!("failed to read me.json: {e}"))).into_response(),
     }
@@ -1252,8 +1247,7 @@ async fn agents_add(
 
     let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-        return Json(ErrorBody::new(format!("failed to create agents dir: {e}")))
-            .into_response();
+        return Json(ErrorBody::new(format!("failed to create agents dir: {e}"))).into_response();
     }
 
     let remote_url = match git_provider {
@@ -2094,11 +2088,7 @@ async fn agents_remove(
 
     if req.hard_delete {
         if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody::new(e)),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response();
         }
         // Best-effort hermes profile cleanup: failures only warn so a
         // missing/broken hermes CLI never blocks the user-facing delete.
@@ -2240,10 +2230,22 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
     tracing::info!("recovering {} workspace(s)", cfg.workspaces.len());
 
     let mut tasks = Vec::new();
+    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
     for entry in cfg.workspaces {
         let workspace = PathBuf::from(&entry.path);
         if !workspace.exists() {
             tracing::warn!(slug=%entry.slug, path=%entry.path, "workspace path missing; skip");
+            continue;
+        }
+        let recovered_path = match workspace.canonicalize() {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(slug=%entry.slug, path=%entry.path, error=%e, "workspace path canonicalization failed; using configured path");
+                workspace.clone()
+            }
+        };
+        if !seen_paths.insert(recovered_path) {
+            tracing::warn!(slug=%entry.slug, path=%entry.path, "workspace path already recovered; skipping duplicate entry");
             continue;
         }
         let state = state.clone();
@@ -2344,6 +2346,14 @@ async fn recover_single_workspace(
 /// recovery loop. The workspace context must already exist in state (the
 /// caller inserts it before calling us).
 pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str, workspace: &Path) {
+    {
+        let s = state.lock().unwrap();
+        if !s.workspaces.contains_key(slug) {
+            tracing::warn!(slug=%slug, "workspace missing during agent recovery; skipping scan");
+            return;
+        }
+    }
+
     let entries = match std::fs::read_dir(workspace) {
         Ok(e) => e,
         Err(_) => return,
@@ -2404,11 +2414,17 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
             tracing::warn!("agent @{handler} recovered in error state: {msg}");
             let activity_tx = {
                 let s = state.lock().unwrap();
-                s.workspaces
-                    .get(slug)
-                    .expect("ws exists")
-                    .activity_tx
-                    .clone()
+                match s.workspaces.get(slug) {
+                    Some(ctx) => ctx.activity_tx.clone(),
+                    None => {
+                        tracing::warn!(
+                            slug=%slug,
+                            handler=%handler,
+                            "workspace missing during agent recovery; skipping agent"
+                        );
+                        continue;
+                    }
+                }
             };
             let _ = activity_tx.send(AgentActivityEvent {
                 agent_id: handler.clone(),
@@ -2418,32 +2434,39 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
             let mut s = state.lock().unwrap();
-            s.workspaces
-                .get_mut(slug)
-                .expect("ws exists")
-                .agents
-                .insert(
-                    handler.clone(),
-                    AgentInfo {
-                        id: handler.clone(),
-                        handler: handler.clone(),
-                        display_name,
-                        status: "error".to_string(),
-                        last_activity: None,
-                        messages_processed: 0,
-                        repo_path: dir.display().to_string(),
-                        provider: provider_raw.map(|s| s.to_string()),
-                        model,
-                        system_prompt: custom_system_prompt,
-                        introduction: read_user_introduction(&dir, &handler),
-                        env,
-                        error_message: Some(msg),
-                        session_usage: crate::state::AgentState::load(&dir)
-                            .ok()
-                            .and_then(|s| s.session_usage),
-                        loop_handle: None,
-                    },
-                );
+            match s.workspaces.get_mut(slug) {
+                Some(ctx) => {
+                    ctx.agents.insert(
+                        handler.clone(),
+                        AgentInfo {
+                            id: handler.clone(),
+                            handler: handler.clone(),
+                            display_name,
+                            status: "error".to_string(),
+                            last_activity: None,
+                            messages_processed: 0,
+                            repo_path: dir.display().to_string(),
+                            provider: provider_raw.map(|s| s.to_string()),
+                            model,
+                            system_prompt: custom_system_prompt,
+                            introduction: read_user_introduction(&dir, &handler),
+                            env,
+                            error_message: Some(msg),
+                            session_usage: crate::state::AgentState::load(&dir)
+                                .ok()
+                                .and_then(|s| s.session_usage),
+                            loop_handle: None,
+                        },
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        slug=%slug,
+                        handler=%handler,
+                        "workspace missing during agent recovery; skipping agent"
+                    );
+                }
+            }
             continue;
         }
 
@@ -2467,32 +2490,40 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
 
         {
             let mut s = state.lock().unwrap();
-            s.workspaces
-                .get_mut(slug)
-                .expect("ws exists")
-                .agents
-                .insert(
-                    handler.clone(),
-                    AgentInfo {
-                        id: handler.clone(),
-                        handler: handler.clone(),
-                        display_name,
-                        status: "idle".to_string(),
-                        last_activity: None,
-                        messages_processed: 0,
-                        repo_path: dir.display().to_string(),
-                        provider: provider_raw.map(|s| s.to_string()),
-                        model,
-                        system_prompt: custom_system_prompt,
-                        introduction: read_user_introduction(&dir, &handler),
-                        env,
-                        error_message: None,
-                        session_usage: crate::state::AgentState::load(&dir)
-                            .ok()
-                            .and_then(|s| s.session_usage),
-                        loop_handle: None,
-                    },
-                );
+            match s.workspaces.get_mut(slug) {
+                Some(ctx) => {
+                    ctx.agents.insert(
+                        handler.clone(),
+                        AgentInfo {
+                            id: handler.clone(),
+                            handler: handler.clone(),
+                            display_name,
+                            status: "idle".to_string(),
+                            last_activity: None,
+                            messages_processed: 0,
+                            repo_path: dir.display().to_string(),
+                            provider: provider_raw.map(|s| s.to_string()),
+                            model,
+                            system_prompt: custom_system_prompt,
+                            introduction: read_user_introduction(&dir, &handler),
+                            env,
+                            error_message: None,
+                            session_usage: crate::state::AgentState::load(&dir)
+                                .ok()
+                                .and_then(|s| s.session_usage),
+                            loop_handle: None,
+                        },
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        slug=%slug,
+                        handler=%handler,
+                        "workspace missing during agent recovery; skipping agent"
+                    );
+                    continue;
+                }
+            }
         }
 
         match start_agent_loop(&state, slug, &handler) {
@@ -2608,7 +2639,7 @@ async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<Worksp
 
 async fn workspaces_get(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path(slug): axum::extract::Path<String>,
+    WorkspaceSlug(slug): WorkspaceSlug,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -2650,7 +2681,7 @@ async fn workspaces_get(
 /// durable state (workspace gone from memory, resurrects on restart).
 async fn workspaces_delete(
     State(state): State<SharedRuntimeState>,
-    axum::extract::Path(slug): axum::extract::Path<String>,
+    WorkspaceSlug(slug): WorkspaceSlug,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;

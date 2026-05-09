@@ -107,11 +107,3 @@ export function MemberPicker({
     </div>
   );
 }
-
-// TODO(test): Unit tests worth adding:
-// - toggle adds/removes handle from value correctly
-// - excludeHandlers filters out handles before display
-// - query filter is case-insensitive (e.g. "ALICE" matches "alice")
-// - chip × button calls onChange with handle removed
-// - chip area absent (no DOM space) when value === []
-// - emptyMessage shown when filtered list is empty

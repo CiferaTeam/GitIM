@@ -181,6 +181,36 @@ async fn recover_skips_missing_workspace_path() {
     );
 }
 
+#[tokio::test]
+#[serial(home_env)]
+async fn recover_skips_duplicate_workspace_path_entries() {
+    let (_home_guard, home) = HomeGuard::install();
+
+    let ws_tmp = TempDir::new().unwrap();
+    let shared = ws_tmp.path().join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+
+    let cfg = UserConfig {
+        runtime_id: String::new(),
+        workspaces: vec![
+            entry("shared-a", "Shared A", &shared),
+            entry("shared-b", "Shared B", &shared),
+        ],
+    };
+    write_runtime_json(&home, &cfg);
+
+    let state = empty_state();
+    recover_from_config(state.clone()).await;
+
+    let s = state.lock().unwrap();
+    assert_eq!(
+        s.workspaces.len(),
+        1,
+        "only one workspace should be recovered for a duplicate path"
+    );
+    assert!(s.workspaces.contains_key("shared-a"));
+}
+
 // -- 3. Parallel recovery still populates every workspace --
 //
 // Recovery dispatches one tokio task per entry. A serial loop would also pass
