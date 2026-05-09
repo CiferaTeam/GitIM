@@ -262,32 +262,32 @@ pub enum Request {
     #[serde(rename = "archive_user")]
     ArchiveUser {
         handler: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         author: Option<String>,
     },
     #[serde(rename = "unarchive_user")]
     UnarchiveUser {
         handler: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         author: Option<String>,
     },
     #[serde(rename = "archive_dm")]
     ArchiveDm {
         peer: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         author: Option<String>,
     },
     #[serde(rename = "unarchive_dm")]
     UnarchiveDm {
         peer: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         author: Option<String>,
     },
     #[serde(rename = "list_archived_users")]
     ListArchivedUsers,
     #[serde(rename = "list_archived_dms")]
     ListArchivedDms {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         author: Option<String>,
     },
     #[serde(rename = "depart_user")]
@@ -471,6 +471,18 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"unarchive_user","handler":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::UnarchiveUser { handler, author } => {
+                assert_eq!(handler, "bob");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -484,6 +496,18 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"archive_dm","peer":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::ArchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -494,6 +518,18 @@ mod tests {
             Request::UnarchiveDm { peer, author } => {
                 assert_eq!(peer, "bob");
                 assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"unarchive_dm","peer":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::UnarchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, None);
             }
             _ => panic!("wrong variant"),
         }
