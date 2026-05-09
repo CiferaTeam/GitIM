@@ -52,6 +52,36 @@ pub fn write_to(cfg: &UserConfig, path: &Path) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
+/// Read or generate the device-bound runtime ID.
+///
+/// Behavior:
+/// - If `path` exists and `runtime_id` parses as a UUID → return it as-is.
+/// - Otherwise (missing file, missing field, empty string, malformed UUID)
+///   → generate a new v4 UUID, write it back into the same file (preserving
+///   `workspaces`), and return the new ID.
+/// - Write failures are logged via `tracing::warn!` but do NOT propagate;
+///   the in-memory UUID is still returned so runtime startup can proceed.
+///   Next startup will retry the write.
+///
+/// See docs/plans/runtime-id/00-design.md for the full design and
+/// non-goals (no platform-native device ID, no git sync, no agent injection).
+pub fn ensure_runtime_id_at(path: &Path) -> String {
+    let mut cfg = read_from(Some(path));
+    if uuid::Uuid::parse_str(&cfg.runtime_id).is_ok() {
+        return cfg.runtime_id;
+    }
+    let new_id = uuid::Uuid::new_v4().to_string();
+    cfg.runtime_id = new_id.clone();
+    if let Err(e) = write_to(&cfg, path) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "failed to persist runtime_id; will retry on next startup"
+        );
+    }
+    new_id
+}
+
 impl UserConfig {
     pub fn upsert(&mut self, entry: WorkspaceEntry) {
         if let Some(existing) = self.workspaces.iter_mut().find(|e| e.slug == entry.slug) {
@@ -170,5 +200,66 @@ mod tests {
         assert_eq!(cfg.runtime_id, "");
         assert_eq!(cfg.workspaces.len(), 1);
         assert_eq!(cfg.workspaces[0].slug, "a");
+    }
+
+    #[test]
+    fn ensure_runtime_id_creates_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        assert!(!path.exists());
+        let id = ensure_runtime_id_at(&path);
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.matches('-').count(), 4);
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        let cfg = read_from(Some(&path));
+        assert_eq!(cfg.runtime_id, id);
+    }
+
+    #[test]
+    fn ensure_runtime_id_returns_same_on_second_call() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let first = ensure_runtime_id_at(&path);
+        let second = ensure_runtime_id_at(&path);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ensure_runtime_id_regenerates_on_corruption() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        std::fs::write(&path, r#"{"runtime_id":"not-a-uuid","workspaces":[]}"#).unwrap();
+        let id = ensure_runtime_id_at(&path);
+        assert_ne!(id, "not-a-uuid");
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        let cfg = read_from(Some(&path));
+        assert_eq!(cfg.runtime_id, id);
+    }
+
+    #[test]
+    fn ensure_runtime_id_regenerates_on_empty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        std::fs::write(&path, r#"{"runtime_id":"","workspaces":[]}"#).unwrap();
+        let id = ensure_runtime_id_at(&path);
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        assert_eq!(read_from(Some(&path)).runtime_id, id);
+    }
+
+    #[test]
+    fn ensure_runtime_id_preserves_workspaces() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let mut cfg = UserConfig::default();
+        cfg.upsert(sample("frontend", "Frontend", "/ws/frontend"));
+        cfg.upsert(sample("backend", "Backend", "/ws/backend"));
+        write_to(&cfg, &path).unwrap();
+        let id = ensure_runtime_id_at(&path);
+        assert!(!id.is_empty());
+        let after = read_from(Some(&path));
+        assert_eq!(after.runtime_id, id);
+        assert_eq!(after.workspaces.len(), 2);
+        assert_eq!(after.workspaces[0].slug, "frontend");
+        assert_eq!(after.workspaces[1].slug, "backend");
     }
 }
