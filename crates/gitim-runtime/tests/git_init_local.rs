@@ -2,7 +2,7 @@ mod common;
 
 use std::net::SocketAddr;
 
-use common::{ensure_daemon_in_path, short_tempdir};
+use common::{ensure_daemon_in_path, short_tempdir, HomeGuard};
 use gitim_runtime::git_config::{GitProvider, WorkspaceConfig};
 use gitim_runtime::http::create_router;
 
@@ -28,7 +28,9 @@ async fn post_json(addr: SocketAddr, path: &str, body: serde_json::Value) -> ser
 }
 
 #[tokio::test]
+#[serial_test::serial(home_env)]
 async fn git_init_local_creates_bare_and_human_and_config() {
+    let _home = HomeGuard::install();
     ensure_daemon_in_path();
     let tmp = short_tempdir();
     let (addr, server) = spawn_server().await;

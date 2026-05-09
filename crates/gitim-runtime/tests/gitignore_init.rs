@@ -4,7 +4,7 @@ mod common;
 
 use std::net::SocketAddr;
 
-use common::{ensure_daemon_in_path, short_tempdir};
+use common::{ensure_daemon_in_path, short_tempdir, HomeGuard};
 use gitim_runtime::http::create_router;
 use serial_test::serial;
 
@@ -41,8 +41,9 @@ fn kill_daemon_in(workspace_path: &std::path::Path) {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_env)]
 async fn local_git_init_adds_env_to_gitignore_and_commits() {
+    let _home = HomeGuard::install();
     ensure_daemon_in_path();
     let tmp = short_tempdir();
     let (addr, server) = spawn_server().await;
@@ -94,8 +95,9 @@ async fn local_git_init_adds_env_to_gitignore_and_commits() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_env)]
 async fn local_git_init_commits_env_gitignore_exactly_once() {
+    let _home = HomeGuard::install();
     ensure_daemon_in_path();
     let tmp = short_tempdir();
     let (addr, server) = spawn_server().await;

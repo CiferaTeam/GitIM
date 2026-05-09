@@ -31,6 +31,35 @@ pub fn short_tempdir() -> TempDir {
     Builder::new().prefix("gim").tempdir_in("/tmp").unwrap()
 }
 
+/// Temporarily point HOME at a fresh tempdir so tests that hit runtime routes
+/// persisting `~/.gitim/runtime.json` cannot mutate the developer machine's
+/// real GitIM config.
+pub struct HomeGuard {
+    original: Option<std::ffi::OsString>,
+    _tmp: TempDir,
+}
+
+impl HomeGuard {
+    pub fn install() -> Self {
+        let tmp = TempDir::new().expect("tempdir for HOME");
+        let original = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+        Self {
+            original,
+            _tmp: tmp,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(val) => std::env::set_var("HOME", val),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 /// Create a bare git repo with an initial commit so clone works.
 pub fn setup_bare_remote(tmp: &TempDir) -> PathBuf {
     let bare_path = tmp.path().join("remote.git");
