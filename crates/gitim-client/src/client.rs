@@ -405,4 +405,20 @@ impl GitimClient {
         )
         .await
     }
+
+    /// Compose the archive-protocol "burn" sequence on the daemon side:
+    /// append leave-workspace events, archive DMs, scrub channel members,
+    /// and finally `git mv users/<h>.meta.yaml` into `archive/users/`.
+    ///
+    /// The daemon walks an idempotent multi-commit phase chain and uses
+    /// `archive/users/<handler>.meta.yaml` as the single source of truth
+    /// for "depart complete" — so retrying after a partial failure is
+    /// safe and resumes from the first incomplete step. C.1 will add
+    /// the rest of the archive-protocol surface (`archive_dm`,
+    /// `unarchive_dm`, etc.) to this client; B.1 only needs `depart_user`
+    /// to unblock the runtime burn endpoint.
+    pub async fn depart_user(&self, handler: &str) -> Result<ApiResponse, ClientError> {
+        self.request("depart_user", json!({ "handler": handler }))
+            .await
+    }
 }

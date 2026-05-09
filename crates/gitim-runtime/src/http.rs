@@ -2026,6 +2026,196 @@ async fn agents_remove(
     Json(OkAckResponse { ok: true }).into_response()
 }
 
+// -- /agents/burn --
+
+/// `POST /workspaces/{slug}/agents/burn { id }` — full archive-protocol
+/// departure. See `docs/plans/2026-05-09-archive-protocol/01-plan.md`
+/// "Agent burn 工作流" for the contract.
+///
+/// Steps:
+///   1. type-check `id` is in `ctx.agents` — burn is strictly for agents
+///      (humans are out of v1 scope; daemon is type-agnostic but the
+///      runtime entry point gates on agent-membership here)
+///   2. abort the agent loop (so it stops polling/sending)
+///   3. ensure the target's daemon is alive, then RPC `depart_user` to it
+///      — daemon walks A.4's idempotent multi-commit chain and uses
+///      `archive/users/<h>.meta.yaml` as the single source of truth for
+///      "depart complete". A daemon RPC failure short-circuits steps
+///      4-7; the user retries and the daemon resumes from the first
+///      incomplete phase
+///   4. kill the agent daemon process
+///   5. `hard_delete_agent_dir` — rm -rf the clone
+///   6. best-effort hermes profile delete (warn-only on failure)
+///   7. remove from `ctx.agents` + broadcast `AgentActivityEvent::burned`
+async fn agents_burn(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<AgentIdRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Step 1: type-check the target id is an agent in this workspace.
+    // The daemon's depart_user is type-agnostic (so unarchive_user/
+    // archive_user can serve future "human leaves workspace" needs), but
+    // the burn endpoint is strictly for agents. Returning 404 +
+    // not_an_agent makes WebUI's "Burn" button safe even if the operator
+    // somehow types a human handler — it can't accidentally archive a
+    // human user via this path.
+    let (workspace_path, repo_path, loop_handle, provider, activity_tx) = {
+        let mut s = state.lock().unwrap();
+        let ctx = match s.workspaces.get_mut(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get_mut(&req.id) {
+            Some(info) => {
+                let loop_handle = info.loop_handle.take();
+                info.status = "idle".to_string();
+                (
+                    ctx.path.clone(),
+                    PathBuf::from(&info.repo_path),
+                    loop_handle,
+                    info.provider.clone(),
+                    ctx.activity_tx.clone(),
+                )
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody::with_code(
+                        format!("agent not found: {}", req.id),
+                        "not_an_agent",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Step 2: abort the in-process agent loop. Stops the agent from
+    // sending or polling while the daemon performs its multi-commit
+    // depart sequence. We deliberately leave the daemon process
+    // running for now — depart_user needs a live socket.
+    if let Some(handle) = loop_handle {
+        handle.abort();
+    }
+
+    // Step 3: ensure the daemon is up, then RPC depart_user.
+    //
+    // The agent's daemon may have been stopped by a prior `agents/stop`
+    // call. We respawn it so the depart_user RPC has a target — it
+    // will be killed in step 4 immediately afterward, so this is a
+    // brief, scoped revival.
+    {
+        let repo_root = repo_path.clone();
+        let log_path = crate::daemon_log::daemon_log_path(&repo_path);
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            gitim_client::ensure_daemon_with_log(&repo_root, &log_path)
+        })
+        .await;
+        match spawn_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!("failed to start agent daemon for burn: {e}"),
+                        "daemon_unreachable",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!("agent daemon spawn task panicked: {e}"),
+                        "daemon_unreachable",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let client = GitimClient::new(&repo_path);
+    match client.depart_user(&req.id).await {
+        Ok(resp) if resp.ok => {}
+        Ok(resp) => {
+            // Daemon returned `{"ok": false, "error": ...}`. Don't
+            // execute steps 4-7 — leaving the clone + ctx.agents intact
+            // lets the user retry, and the daemon's terminal-state
+            // judgment (archive/users/<h>) makes the retry idempotent.
+            let detail = resp
+                .error
+                .unwrap_or_else(|| "daemon returned ok=false without error message".to_string());
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("daemon depart_user failed: {detail}"),
+                    "daemon_unreachable",
+                )),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("daemon depart_user RPC failed: {e}"),
+                    "daemon_unreachable",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    // Step 4: kill the agent's daemon process.
+    kill_agent_daemon(&repo_path);
+
+    // Step 5: rm -rf the clone dir. Daemon already wrote the
+    // depart commits to the shared remote, so losing the local
+    // clone's working tree is safe.
+    if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response();
+    }
+
+    // Step 6: best-effort hermes profile cleanup. Failures only warn —
+    // a missing/broken hermes CLI must not block the user-facing burn
+    // since the workspace-side depart already succeeded.
+    if provider.as_deref() == Some("hermes") {
+        if let Err(e) = crate::hermes_profile::delete_profile(&req.id).await {
+            tracing::warn!(
+                agent = %req.id,
+                error = %e,
+                "failed to delete hermes profile during burn"
+            );
+        }
+    }
+
+    // Step 7: drop from in-memory ctx.agents + emit SSE so the WebUI
+    // refreshes its agent list without polling.
+    {
+        let mut s = state.lock().unwrap();
+        let ctx = match s.workspaces.get_mut(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        ctx.agents.remove(&req.id);
+    }
+
+    let _ = activity_tx.send(AgentActivityEvent {
+        agent_id: req.id.clone(),
+        workspace_id: slug.clone(),
+        event_type: "burned".to_string(),
+        detail: format!("agent @{} departed the workspace", req.id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+
+    Json(OkAckResponse { ok: true }).into_response()
+}
+
 fn kill_agent_daemon(repo_path: &Path) {
     let pid_file = repo_path.join(".gitim/run/gitim.pid");
     if let Ok(content) = std::fs::read_to_string(&pid_file) {
@@ -3113,6 +3303,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
+        .route("/agents/burn", post(agents_burn))
         .route("/agents/{id}", get(agents_get).patch(agents_patch));
 
     let router = Router::new()
