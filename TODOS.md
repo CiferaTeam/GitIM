@@ -11,12 +11,6 @@
 **Depends on:** 记忆系统研究完成。
 **Added:** 2026-04-13 via /plan-eng-review
 
-### channels/*.meta.yaml 并发合并
-**What:** 给 `gitim-sync/src/conflict.rs` 增加 `.meta.yaml` 冲突处理，对 `members: Vec<String>` 做 set-union 合并。
-**Why:** 现冲突解决只覆盖 `.thread` 行号。两个成员同时邀请不同人会触发 git 冲突 marker，需手工解决。群聊邀请成员功能上线后此风险暴露面增大。
-**Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` 非目标段。
-**Added:** 2026-04-17 via /plan-eng-review
-
 ### SSE 推送频道 members 变更
 **What:** 邀请成功后，前端通过 SSE 接收精细化 members 更新，而非全量 refetch `/im/channels`。
 **Why:** 当前邀请对话框成功后复用全量 refetch，频道多时开销大；MVP 可接受。
