@@ -135,6 +135,45 @@ pub struct ListArchivedUsersResponse {
     pub users: Vec<String>,
 }
 
+/// Response payload for `Request::ArchiveDm`.
+///
+/// `dm_pair_stem` is the on-disk filename stem `<min>--<max>` (output of
+/// `gitim_core::dm::dm_filename`), so callers can re-derive participants
+/// or display the archive entry without re-deriving the sort.
+/// `archived_at` is the same `%Y%m%dT%H%M%SZ` UTC stamp the daemon uses
+/// in `Event::DmArchived` and other timestamped events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveDmResponse {
+    pub archived_by: String,
+    pub dm_pair_stem: String,
+    pub archived_at: String,
+}
+
+/// Response payload for `Request::UnarchiveDm`. Symmetric to `ArchiveDmResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveDmResponse {
+    pub unarchived_by: String,
+    pub dm_pair_stem: String,
+    pub unarchived_at: String,
+}
+
+/// One row in `ListArchivedDmsResponse.dms`. `peer` is the participant
+/// other than the caller; `dm_pair_stem` is the canonical sorted-pair
+/// filename stem so the client can reconstruct the storage key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchivedDmEntry {
+    pub peer: String,
+    pub dm_pair_stem: String,
+}
+
+/// Response payload for `Request::ListArchivedDms`. Daemon filters to
+/// rows where the caller participated in the DM; third parties never
+/// appear here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedDmsResponse {
+    pub dms: Vec<ArchivedDmEntry>,
+}
+
 /// Shared response shape for `Request::JoinChannel` and
 /// `Request::LeaveChannel`. Both go through `write_channel_event` and
 /// emit identical wire fields; `event_type` discriminates.
@@ -547,6 +586,59 @@ mod tests {
         assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
         assert!(u.as_object().unwrap().contains_key("unarchived_by"));
         assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn dm_archive_unarchive_response_distinct_fields() {
+        let a = serde_json::to_value(ArchiveDmResponse {
+            archived_by: "alice".to_string(),
+            dm_pair_stem: "alice--bob".to_string(),
+            archived_at: "20260507T120000Z".to_string(),
+        })
+        .unwrap();
+        let u = serde_json::to_value(UnarchiveDmResponse {
+            unarchived_by: "alice".to_string(),
+            dm_pair_stem: "alice--bob".to_string(),
+            unarchived_at: "20260507T120000Z".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            a.get("dm_pair_stem").and_then(|v| v.as_str()),
+            Some("alice--bob"),
+        );
+        assert!(a.as_object().unwrap().contains_key("archived_by"));
+        assert!(a.as_object().unwrap().contains_key("archived_at"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_at"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_at"));
+        assert!(!u.as_object().unwrap().contains_key("archived_by"));
+        assert!(!u.as_object().unwrap().contains_key("archived_at"));
+    }
+
+    #[test]
+    fn list_archived_dms_response_wire_shape() {
+        let r = ListArchivedDmsResponse {
+            dms: vec![
+                ArchivedDmEntry {
+                    peer: "alice".to_string(),
+                    dm_pair_stem: "alice--charlie".to_string(),
+                },
+                ArchivedDmEntry {
+                    peer: "bob".to_string(),
+                    dm_pair_stem: "bob--charlie".to_string(),
+                },
+            ],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let arr = v.get("dms").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let first = arr[0].as_object().unwrap();
+        assert_eq!(first.get("peer").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            first.get("dm_pair_stem").and_then(|v| v.as_str()),
+            Some("alice--charlie"),
+        );
     }
 
     #[test]

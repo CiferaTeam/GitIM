@@ -81,6 +81,20 @@ pub enum Event {
         unarchived_by: String,
         timestamp: String,
     },
+
+    #[serde(rename = "dm_archived")]
+    DmArchived {
+        peer: String,
+        archived_by: String,
+        timestamp: String,
+    },
+
+    #[serde(rename = "dm_unarchived")]
+    DmUnarchived {
+        peer: String,
+        unarchived_by: String,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +495,40 @@ mod tests {
         assert!(json.contains("\"handler\":\"alice\""));
         assert!(json.contains("\"unarchived_by\":\"bob\""));
         assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
+
+    #[test]
+    fn test_dm_archived_event_roundtrip() {
+        let ev = Event::DmArchived {
+            peer: "bob".to_string(),
+            archived_by: "alice".to_string(),
+            timestamp: "20260509T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"dm_archived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"peer\":\"bob\""));
+        assert!(json.contains("\"archived_by\":\"alice\""));
+        assert!(json.contains("\"timestamp\":\"20260509T120000Z\""));
+    }
+
+    #[test]
+    fn test_dm_unarchived_event_roundtrip() {
+        let ev = Event::DmUnarchived {
+            peer: "bob".to_string(),
+            unarchived_by: "alice".to_string(),
+            timestamp: "20260509T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"dm_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"peer\":\"bob\""));
+        assert!(json.contains("\"unarchived_by\":\"alice\""));
+        assert!(json.contains("\"timestamp\":\"20260509T120000Z\""));
     }
 
     #[test]

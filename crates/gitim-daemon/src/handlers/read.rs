@@ -195,6 +195,54 @@ pub async fn handle_list_archived_users(state: SharedState) -> Response {
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
+/// Scan `archive/dms/*.thread` and return the rows where `author` is one
+/// of the two participants. Filtering by participation is the whole
+/// access-control story for archived DMs at this layer — the daemon does
+/// not expose third-party listings.
+///
+/// The peer is the participant other than `author`. Self-DMs (handler
+/// equal to itself, which `dm_filename` produces as `<h>--<h>`) report
+/// `author` as the peer; this branch is unreachable through normal
+/// `archive_dm` flow because that requires `author != peer`, but the
+/// listing tolerates the malformed file shape rather than panicking.
+pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Response {
+    use gitim_core::dm::parse_dm_filename;
+    use gitim_core::responses::{ArchivedDmEntry, ListArchivedDmsResponse};
+
+    let arch_dm_dir = state.repo_root.join("archive").join("dms");
+    let mut entries: Vec<ArchivedDmEntry> = Vec::new();
+    if arch_dm_dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(&arch_dm_dir) {
+            for entry in rd.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                let stem = match fname.strip_suffix(".thread") {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let (first, second) = match parse_dm_filename(&stem) {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+                let peer = if first == author {
+                    second
+                } else if second == author {
+                    first
+                } else {
+                    // Caller did not participate in this DM — skip.
+                    continue;
+                };
+                entries.push(ArchivedDmEntry {
+                    peer: peer.to_string(),
+                    dm_pair_stem: stem,
+                });
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.peer.cmp(&b.peer));
+    let payload = ListArchivedDmsResponse { dms: entries };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
 pub async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
     if let Err(e) = ChannelName::new(&channel) {
         return Response::error(format!("invalid channel name: {}", e));
