@@ -73,14 +73,13 @@ function StatusDot({ status }: { status: string }) {
 }
 
 function ActivityLine({ event }: { event: AgentActivityEvent }) {
-  const typeLabel =
-    event.event_type === "tool_use"
-      ? ""
-      : event.event_type === "thinking"
-        ? ""
-        : event.event_type === "done"
-          ? ""
-          : "err ";
+  // TODO(E.3): replace this string with proper rendering — the "burned"
+  // case (broadcast by /agents/burn and the self-departed self-heal
+  // path) deserves its own visual treatment. For now we narrow the
+  // "err " label strictly to the "error" event_type so unknown types
+  // ("burned", "usage", etc.) render label-less rather than as fake
+  // errors.
+  const typeLabel = event.event_type === "error" ? "err " : "";
 
   const time = event.timestamp.slice(11, 19);
 

@@ -211,7 +211,7 @@ struct AgentAddResponse {
 pub struct AgentActivityEvent {
     pub agent_id: String,
     pub workspace_id: String,
-    pub event_type: String, // "tool_use", "thinking", "done", "error"
+    pub event_type: String, // "tool_use", "thinking", "done", "error", "usage", "burned"
     pub detail: String,
     pub timestamp: String, // ISO8601
 }
@@ -2043,10 +2043,20 @@ async fn agents_remove(
 ///      "depart complete". A daemon RPC failure short-circuits steps
 ///      4-7; the user retries and the daemon resumes from the first
 ///      incomplete phase
-///   4. kill the agent daemon process
-///   5. `hard_delete_agent_dir` — rm -rf the clone
-///   6. best-effort hermes profile delete (warn-only on failure)
-///   7. remove from `ctx.agents` + broadcast `AgentActivityEvent::burned`
+///   4-7. delegate to [`cleanup_agent_runtime_side`]: kill daemon, rm -rf
+///        clone, best-effort hermes profile delete, drop from `ctx.agents`,
+///        broadcast `AgentActivityEvent::burned` SSE
+///
+/// Error codes:
+/// - `not_an_agent` — `id` is not an agent in `ctx.agents` (404)
+/// - `daemon_unreachable` — couldn't reach daemon: spawn failed,
+///   `ensure_daemon_with_log` errored, `spawn_blocking` panicked, or the
+///   `depart_user` RPC IO failed (500)
+/// - `daemon_depart_failed` — daemon was reachable and replied `ok=false`
+///   from `depart_user` (e.g. partial commit chain failure mid-depart);
+///   client may retry safely, daemon resumes from first incomplete phase (500)
+/// - (filesystem cleanup errors return 500 with no error_code; rare and
+///   typically fatal — a permission issue or a stale handle on the clone)
 async fn agents_burn(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -2143,10 +2153,13 @@ async fn agents_burn(
     match client.depart_user(&req.id).await {
         Ok(resp) if resp.ok => {}
         Ok(resp) => {
-            // Daemon returned `{"ok": false, "error": ...}`. Don't
-            // execute steps 4-7 — leaving the clone + ctx.agents intact
-            // lets the user retry, and the daemon's terminal-state
-            // judgment (archive/users/<h>) makes the retry idempotent.
+            // Daemon was reachable but replied `ok=false`. Semantically
+            // distinct from RPC IO failure: daemon is up, we got a
+            // response, the depart logic itself refused or failed
+            // partway. We don't execute steps 4-7 — leaving the clone +
+            // ctx.agents intact lets the user retry, and the daemon's
+            // terminal-state judgment (archive/users/<h>) makes the
+            // retry idempotent.
             let detail = resp
                 .error
                 .unwrap_or_else(|| "daemon returned ok=false without error message".to_string());
@@ -2154,7 +2167,7 @@ async fn agents_burn(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorBody::with_code(
                     format!("daemon depart_user failed: {detail}"),
-                    "daemon_unreachable",
+                    "daemon_depart_failed",
                 )),
             )
                 .into_response();
@@ -2171,49 +2184,91 @@ async fn agents_burn(
         }
     }
 
-    // Step 4: kill the agent's daemon process.
-    kill_agent_daemon(&repo_path);
-
-    // Step 5: rm -rf the clone dir. Daemon already wrote the
-    // depart commits to the shared remote, so losing the local
-    // clone's working tree is safe.
-    if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response();
+    // Steps 4-7: shared cleanup with the self-departed self-heal path
+    // (B.4). Both call sites must produce identical end state — see
+    // `cleanup_agent_runtime_side` for the contract.
+    match cleanup_agent_runtime_side(
+        &state,
+        &slug,
+        &req.id,
+        &workspace_path,
+        &repo_path,
+        provider.as_deref(),
+        &activity_tx,
+    )
+    .await
+    {
+        Ok(()) => Json(OkAckResponse { ok: true }).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response(),
     }
+}
+
+/// Steps 4-7 of the burn workflow, factored out so the self-departed
+/// self-heal path (B.4) can reuse it. Both call sites must converge on
+/// identical end state: agent daemon dead, clone dir gone, hermes profile
+/// gone (if applicable), `ctx.agents` does not contain `agent_id`, and a
+/// `burned` `AgentActivityEvent` was broadcast on `activity_tx`.
+///
+/// Hard-delete failure is the only condition that returns `Err` — hermes
+/// cleanup is best-effort (warn on failure) and `ctx.agents.remove` /
+/// SSE broadcast cannot fail in a way the caller could recover from.
+///
+/// Concurrency: re-locks `SharedRuntimeState` at the end to remove the
+/// agent. If the workspace was dropped mid-flight, the remove is a no-op
+/// — this matches the pre-extraction behavior, which assumed the
+/// workspace would still be present (it almost always is, since the
+/// caller already verified it before this point).
+async fn cleanup_agent_runtime_side(
+    state: &SharedRuntimeState,
+    slug: &str,
+    agent_id: &str,
+    workspace_path: &Path,
+    repo_path: &Path,
+    provider: Option<&str>,
+    activity_tx: &tokio::sync::broadcast::Sender<AgentActivityEvent>,
+) -> Result<(), String> {
+    // Step 4: kill the agent's daemon process.
+    kill_agent_daemon(repo_path);
+
+    // Step 5: rm -rf the clone dir. Daemon already wrote the depart
+    // commits to the shared remote (in the burn path) or self-burn
+    // already wrote them (in the B.4 self-heal path), so losing the
+    // local clone's working tree is safe.
+    hard_delete_agent_dir(workspace_path, agent_id, repo_path)?;
 
     // Step 6: best-effort hermes profile cleanup. Failures only warn —
-    // a missing/broken hermes CLI must not block the user-facing burn
-    // since the workspace-side depart already succeeded.
-    if provider.as_deref() == Some("hermes") {
-        if let Err(e) = crate::hermes_profile::delete_profile(&req.id).await {
+    // a missing/broken hermes CLI must not block cleanup since the
+    // workspace-side depart already succeeded.
+    if provider == Some("hermes") {
+        if let Err(e) = crate::hermes_profile::delete_profile(agent_id).await {
             tracing::warn!(
-                agent = %req.id,
+                agent = %agent_id,
                 error = %e,
-                "failed to delete hermes profile during burn"
+                "failed to delete hermes profile during cleanup"
             );
         }
     }
 
     // Step 7: drop from in-memory ctx.agents + emit SSE so the WebUI
-    // refreshes its agent list without polling.
+    // refreshes its agent list without polling. Workspace-not-found at
+    // this stage is a no-op (workspace was dropped concurrently — rare,
+    // and the agent is already gone from a user-visible standpoint).
     {
         let mut s = state.lock().unwrap();
-        let ctx = match s.workspaces.get_mut(&slug) {
-            Some(c) => c,
-            None => return not_found_workspace(),
-        };
-        ctx.agents.remove(&req.id);
+        if let Some(ctx) = s.workspaces.get_mut(slug) {
+            ctx.agents.remove(agent_id);
+        }
     }
 
     let _ = activity_tx.send(AgentActivityEvent {
-        agent_id: req.id.clone(),
-        workspace_id: slug.clone(),
+        agent_id: agent_id.to_string(),
+        workspace_id: slug.to_string(),
         event_type: "burned".to_string(),
-        detail: format!("agent @{} departed the workspace", req.id),
+        detail: format!("agent @{agent_id} departed the workspace"),
         timestamp: chrono::Utc::now().to_rfc3339(),
     });
 
-    Json(OkAckResponse { ok: true }).into_response()
+    Ok(())
 }
 
 fn kill_agent_daemon(repo_path: &Path) {

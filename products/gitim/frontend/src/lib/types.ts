@@ -65,7 +65,17 @@ export interface UserInfo {
 
 export interface AgentActivityEvent {
   agent_id: string;
-  event_type: "tool_use" | "thinking" | "done" | "error" | "usage";
+  // "burned" is broadcast by /agents/burn (and the B.4 self-departed
+  // self-heal path) once the agent is removed from the workspace. E.3
+  // will render it; until then renderers fall through gracefully without
+  // mis-labelling it as an error.
+  event_type:
+    | "tool_use"
+    | "thinking"
+    | "done"
+    | "error"
+    | "usage"
+    | "burned";
   detail: string;
   timestamp: string; // ISO8601
 }
