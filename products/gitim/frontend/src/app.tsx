@@ -44,6 +44,10 @@ function apiToDisplay(channel: string): string {
   return channel;
 }
 
+function isUnknownWorkspaceResponse(res: { ok: boolean; error?: string | null }) {
+  return !res.ok && res.error === "unknown workspace";
+}
+
 function ManagementPage() {
   return <AgentList />;
 }
@@ -123,6 +127,9 @@ export default function App() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const workspacesLoading = useWorkspaceStore((s) => s.loading);
   const fetchWorkspaces = useWorkspaceStore((s) => s.fetchAll);
+  const refreshAfterActiveUnavailable = useWorkspaceStore(
+    (s) => s.refreshAfterActiveUnavailable,
+  );
   const activeWorkspaceIdentity =
     activeSlug == null
       ? null
@@ -213,6 +220,10 @@ export default function App() {
       if (!isCurrentPollTarget()) return;
 
       if (!pollRes.ok || !pollRes.data) {
+        if (isUnknownWorkspaceResponse(pollRes)) {
+          await refreshAfterActiveUnavailable(slug);
+          return;
+        }
         // Stale cursor recovery: discard and re-init
         if (pollRes.error && workspaceRef.current) {
           clearCursor(workspaceRef.current);
@@ -373,6 +384,7 @@ export default function App() {
     setConnectionStatus,
     setConnectionError,
     fetchWorkspaces,
+    refreshAfterActiveUnavailable,
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,
@@ -443,6 +455,15 @@ export default function App() {
         ]);
 
       if (cancelled) return false;
+
+      if (
+        [meRes, channelsRes, usersRes, agentsRes, cardsRes].some(
+          isUnknownWorkspaceResponse,
+        )
+      ) {
+        await refreshAfterActiveUnavailable(slug);
+        return false;
+      }
 
       // Restore cursor from localStorage keyed by runtime or browser workspace identity.
       workspaceRef.current = workspaceKey;
@@ -526,6 +547,7 @@ export default function App() {
     setConnectionStatus,
     setConnectionError,
     fetchWorkspaces,
+    refreshAfterActiveUnavailable,
     markConnected,
     runPoll,
   ]);

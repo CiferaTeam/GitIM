@@ -23,12 +23,6 @@
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` Perf P1。
 **Added:** 2026-04-17 via /plan-eng-review
 
-### WebUI `activeSlug` 失联时的自动 fallback
-**What:** `products/gitim/frontend/src/hooks/use-workspace-store.ts`: 当 `activeSlug` 引用的 workspace 被其它客户端(或另一台机)删除后,poll 轮询 / SSE 重连发现 404/stream 关闭时,应自动 trigger `fetchAll()` 并切到第一个可用 workspace。当前仅在 `fetchAll` 内部修复(启动 + 本地 create/remove 时触发),线上 workspace 消失时 UI 卡住。
-**Why:** 多设备或多 runtime 实例场景下 workspace 列表会异步变化。
-**Context:** 2026-04-18 Codex review P2 for multi-workspace-runtime feature。`use-agent-activity.ts:56` 的 `onerror` 当前是 no-op。
-**Added:** 2026-04-18 via /plan-eng-review (multi-workspace review)
-
 ### Release artifact L2 signing (minisign/GPG over SHA256SUMS)
 **What:** 当前 release pipeline 用 SHA256SUMS 做 artifact integrity 校验 (L1)。未来升级到 L2:maintainer 用 `minisign` 或 GPG 对 `SHA256SUMS` 文件签名,公钥嵌入 `gitim-updater` binary / 发布在 `CiferaTeam/GitIM` repo 根目录,`install.sh` 和 `gitim-updater` 在校验 SHA 前先验 SHA 文件的签名。
 **Why:** L1 只挡 "单独污染 tarball" 攻击场景。如果 attacker 同时拿到 releases repo write token (或 maintainer 机器被攻破),可以同时篡改 SHA 文件和 tarball,L1 就穿了。L2 把信任锚定在 maintainer 私钥,repo 即使被完全控制也挡得住。

@@ -56,6 +56,7 @@ describe("useWorkspaceStore", () => {
   beforeEach(() => {
     resetStorage();
     workspacesResponses.length = 0;
+    vi.clearAllMocks();
     vi.resetModules();
     workspacesResponse = {
       ok: true,
@@ -149,5 +150,65 @@ describe("useWorkspaceStore", () => {
       expect.objectContaining({ slug: "browser-local" }),
     ]);
     expect(localStorage.getItem("gitim-active-browser-workspace")).toBeNull();
+  });
+
+  it("refreshes and falls back when the active workspace disappears", async () => {
+    localStorage.setItem("gitim-active-workspace", "deleted-ws");
+    const { useWorkspaceStore } = await import("./use-workspace-store");
+
+    useWorkspaceStore.setState({
+      workspaces: [
+        {
+          slug: "deleted-ws",
+          workspace_name: "Deleted",
+          path: "/tmp/deleted",
+          provider: "local",
+          initialized: true,
+        },
+      ],
+      activeSlug: "deleted-ws",
+      loading: false,
+      error: null,
+      errorCode: null,
+    });
+
+    await useWorkspaceStore
+      .getState()
+      .refreshAfterActiveUnavailable("deleted-ws");
+
+    expect(useWorkspaceStore.getState().workspaces).toEqual([
+      expect.objectContaining({ slug: "browser-2" }),
+      expect.objectContaining({ slug: "browser-3" }),
+    ]);
+    expect(useWorkspaceStore.getState().activeSlug).toBe("browser-2");
+    expect(localStorage.getItem("gitim-active-workspace")).toBe("browser-2");
+  });
+
+  it("does not refresh when an old workspace reports unavailable after switching", async () => {
+    const client = await import("@/lib/client");
+    const { useWorkspaceStore } = await import("./use-workspace-store");
+
+    useWorkspaceStore.setState({
+      workspaces: [
+        {
+          slug: "current-ws",
+          workspace_name: "Current",
+          path: "/tmp/current",
+          provider: "local",
+          initialized: true,
+        },
+      ],
+      activeSlug: "current-ws",
+      loading: false,
+      error: null,
+      errorCode: null,
+    });
+
+    await useWorkspaceStore
+      .getState()
+      .refreshAfterActiveUnavailable("old-ws");
+
+    expect(client.listWorkspaces).not.toHaveBeenCalled();
+    expect(useWorkspaceStore.getState().activeSlug).toBe("current-ws");
   });
 });

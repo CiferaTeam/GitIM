@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import type { AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
+import { useWorkspaceStore } from "./use-workspace-store";
 
 const MAX_EVENTS_PER_AGENT = 20;
 
@@ -57,6 +58,7 @@ export function useAgentActivitySSE(slug: string | null) {
   const push = useAgentActivityStore((s) => s.push);
   const ensureSlug = useAgentActivityStore((s) => s.ensureSlug);
   const esRef = useRef<EventSource | null>(null);
+  const refreshRef = useRef(false);
 
   useEffect(() => {
     if (!port || !slug) return;
@@ -98,7 +100,14 @@ export function useAgentActivitySSE(slug: string | null) {
     };
 
     es.onerror = () => {
-      // EventSource auto-reconnects; no action needed
+      if (refreshRef.current) return;
+      refreshRef.current = true;
+      void useWorkspaceStore
+        .getState()
+        .refreshAfterActiveUnavailable(slug)
+        .finally(() => {
+          refreshRef.current = false;
+        });
     };
 
     return () => {

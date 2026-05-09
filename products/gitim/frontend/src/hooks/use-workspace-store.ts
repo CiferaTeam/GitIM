@@ -27,6 +27,7 @@ interface WorkspaceStore {
   errorCode: string | null;
 
   fetchAll: () => Promise<void>;
+  refreshAfterActiveUnavailable: (slug: string) => Promise<void>;
   setActive: (slug: string) => void;
   create: (req: CreateWorkspaceRequest) => Promise<WorkspaceSummary | null>;
   remove: (slug: string) => Promise<boolean>;
@@ -68,6 +69,11 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     }
     if (nextActive !== current) persistSlug(nextActive, activeKey);
     set({ workspaces, activeSlug: nextActive, loading: false });
+  },
+
+  refreshAfterActiveUnavailable: async (slug) => {
+    if (get().activeSlug !== slug) return;
+    await get().fetchAll();
   },
 
   setActive: (slug) => {
