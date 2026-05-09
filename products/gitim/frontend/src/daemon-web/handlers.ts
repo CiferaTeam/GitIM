@@ -833,6 +833,10 @@ export async function initBoard(): Promise<ApiResponse> {
     if (!s.token) return reconnectRequired();
     await ensureWasmReady();
     const handler = s.me.handler;
+    const path = boardPath(handler);
+    if (await exists(`${s.repoDir}/${path}`)) {
+      return err(`board already exists for @${handler}`);
+    }
     const board = defaultBoard(handler, utcTimestamp()) as BoardDocument;
     return await commitBoardDocument(handler, board, "board: init");
   } catch (e) {

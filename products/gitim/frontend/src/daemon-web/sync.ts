@@ -6,6 +6,7 @@ import * as gitOps from "./git";
 import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
 import { isAuthFailure } from "./auth-errors";
+import { validateHandler } from "./paths";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -20,6 +21,12 @@ function isNonFastForward(e: unknown): boolean {
     msg.includes("non-fast-forward") ||
     msg.includes("rejected")
   );
+}
+
+function boardHandlerFromPath(path: string): string | null {
+  const match = /^showboards\/([^/]+)\/board\.md$/.exec(path);
+  if (!match) return null;
+  return validateHandler(match[1]) ? null : match[1];
 }
 
 let syncInFlight: Promise<void> | null = null;
@@ -83,7 +90,17 @@ async function runSyncOnce(): Promise<void> {
     const { extractThreadAdditions } = await import("./conflict");
     const localAdditions: Record<string, string> = {};
     const remoteContents: Record<string, string> = {};
+    const localBoards: Record<string, string> = {};
     for (const fp of changedFiles) {
+      if (boardHandlerFromPath(fp)) {
+        try {
+          localBoards[fp] = await readFile(`${s.repoDir}/${fp}`);
+        } catch {
+          throw new Error(`Cannot auto-merge local browser sync change: ${fp}`);
+        }
+        continue;
+      }
+
       try {
         const [localContent, baseContent, remoteContent] = await Promise.all([
           readFile(`${s.repoDir}/${fp}`),
@@ -125,12 +142,21 @@ async function runSyncOnce(): Promise<void> {
       await writeFile(`${s.repoDir}/${fp}`, content);
       filePaths.push(fp);
     }
+    for (const [fp, content] of Object.entries(localBoards)) {
+      await writeFile(`${s.repoDir}/${fp}`, content);
+      filePaths.push(fp);
+    }
 
     // Commit the merge result
+    const hasThreadFiles = Object.keys(resolved.files).length > 0;
+    const hasBoardFiles = Object.keys(localBoards).length > 0;
+    const commitMessage = hasBoardFiles && !hasThreadFiles
+      ? "board: sync after rebase"
+      : resolved.commitMessage;
     await gitOps.addAndCommit(
       s.repoDir,
       filePaths,
-      resolved.commitMessage,
+      commitMessage,
       s.me.handler,
     );
 

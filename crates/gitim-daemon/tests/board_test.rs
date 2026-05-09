@@ -89,6 +89,37 @@ async fn board_init_creates_current_handler_board() {
 }
 
 #[tokio::test]
+async fn board_init_refuses_to_overwrite_existing_board() {
+    let (_tmp, state) = setup().await;
+
+    let first = handle_request(
+        Request::BoardInit {
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(first.ok, "first board_init failed: {:?}", first.error);
+
+    let path = state.repo_root.join("showboards/alice/board.md");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let edited = original.replace("## 当前状态", "## 当前状态\n\nKeep this board");
+    std::fs::write(&path, &edited).unwrap();
+
+    let second = handle_request(
+        Request::BoardInit {
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+
+    assert!(!second.ok);
+    assert!(second.error.unwrap().contains("already exists"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), edited);
+}
+
+#[tokio::test]
 async fn board_init_rejects_author_mismatch_with_current_user() {
     let (_tmp, state) = setup().await;
 

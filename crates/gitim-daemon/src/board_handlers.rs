@@ -181,6 +181,13 @@ async fn ensure_known_user(state: &SharedState, handler: &str) -> Result<(), Res
 
 fn init_board(state: &SharedState, author: &str) -> Result<CommittedBoard, Response> {
     let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let rel = board_path(author).map_err(|e| Response::error(e.to_string()))?;
+    if state.repo_root.join(&rel).exists() {
+        return Err(Response::error(format!(
+            "board already exists for @{}",
+            author
+        )));
+    }
     let now = current_timestamp();
     let doc = default_board(author, &now).map_err(|e| Response::error(e.to_string()))?;
     commit_board_document_locked(state, author, doc, "board: init")

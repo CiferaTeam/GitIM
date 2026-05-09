@@ -315,6 +315,34 @@ impl GitStorage {
             .collect())
     }
 
+    pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
+        let output = Command::new("git")
+            .args(["merge-base", "@{upstream}", "HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let range = format!("{}..HEAD", merge_base);
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", &range, "--", pattern])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
     pub fn mv(&self, from: &str, to: &str) -> Result<(), GitError> {
         let output = Command::new("git")
             .args(["mv", from, to])

@@ -356,7 +356,7 @@ where
         }
 
         let changed_board_files = repo
-            .changed_files_unpushed("showboards/*/board.md")
+            .changed_files_since_merge_base("showboards/*/board.md")
             .unwrap_or_default();
         let mut local_boards: HashMap<PathBuf, String> = HashMap::new();
         for rel_path in &changed_board_files {

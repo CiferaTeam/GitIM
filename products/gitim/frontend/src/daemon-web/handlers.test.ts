@@ -861,6 +861,19 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("refuses to initialize over an existing browser board", async () => {
+    dirs.set("/repo/showboards", ["lewis"]);
+    dirs.set("/repo/showboards/lewis", ["board.md"]);
+    files.set("/repo/showboards/lewis/board.md", boardMarkdown("lewis", "## 当前状态\n\nKeep me\n"));
+
+    const res = await initBoard();
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("already exists");
+    expect(files.get("/repo/showboards/lewis/board.md")).toContain("Keep me");
+    expect(commits).toHaveLength(0);
+  });
+
   it("rejects browser board publish content with handler mismatch", async () => {
     const res = await publishBoard(boardMarkdown("alice"));
 

@@ -46,6 +46,20 @@ const localThread =
 const remoteThread =
   baseThread +
   "[L000002][P000001][@alice][20260317T120050Z] remote\n";
+const localBoard = [
+  "---",
+  "version: 1",
+  "handler: lewis",
+  "updated_at: 20260317T120100Z",
+  "status: working",
+  "summary: local board",
+  "tags: []",
+  "---",
+  "## 当前状态",
+  "",
+  "local board",
+  "",
+].join("\n");
 
 function initSyncState() {
   initState({
@@ -147,5 +161,32 @@ describe("daemon-web sync", () => {
     expect(gitMocks.addAndCommit).not.toHaveBeenCalled();
     expect(files.get("/repo/channels/general.thread")).toBe(localThread);
     expect(getState().syncStatus).toBe("error");
+  });
+
+  it("rebases local board commits after remote changes", async () => {
+    files.set("/repo/showboards/lewis/board.md", localBoard);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce(["showboards/lewis/board.md"]);
+
+    await runSync({ forceNewCycle: true });
+
+    expect(files.get("/repo/showboards/lewis/board.md")).toBe(localBoard);
+    expect(gitMocks.resetToRemote).toHaveBeenCalledWith(
+      "/repo",
+      "refs/remotes/origin/main",
+    );
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      ["showboards/lewis/board.md"],
+      "board: sync after rebase",
+      "lewis",
+    );
+    expect(getState().headCommit).toBe("merged-head");
+    expect(getState().syncStatus).toBe("idle");
   });
 });
