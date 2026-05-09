@@ -884,3 +884,74 @@ async fn test_unarchive_user_preserves_leave_events() {
         "dev.thread must remain stable across alice's later activity"
     );
 }
+
+// ─── B.4: handle_poll surfaces self_departed when the daemon's own
+//          handler has been departed. ─────────────────────────────────────
+
+/// After alice's daemon's own user.meta.yaml lands in archive/users/,
+/// any poll request must short-circuit with the typed `self_departed`
+/// error_code so the runtime agent_loop can drive self-cleanup instead
+/// of looping on a corpse. This is the daemon side of archive-protocol
+/// B.4 — pairs with the runtime-side `RuntimeError::SelfDeparted` arm
+/// in `start_agent_loop`.
+#[tokio::test]
+async fn test_poll_returns_self_departed_when_handler_archived() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Run the full depart sequence on alice (she is the daemon's
+    // current_user — see setup_test_repo). Phase 4 places
+    // archive/users/alice.meta.yaml; that's the only file the
+    // self-departed gate stats.
+    let resp = depart_user(state.clone(), "alice").await;
+    assert!(resp.ok, "depart_user failed: {:?}", resp.error);
+
+    // Poll — must trip the self-departed gate.
+    let poll = handle_request(Request::Poll { since: None }, state.clone()).await;
+    assert!(!poll.ok, "expected error response, got ok=true");
+    assert_eq!(
+        poll.error_code.as_deref(),
+        Some("self_departed"),
+        "expected error_code=self_departed, got {:?}",
+        poll.error_code
+    );
+    assert!(
+        poll.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("self-departed"),
+        "expected human message to mention self-departed, got {:?}",
+        poll.error
+    );
+}
+
+/// Without a current_user (guest / pre-onboard), the gate is a no-op —
+/// poll falls through to the normal path. This guards against accidental
+/// regressions where the gate might trip on archived rows for *other*
+/// handlers, or where empty current_user is misread as a hit.
+#[tokio::test]
+async fn test_poll_self_departed_no_op_when_no_current_user() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Drop current_user so the gate has no handler to compare against.
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = None;
+    }
+
+    // Even after some other handler departs, a daemon with no own
+    // identity must not surface self_departed.
+    let resp = depart_user(state.clone(), "bob").await;
+    assert!(resp.ok, "depart_user(bob) failed: {:?}", resp.error);
+
+    let poll = handle_request(Request::Poll { since: None }, state.clone()).await;
+    assert!(
+        poll.ok,
+        "poll should succeed for guest-like daemon, got error: {:?} code: {:?}",
+        poll.error, poll.error_code
+    );
+    assert!(
+        poll.error_code.is_none(),
+        "expected no error_code, got {:?}",
+        poll.error_code
+    );
+}

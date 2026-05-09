@@ -47,6 +47,14 @@ impl Poller {
             .map_err(|e| RuntimeError::PollFailed(e.to_string()))?;
 
         if !resp.ok {
+            // Map daemon's tagged error codes to typed RuntimeError variants
+            // so call sites (agent_loop) can pattern-match on the failure
+            // mode instead of substring-grepping the human message. This
+            // keeps the wire-level "error_code" contract isolated to the
+            // poller; everything upstream sees a typed error.
+            if resp.error_code.as_deref() == Some("self_departed") {
+                return Err(RuntimeError::SelfDeparted);
+            }
             let msg = resp.error.unwrap_or_else(|| "poll failed".into());
             return Err(RuntimeError::PollFailed(msg));
         }
@@ -95,6 +103,12 @@ impl Poller {
             .map_err(|e| RuntimeError::PollFailed(e.to_string()))?;
 
         if !resp.ok {
+            // Mirror `poll`: surface self_departed as a typed variant so
+            // mid-execution steering checks also trip the self-heal path
+            // instead of looping on a corpse.
+            if resp.error_code.as_deref() == Some("self_departed") {
+                return Err(RuntimeError::SelfDeparted);
+            }
             let msg = resp.error.unwrap_or_else(|| "poll failed".into());
             return Err(RuntimeError::PollFailed(msg));
         }

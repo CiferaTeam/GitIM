@@ -603,11 +603,29 @@ impl AgentLoop {
     }
 
     /// Run the agent loop indefinitely with exponential backoff on errors.
+    ///
+    /// Stops cleanly when poll surfaces `RuntimeError::SelfDeparted` — the
+    /// agent's own handler has been archived, so retrying would just re-trip
+    /// the daemon's self-departed gate. This standalone entry point cannot
+    /// run the WebUI-side cleanup (no `SharedRuntimeState`), so it just
+    /// returns — the runtime spawn loop in `http.rs::start_agent_loop`
+    /// holds the production self-heal that drives clone removal + SSE.
     pub async fn run(&mut self) -> Result<(), RuntimeError> {
         if self.poller.cursor().is_none() {
-            self.poller.poll().await?;
-            self.save_state()?;
-            info!("agent loop started, cursor initialized");
+            match self.poller.poll().await {
+                Ok(_) => {
+                    self.save_state()?;
+                    info!("agent loop started, cursor initialized");
+                }
+                Err(RuntimeError::SelfDeparted) => {
+                    info!(
+                        handler = %self.handler,
+                        "agent self-departed during cursor init; exiting loop"
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
         } else {
             info!("agent loop started, cursor restored from state");
         }
@@ -624,6 +642,13 @@ impl AgentLoop {
                 Ok(false) => {
                     consecutive_errors = 0;
                     tracing::trace!("idle");
+                }
+                Err(RuntimeError::SelfDeparted) => {
+                    info!(
+                        handler = %self.handler,
+                        "agent self-departed; exiting loop"
+                    );
+                    return Ok(());
                 }
                 Err(e) => {
                     consecutive_errors += 1;

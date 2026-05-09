@@ -723,6 +723,12 @@ pub struct Response {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional machine-readable error tag. Wire-additive: existing clients
+    /// that only read `error` are unaffected. New code that needs to branch
+    /// on a specific failure mode (e.g. runtime self-heal on
+    /// `self_departed`) reads this instead of parsing the human message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl Response {
@@ -731,6 +737,7 @@ impl Response {
             ok: true,
             data: Some(data),
             error: None,
+            error_code: None,
         }
     }
 
@@ -739,6 +746,19 @@ impl Response {
             ok: false,
             data: None,
             error: Some(msg.into()),
+            error_code: None,
+        }
+    }
+
+    /// Tagged error variant. Use when a downstream consumer needs to
+    /// distinguish this failure from generic ones — e.g. the runtime
+    /// agent_loop checking for `self_departed` to trigger self-cleanup.
+    pub fn error_with_code(msg: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: Some(code.into()),
         }
     }
 }

@@ -1557,6 +1557,62 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 Ok(false) => {
                     consecutive_errors = 0;
                 }
+                Err(crate::error::RuntimeError::SelfDeparted) => {
+                    // Archive-protocol B.4: this agent's own user.meta.yaml
+                    // landed in archive/users/, so the daemon refuses
+                    // further polls. Don't back off — drive the same
+                    // cleanup the WebUI burn endpoint runs (kill daemon,
+                    // rm clone, hermes profile, ctx.agents removal, SSE)
+                    // and exit the loop. Any further iteration would just
+                    // re-trip the same self_departed gate.
+                    tracing::info!(
+                        agent = %owned_id,
+                        slug = %owned_slug,
+                        "agent self-departed, triggering runtime cleanup"
+                    );
+                    let cleanup_inputs = {
+                        let s = state_clone.lock().unwrap();
+                        s.workspaces.get(&owned_slug).and_then(|ctx| {
+                            ctx.agents.get(&owned_id).map(|info| {
+                                (
+                                    ctx.path.clone(),
+                                    PathBuf::from(&info.repo_path),
+                                    info.provider.clone(),
+                                    ctx.activity_tx.clone(),
+                                )
+                            })
+                        })
+                    };
+                    if let Some((workspace_path, repo_path, provider, activity_tx)) =
+                        cleanup_inputs
+                    {
+                        if let Err(e) = cleanup_agent_runtime_side(
+                            &state_clone,
+                            &owned_slug,
+                            &owned_id,
+                            &workspace_path,
+                            &repo_path,
+                            provider.as_deref(),
+                            &activity_tx,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                agent = %owned_id,
+                                slug = %owned_slug,
+                                error = %e,
+                                "self-departed cleanup failed"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            agent = %owned_id,
+                            slug = %owned_slug,
+                            "self-departed but agent already removed from state — nothing to clean"
+                        );
+                    }
+                    return;
+                }
                 Err(e) => {
                     consecutive_errors += 1;
                     let backoff = std::time::Duration::from_secs(
@@ -2218,7 +2274,7 @@ async fn agents_burn(
 /// — this matches the pre-extraction behavior, which assumed the
 /// workspace would still be present (it almost always is, since the
 /// caller already verified it before this point).
-async fn cleanup_agent_runtime_side(
+pub(crate) async fn cleanup_agent_runtime_side(
     state: &SharedRuntimeState,
     slug: &str,
     agent_id: &str,

@@ -9,6 +9,40 @@ use std::collections::HashMap;
 use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
+    // Self-departure check (archive-protocol B.4).
+    //
+    // If `archive/users/<self_handler>.meta.yaml` exists, this daemon's
+    // own agent has been departed — most commonly via `gitim burn-self`
+    // (C.3) writing the depart commits, but also reachable when another
+    // clone burns this handler and the change syncs in. Either way the
+    // agent_loop on the runtime side has nothing useful to do here:
+    // every other poll branch would either return stale data or trip
+    // the existing per-author commit-time guard. Surfacing a tagged
+    // `self_departed` error lets the runtime fast-path into self-cleanup
+    // (kill daemon + rm clone + ctx.agents removal + SSE) instead of
+    // falling into exponential backoff on a corpse.
+    //
+    // Placed at the very top so we skip the rest of the I/O (rev-parse,
+    // diff, membership cache) once the agent is gone — there's no
+    // reason to do the work when the response is going to be discarded.
+    //
+    // Guest sessions never write the user.meta.yaml in the first place,
+    // so this check is a no-op for them; admin/system identity is also
+    // unaffected because it isn't tracked in users/.
+    let self_handler_snapshot = state.current_user.read().await.clone();
+    if let Some(handler) = self_handler_snapshot.as_deref() {
+        let archive_path = state
+            .repo_root
+            .join("archive/users")
+            .join(format!("{}.meta.yaml", handler));
+        if archive_path.exists() {
+            return Response::error_with_code(
+                "agent self-departed via burn-self",
+                "self_departed",
+            );
+        }
+    }
+
     // Use @{upstream} (current branch's tracking ref) when available, else HEAD.
     let ref_name =
         if state.git_storage.has_remote() && state.git_storage.rev_parse("@{upstream}").is_ok() {

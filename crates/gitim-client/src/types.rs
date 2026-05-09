@@ -15,6 +15,12 @@ pub struct ApiResponse {
     pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional machine-readable error tag mirrored from the daemon's
+    /// `Response::error_code`. Wire-additive: daemons that don't emit
+    /// it deserialize as `None`, and the field is omitted from the
+    /// serialized form so existing JSON consumers see no diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl ApiResponse {
@@ -63,6 +69,7 @@ mod tests {
             ok: true,
             data: Some(json!({"status": "running", "version": "0.1.0"})),
             error: None,
+            error_code: None,
         };
         let parsed = resp.parse_data::<StatusShape>().unwrap();
         assert_eq!(
@@ -80,6 +87,7 @@ mod tests {
             ok: false,
             data: None,
             error: Some("boom".to_string()),
+            error_code: None,
         };
         let result = resp.parse_data::<StatusShape>();
         assert!(result.is_err(), "missing data should error");
@@ -115,6 +123,7 @@ mod tests {
             ok: true,
             data: Some(json!({"unexpected": 42})),
             error: None,
+            error_code: None,
         };
         let result = resp.parse_data::<StatusShape>();
         assert!(result.is_err(), "wrong shape should error");
@@ -130,6 +139,7 @@ mod tests {
                 ok: true,
                 data: Some(json!({"status": "running"})),
                 error: None,
+                error_code: None,
             }
         );
     }
@@ -144,8 +154,19 @@ mod tests {
                 ok: false,
                 data: None,
                 error: Some("not found".to_string()),
+                error_code: None,
             }
         );
+    }
+
+    #[test]
+    fn deserialize_error_with_code() {
+        // Wire-additive: error_code surfaces when present.
+        let raw = r#"{"ok":false,"error":"agent self-departed","error_code":"self_departed"}"#;
+        let resp: ApiResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(resp.ok, false);
+        assert_eq!(resp.error.as_deref(), Some("agent self-departed"));
+        assert_eq!(resp.error_code.as_deref(), Some("self_departed"));
     }
 
     #[test]
