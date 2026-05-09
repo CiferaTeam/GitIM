@@ -861,3 +861,205 @@ async fn test_list_users_include_archived_returns_both() {
         );
     }
 }
+
+// ─── 13. A.7: poll surfaces `user_archived` for a departed handler ───────────
+
+#[tokio::test]
+async fn test_poll_emits_user_archived_event() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Cursor before the archive — captures HEAD as it stands.
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // alice archives bob — workspace-wide event, alice as the actor sees it.
+    let resp = archive_user(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Poll since the pre-archive cursor — must emit user_archived for bob.
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+
+    // The `channel` field carries the bare handler — PollChange has no
+    // dedicated handler slot, the wire reuses the existing field. Clients
+    // discriminate by `kind`.
+    let archived_hit = changes
+        .iter()
+        .any(|c| c["kind"] == "user_archived" && c["channel"] == "bob");
+    assert!(
+        archived_hit,
+        "expected user_archived event for bob, got: {:#?}",
+        changes,
+    );
+
+    // Path-shaped event — no entries on a meta-only file move.
+    for c in &changes {
+        if c["kind"] == "user_archived" {
+            assert!(
+                c["entries"].as_array().unwrap().is_empty(),
+                "user_archived event must have empty entries, got: {:?}",
+                c["entries"],
+            );
+            // Sanity: handler must not be a path or carry a slash — would
+            // signal we leaked the on-disk path through.
+            let h = c["channel"].as_str().unwrap_or("");
+            assert!(
+                !h.contains('/'),
+                "user_archived `channel` must be the bare handler, got: {:?}",
+                h,
+            );
+            assert!(
+                !h.starts_with("archive"),
+                "user_archived `channel` must not start with 'archive', got: {:?}",
+                h,
+            );
+        }
+    }
+}
+
+// ─── 14. A.7 (P2.a verify): poll does NOT filter old messages from a now-
+//        archived author. The archive marker is a forward-looking write
+//        gate (Contract 2 / A.5), not a retroactive content filter. Agents
+//        polling a channel must see the departed author's history exactly
+//        as it stood — silencing those rows would amount to retroactive
+//        history rewriting, which the design explicitly rejects (decision
+//        A2 in the archive-protocol plan).
+//
+// Sequence: alice + bob both write to #dev → alice gets archived → bob
+// polls and must still see alice's earlier messages.
+
+#[tokio::test]
+async fn test_poll_does_not_filter_archived_authors_old_messages() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Set up #dev as a channel both alice and bob can post to. The shared
+    // setup_test_repo helper creates only users/, not channels/, so we
+    // drive the real handler to keep the on-disk shape production-shaped.
+    // Inviting bob at create time makes him an `allowed_sender` for
+    // compliance — that's what create_channel writes into channel meta.
+    let resp = handle_request(
+        serde_json::from_value(serde_json::json!({
+            "method": "create_channel",
+            "name": "dev",
+            "author": "alice",
+            "invitees": ["bob"],
+        }))
+        .unwrap(),
+        state.clone(),
+    )
+    .await;
+    assert!(resp.ok, "create #dev failed: {:?}", resp.error);
+
+    // Cursor BEFORE alice writes anything — anchors the diff so the poll
+    // covers her messages, the archive op, and bob's post-archive write
+    // in a single pass. The contract is: a single poll diff that crosses
+    // the archive boundary must surface the pre-archive messages from the
+    // now-archived author. Anything narrower (cursor mid-stream) wouldn't
+    // exercise the no-filter contract — it would just be a normal poll.
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // alice writes 2 messages.
+    let resp = send_message(state.clone(), "dev", "first from alice", "alice").await;
+    assert!(resp.ok, "alice send 1 failed: {:?}", resp.error);
+    let resp = send_message(state.clone(), "dev", "second from alice", "alice").await;
+    assert!(resp.ok, "alice send 2 failed: {:?}", resp.error);
+
+    // Archive alice (bob's perspective driving). Post-archive alice is no
+    // longer in state.users, but the messages she already wrote are
+    // committed in channels/dev.thread — they MUST stay visible.
+    let resp = archive_user(state.clone(), "alice", "bob").await;
+    assert!(resp.ok, "archive alice failed: {:?}", resp.error);
+
+    // bob writes one more message after alice is archived. This proves the
+    // channel keeps accepting writes from active users while the archived
+    // author's history persists alongside.
+    {
+        let mut me = state.current_user.write().await;
+        *me = Some("bob".to_string());
+    }
+    let resp = send_message(state.clone(), "dev", "third from bob", "bob").await;
+    assert!(resp.ok, "bob send post-archive failed: {:?}", resp.error);
+
+    // Poll from cursor — must include both alice's messages (pre-archive)
+    // AND bob's post-archive message. The diff is computed over the
+    // channels/dev.thread file additions only; the test asserts no
+    // author-state-aware filter has been applied.
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+
+    // Aggregate every entry across `kind: "channel"` for #dev. We don't
+    // care if it spans one or many PollChange rows — the contract is
+    // about content presence.
+    let mut bodies: Vec<String> = Vec::new();
+    let mut authors: Vec<String> = Vec::new();
+    for c in &changes {
+        if c["kind"] == "channel" && c["channel"] == "dev" {
+            for e in c["entries"].as_array().unwrap() {
+                if let Some(b) = e.get("body").and_then(|v| v.as_str()) {
+                    bodies.push(b.to_string());
+                }
+                if let Some(a) = e.get("author").and_then(|v| v.as_str()) {
+                    authors.push(a.to_string());
+                }
+            }
+        }
+    }
+
+    // alice's two messages must be present despite her now-archived state.
+    assert!(
+        bodies.iter().any(|b| b == "first from alice"),
+        "alice's first message must not be filtered, bodies: {:?}",
+        bodies,
+    );
+    assert!(
+        bodies.iter().any(|b| b == "second from alice"),
+        "alice's second message must not be filtered, bodies: {:?}",
+        bodies,
+    );
+    // bob's post-archive message rounds out the sequence — proves the
+    // diff range correctly spanned both pre- and post-archive commits.
+    assert!(
+        bodies.iter().any(|b| b == "third from bob"),
+        "bob's post-archive message must appear, bodies: {:?}",
+        bodies,
+    );
+    // Author column must surface "alice" — not redacted, not rewritten.
+    assert!(
+        authors.iter().any(|a| a == "alice"),
+        "archived author handle must remain on her old messages, authors: {:?}",
+        authors,
+    );
+}

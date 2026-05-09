@@ -764,3 +764,206 @@ async fn archive_user(
     .unwrap();
     handle_request(req, state).await
 }
+
+// ─── 13. A.7: poll surfaces `dm_archived` for the alice<->bob DM ─────────────
+
+#[tokio::test]
+async fn test_poll_emits_dm_archived_event() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Cursor before the archive — captures HEAD as it stands. The setup
+    // helper already commits the initial DM file; archive will produce a
+    // single new commit that the diff range below should capture.
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // alice archives the DM with bob.
+    let resp = archive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Poll since the pre-archive cursor — must see a `dm_archived` event
+    // keyed off the canonical `dm:alice,bob` channel form.
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    let archived_hit = changes
+        .iter()
+        .any(|c| c["kind"] == "dm_archived" && c["channel"] == "dm:alice,bob");
+    assert!(
+        archived_hit,
+        "expected dm_archived event for dm:alice,bob, got: {:#?}",
+        changes,
+    );
+
+    // The event should carry no entries — it's a path-shaped notification,
+    // mirror of `channel_meta`. Clients refetch; they don't read the
+    // archived thread inline.
+    for c in &changes {
+        if c["kind"] == "dm_archived" {
+            assert!(
+                c["entries"].as_array().unwrap().is_empty(),
+                "dm_archived event must have empty entries, got: {:?}",
+                c["entries"],
+            );
+        }
+    }
+
+    // No spurious `dm` event for the same archive operation — the active
+    // path is being deleted, the only re-appearing path is in archive/dm/,
+    // so the active `dm/` branch must not fire.
+    let active_dm_hit = changes
+        .iter()
+        .any(|c| c["kind"] == "dm" && c["channel"] == "dm:alice,bob");
+    assert!(
+        !active_dm_hit,
+        "archive must not produce a phantom `dm` event for the same DM",
+    );
+}
+
+// ─── 14. A.7: dm_archived visibility — third party must NOT see it ───────────
+
+#[tokio::test]
+async fn test_poll_dm_archived_visibility_respects_participants() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Add a second DM file alice<->charlie so we have a non-bob DM to
+    // archive (charlie is a third party from bob's perspective).
+    std::fs::write(
+        state.repo_root.join("dm/alice--charlie.thread"),
+        "[L000001][P000000][@alice][20260509T101000Z] hey charlie\n",
+    )
+    .unwrap();
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&state.repo_root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+    run_git(&["add", "dm/alice--charlie.thread"]);
+    run_git(&["commit", "-m", "add charlie dm"]);
+
+    // Switch the daemon's "current user" to bob — he's NOT a participant
+    // in the alice<->charlie DM and must not see its archived event.
+    {
+        let mut me = state.current_user.write().await;
+        *me = Some("bob".to_string());
+    }
+
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // alice archives her DM with charlie. bob should not see this event.
+    let resp = archive_dm(state.clone(), "charlie", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+
+    // bob is a third party — must not see the dm_archived event for
+    // alice<->charlie.
+    let leak = changes
+        .iter()
+        .any(|c| c["kind"] == "dm_archived" && c["channel"] == "dm:alice,charlie");
+    assert!(
+        !leak,
+        "third-party bob must not see dm_archived for alice<->charlie, got: {:#?}",
+        changes,
+    );
+}
+
+// ─── 15. A.7: dm unarchive emits naturally via the active `dm/` branch ───────
+//
+// Channel unarchive surfaces as a `kind: "channel"` event with the thread
+// content — there's no dedicated `channel_unarchived`, the active path
+// re-appearing in the diff is enough. DM unarchive must do the same:
+// `dm/<sorted>.thread` re-appears, the existing `dm/` branch picks it up,
+// emits `kind: "dm"` with entries. This test pins that contract.
+
+#[tokio::test]
+async fn test_poll_emits_dm_unarchived_event() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive first.
+    let resp = archive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Cursor between archive and unarchive — anchors the diff to a state
+    // where the active path is gone.
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Now unarchive. Active `dm/alice--bob.thread` re-appears in the diff.
+    let resp = unarchive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "unarchive failed: {:?}", resp.error);
+
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+
+    // Symmetric to channel unarchive: a `kind: "dm"` event for the
+    // canonical `dm:alice,bob` channel, carrying the thread entries.
+    let dm_hit = changes
+        .iter()
+        .find(|c| c["kind"] == "dm" && c["channel"] == "dm:alice,bob");
+    assert!(
+        dm_hit.is_some(),
+        "expected dm event for dm:alice,bob after unarchive, got: {:#?}",
+        changes,
+    );
+    let entries = dm_hit.unwrap()["entries"].as_array().unwrap();
+    assert!(
+        !entries.is_empty(),
+        "unarchive should surface thread content (active path re-appears with full file)",
+    );
+}
