@@ -1524,16 +1524,74 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = agent_loop.init().await {
-            tracing::error!(error = %e, "agent loop init failed");
-            let mut s = state_clone.lock().unwrap();
-            if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
-                if let Some(info) = ctx.agents.get_mut(&owned_id) {
-                    info.loop_handle = None;
-                    info.status = "error".to_string();
+        match agent_loop.init().await {
+            Ok(()) => {}
+            Err(crate::error::RuntimeError::SelfDeparted) => {
+                // Edge case: runtime restarted AFTER this agent self-burned.
+                // Recovery walked the agent back into ctx.agents and
+                // start_agent_loop spawned us — but the daemon's first
+                // poll trips the self_departed gate immediately. Mirror
+                // the run_once SelfDeparted arm: drive cleanup once, then
+                // exit. Without this, the agent would sit in ctx.agents
+                // with status="error" forever (or until the user
+                // manually clicked burn in the WebUI).
+                tracing::info!(
+                    agent = %owned_id,
+                    slug = %owned_slug,
+                    "agent self-departed before runtime startup, triggering cleanup"
+                );
+                let cleanup_inputs = {
+                    let s = state_clone.lock().unwrap();
+                    s.workspaces.get(&owned_slug).and_then(|ctx| {
+                        ctx.agents.get(&owned_id).map(|info| {
+                            (
+                                ctx.path.clone(),
+                                PathBuf::from(&info.repo_path),
+                                info.provider.clone(),
+                                ctx.activity_tx.clone(),
+                            )
+                        })
+                    })
+                };
+                if let Some((workspace_path, repo_path, provider, activity_tx)) = cleanup_inputs {
+                    if let Err(e) = cleanup_agent_runtime_side(
+                        &state_clone,
+                        &owned_slug,
+                        &owned_id,
+                        &workspace_path,
+                        &repo_path,
+                        provider.as_deref(),
+                        &activity_tx,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            agent = %owned_id,
+                            slug = %owned_slug,
+                            error = %e,
+                            "self-departed cleanup failed during init"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        agent = %owned_id,
+                        slug = %owned_slug,
+                        "self-departed at init but agent already removed from state — nothing to clean"
+                    );
                 }
+                return;
             }
-            return;
+            Err(e) => {
+                tracing::error!(error = %e, "agent loop init failed");
+                let mut s = state_clone.lock().unwrap();
+                if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
+                    if let Some(info) = ctx.agents.get_mut(&owned_id) {
+                        info.loop_handle = None;
+                        info.status = "error".to_string();
+                    }
+                }
+                return;
+            }
         }
 
         let poll_interval = agent_loop.poll_interval;
