@@ -210,9 +210,17 @@ pub async fn cmd_list_archived_users(client: &GitimClient, mode: &OutputMode) {
 
                     match users {
                         Some(arr) if !arr.is_empty() => {
-                            for handler in arr {
-                                if let Some(h) = handler.as_str() {
-                                    println!("{h}");
+                            // Wire shape: `[{handler, display_name?}]`. Print
+                            // `display_name (@handler)` when display_name is
+                            // present, else just `@handler`.
+                            for entry in arr {
+                                let handler = entry
+                                    .get("handler")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                match entry.get("display_name").and_then(|v| v.as_str()) {
+                                    Some(name) => println!("{name} (@{handler})"),
+                                    None => println!("@{handler}"),
                                 }
                             }
                         }

@@ -220,9 +220,21 @@ async fn test_archive_user_round_trip() {
 
     let la = list_archived_users(state.clone()).await;
     assert!(la.ok);
-    let la_users: Vec<String> =
-        serde_json::from_value(la.data.unwrap()["users"].clone()).unwrap();
-    assert_eq!(la_users, vec!["alice".to_string()]);
+    let la_users = la.data.unwrap()["users"].as_array().cloned().unwrap();
+    let la_handlers: Vec<String> = la_users
+        .iter()
+        .map(|v| v["handler"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(la_handlers, vec!["alice".to_string()]);
+    // display_name is parsed best-effort from the archived meta.yaml. The
+    // setup wrote `display_name: Alice` for alice, so the response must
+    // surface it on the wire — proves the daemon actually reads the file
+    // (not just the filename stem).
+    assert_eq!(
+        la_users[0]["display_name"].as_str(),
+        Some("Alice"),
+        "list_archived_users must parse display_name from archive meta",
+    );
 
     // Now restore. archive_user dropped alice from the in-memory users
     // list, so alice can't author her own unarchive — bob (still active)
@@ -264,8 +276,7 @@ async fn test_archive_user_round_trip() {
     assert!(lu_users.contains(&"alice".to_string()));
 
     let la = list_archived_users(state.clone()).await;
-    let la_users: Vec<String> =
-        serde_json::from_value(la.data.unwrap()["users"].clone()).unwrap();
+    let la_users = la.data.unwrap()["users"].as_array().cloned().unwrap();
     assert!(la_users.is_empty());
 }
 
@@ -454,8 +465,7 @@ async fn test_list_archived_users_empty_then_sorted() {
     // Empty before any archive.
     let resp = list_archived_users(state.clone()).await;
     assert!(resp.ok);
-    let users: Vec<String> =
-        serde_json::from_value(resp.data.unwrap()["users"].clone()).unwrap();
+    let users = resp.data.unwrap()["users"].as_array().cloned().unwrap();
     assert!(users.is_empty());
 
     // Archive bob then alice (insertion order != alphabetical).
@@ -469,9 +479,17 @@ async fn test_list_archived_users_empty_then_sorted() {
 
     let resp = list_archived_users(state.clone()).await;
     assert!(resp.ok);
-    let users: Vec<String> =
-        serde_json::from_value(resp.data.unwrap()["users"].clone()).unwrap();
-    assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+    let users = resp.data.unwrap()["users"].as_array().cloned().unwrap();
+    let handlers: Vec<String> = users
+        .iter()
+        .map(|v| v["handler"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(handlers, vec!["alice".to_string(), "bob".to_string()]);
+    // Both setup_test_repo entries had `display_name: Alice` / `Bob` —
+    // verify the parse worked for every row, not just the alphabetically
+    // first one.
+    assert_eq!(users[0]["display_name"].as_str(), Some("Alice"));
+    assert_eq!(users[1]["display_name"].as_str(), Some("Bob"));
 }
 
 // ─── 8. A.5: write interception — departed author can't send ──────────────────

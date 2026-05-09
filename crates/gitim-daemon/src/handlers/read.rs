@@ -3,7 +3,7 @@ use crate::handlers::{entry_to_json, resolve_thread_path};
 use crate::state::SharedState;
 
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry};
+use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry, UserMeta};
 
 pub async fn handle_read(
     state: SharedState,
@@ -216,25 +216,40 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
-/// Scan `archive/users/*.meta.yaml` and return the handlers (filename
-/// stem) sorted alphabetically. Mirrors `handle_list_archived_channels`
-/// in shape; the response is `ListArchivedUsersResponse` rather than
-/// the channel-summary shape because users have no per-row members.
+/// Scan `archive/users/*.meta.yaml` and return one `ArchivedUserEntry`
+/// per file, sorted by handler. Mirrors `handle_list_archived_channels`
+/// in shape; the per-row payload carries `handler` (always) and
+/// `display_name` (best-effort — parsed from the archived `UserMeta`
+/// yaml, omitted when the file is missing or unparseable). Frontends
+/// fall back to rendering the bare handler when `display_name` is
+/// absent.
 pub async fn handle_list_archived_users(state: SharedState) -> Response {
+    use gitim_core::responses::{ArchivedUserEntry, ListArchivedUsersResponse};
     let arch_users_dir = state.repo_root.join("archive").join("users");
-    let mut handlers: Vec<String> = Vec::new();
+    let mut entries: Vec<ArchivedUserEntry> = Vec::new();
     if arch_users_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&arch_users_dir) {
-            for entry in entries.flatten() {
+        if let Ok(rd) = std::fs::read_dir(&arch_users_dir) {
+            for entry in rd.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if let Some(handler) = fname.strip_suffix(".meta.yaml") {
-                    handlers.push(handler.to_string());
-                }
+                let Some(handler) = fname.strip_suffix(".meta.yaml") else {
+                    continue;
+                };
+                // Best-effort display_name lookup. A read or parse failure
+                // means the entry simply has no display_name on the wire —
+                // not an error condition for the list call.
+                let display_name = std::fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|c| serde_yaml::from_str::<UserMeta>(&c).ok())
+                    .map(|m| m.display_name);
+                entries.push(ArchivedUserEntry {
+                    handler: handler.to_string(),
+                    display_name,
+                });
             }
         }
     }
-    handlers.sort();
-    let payload = gitim_core::responses::ListArchivedUsersResponse { users: handlers };
+    entries.sort_by(|a, b| a.handler.cmp(&b.handler));
+    let payload = ListArchivedUsersResponse { users: entries };
     Response::success(serde_json::to_value(payload).unwrap())
 }
 

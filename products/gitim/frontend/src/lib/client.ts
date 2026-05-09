@@ -1140,10 +1140,10 @@ export async function listArchivedUsers(
     const res = await fetch(`${wsBase(slug)}/users/archived`);
     const data = await res.json();
     if (!data.ok) return data;
-    // Daemon returns `{ users: ["alice", "bob"] }` — handlers as bare
-    // strings. Wrap each into the entry shape so the UI can extend
-    // the row payload (display_name, archived_at, etc.) without a
-    // breaking change here.
+    // Daemon returns `{ users: [{handler, display_name?}, ...] }`.
+    // Pre-archive-protocol the daemon emitted bare handler strings; we
+    // still tolerate that shape so a stale WebUI talking to a fresh
+    // daemon (or vice versa) doesn't crash on the row map.
     const raw = (data.data?.users ?? data.users ?? []) as unknown[];
     const users: ArchivedUserEntry[] = raw.map((u) =>
       typeof u === "string"

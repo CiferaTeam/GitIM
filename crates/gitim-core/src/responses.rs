@@ -148,10 +148,30 @@ pub struct UnarchiveUserResponse {
     pub unarchived_by: String,
 }
 
+/// One row in `ListArchivedUsersResponse.users`. The handler is
+/// structurally guaranteed (it's the file stem under `archive/users/`);
+/// `display_name` is best-effort — the daemon parses the archived
+/// `UserMeta` yaml on each list call and omits the field when the file
+/// is absent or unparseable. Frontends must render gracefully when
+/// `display_name` is `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchivedUserEntry {
+    pub handler: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
 /// Response payload for `Request::ListArchivedUsers`.
+///
+/// Wire shape: `users` is a list of `{handler, display_name?}` objects.
+/// The pre-archive-protocol shape — bare handler strings — was a dead
+/// contract: the WebUI's `ArchivedUserEntry` already typed `display_name`
+/// optional, but the daemon never emitted it, so archived agent cards
+/// always fell back to bare handler. Promoting the row to an object is
+/// a hard wire change; the only client is the WebUI we control.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListArchivedUsersResponse {
-    pub users: Vec<String>,
+    pub users: Vec<ArchivedUserEntry>,
 }
 
 /// Response payload for `Request::DepartUser`.
@@ -711,14 +731,39 @@ mod tests {
     #[test]
     fn list_archived_users_response_wire_shape() {
         let r = ListArchivedUsersResponse {
-            users: vec!["alice".to_string(), "bob".to_string()],
+            users: vec![
+                ArchivedUserEntry {
+                    handler: "alice".to_string(),
+                    display_name: Some("Alice".to_string()),
+                },
+                ArchivedUserEntry {
+                    handler: "bob".to_string(),
+                    display_name: None,
+                },
+            ],
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 1);
+        let arr = obj.get("users").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // Row with display_name: present on the wire.
+        let alice = arr[0].as_object().unwrap();
+        assert_eq!(alice.get("handler").and_then(|v| v.as_str()), Some("alice"));
         assert_eq!(
-            obj.get("users").unwrap().as_array().map(|a| a.len()),
-            Some(2),
+            alice.get("display_name").and_then(|v| v.as_str()),
+            Some("Alice"),
+        );
+
+        // Row without display_name: field skipped on the wire (no `null`).
+        // `skip_serializing_if = Option::is_none` keeps the payload minimal
+        // and matches the rest of the response module's conventions.
+        let bob = arr[1].as_object().unwrap();
+        assert_eq!(bob.get("handler").and_then(|v| v.as_str()), Some("bob"));
+        assert!(
+            !bob.contains_key("display_name"),
+            "absent display_name must be omitted, not serialized as null"
         );
     }
 
