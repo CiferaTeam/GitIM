@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,33 @@ impl CronSpec {
     pub fn is_active(&self) -> bool {
         self.enabled
     }
+}
+
+/// Compute the next time the spec should fire, strictly after `after`.
+///
+/// `after` is in UTC; the result is in UTC. Internally the spec's timezone
+/// (default UTC) is used to interpret the cron expression so wall-clock
+/// schedules like "9am Pacific" honor DST transitions.
+pub fn next_fire_after(
+    spec: &CronSpec,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>, CronSpecError> {
+    let cron = Cron::from_str(&spec.schedule)
+        .map_err(|e| CronSpecError::InvalidSchedule(format!("{e}")))?;
+
+    let tz: Tz = match &spec.timezone {
+        Some(s) => s
+            .parse()
+            .map_err(|e| CronSpecError::InvalidTimezone(format!("{s}: {e}")))?,
+        None => Tz::UTC,
+    };
+
+    let after_in_tz = after.with_timezone(&tz);
+    let next_in_tz = cron
+        .find_next_occurrence(&after_in_tz, false)
+        .map_err(|e| CronSpecError::InvalidSchedule(format!("{e}")))?;
+
+    Ok(next_in_tz.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -321,5 +348,132 @@ created_at: "2026-05-09T10:00:00Z"
 "#;
         let err = CronSpec::from_yaml(yaml).unwrap_err();
         assert!(matches!(err, CronSpecError::InvalidVersion(2)));
+    }
+
+    fn spec_with(schedule: &str, timezone: Option<&str>) -> CronSpec {
+        CronSpec {
+            version: 1,
+            schedule: schedule.to_string(),
+            timezone: timezone.map(String::from),
+            target: Handler::new("alice").unwrap(),
+            prompt: "x".to_string(),
+            enabled: true,
+            created_by: Handler::new("alice").unwrap(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    mod next_fire {
+        use super::*;
+        use chrono::TimeZone;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn next_monday_9am_from_sunday() {
+            // 2026-05-10 is a Sunday. Schedule fires Mondays at 9am UTC.
+            let spec = spec_with("0 9 * * 1", None);
+            let sunday = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+            let next = next_fire_after(&spec, sunday).unwrap();
+            assert_eq!(next, Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap());
+        }
+
+        #[test]
+        fn alias_daily_from_arbitrary_time() {
+            // @daily expands to "0 0 * * *". Next fire is the next 00:00 UTC.
+            let spec = spec_with("@daily", None);
+            let now = Utc.with_ymd_and_hms(2026, 5, 9, 14, 37, 12).unwrap();
+            let next = next_fire_after(&spec, now).unwrap();
+            assert_eq!(next, Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap());
+        }
+
+        #[test]
+        fn tz_la_morning_from_utc() {
+            // schedule "0 9 * * *" in America/Los_Angeles.
+            // In May 2026 LA is on PDT (UTC-7), so LA 09:00 == UTC 16:00.
+            let spec = spec_with("0 9 * * *", Some("America/Los_Angeles"));
+
+            // From UTC 16:00 (= LA 09:00 same day) — already fired this minute,
+            // expect next day's LA 09:00 since search is strictly-after.
+            let from_morning = Utc.with_ymd_and_hms(2026, 5, 9, 16, 0, 0).unwrap();
+            let next1 = next_fire_after(&spec, from_morning).unwrap();
+            assert_eq!(next1, Utc.with_ymd_and_hms(2026, 5, 10, 16, 0, 0).unwrap());
+
+            // From UTC 18:00 (= LA 11:00 same day) — also already fired,
+            // expect next day's LA 09:00.
+            let from_afternoon = Utc.with_ymd_and_hms(2026, 5, 9, 18, 0, 0).unwrap();
+            let next2 = next_fire_after(&spec, from_afternoon).unwrap();
+            assert_eq!(next2, Utc.with_ymd_and_hms(2026, 5, 10, 16, 0, 0).unwrap());
+        }
+
+        #[test]
+        fn dst_forward_no_double_fire() {
+            // US DST forward: 2026-03-08 02:00 LA → 03:00 LA.
+            // Schedule "30 2 * * *" — 02:30 LA does not exist on 2026-03-08.
+            //
+            // croner's documented behavior for fixed-time jobs in a DST gap
+            // (see croner src/lib.rs::test_dst_gap_fixed_time_job) is to SNAP
+            // to the first valid wall-clock time after the gap, not skip the
+            // day. So the "missed" 02:30 PST becomes 03:00 PDT = UTC 10:00
+            // (LA was UTC-8 before the transition, becomes UTC-7 after).
+            //
+            // The plan anticipated "skip to next day" but croner snaps; we
+            // assert what croner actually does. The critical invariant either
+            // way is NO double-fire — verified below by checking that the
+            // fire AFTER the snap lands on the FOLLOWING day, not somewhere
+            // else on 2026-03-08.
+            let spec = spec_with("30 2 * * *", Some("America/Los_Angeles"));
+
+            // Just before the gap: 2026-03-08 01:59 LA PST = UTC 09:59.
+            let before_gap = Utc.with_ymd_and_hms(2026, 3, 8, 9, 59, 0).unwrap();
+            let next = next_fire_after(&spec, before_gap).unwrap();
+
+            // Snap to first valid wall-clock time after the gap: 03:00 LA PDT
+            // = UTC 10:00.
+            let snap = Utc.with_ymd_and_hms(2026, 3, 8, 10, 0, 0).unwrap();
+            assert_eq!(next, snap, "croner snaps fixed-time jobs out of DST gaps");
+
+            // The next fire after the snap is 2026-03-09 02:30 LA PDT
+            // = UTC 09:30. No second fire on 2026-03-08.
+            let after = next_fire_after(&spec, next).unwrap();
+            let next_day = Utc.with_ymd_and_hms(2026, 3, 9, 9, 30, 0).unwrap();
+            assert_eq!(after, next_day, "no double-fire on DST forward day");
+        }
+
+        #[test]
+        fn dst_backward_no_double_fire() {
+            // US DST backward: 2026-11-01 02:00 LA → 01:00 LA.
+            // 01:30 LA happens twice — once at PDT (UTC-7), once at PST
+            // (UTC-8). Schedule "30 1 * * *" is a fixed-time job; croner
+            // fires only at the FIRST occurrence (PDT). We assert exactly
+            // one fire on this day, and the next fire is the following day.
+            let spec = spec_with("30 1 * * *", Some("America/Los_Angeles"));
+
+            // Midnight LA on 2026-11-01 (still PDT) = UTC 07:00.
+            let midnight = Utc.with_ymd_and_hms(2026, 11, 1, 7, 0, 0).unwrap();
+            let first = next_fire_after(&spec, midnight).unwrap();
+
+            // 01:30 LA PDT = UTC 08:30.
+            let pdt_fire = Utc.with_ymd_and_hms(2026, 11, 1, 8, 30, 0).unwrap();
+            assert_eq!(first, pdt_fire, "first fire is at 01:30 LA PDT");
+
+            // The next fire is 2026-11-02 01:30 LA PST = UTC 09:30, NOT a
+            // second fire on 2026-11-01 at 01:30 PST (which is the same
+            // wall-clock time but a different absolute instant).
+            let second = next_fire_after(&spec, first).unwrap();
+            let next_day = Utc.with_ymd_and_hms(2026, 11, 2, 9, 30, 0).unwrap();
+            assert_eq!(second, next_day, "no second fire during fall-back overlap");
+        }
+
+        #[test]
+        fn invalid_schedule_returns_error() {
+            // Real specs go through validate() before fire. The function
+            // should still surface an error rather than panic if a caller
+            // hands in a bogus spec directly.
+            let mut spec = spec_with("0 9 * * 1", None);
+            spec.schedule = "totally bogus".to_string();
+            let err = next_fire_after(&spec, Utc::now()).unwrap_err();
+            assert!(matches!(err, CronSpecError::InvalidSchedule(_)));
+        }
     }
 }
