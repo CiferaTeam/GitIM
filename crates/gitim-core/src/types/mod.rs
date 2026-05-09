@@ -1,3 +1,4 @@
+pub mod board;
 pub mod card;
 pub mod channel;
 pub mod config;
@@ -6,6 +7,12 @@ pub mod link;
 pub mod message;
 pub mod meta;
 
+pub use board::{
+    append_board_section, board_path, default_board, parse_board_markdown, set_board_field,
+    set_board_section, stringify_board_markdown, validate_board_document,
+    validate_board_for_handler, BoardDocument, BoardError, BoardMarkdownError, BoardMeta,
+    BOARD_VERSION,
+};
 pub use card::{
     parse_card_meta_yaml, stringify_card_meta_yaml, validate_card_id, validate_card_meta,
     validate_labels, CardError, CardMeta, CardMetaYamlError, CardStatus,
