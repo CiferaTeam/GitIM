@@ -22,8 +22,8 @@ interface ConnectionState {
   headCommit: string | null;
   error: string | null;
 
-  // Self-update state machine (Task 8). Set by `useVersionCheck.triggerUpdate`.
-  // - isUpdating: update-and-restart accepted, polling /health
+  // Self-update state machine. Set by `useVersionCheck.triggerUpdate`.
+  // - isUpdating: user-triggered update is in flight or polling /health
   // - isRestarting: /health unreachable (parent exiting / child rebinding)
   // - updateError: surfaced error string for the UI
   isUpdating: boolean;
