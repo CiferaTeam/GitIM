@@ -390,10 +390,47 @@ where
                 }
             }
             Err(_) => {
+                // Rebase failed. Two failure modes from here:
+                //
+                //   1. All local unpushed files belong to the resolvable set
+                //      (`*.thread` additions, `*.meta.yaml` changes). Discard
+                //      the partial rebase, re-apply via the content-aware
+                //      resolvers below.
+                //   2. Any local unpushed file is OUTSIDE that set
+                //      (`crons/<name>/spec.yaml`, an arbitrary doc, a binary
+                //      asset, future protocol additions). The resolvable
+                //      path's `discard_unpushed` would `git reset --hard
+                //      @{upstream}` and silently destroy those edits. There
+                //      is no generic content-aware resolver for arbitrary
+                //      files, so we bail: abort the rebase (which leaves HEAD
+                //      and working tree intact), warn, and let the next cycle
+                //      retry. The user keeps their commit.
+                //
+                // The detection is "did the unpushed range touch any file
+                // outside `*.thread` and `*.meta.yaml`" — not "is the
+                // conflict on a non-resolvable file". A single unpushed
+                // commit that touches both a thread file and a cron spec
+                // would otherwise have its spec destroyed even when only the
+                // thread side actually conflicts.
+                let all_unpushed = repo.changed_files_unpushed_all().unwrap_or_default();
+                let has_unresolvable = all_unpushed.iter().any(|p| {
+                    let path_str = p.to_string_lossy();
+                    !path_str.ends_with(".thread") && !path_str.ends_with(".meta.yaml")
+                });
+                if has_unresolvable {
+                    let _ = repo.abort_rebase();
+                    warn!(
+                        "sync: rebase conflict on non-resolvable files (e.g. cron specs); \
+                         preserving local commit. Files: {:?}",
+                        all_unpushed
+                    );
+                    return SyncOutcome::Normal;
+                }
+
                 // Rebase failed — use thread-aware + meta conflict resolution
                 if local_additions.is_empty() && local_metas.is_empty() {
-                    let _ = repo.discard_unpushed();
-                    warn!("sync: non-thread/meta rebase conflict, aborted");
+                    let _ = repo.abort_rebase();
+                    warn!("sync: rebase conflict with no resolvable changes, aborted");
                     return SyncOutcome::Normal;
                 }
 
