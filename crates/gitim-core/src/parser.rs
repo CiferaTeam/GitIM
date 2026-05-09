@@ -16,9 +16,13 @@ pub enum ParseError {
     },
 }
 
+// Event tokens are kebab- or snake-case lowercase ASCII. Hyphens are
+// part of the alphabet (e.g. `leave-workspace`) — the original `[a-z_]+`
+// rejected anything compound and silently fell through the parser
+// (offending lines were treated as continuation text).
 static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z_]+)\])? (.+)$",
+        r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z][a-z0-9_-]*)\])? (.+)$",
     )
     .unwrap()
 });

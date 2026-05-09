@@ -154,6 +154,21 @@ pub struct ListArchivedUsersResponse {
     pub users: Vec<String>,
 }
 
+/// Response payload for `Request::DepartUser`.
+///
+/// `commits` reports how many commits this invocation produced. On a
+/// fresh burn this counts every phase that did real work; on an
+/// idempotent retry the count drops as already-completed steps skip.
+/// `already_departed` flags the terminal-state shortcut — the caller
+/// can distinguish "depart just finished" from "depart was already
+/// done before this call" without diffing git logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DepartUserResponse {
+    pub handler: String,
+    pub commits: u64,
+    pub already_departed: bool,
+}
+
 /// Response payload for `Request::ArchiveDm`.
 ///
 /// `dm_pair_stem` is the on-disk filename stem `<min>--<max>` (output of
@@ -574,8 +589,14 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 2);
-        assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("engineering"));
-        assert_eq!(obj.get("created_by").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            obj.get("channel").and_then(|v| v.as_str()),
+            Some("engineering")
+        );
+        assert_eq!(
+            obj.get("created_by").and_then(|v| v.as_str()),
+            Some("alice")
+        );
     }
 
     #[test]
