@@ -1,6 +1,7 @@
 pub mod card;
 pub mod channel;
 pub mod config;
+pub mod cron;
 pub mod handler;
 pub mod link;
 pub mod message;
@@ -12,6 +13,7 @@ pub use card::{
 };
 pub use channel::ChannelName;
 pub use config::Config;
+pub use cron::{CronSpec, CronSpecError};
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
