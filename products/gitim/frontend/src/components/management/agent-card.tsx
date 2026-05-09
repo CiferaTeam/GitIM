@@ -12,8 +12,8 @@ import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
-import { RemoveAgentDialog } from "./remove-agent-dialog";
-import { Play, Pause, Settings, Trash2 } from "lucide-react";
+import { BurnAgentDialog } from "./burn-agent-dialog";
+import { Play, Pause, Settings, Flame } from "lucide-react";
 import { relativeTime, statusBadge } from "./agent-status";
 
 function statusBarColor(status: AgentStatus) {
@@ -45,7 +45,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const navigate = useNavigate();
-  const [removeOpen, setRemoveOpen] = useState(false);
+  const [burnOpen, setBurnOpen] = useState(false);
 
   const isRunning = agent.status !== "offline";
 
@@ -143,21 +143,20 @@ export function AgentCard({ agent }: AgentCardProps) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setRemoveOpen(true)}
+            onClick={() => setBurnOpen(true)}
             className="text-destructive hover:text-destructive hover:bg-destructive/10"
           >
-            <Trash2 className="size-3.5 mr-1" />
-            Remove
+            <Flame className="size-3.5 mr-1" />
+            Burn
           </Button>
         </CardFooter>
       </Card>
 
-      <RemoveAgentDialog
+      <BurnAgentDialog
         agentId={agent.id}
         agentName={agent.name}
-        agentPath={agent.repoPath}
-        open={removeOpen}
-        onOpenChange={setRemoveOpen}
+        open={burnOpen}
+        onOpenChange={setBurnOpen}
       />
     </>
   );

@@ -1151,6 +1151,47 @@ async fn im_list_archived_dms(
     api_response_to_json(client.list_archived_dms().await)
 }
 
+// -- /users/archived + /users/{handler}/unarchive --
+//
+// Used by WebUI's E.3 "show archived" toggle on the agent list, and by
+// the unarchive recovery action on archived agents. Both proxy directly
+// to the human-clone daemon — no runtime-side state is involved, since
+// archived users are an artifact of `archive/users/<handler>.meta.yaml`
+// in the shared repo. The runtime keeps no metadata for archived
+// agents (provider / model / messages_processed are gone with the
+// daemon's clone delete), so the WebUI renders the list with only
+// handler / display_name from the daemon response.
+
+async fn users_list_archived(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_users().await)
+}
+
+async fn users_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, handler)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_user(&handler).await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -3518,6 +3559,8 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/dm/archived", get(im_list_archived_dms))
         .route("/im/dm/{peer}/archive", post(im_dm_archive))
         .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
+        .route("/users/archived", get(users_list_archived))
+        .route("/users/{handler}/unarchive", post(users_unarchive))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))

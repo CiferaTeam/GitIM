@@ -1082,6 +1082,106 @@ export async function removeAgent(
   }
 }
 
+/**
+ * archive-protocol burn (B.1) — full workspace-wide departure.
+ * Replaces `removeAgent({ hardDelete: true })`. Daemon walks the
+ * idempotent multi-commit phase chain (leave events → DM archive →
+ * channel meta scrub → user.meta.yaml → archive/users/), runtime
+ * deletes the clone + hermes profile, and broadcasts `burned` SSE.
+ *
+ * Failure modes (`error_code` in response body):
+ * - `not_an_agent` (404)
+ * - `daemon_unreachable` (500) — RPC IO / spawn failure; retry safe
+ * - `daemon_depart_failed` (500) — daemon ok=false; retry resumes
+ *   from first incomplete phase via the terminal-state check
+ */
+export async function agentsBurn(
+  slug: string,
+  id: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void id;
+    return { ok: false, error: "agents are unavailable in browser mode" };
+  }
+  try {
+    const res = await fetch(`${wsBase(slug)}/agents/burn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Archived-user entry from daemon `list_archived_users`. Only the
+ * handler is structurally guaranteed — display_name is best-effort
+ * because the runtime no longer holds the agent metadata after burn,
+ * and the daemon reads it from `archive/users/<handler>.meta.yaml` if
+ * the file is well-formed. WebUI must render gracefully when
+ * display_name is absent.
+ */
+export interface ArchivedUserEntry {
+  handler: string;
+  display_name?: string;
+}
+
+export async function listArchivedUsers(
+  slug: string,
+): Promise<ApiResponse<{ users: ArchivedUserEntry[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    return { ok: true, data: { users: [] } };
+  }
+  try {
+    const res = await fetch(`${wsBase(slug)}/users/archived`);
+    const data = await res.json();
+    if (!data.ok) return data;
+    // Daemon returns `{ users: ["alice", "bob"] }` — handlers as bare
+    // strings. Wrap each into the entry shape so the UI can extend
+    // the row payload (display_name, archived_at, etc.) without a
+    // breaking change here.
+    const raw = (data.data?.users ?? data.users ?? []) as unknown[];
+    const users: ArchivedUserEntry[] = raw.map((u) =>
+      typeof u === "string"
+        ? { handler: u }
+        : (u as ArchivedUserEntry),
+    );
+    return { ok: true, data: { users } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Move `archive/users/<handler>.meta.yaml` back to `users/`. Recovery
+ * action exposed on the show-archived view of the agent list — reverses
+ * the daemon side of `agentsBurn` only; the agent runtime instance is
+ * not respawned (operator must re-add the agent if they want it live).
+ */
+export async function unarchiveUser(
+  slug: string,
+  handler: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    void handler;
+    return { ok: false, error: "user archive is unavailable in browser mode" };
+  }
+  try {
+    const res = await fetch(
+      `${wsBase(slug)}/users/${encodeURIComponent(handler)}/unarchive`,
+      { method: "POST" },
+    );
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function startAgent(slug: string, id: string): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;

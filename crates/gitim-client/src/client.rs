@@ -247,6 +247,18 @@ impl GitimClient {
         self.request("list_archived_users", json!({})).await
     }
 
+    /// Restore a departed user — moves `archive/users/<handler>.meta.yaml`
+    /// back to `users/<handler>.meta.yaml`. The runtime burn endpoint
+    /// (B.1) drives departure via `depart_user`; this is the inverse, so
+    /// WebUI can offer a recovery path on the archived-agent view (E.3).
+    ///
+    /// Daemon resolves caller via the connection's me.json when `author`
+    /// is omitted — matches `archive_dm` / `unarchive_dm` shape.
+    pub async fn unarchive_user(&self, handler: &str) -> Result<ApiResponse, ClientError> {
+        self.request("unarchive_user", json!({ "handler": handler }))
+            .await
+    }
+
     pub async fn stop(&self) -> Result<ApiResponse, ClientError> {
         self.request("stop", json!({})).await
     }
@@ -611,5 +623,11 @@ mod tests {
 
         let list_users = build_request("list_archived_users", json!({}));
         assert_eq!(list_users, json!({"method": "list_archived_users"}));
+
+        let unarchive_user = build_request("unarchive_user", json!({"handler": "bob"}));
+        assert_eq!(
+            unarchive_user,
+            json!({"method": "unarchive_user", "handler": "bob"}),
+        );
     }
 }

@@ -7,11 +7,11 @@ import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { PROVIDERS } from "@/lib/providers";
 import type { Agent } from "@/lib/types";
-import { ArrowLeft, Play, Pause, Trash2, Pencil } from "lucide-react";
+import { ArrowLeft, Play, Pause, Flame, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-status";
 import { ProviderBadge } from "./provider-badge";
-import { RemoveAgentDialog } from "./remove-agent-dialog";
+import { BurnAgentDialog } from "./burn-agent-dialog";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
@@ -51,7 +51,7 @@ export function AgentDetail() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const agents = useAgentStore((s) => s.agents);
   const updateAgent = useAgentStore((s) => s.updateAgent);
-  const [removeOpen, setRemoveOpen] = useState(false);
+  const [burnOpen, setBurnOpen] = useState(false);
 
   type Mode = "view" | "edit" | "saving";
   const [mode, setMode] = useState<Mode>("view");
@@ -440,13 +440,12 @@ export function AgentDetail() {
               )}
             </Button>
             <Button
-              variant="ghost"
+              variant="destructive"
               size="default"
-              onClick={() => setRemoveOpen(true)}
-              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+              onClick={() => setBurnOpen(true)}
             >
-              <Trash2 className="size-4 mr-1.5" />
-              Remove
+              <Flame className="size-4 mr-1.5" />
+              Burn
             </Button>
           </>
         ) : (
@@ -477,13 +476,12 @@ export function AgentDetail() {
         </div>
       )}
 
-      <RemoveAgentDialog
+      <BurnAgentDialog
         agentId={agent.id}
         agentName={agent.name}
-        agentPath={agent.repoPath}
-        open={removeOpen}
-        onOpenChange={setRemoveOpen}
-        onRemoved={() => navigate("/management")}
+        open={burnOpen}
+        onOpenChange={setBurnOpen}
+        onBurned={() => navigate("/management")}
       />
       </div>
     </div>
