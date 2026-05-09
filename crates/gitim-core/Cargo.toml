@@ -9,6 +9,9 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+chrono.workspace = true
+chrono-tz = { workspace = true }
+croner = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = "1"
