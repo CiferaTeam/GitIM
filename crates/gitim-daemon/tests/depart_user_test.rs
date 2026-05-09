@@ -924,6 +924,173 @@ async fn test_poll_returns_self_departed_when_handler_archived() {
     );
 }
 
+// ─── 11. Codex P1: terminal-state branch must push pending commits.
+//         Regression for the case where a previous attempt's Phase 4 commit
+//         landed locally but never reached origin (e.g. transient network /
+//         auth failure during push). On retry, the terminal-state check
+//         (`archive/users/<h>.meta.yaml` exists locally) fired and the
+//         daemon returned ok=true — runtime then `rm -rf`'d the clone, the
+//         only place the unpushed audit commits lived. Workspace footprint
+//         stayed visible on origin forever.
+//
+//         Fix: terminal-state branch now calls push_with_retry. If origin
+//         already has everything, the push fast-forwards (cheap no-op). If
+//         not, it catches origin up before reporting success. ─────────────
+#[tokio::test]
+async fn test_depart_terminal_state_pushes_pending_commits_to_origin() {
+    use std::path::Path;
+    use std::process::Command;
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .expect("git failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // 1) Bare origin + working clone with alice + bob registered.
+    let bare = TempDir::new().unwrap();
+    let clone_dir = TempDir::new().unwrap();
+    run_git(bare.path(), &["init", "--bare"]);
+    run_git(
+        clone_dir.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            clone_dir.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone_dir.path(), &["config", "user.email", "test@test.com"]);
+    run_git(clone_dir.path(), &["config", "user.name", "test"]);
+
+    let root = clone_dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("users")).unwrap();
+    for h in ["alice", "bob"] {
+        std::fs::write(
+            root.join(format!("users/{}.meta.yaml", h)),
+            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
+        )
+        .unwrap();
+    }
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "init"]);
+    run_git(&root, &["push", "-u", "origin", "HEAD"]);
+
+    // Capture the SHA of the pre-depart tip so we can rewind origin to it
+    // later — simulating "Phase 4's commit never reached origin".
+    let pre_depart_sha = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    let (event_tx, _) = broadcast::channel(100);
+    let state = Arc::new(AppState::new(
+        root.clone(),
+        make_config(),
+        event_tx,
+        Some("alice".to_string()),
+    ));
+    {
+        let mut users = state.users.write().await;
+        *users = vec!["alice".to_string(), "bob".to_string()];
+    }
+
+    // 2) Normal depart — all phases land locally and on origin.
+    let resp = depart_user(state.clone(), "alice").await;
+    assert!(resp.ok, "first depart failed: {:?}", resp.error);
+    assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
+
+    // Pre-condition for the regression: origin has the archive/ entry now.
+    let bare_default_branch = {
+        let out = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bare_has_archive_user = |branch: &str| -> bool {
+        let out = Command::new("git")
+            .args([
+                "ls-tree",
+                "-r",
+                "--name-only",
+                branch,
+                "archive/users/alice.meta.yaml",
+            ])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        !out.stdout.is_empty()
+    };
+    assert!(
+        bare_has_archive_user(&bare_default_branch),
+        "pre-condition: origin should have archive/users/alice.meta.yaml after first depart"
+    );
+
+    // 3) Rewind origin to before the depart commits. Mirrors a real-world
+    //    scenario where Phase 4's local commit succeeded but `git push` to
+    //    origin failed (network blip, auth flake, bare went read-only). The
+    //    LOCAL clone still has every archive/ commit; origin does not.
+    //    `update-ref` on the bare repo's branch is the cleanest way to
+    //    achieve this without running an interactive rewind on the live
+    //    clone.
+    run_git(
+        bare.path(),
+        &[
+            "update-ref",
+            &format!("refs/heads/{}", bare_default_branch),
+            &pre_depart_sha,
+        ],
+    );
+    assert!(
+        !bare_has_archive_user(&bare_default_branch),
+        "post-rewind: origin should no longer have archive/users/alice.meta.yaml"
+    );
+
+    // 4) Retry depart_user. Local archive/users/alice.meta.yaml exists →
+    //    terminal-state branch fires. Pre-fix: returns ok=true with no push,
+    //    runtime would then nuke the clone. Post-fix: push_with_retry runs
+    //    first, catches origin up, then returns success.
+    let resp = depart_user(state.clone(), "alice").await;
+    assert!(
+        resp.ok,
+        "retry depart should succeed (terminal-state push): {:?}",
+        resp.error
+    );
+    let data = resp.data.unwrap();
+    assert!(
+        data["already_departed"].as_bool().unwrap(),
+        "retry should hit terminal-state branch (already_departed=true)"
+    );
+    assert_eq!(
+        data["commits"].as_u64().unwrap(),
+        0,
+        "no new commits — only the pending push catches up"
+    );
+
+    // 5) The fix's contract: origin now has archive/users/alice.meta.yaml.
+    assert!(
+        bare_has_archive_user(&bare_default_branch),
+        "FIX REGRESSION: terminal-state branch must push pending commits to origin"
+    );
+}
+
 /// Without a current_user (guest / pre-onboard), the gate is a no-op —
 /// poll falls through to the normal path. This guards against accidental
 /// regressions where the gate might trip on archived rows for *other*

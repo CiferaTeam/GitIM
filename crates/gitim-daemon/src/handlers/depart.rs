@@ -54,9 +54,25 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
     }
 
     // 2. Terminal-state judgment. If the user is already in archive/users/,
-    //    the burn is complete. Idempotent retry returns success with
-    //    `commits: 0, already_departed: true`.
+    //    the burn is *locally* complete. Before reporting success, drive a
+    //    push to make sure origin sees every depart commit — otherwise a
+    //    previous attempt's Phase 4 commit could be sitting in the local
+    //    clone with no remote counterpart, and the runtime's burn endpoint
+    //    will then `rm -rf` the clone (the only copy of the audit commits)
+    //    on receipt of our success. Net effect: workspace footprint stays
+    //    visible to other clones forever, the opposite of what burn promises.
+    //
+    //    push_with_retry is idempotent on origin: when origin already has
+    //    everything, the push fast-forwards / returns "everything up-to-date".
+    //    When origin is behind, it catches up. When push fails (auth, network,
+    //    conflict-after-retries), we return Err so the caller retries —
+    //    runtime's `agents_burn` short-circuits on `daemon_depart_failed` and
+    //    skips the destructive cleanup, so the clone stays put for the next
+    //    attempt.
     if is_already_departed(&state, &handler) {
+        if let Err(resp) = push_with_retry(&state, "depart_user(terminal-resync)") {
+            return resp;
+        }
         let payload = gitim_core::responses::DepartUserResponse {
             handler,
             commits: 0,
