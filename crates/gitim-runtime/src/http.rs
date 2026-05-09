@@ -1110,6 +1110,115 @@ async fn im_list_archived_channels(
     api_response_to_json(client.list_archived_channels().await)
 }
 
+// -- /im/boards --
+
+async fn im_list_boards(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_list().await)
+}
+
+async fn im_show_board(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, handler)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_show(&handler).await)
+}
+
+async fn im_board_init(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_init().await)
+}
+
+#[derive(Deserialize)]
+struct BoardPublishRequest {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn im_board_publish(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<BoardPublishRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_publish(req.content.as_deref()).await)
+}
+
+#[derive(Deserialize)]
+struct BoardFieldRequest {
+    field: String,
+    value: String,
+}
+
+async fn im_board_field(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<BoardFieldRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_set(&req.field, &req.value).await)
+}
+
+#[derive(Deserialize)]
+struct BoardSectionRequest {
+    section: String,
+    value: String,
+}
+
+async fn im_board_section_set(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<BoardSectionRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_section_set(&req.section, &req.value).await)
+}
+
+async fn im_board_section_append(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<BoardSectionRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.board_section_append(&req.section, &req.value).await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -3182,6 +3291,13 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/poll", post(im_poll))
         .route("/im/users", get(im_users))
         .route("/im/thread", post(im_thread))
+        .route("/im/boards", get(im_list_boards))
+        .route("/im/boards/{handler}", get(im_show_board))
+        .route("/im/board/init", post(im_board_init))
+        .route("/im/board/publish", post(im_board_publish))
+        .route("/im/board/field", post(im_board_field))
+        .route("/im/board/section/set", post(im_board_section_set))
+        .route("/im/board/section/append", post(im_board_section_append))
         .route("/im/cards", post(im_create_card).get(im_list_cards))
         // `/im/cards/archived` must come before `/im/cards/{channel}/{card_id}`
         // so axum doesn't try to match "archived" as a channel segment.
@@ -3480,6 +3596,31 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["ok"], false);
         assert_eq!(body["error"], "human daemon unavailable");
+    }
+
+    #[tokio::test]
+    async fn im_boards_route_reaches_workspace_lookup() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces/missing/im/boards")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "unknown workspace");
     }
 
     #[tokio::test]

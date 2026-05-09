@@ -424,4 +424,63 @@ impl GitimClient {
         )
         .await
     }
+
+    pub async fn board_show(&self, handler: &str) -> Result<ApiResponse, ClientError> {
+        self.request("board_show", json!({ "handler": handler }))
+            .await
+    }
+
+    pub async fn board_list(&self) -> Result<ApiResponse, ClientError> {
+        self.request("board_list", json!({})).await
+    }
+
+    pub async fn board_init(&self) -> Result<ApiResponse, ClientError> {
+        self.request("board_init", json!({})).await
+    }
+
+    pub async fn board_publish(&self, content: Option<&str>) -> Result<ApiResponse, ClientError> {
+        self.request("board_publish", json!({ "content": content }))
+            .await
+    }
+
+    pub async fn board_set(&self, field: &str, value: &str) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "board_set",
+            json!({
+                "field": field,
+                "value": value,
+            }),
+        )
+        .await
+    }
+
+    pub async fn board_section_set(
+        &self,
+        section: &str,
+        value: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "board_section_set",
+            json!({
+                "section": section,
+                "value": value,
+            }),
+        )
+        .await
+    }
+
+    pub async fn board_section_append(
+        &self,
+        section: &str,
+        value: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "board_section_append",
+            json!({
+                "section": section,
+                "value": value,
+            }),
+        )
+        .await
+    }
 }
