@@ -161,6 +161,33 @@ fn gitim_api_exposes_card_and_archive_commands() {
 }
 
 #[test]
+fn reset_protocol_handles_lost_gitim_output_contract() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+    let reset = provider.prompt_reset_protocol(&ctx);
+
+    assert!(
+        reset.contains("不确定如何用 `gitim send`"),
+        "reset protocol should cover a lost gitim send contract"
+    );
+    assert!(
+        reset.contains("普通回复里写了对外消息"),
+        "reset protocol should cover accidental plain assistant replies"
+    );
+    assert!(
+        reset.contains("未调用 gitim CLI"),
+        "reset protocol should require reset when the CLI contract is missing"
+    );
+    assert!(
+        reset.contains("[[RESET]]"),
+        "reset protocol should still point to the runtime reset marker"
+    );
+}
+
+#[test]
 fn codex_provider_uses_agents_md() {
     // Codex inherits the default — AGENTS.md is the conventional file name
     // for Codex CLI and most non-Claude coding agents.
