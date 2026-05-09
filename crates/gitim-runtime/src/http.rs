@@ -2522,9 +2522,57 @@ fn hard_delete_agent_dir(workspace: &Path, agent_id: &str, repo_path: &Path) -> 
         return Err("agent repo path is not a directory".to_string());
     }
 
-    std::fs::remove_dir_all(&target)
-        .map_err(|e| format!("failed to delete agent directory: {e}"))?;
-    Ok(())
+    // Retry on ENOTEMPTY / EBUSY — the SIGTERM-vs-rm race.
+    //
+    // `cleanup_agent_runtime_side` SIGTERMs the agent's daemon
+    // (`kill_agent_daemon`) without waiting for exit, then immediately
+    // calls into here. On macOS (and occasionally Linux under load) the
+    // daemon's signal handler is still tearing down `.gitim/run/` while
+    // `remove_dir_all` walks it, surfacing as `ENOTEMPTY` (errno 66) on
+    // an intermediate directory. The daemon finishes exiting within
+    // ~hundreds of ms, so a few retries with short backoff is enough to
+    // converge — and `remove_dir_all` itself is idempotent over partial
+    // state, so the second pass picks up where the first left off.
+    //
+    // 50 / 100 / 150 ms backoff fits inside a normal cleanup turn (the
+    // `tests/burn_test.rs::burn_with_idempotent_retry` helper waits 500 ms
+    // between attempts, so we're well under that even in the worst case).
+    // Past 3 attempts: bubble the error up. The caller sees the same 5xx
+    // it would have without retry, plus we've at least proven this isn't
+    // the daemon-shutdown race (which never takes >450 ms in practice).
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF_MS: u64 = 50;
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let retriable = matches!(
+                    e.raw_os_error(),
+                    // ENOTEMPTY (Linux 39, macOS 66) and EBUSY (Linux/macOS 16):
+                    // the daemon is still releasing handles or its signal
+                    // handler is mid-flight. ENOENT means a parallel cleanup
+                    // beat us to it; we treat that as success below.
+                    Some(39) | Some(66) | Some(16)
+                );
+                let already_gone = e.kind() == std::io::ErrorKind::NotFound;
+                if already_gone {
+                    return Ok(());
+                }
+                if retriable && attempt < MAX_ATTEMPTS {
+                    let backoff = std::time::Duration::from_millis(BACKOFF_MS * attempt as u64);
+                    std::thread::sleep(backoff);
+                    last_err = Some(format!("{e}"));
+                    continue;
+                }
+                return Err(format!("failed to delete agent directory: {e}"));
+            }
+        }
+    }
+    Err(format!(
+        "failed to delete agent directory after {MAX_ATTEMPTS} attempts: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string()),
+    ))
 }
 
 // -- /agents/stop --

@@ -115,6 +115,15 @@ async fn provision_test_agent(workspace: &Path, handler: &str, remote: &Path) ->
 /// known SIGTERM-vs-rm race in `cleanup_agent_runtime_side` (the kill is
 /// non-blocking, so the daemon may still hold `.gitim/run/` when
 /// `remove_dir_all` walks it on macOS). Returns the final response body.
+///
+/// Note: as of the final-review fix, production `hard_delete_agent_dir`
+/// retries internally up to 3× on ENOTEMPTY / EBUSY with short backoff,
+/// so the burn endpoint should converge on its own. We keep this helper
+/// as defense-in-depth — under heavy parallel `serial_test` load on macOS
+/// the daemon's signal handler can still spike past the 50/100/150 ms
+/// internal backoff, and the test-side retry tolerates that without
+/// hiding real burn-protocol regressions (it only retries on the
+/// canonical race signature; any other 5xx panics).
 async fn burn_with_idempotent_retry(
     router: &axum::Router,
     slug: &str,
