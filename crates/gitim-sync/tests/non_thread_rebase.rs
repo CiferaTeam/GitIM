@@ -41,6 +41,12 @@ fn run_git(dir: &Path, args: &[&str]) {
 fn setup_git_config(dir: &Path, name: &str, email: &str) {
     run_git(dir, &["config", "user.email", email]);
     run_git(dir, &["config", "user.name", name]);
+    // Disable GPG signing locally: devs and CI with global `commit.gpgsign=true`
+    // would otherwise silently fail every commit in this test (no key in the
+    // ephemeral tempdir), the repo would never advance past `git init`, and the
+    // assertions below would fail in confusing ways. Repo-local override beats
+    // global config.
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 /// Bare repo + two clones with one shared initial commit. Returns
@@ -313,5 +319,120 @@ fn non_thread_conflict_same_file_does_not_silently_drop_local() {
          a_wins_in_tree={a_wins_in_tree}, b_wins_in_tree={b_wins_in_tree}, \
          working tree={after:?}",
         head_after_sync != b_head_before_sync,
+    );
+}
+
+// ── Mixed commit: thread file + non-thread file in ONE commit ────────
+//
+// Single commit on B touches both a `.thread` file (resolvable) AND a
+// `crons/<name>/spec.yaml` (non-thread, non-meta — UNresolvable). A
+// pushes a conflicting append on the same thread first.
+//
+// Pre-fix behaviour (the bug): the rebase fails on the thread side; the
+// guard runs `changed_files_unpushed_all()` AFTER the rebase has already
+// failed, which on a partial-rebase HEAD can return wrong/empty results;
+// `local_additions` from before the rebase is non-empty (the thread side)
+// so the resolvable path runs; `discard_unpushed` does
+// `git reset --hard @{upstream}` and silently destroys the spec.yaml side
+// of the same commit.
+//
+// Post-fix: the unpushed file list is captured BEFORE the rebase. After
+// the rebase fails, the cached list still contains the cron spec; the
+// presence of any non-thread non-meta file forces the bail path
+// (abort_rebase + warn), and B's local commit is preserved intact.
+
+#[test]
+fn mixed_commit_with_thread_conflict_preserves_non_thread_change() {
+    let (_bare, clone_a, clone_b) = setup_two_clones();
+
+    let repo_a = GitStorage::new(clone_a.path());
+    let repo_b = GitStorage::new(clone_b.path());
+
+    let thread_rel = "channels/general.thread";
+    let cron_spec_rel = "crons/weekly/spec.yaml";
+
+    // Step 1: A creates the thread with one message + pushes; B catches up.
+    let base_thread = "[L000001][P000000][@alice][20260317T100000Z] base from alice\n";
+    std::fs::create_dir_all(clone_a.path().join("channels")).unwrap();
+    std::fs::write(clone_a.path().join(thread_rel), base_thread).unwrap();
+    repo_a
+        .add_and_commit(&[thread_rel], "thread: create with base")
+        .unwrap();
+    repo_a.push().unwrap();
+    repo_b.fetch().unwrap();
+    repo_b.rebase_onto_origin().unwrap();
+    assert!(clone_b.path().join(thread_rel).exists());
+
+    // Step 2: A appends a message to the thread and pushes. From B's
+    // perspective the remote is now ahead by one commit on this file.
+    let a_thread = "[L000001][P000000][@alice][20260317T100000Z] base from alice\n\
+                    [L000002][P000001][@alice][20260317T100100Z] alice follow-up\n";
+    std::fs::write(clone_a.path().join(thread_rel), a_thread).unwrap();
+    repo_a
+        .add_and_commit(&[thread_rel], "thread: alice follow-up")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    // Step 3: B makes a SINGLE commit that touches both the thread (L2
+    // collides with A's append, so rebase will conflict) AND a brand-new
+    // crons/weekly/spec.yaml (non-thread non-meta — what the fix is for).
+    let b_thread = "[L000001][P000000][@alice][20260317T100000Z] base from alice\n\
+                    [L000002][P000001][@bob][20260317T100200Z] bob append at same line\n";
+    std::fs::write(clone_b.path().join(thread_rel), b_thread).unwrap();
+
+    let bob_spec = "version: 1\n\
+                    schedule: '@weekly'\n\
+                    target: bob\n\
+                    prompt: weekly digest\n\
+                    created_by: bob\n\
+                    created_at: '2026-05-09T12:00:00Z'\n";
+    std::fs::create_dir_all(clone_b.path().join("crons/weekly")).unwrap();
+    std::fs::write(clone_b.path().join(cron_spec_rel), bob_spec).unwrap();
+
+    repo_b
+        .add_and_commit(
+            &[thread_rel, cron_spec_rel],
+            "mixed: thread append + new cron spec",
+        )
+        .unwrap();
+    let b_head_before_sync = repo_b.rev_parse("HEAD").unwrap();
+
+    // Step 4: drive sync. Rebase will fail on the thread; the fix's
+    // capture-before-rebase guard must see the cron spec in the unpushed
+    // set and bail (preserving B's local commit) instead of falling
+    // through to discard_unpushed.
+    let _pushed = drive_one_cycle(&repo_b);
+
+    // Step 5: assert B's spec.yaml is still on disk with B's content. Two
+    // safe shapes:
+    //   (a) Cycle bailed: B's commit still HEAD, both files intact.
+    //   (b) Cycle resolved + pushed: spec.yaml content present on disk
+    //       and on remote unchanged (only the thread side could differ).
+    let spec_after = read_or_missing(&clone_b.path().join(cron_spec_rel));
+    assert_eq!(
+        spec_after.as_deref(),
+        Some(bob_spec),
+        "BUG: B's cron spec.yaml was silently dropped during mixed-commit \
+         rebase conflict (this is the data-loss scenario the pre-rebase \
+         capture exists to prevent)",
+    );
+
+    // The local commit must survive in some shape. We accept either:
+    // - HEAD unchanged (bail path), still_unpushed=true
+    // - HEAD changed but spec preserved (fix kept the non-thread side
+    //   even after re-applying)
+    // The smoking-gun bug is HEAD reset to upstream AND no unpushed
+    // commits AND spec absent — assert against that explicitly.
+    let head_after = repo_b.rev_parse("HEAD").unwrap();
+    let still_unpushed = repo_b.has_unpushed_commits().unwrap_or(false);
+    let smoking_gun = head_after != b_head_before_sync && !still_unpushed && spec_after.is_none();
+    assert!(
+        !smoking_gun,
+        "BUG: B's mixed commit was silently dropped — HEAD before={}, \
+         HEAD after={}, still_unpushed={}, spec present={}",
+        b_head_before_sync,
+        head_after,
+        still_unpushed,
+        spec_after.is_some(),
     );
 }

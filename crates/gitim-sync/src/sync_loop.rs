@@ -349,6 +349,21 @@ where
             }
         }
 
+        // Capture the FULL unpushed file list BEFORE attempting rebase. After
+        // rebase failure, HEAD may be detached or in a partial-rebase state, so
+        // querying `@{upstream}..HEAD` then can return wrong/empty results and
+        // mask non-resolvable changes — falling through to discard_unpushed
+        // (data loss). We snapshot it here while HEAD is reliably on the local
+        // branch and use the cached list to decide whether the rebase failure
+        // is safe to recover from.
+        let all_unpushed_before_rebase = match repo.changed_files_unpushed_all() {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("sync: failed to list unpushed files: {}", e);
+                return SyncOutcome::Normal;
+            }
+        };
+
         // Rebase + optional conflict resolution mutates the local commit
         // tree; hold commit_lock across the whole block so handler writes
         // never interleave with it. Push happens *after* the guard drops so
@@ -412,8 +427,14 @@ where
                 // commit that touches both a thread file and a cron spec
                 // would otherwise have its spec destroyed even when only the
                 // thread side actually conflicts.
-                let all_unpushed = repo.changed_files_unpushed_all().unwrap_or_default();
-                let has_unresolvable = all_unpushed.iter().any(|p| {
+                //
+                // We use `all_unpushed_before_rebase`, captured before the
+                // rebase started: after a failed rebase the working tree is
+                // in a partial / detached state where `@{upstream}..HEAD`
+                // can return empty or otherwise-wrong results, and falling
+                // through to discard_unpushed on a false-empty list is the
+                // exact data-loss path this guard exists to prevent.
+                let has_unresolvable = all_unpushed_before_rebase.iter().any(|p| {
                     let path_str = p.to_string_lossy();
                     !path_str.ends_with(".thread") && !path_str.ends_with(".meta.yaml")
                 });
@@ -422,7 +443,7 @@ where
                     warn!(
                         "sync: rebase conflict on non-resolvable files (e.g. cron specs); \
                          preserving local commit. Files: {:?}",
-                        all_unpushed
+                        all_unpushed_before_rebase
                     );
                     return SyncOutcome::Normal;
                 }
