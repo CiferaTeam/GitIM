@@ -91,6 +91,45 @@ impl GitStorage {
         Ok(())
     }
 
+    pub fn add_and_commit_only_as(
+        &self,
+        path: &str,
+        message: &str,
+        author: Option<(&str, &str)>,
+    ) -> Result<String, GitError> {
+        let output = Command::new("git")
+            .args(["add", "--", path])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let mut commit_args = vec!["commit", "--only", "-m", message];
+        let author_str;
+        if let Some((name, email)) = author {
+            author_str = format!("{} <{}>", name, email);
+            commit_args.push("--author");
+            commit_args.push(&author_str);
+        }
+        commit_args.push("--");
+        commit_args.push(path);
+
+        let output = Command::new("git")
+            .args(&commit_args)
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        self.rev_parse("HEAD")
+    }
+
     pub fn push(&self) -> Result<(), GitError> {
         let output = Command::new("git")
             .args(["push", "-u", "origin", "HEAD"])
