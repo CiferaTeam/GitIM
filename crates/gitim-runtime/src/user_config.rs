@@ -10,6 +10,11 @@ pub struct WorkspaceEntry {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
+    /// Stable device-bound UUID for this runtime install. Empty when
+    /// uninitialized — `ensure_runtime_id` materializes it on first call.
+    /// See docs/plans/runtime-id/00-design.md.
+    #[serde(default)]
+    pub runtime_id: String,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceEntry>,
 }
@@ -152,5 +157,18 @@ mod tests {
         assert!(nested.exists());
         let loaded = read_from(Some(&nested));
         assert_eq!(loaded.workspaces, cfg.workspaces);
+    }
+
+    #[test]
+    fn legacy_config_without_runtime_id_loads() {
+        // 旧 schema 没有 runtime_id 字段;serde(default) 应让它解析为空字符串。
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let legacy = r#"{"workspaces":[{"slug":"a","workspace_name":"A","path":"/x"}]}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let cfg = read_from(Some(&path));
+        assert_eq!(cfg.runtime_id, "");
+        assert_eq!(cfg.workspaces.len(), 1);
+        assert_eq!(cfg.workspaces[0].slug, "a");
     }
 }
