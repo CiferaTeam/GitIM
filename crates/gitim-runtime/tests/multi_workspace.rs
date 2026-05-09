@@ -113,6 +113,7 @@ async fn recover_multiple_workspaces_from_user_config() {
     }
 
     let cfg = UserConfig {
+        runtime_id: String::new(),
         workspaces: vec![
             entry("ws-a", "A", &ws_a),
             entry("ws-b", "B", &ws_b),
@@ -156,6 +157,7 @@ async fn recover_skips_missing_workspace_path() {
     // Intentionally not created.
 
     let cfg = UserConfig {
+        runtime_id: String::new(),
         workspaces: vec![
             entry("real", "Real", &ws_real),
             entry("ghost", "Ghost", &ws_missing),
@@ -198,6 +200,7 @@ async fn recover_populates_all_workspaces_even_without_human_dir() {
     std::fs::create_dir_all(&b).unwrap();
 
     let cfg = UserConfig {
+        runtime_id: String::new(),
         workspaces: vec![entry("alpha", "Alpha", &a), entry("beta", "Beta", &b)],
     };
     write_runtime_json(&home, &cfg);
