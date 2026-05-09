@@ -82,6 +82,27 @@ pub fn ensure_runtime_id_at(path: &Path) -> String {
     new_id
 }
 
+/// Production entry point: resolves `~/.gitim/runtime.json` and delegates to
+/// `ensure_runtime_id_at`. If `dirs::home_dir()` returns `None` (rare —
+/// containers, no-HOME environments), generates a fresh in-memory UUID
+/// without persisting it, matching the existing `write()` noop semantics.
+/// In that case the runtime keeps a stable ID for its current process
+/// lifetime but rolls a new one on each restart — acceptable for the
+/// tail-edge case.
+pub fn ensure_runtime_id() -> String {
+    match config_path() {
+        Some(p) => ensure_runtime_id_at(&p),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            tracing::warn!(
+                runtime_id = %id,
+                "dirs::home_dir() returned None; runtime_id not persisted, will reroll on restart"
+            );
+            id
+        }
+    }
+}
+
 impl UserConfig {
     pub fn upsert(&mut self, entry: WorkspaceEntry) {
         if let Some(existing) = self.workspaces.iter_mut().find(|e| e.slug == entry.slug) {
@@ -261,5 +282,17 @@ mod tests {
         assert_eq!(after.workspaces.len(), 2);
         assert_eq!(after.workspaces[0].slug, "frontend");
         assert_eq!(after.workspaces[1].slug, "backend");
+    }
+
+    #[test]
+    #[ignore = "writes to real ~/.gitim/runtime.json; run manually with --ignored"]
+    fn ensure_runtime_id_returns_valid_uuid() {
+        // Manual smoke test for the home_dir-bound production wrapper.
+        // Marked #[ignore] because it touches the real $HOME — running it in
+        // CI or in a developer's normal `cargo test` would write/mutate
+        // ~/.gitim/runtime.json. The integration tests in
+        // tests/runtime_id.rs cover the wiring without this side effect.
+        let id = ensure_runtime_id();
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
     }
 }
