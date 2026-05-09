@@ -114,6 +114,22 @@ async fn list_archived_dms(state: Arc<AppState>, author: &str) -> gitim_daemon::
     handle_request(req, state).await
 }
 
+async fn send_message(
+    state: Arc<AppState>,
+    channel: &str,
+    body: &str,
+    author: &str,
+) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "send",
+        "channel": channel,
+        "body": body,
+        "author": author,
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
 fn git_log_subjects(root: &std::path::Path) -> String {
     let out = std::process::Command::new("git")
         .args(["log", "--pretty=%s"])
@@ -498,4 +514,97 @@ async fn test_list_archived_dms_empty_then_sorted() {
     // Sorted by peer alphabetically: bob < charlie.
     assert_eq!(arr[0]["peer"].as_str().unwrap(), "bob");
     assert_eq!(arr[1]["peer"].as_str().unwrap(), "charlie");
+}
+
+// ─── 9. A.5: write interception — send to archived DM is rejected ─────────────
+
+#[tokio::test]
+async fn test_send_to_archived_dm_fails() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // alice archives her DM with bob.
+    let resp = archive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+    assert!(state
+        .repo_root
+        .join("archive/dm/alice--bob.thread")
+        .exists());
+
+    // alice tries to send to bob via the canonical "dm:" channel form —
+    // contract under test: handle_send stats archive/dm/<sorted>.thread
+    // before any write. Use both ordering variants so we know the check
+    // doesn't depend on caller-provided handler order.
+    let resp = send_message(state.clone(), "dm:alice,bob", "hello again", "alice").await;
+    assert!(!resp.ok, "send to archived DM should be rejected");
+    let err = resp.error.unwrap();
+    assert!(
+        err.contains("is archived"),
+        "err should mention archived: {}",
+        err
+    );
+
+    // Reverse handler order — same archive file, must still reject. Author
+    // is now bob; the implementation derives `peer` from "the participant
+    // that isn't the author", so we expect "@alice is archived".
+    let resp = send_message(state.clone(), "dm:bob,alice", "ping", "bob").await;
+    assert!(!resp.ok, "reversed-order send should also reject");
+    let err = resp.error.unwrap();
+    assert!(
+        err.contains("is archived"),
+        "err should mention archived: {}",
+        err
+    );
+
+    // Sanity: third party charlie can still DM bob (no archive file for
+    // bob<->charlie). Send to charlie's DM with bob — should succeed.
+    let resp = send_message(state.clone(), "dm:bob,charlie", "side channel", "charlie").await;
+    assert!(
+        resp.ok,
+        "unrelated DM should still be writable: {:?}",
+        resp.error
+    );
+}
+
+// ─── 10. A.5: unarchive_dm works even when called by an active third party ────
+
+#[tokio::test]
+async fn test_unarchive_dm_works_after_departure() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // alice archives her DM with bob.
+    let resp = archive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Now archive bob (so bob is "departed"). alice (active) unarchives
+    // the DM — contract: unarchive_dm does NOT gate on archived-author
+    // semantics for the *target*, only on the caller's own state. alice
+    // is active, so this must succeed.
+    //
+    // Note: archiving bob removes bob from state.users in-memory, so bob
+    // himself can't author the unarchive RPC — this is the realistic
+    // production shape. Just verify alice can.
+    let resp = archive_user(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive bob failed: {:?}", resp.error);
+
+    let resp = unarchive_dm(state.clone(), "bob", "alice").await;
+    assert!(
+        resp.ok,
+        "unarchive_dm by active alice should succeed even with bob departed: {:?}",
+        resp.error
+    );
+    assert!(state.repo_root.join("dm/alice--bob.thread").exists());
+}
+
+async fn archive_user(
+    state: Arc<AppState>,
+    handler: &str,
+    author: &str,
+) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "archive_user",
+        "handler": handler,
+        "author": author,
+    }))
+    .unwrap();
+    handle_request(req, state).await
 }

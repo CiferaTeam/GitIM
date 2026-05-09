@@ -1220,6 +1220,27 @@ async fn agents_add(
         .into_response();
     }
 
+    // Archive Contract 2: handlers are terminally unique once departed.
+    // The daemon enforces this at register_user / onboard time, but the
+    // runtime checks it here too — we'd otherwise let the user pick a
+    // handler the daemon will reject after we've already kicked off
+    // provisioning. Distinct error_code so the WebUI can surface a clear
+    // "previously departed" message instead of conflating it with a live
+    // conflict.
+    let archived_meta_path = human_dir
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", req.handler));
+    if archived_meta_path.exists() {
+        return Json(ErrorBody::with_code(
+            format!(
+                "handler @{} is reserved (previously departed in this workspace)",
+                req.handler
+            ),
+            "handler_reserved",
+        ))
+        .into_response();
+    }
+
     let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
         return Json(ErrorBody::new(format!("failed to create agents dir: {e}")))

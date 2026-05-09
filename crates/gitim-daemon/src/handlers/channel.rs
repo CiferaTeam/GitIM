@@ -1,4 +1,5 @@
 use crate::api::{Event, Response};
+use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 
 use gitim_core::formatter::format_event;
@@ -42,6 +43,9 @@ pub async fn handle_create_channel(
         Ok(h) => h,
         Err(e) => return Response::error(format!("invalid author: {}", e)),
     };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     {
         let users = state.users.read().await;
         if !users.contains(&author) {
@@ -189,7 +193,10 @@ pub async fn handle_archive_channel(
         Err(e) => return Response::error(format!("invalid channel name: {}", e)),
     };
 
-    // 2. Validate author is registered
+    // 2. Validate author is registered + not departed
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     {
         let users = state.users.read().await;
         if !users.contains(&author) {
@@ -465,6 +472,11 @@ pub(super) async fn write_channel_event(
         Ok(h) => h,
         Err(e) => return Response::error(format!("invalid author: {}", e)),
     };
+
+    // Archive Contract 2: a departed author can't author join/leave events.
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
 
     // Check author is registered
     let user_list: Vec<String> = {

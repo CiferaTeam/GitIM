@@ -103,6 +103,38 @@ async fn list_archived_users(state: Arc<AppState>) -> gitim_daemon::api::Respons
     handle_request(req, state).await
 }
 
+async fn send_message(
+    state: Arc<AppState>,
+    channel: &str,
+    body: &str,
+    author: &str,
+) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "send",
+        "channel": channel,
+        "body": body,
+        "author": author,
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
+async fn register_user(
+    state: Arc<AppState>,
+    handler: &str,
+    display_name: &str,
+) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "register_user",
+        "handler": handler,
+        "display_name": display_name,
+        "role": "member",
+        "introduction": "hi",
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
 fn git_log_subjects(root: &std::path::Path) -> String {
     let out = std::process::Command::new("git")
         .args(["log", "--pretty=%s"])
@@ -431,4 +463,110 @@ async fn test_list_archived_users_empty_then_sorted() {
     let users: Vec<String> =
         serde_json::from_value(resp.data.unwrap()["users"].clone()).unwrap();
     assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+}
+
+// ─── 8. A.5: write interception — departed author can't send ──────────────────
+
+#[tokio::test]
+async fn test_send_by_departed_user_fails() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive alice. Post-archive alice is removed from state.users in-memory,
+    // but the dispatch path validates `archive/users/alice.meta.yaml` first
+    // — that's the contract under test.
+    let resp = archive_user(state.clone(), "alice", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Re-add alice to the in-memory users list to bypass the "unknown user"
+    // check and isolate the departed-author gate. In production, the on-disk
+    // state.users refresh after sync would normally drop her too — but the
+    // archive path on disk is the authoritative signal we want to assert.
+    {
+        let mut users = state.users.write().await;
+        if !users.contains(&"alice".to_string()) {
+            users.push("alice".to_string());
+            users.sort();
+        }
+    }
+
+    // alice tries to send a DM to bob — must be rejected with "is departed".
+    let resp = send_message(state.clone(), "dm:alice,bob", "are you there", "alice").await;
+    assert!(!resp.ok, "send by departed alice should be rejected");
+    let err = resp.error.unwrap();
+    assert!(
+        err.contains("is departed"),
+        "err should mention departed: {}",
+        err
+    );
+
+    // bob (still active) can send to alice — but the DM thread doesn't exist
+    // yet, so just send to a channel-style target instead. Use a fresh
+    // sanity check via register_user: bob is active and his send-equivalent
+    // (register a new user) should still work later. Here we just confirm
+    // bob's archive guard does NOT fire (negative side of the contract).
+    let archive_bob_path = state
+        .repo_root
+        .join("archive/users/bob.meta.yaml");
+    assert!(!archive_bob_path.exists(), "bob should not be archived");
+}
+
+// ─── 9. A.5: write interception — register_user rejects departed handler ──────
+
+#[tokio::test]
+async fn test_register_user_rejects_departed_handler() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive alice — `archive/users/alice.meta.yaml` now exists.
+    let resp = archive_user(state.clone(), "alice", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+
+    // Try to register a fresh alice — handler is reserved per Contract 2.
+    let resp = register_user(state.clone(), "alice", "Alice Reborn").await;
+    assert!(!resp.ok, "register_user should reject reserved handler");
+    let err = resp.error.unwrap();
+    assert!(
+        err.contains("is reserved"),
+        "err should mention reserved: {}",
+        err
+    );
+
+    // Sanity: a fresh handler that has never been departed registers fine.
+    let resp = register_user(state.clone(), "carol", "Carol").await;
+    assert!(resp.ok, "register fresh handler failed: {:?}", resp.error);
+}
+
+// ─── 10. A.5: unarchive_user works even when the target was departed ──────────
+
+#[tokio::test]
+async fn test_unarchive_user_works_after_departure() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive bob (alice authoring), so bob is the departed party.
+    let resp = archive_user(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive bob failed: {:?}", resp.error);
+    assert!(state
+        .repo_root
+        .join("archive/users/bob.meta.yaml")
+        .exists());
+
+    // alice (active) unarchives bob — the contract: unarchive does NOT gate
+    // on departed *target*, and alice is not departed herself, so this must
+    // succeed. Restoration must always be reachable by an active actor.
+    let resp = unarchive_user(state.clone(), "bob", "alice").await;
+    assert!(
+        resp.ok,
+        "unarchive after departure should succeed: {:?}",
+        resp.error
+    );
+    assert!(
+        state.repo_root.join("users/bob.meta.yaml").exists(),
+        "bob should be back in active dir"
+    );
+    assert!(
+        !state
+            .repo_root
+            .join("archive/users/bob.meta.yaml")
+            .exists(),
+        "archive entry should be gone"
+    );
 }

@@ -1,4 +1,5 @@
 use crate::api::{Event, Response};
+use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::dm::dm_filename;
 use gitim_core::types::Handler;
@@ -35,7 +36,13 @@ pub async fn handle_archive_dm(
     };
     let stem = dm_filename(&author_h, &peer_h);
 
-    // 2. Validate author is registered.
+    // 2. Validate author is registered + not already departed. archive_dm
+    // gates on departed author for symmetry with archive_user / handle_send;
+    // unarchive_dm intentionally does not, so DM threads remain reversible
+    // even after a participant departs.
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     {
         let users = state.users.read().await;
         if !users.contains(&author) {

@@ -155,6 +155,19 @@ fn seed_human_clone(workspace: &Path, existing_handlers: &[&str]) {
     }
 }
 
+/// Seed `archive/users/<h>.meta.yaml` in the human clone — mimics a
+/// post-departure state where the daemon has moved a meta file under
+/// archive/ but the workspace still exists. add_agent should reject
+/// reuse with `error_code: "handler_reserved"`.
+fn seed_archived_handler(workspace: &Path, departed_handlers: &[&str]) {
+    let archive_dir = workspace.join(".gitim-runtime/human/archive/users");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    for h in departed_handlers {
+        let path = archive_dir.join(format!("{h}.meta.yaml"));
+        std::fs::write(&path, format!("handler: {h}\ndisplay_name: {h}\n")).unwrap();
+    }
+}
+
 fn write_workspace_config(
     workspace: &Path,
     provider: GitProvider,
@@ -247,6 +260,49 @@ async fn add_agent_rejects_existing_handler_in_local_mode() {
 
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error_code"], "handler_conflict");
+    server.abort();
+}
+
+// A.5: handlers are terminally unique across the depart/restore frontier.
+// If `archive/users/<h>.meta.yaml` exists in the human clone, the runtime
+// must reject reuse before kicking off provisioning — daemon would reject
+// it anyway, but we want the early signal so the WebUI can surface a
+// distinct "previously departed" message.
+#[tokio::test]
+async fn add_agent_rejects_departed_handler_local_mode() {
+    ensure_daemon_in_path();
+    let tmp = short_tempdir();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let api = Arc::new(MockGithubApi::all_ok());
+    let (addr, server, state) = spawn_server_with(api, None).await;
+    inject_workspace(&state, "test-ws", &ws);
+
+    write_workspace_config(&ws, GitProvider::Local, None, None);
+    // Seed an empty active users/ dir alongside the archive entry so the
+    // active-conflict check passes and the archive check fires.
+    seed_human_clone(&ws, &[]);
+    seed_archived_handler(&ws, &["departed-bot"]);
+
+    let resp = post_json(
+        addr,
+        "/workspaces/test-ws/agents/add",
+        serde_json::json!({
+            "handler": "departed-bot",
+            "display_name": "Departed Bot",
+            "provider": "mock"
+        }),
+    )
+    .await;
+
+    assert_eq!(resp["ok"], false, "should reject departed handler: {resp:?}");
+    assert_eq!(resp["error_code"], "handler_reserved");
+    let err_msg = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        err_msg.contains("reserved"),
+        "error should mention reserved: {err_msg}"
+    );
     server.abort();
 }
 

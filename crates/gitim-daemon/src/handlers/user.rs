@@ -1,4 +1,5 @@
 use crate::api::{Event, Response};
+use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::types::{Handler, UserMeta};
 use gitim_sync::git::GitError;
@@ -16,6 +17,21 @@ pub async fn handle_register_user(
     // Validate handler format
     if let Err(e) = Handler::new(&handler) {
         return Response::error(format!("invalid handler: {}", e));
+    }
+
+    // Archive Contract 2: handlers are terminally unique once departed.
+    // Reject re-registration before touching `users/` so a stale call
+    // can't recreate an active meta.yaml that would race with the
+    // archived one.
+    let archive_meta = state
+        .repo_root
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", handler));
+    if archive_meta.exists() {
+        return Response::error(format!(
+            "handler @{} is reserved (previously departed)",
+            handler
+        ));
     }
 
     let users_dir = state.repo_root.join("users");
@@ -90,7 +106,14 @@ pub async fn handle_archive_user(
         return Response::error(format!("invalid handler: {}", e));
     }
 
-    // 2. Validate author is registered.
+    // 2. Validate author is registered + not already departed.
+    // archive_user gates on departed author for consistency with the rest
+    // of Contract 2 — a departed actor can't author further commits, even
+    // ones that archive someone else. unarchive_user, by contrast, must
+    // remain reachable so departure is reversible.
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     {
         let users = state.users.read().await;
         if !users.contains(&author) {

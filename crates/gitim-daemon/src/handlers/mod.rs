@@ -39,6 +39,28 @@ pub(super) async fn resolve_author(
     }
 }
 
+/// Reject any author write whose `archive/users/<author>.meta.yaml`
+/// exists. Per archive-protocol Contract 2: once a handler is departed,
+/// the actor identity is terminally retired — any subsequent attempt
+/// to author a commit under that handle must fail closed.
+///
+/// Skip this guard on unarchive paths (we still need a way back) and
+/// on read-only / system-internal entries (poll, status). Apply it on
+/// every active-path mutation that takes an author.
+pub(crate) fn ensure_author_not_departed(
+    state: &SharedState,
+    author: &str,
+) -> Result<(), Response> {
+    let archive_path = state
+        .repo_root
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", author));
+    if archive_path.exists() {
+        return Err(Response::error(format!("user @{} is departed", author)));
+    }
+    Ok(())
+}
+
 /// Resolve a channel string to a filesystem path and a cache key.
 /// Channels: "channels/{name}.thread", DMs: "dm:{h1},{h2}" -> "dm/{h1}--{h2}.thread"
 pub(super) fn resolve_thread_path(
