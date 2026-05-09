@@ -4,8 +4,8 @@ use crate::state::SharedState;
 
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::ChannelMeta;
-use std::collections::HashMap;
+use gitim_core::types::{ChannelMeta, Handler};
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
@@ -59,6 +59,18 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
     let diff = match state.git_storage.diff_range(&since_commit, &current_commit) {
         Ok(d) => d,
         Err(e) => return Response::error(format!("diff failed (commit may not exist): {}", e)),
+    };
+    let changed_files = match state
+        .git_storage
+        .changed_files_range(&since_commit, &current_commit)
+    {
+        Ok(files) => files,
+        Err(e) => {
+            return Response::error(format!(
+                "changed files failed (commit may not exist): {}",
+                e
+            ))
+        }
     };
 
     // Parse changed files into entries
@@ -126,9 +138,29 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         }
     } // end if !skip_filter
 
+    let mut emitted_boards: HashSet<String> = HashSet::new();
+    for path in &changed_files {
+        let path_str = path.to_string_lossy();
+        if let Some(handler) = board_handler_from_path(&path_str) {
+            let handler = handler.to_string();
+            if !emitted_boards.insert(handler.clone()) {
+                continue;
+            }
+            changes.push(gitim_core::responses::PollChange {
+                channel: handler,
+                kind: "board".to_string(),
+                entries: Vec::new(),
+            });
+        }
+    }
+
     // Step 2: Process diff entries with membership filter
     for (path, added_content) in &diff {
         let path_str = path.to_string_lossy();
+
+        if board_handler_from_path(&path_str).is_some() {
+            continue;
+        }
 
         // Match card paths first so they don't fall through to the channel_meta /
         // channel branches below (which would otherwise mangle the channel name).
@@ -284,4 +316,14 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         changes,
     };
     Response::success(serde_json::to_value(payload).unwrap())
+}
+
+fn board_handler_from_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("showboards/")?;
+    let (handler, file) = rest.split_once('/')?;
+    if file == "board.md" && Handler::new(handler).is_ok() {
+        Some(handler)
+    } else {
+        None
+    }
 }

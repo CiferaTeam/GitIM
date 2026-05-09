@@ -37,6 +37,36 @@ pub(super) async fn resolve_author(
     }
 }
 
+/// Board writes are owner-only: callers may omit `author`, or echo the
+/// current daemon identity, but may not select another handler's board.
+async fn resolve_board_author(
+    author: Option<String>,
+    state: &SharedState,
+) -> Result<String, Response> {
+    let current = {
+        let current = state.current_user.read().await;
+        match current.clone() {
+            Some(user) => user,
+            None => {
+                return Err(Response::error(
+                    "board write requires current user identity",
+                ))
+            }
+        }
+    };
+
+    if let Some(requested) = author {
+        if requested != current {
+            return Err(Response::error(format!(
+                "board author mismatch: current user is {}, requested {}",
+                current, requested
+            )));
+        }
+    }
+
+    Ok(current)
+}
+
 /// Resolve a channel string to a filesystem path and a cache key.
 /// Channels: "channels/{name}.thread", DMs: "dm:{h1},{h2}" -> "dm/{h1}--{h2}.thread"
 pub(super) fn resolve_thread_path(
@@ -87,6 +117,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::UpdateCard { .. }
                 | Request::ArchiveCard { .. }
                 | Request::UnarchiveCard { .. }
+                | Request::BoardInit { .. }
+                | Request::BoardPublish { .. }
+                | Request::BoardSet { .. }
+                | Request::BoardSectionSet { .. }
+                | Request::BoardSectionAppend { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -321,6 +356,64 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         } => crate::card_handlers::handle_unarchive_card(state, channel, card_id, author).await,
         Request::ListArchivedCards { channel } => {
             crate::card_handlers::handle_list_archived_cards(state, channel).await
+        }
+        Request::BoardShow { handler } => {
+            crate::board_handlers::handle_board_show(state, handler).await
+        }
+        Request::BoardList => crate::board_handlers::handle_board_list(state).await,
+        Request::BoardInit { author } => {
+            let resolved_author = match resolve_board_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_board_init(state, resolved_author).await
+        }
+        Request::BoardPublish { content, author } => {
+            let resolved_author = match resolve_board_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_board_publish(state, resolved_author, content).await
+        }
+        Request::BoardSet {
+            field,
+            value,
+            author,
+        } => {
+            let resolved_author = match resolve_board_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_board_set(state, resolved_author, field, value).await
+        }
+        Request::BoardSectionSet {
+            section,
+            value,
+            author,
+        } => {
+            let resolved_author = match resolve_board_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_board_section_set(state, resolved_author, section, value)
+                .await
+        }
+        Request::BoardSectionAppend {
+            section,
+            value,
+            author,
+        } => {
+            let resolved_author = match resolve_board_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::board_handlers::handle_board_section_append(
+                state,
+                resolved_author,
+                section,
+                value,
+            )
+            .await
         }
     }
 }

@@ -217,6 +217,24 @@ impl GitStorage {
         )))
     }
 
+    pub fn changed_files_range(&self, from: &str, to: &str) -> Result<Vec<PathBuf>, GitError> {
+        let range = format!("{}..{}", from, to);
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", &range])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let output = Command::new("git")
             .args(["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern])
