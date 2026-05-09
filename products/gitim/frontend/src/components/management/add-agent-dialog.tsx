@@ -18,7 +18,7 @@ import {
   type PreflightResult,
   type ProviderId,
 } from "@/lib/providers";
-import type { Agent } from "@/lib/types";
+import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
 import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -32,6 +32,7 @@ export function AddAgentDialog() {
   const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
+  const [introduction, setIntroduction] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [detecting, setDetecting] = useState(false);
@@ -49,6 +50,7 @@ export function AddAgentDialog() {
     setProvider("");
     setModel("");
     setSystemPrompt("");
+    setIntroduction("");
     setEnvVars([]);
     setSubmitting(false);
     setDetecting(false);
@@ -131,6 +133,7 @@ export function AddAgentDialog() {
         systemPrompt.trim(),
         model,
         envMap,
+        introduction.trim(),
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -269,6 +272,25 @@ export function AddAgentDialog() {
                 </select>
               </div>
             )}
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="agent-introduction">
+                Introduction <span className="text-text-muted font-normal">(optional)</span>
+              </label>
+              <Textarea
+                id="agent-introduction"
+                rows={2}
+                value={introduction}
+                onChange={(e) =>
+                  setIntroduction(e.target.value.slice(0, MAX_INTRODUCTION_LEN))
+                }
+                maxLength={MAX_INTRODUCTION_LEN}
+                placeholder="Short blurb shown on the agent card. Not fed to the LLM."
+              />
+              <p className="text-xs text-text-muted text-right">
+                {introduction.length} / {MAX_INTRODUCTION_LEN}
+              </p>
+            </div>
 
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-prompt">

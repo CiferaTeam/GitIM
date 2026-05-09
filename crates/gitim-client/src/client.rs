@@ -141,6 +141,25 @@ impl GitimClient {
         .await
     }
 
+    /// Overwrite an already-registered user's `introduction` blurb.
+    /// The runtime calls this after `add_agent` (post-onboard) and on
+    /// `PATCH /workspaces/{slug}/agents/{id}` when the WebUI submits
+    /// a new value. The 256-byte ceiling is enforced daemon-side too.
+    pub async fn update_user(
+        &self,
+        handler: &str,
+        introduction: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "update_user",
+            json!({
+                "handler": handler,
+                "introduction": introduction,
+            }),
+        )
+        .await
+    }
+
     pub async fn onboard(
         &self,
         git_server: &str,

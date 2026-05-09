@@ -15,4 +15,4 @@ pub use config::Config;
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
-pub use meta::{ChannelMeta, UserMeta};
+pub use meta::{ChannelMeta, UserMeta, MAX_INTRODUCTION_LEN};

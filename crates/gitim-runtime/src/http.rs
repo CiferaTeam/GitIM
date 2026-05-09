@@ -28,6 +28,7 @@ use crate::github::{
 use crate::gitignore::ensure_env_gitignored;
 use gitim_client::GitimClient;
 use gitim_core::me_json::MeJson;
+use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::url_redact::redacted_url;
 
 /// Default TCP port for the runtime HTTP server. Shared between
@@ -231,6 +232,13 @@ pub struct AgentInfo {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Free-form blurb the WebUI shows on the agent card and detail page.
+    /// Sourced from `users/<handler>.meta.yaml::introduction` — i.e. the
+    /// git-synced user metadata file, NOT `.gitim/me.json`. None at the
+    /// type level lets recovery paths skip the disk read for legacy
+    /// agents whose meta.yaml predates this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introduction: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1116,6 +1124,11 @@ struct AgentAddRequest {
     model: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    /// Optional human blurb (≤ MAX_INTRODUCTION_LEN). Surfaced on the agent
+    /// card and detail page; not fed to the LLM. Empty / missing keeps the
+    /// daemon's onboard default ("GitIM user").
+    #[serde(default)]
+    introduction: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
 }
@@ -1139,6 +1152,23 @@ async fn agents_add(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorBody::new(format!("unsupported provider: {other}"))),
+            )
+                .into_response();
+        }
+    }
+
+    // Length-check the optional introduction up front so we never start
+    // provisioning (clone + daemon spawn + onboard) just to bounce on a
+    // 400 at the post-onboard update_user step. Daemon enforces the same
+    // ceiling as a defense-in-depth.
+    if let Some(intro) = req.introduction.as_deref() {
+        if intro.len() > MAX_INTRODUCTION_LEN {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(format!(
+                    "introduction exceeds {} byte limit",
+                    MAX_INTRODUCTION_LEN
+                ))),
             )
                 .into_response();
         }
@@ -1357,6 +1387,40 @@ async fn agents_add(
                 }
             }
 
+            // Apply the user-supplied introduction blurb (if any) to the
+            // freshly-registered user meta.yaml. The daemon is still running
+            // from provision_agent, so we reach it via the IPC client. Empty
+            // / missing keeps the onboard default ("GitIM user"). Failure
+            // here is intentionally non-fatal: the agent is fully usable
+            // without the blurb, and the user can retry via PATCH.
+            if let Some(intro) = req.introduction.as_deref() {
+                if !intro.is_empty() {
+                    let client = GitimClient::new(&handle.repo_root);
+                    match client.update_user(&req.handler, intro).await {
+                        Ok(resp) if resp.ok => {}
+                        Ok(resp) => {
+                            tracing::warn!(
+                                handler = %req.handler,
+                                error = ?resp.error,
+                                "update_user during add_agent failed; continuing with default introduction",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                handler = %req.handler,
+                                error = %e,
+                                "update_user during add_agent IPC error; continuing with default introduction",
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Read introduction back from disk so AgentInfo reflects what
+            // actually got committed (covers update_user no-op, partial
+            // failure, and the default-introduction case uniformly).
+            let introduction = read_user_introduction(&handle.repo_root, &req.handler);
+
             let info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),
@@ -1371,6 +1435,7 @@ async fn agents_add(
                 provider: Some(req.provider.clone()),
                 model: req.model.clone(),
                 system_prompt: req.system_prompt.clone(),
+                introduction,
                 env: req.env.clone(),
                 error_message: None,
                 session_usage: None,
@@ -1411,6 +1476,19 @@ async fn agents_add(
             .into_response()
         }
     }
+}
+
+/// Read `introduction` out of `users/<handler>.meta.yaml` for the agent's
+/// own clone. Returns `None` for legacy agents where the file is missing
+/// or malformed — recovery should not fail just because a meta file drifted,
+/// the WebUI just won't have a blurb to display until the next PATCH.
+fn read_user_introduction(repo_root: &Path, handler: &str) -> Option<String> {
+    let meta_path = repo_root
+        .join("users")
+        .join(format!("{}.meta.yaml", handler));
+    let content = std::fs::read_to_string(&meta_path).ok()?;
+    let meta: UserMeta = serde_yaml::from_str(&content).ok()?;
+    Some(meta.introduction)
 }
 
 fn cleanup_agent_dir(workspace: &Path, handler: &str) {
@@ -1638,6 +1716,11 @@ struct AgentUpdateRequest {
     system_prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "deser_triple_option")]
     model: Option<Option<String>>,
+    /// Three-state: absent → no-op, null → clear (empty introduction),
+    /// "s" → set to s. Goes to daemon via `update_user`, which writes
+    /// `users/<handler>.meta.yaml` and commits.
+    #[serde(default, deserialize_with = "deser_triple_option")]
+    introduction: Option<Option<String>>,
     #[serde(default)]
     env: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -1776,6 +1859,27 @@ async fn agents_patch(
         }
     }
 
+    // Introduction length validation — runs before any disk write so a
+    // malformed payload doesn't leave the rest of the patch half-applied.
+    // Empty / null both clear the field; the daemon will write "" to the
+    // YAML on our behalf.
+    let introduction_patch: Option<String> = match &req.introduction {
+        None => None,
+        Some(opt) => Some(opt.clone().unwrap_or_default()),
+    };
+    if let Some(intro) = introduction_patch.as_deref() {
+        if intro.len() > MAX_INTRODUCTION_LEN {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(format!(
+                    "introduction exceeds {} byte limit",
+                    MAX_INTRODUCTION_LEN
+                ))),
+            )
+                .into_response();
+        }
+    }
+
     if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1867,6 +1971,35 @@ async fn agents_patch(
         }
     }
 
+    // Introduction lives in the git-tracked `users/<handler>.meta.yaml`,
+    // not me.json — we route it through the daemon so the commit + push
+    // flow goes through the same lock/sync paths as register_user. The
+    // daemon stays alive even when the agent loop is offline (stop_agent
+    // only aborts the loop task), so the IPC connection is reliable.
+    if let Some(intro) = introduction_patch.as_deref() {
+        let client = GitimClient::new(&repo_root);
+        match client.update_user(&agent_id, intro).await {
+            Ok(resp) if resp.ok => {}
+            Ok(resp) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::new(format!(
+                        "update_user failed: {}",
+                        resp.error.unwrap_or_else(|| "unknown".into())
+                    ))),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::new(format!("update_user IPC failed: {e}"))),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // 3+4. Update in-memory AgentInfo + take fresh snapshot under one lock.
     // Folding these into one acquisition prevents a TOCTOU panic when
     // `agents_remove` lands between the update and the snapshot.  If the agent
@@ -1894,6 +2027,9 @@ async fn agents_patch(
                 }
                 if let Some(env_map) = &req.env {
                     info.env = env_map.clone();
+                }
+                if introduction_patch.is_some() {
+                    info.introduction = introduction_patch.clone();
                 }
                 Some(info.clone())
             } else {
@@ -2299,6 +2435,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                         provider: provider_raw.map(|s| s.to_string()),
                         model,
                         system_prompt: custom_system_prompt,
+                        introduction: read_user_introduction(&dir, &handler),
                         env,
                         error_message: Some(msg),
                         session_usage: crate::state::AgentState::load(&dir)
@@ -2347,6 +2484,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                         provider: provider_raw.map(|s| s.to_string()),
                         model,
                         system_prompt: custom_system_prompt,
+                        introduction: read_user_introduction(&dir, &handler),
                         env,
                         error_message: None,
                         session_usage: crate::state::AgentState::load(&dir)
@@ -3487,5 +3625,63 @@ mod tests {
         );
         // 现存字段不能被破坏
         assert_eq!(body["service"], "gitim-runtime");
+    }
+
+    // -- introduction wire format coverage --
+    //
+    // The triple-option semantics on `AgentUpdateRequest::introduction` are
+    // shared with `system_prompt` and `model`, but each one is exposed on the
+    // wire as a separate JSON key — a regression in the deserializer or rename
+    // would silently drop introduction patches without these tests catching it.
+
+    #[test]
+    fn agent_add_request_accepts_introduction() {
+        let body = serde_json::json!({
+            "handler": "alice",
+            "display_name": "Alice",
+            "provider": "claude",
+            "introduction": "Senior code reviewer"
+        });
+        let req: AgentAddRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.introduction.as_deref(), Some("Senior code reviewer"));
+    }
+
+    #[test]
+    fn agent_add_request_introduction_omitted_is_none() {
+        let body = serde_json::json!({
+            "handler": "alice",
+            "display_name": "Alice",
+            "provider": "claude"
+        });
+        let req: AgentAddRequest = serde_json::from_value(body).unwrap();
+        assert!(req.introduction.is_none());
+    }
+
+    #[test]
+    fn agent_update_request_introduction_absent_is_noop() {
+        let body = serde_json::json!({});
+        let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
+        assert!(
+            req.introduction.is_none(),
+            "missing key should preserve the existing value"
+        );
+    }
+
+    #[test]
+    fn agent_update_request_introduction_null_clears() {
+        let body = serde_json::json!({ "introduction": null });
+        let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            req.introduction,
+            Some(None),
+            "null must be distinguishable from absent so the daemon clears the blurb"
+        );
+    }
+
+    #[test]
+    fn agent_update_request_introduction_string_sets() {
+        let body = serde_json::json!({ "introduction": "AI assistant" });
+        let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.introduction, Some(Some("AI assistant".to_string())));
     }
 }

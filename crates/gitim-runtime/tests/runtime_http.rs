@@ -214,6 +214,7 @@ fn insert_agent(
             provider: Some("mock".to_string()),
             model: None,
             system_prompt: None,
+            introduction: None,
             env: HashMap::new(),
             error_message: None,
             session_usage: None,

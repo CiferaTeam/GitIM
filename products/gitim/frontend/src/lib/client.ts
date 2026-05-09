@@ -868,6 +868,7 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     provider: (raw.provider as ProviderId) ?? undefined,
     systemPrompt: (raw.system_prompt as string) ?? "",
     model: (raw.model as string) ?? undefined,
+    introduction: (raw.introduction as string) ?? undefined,
     env: (raw.env as Record<string, string>) ?? undefined,
     repoPath: (raw.repo_path as string) ?? "",
     messagesProcessed: (raw.messages_processed as number) ?? 0,
@@ -918,6 +919,7 @@ export async function addAgent(
   systemPrompt: string,
   model?: string,
   env?: Record<string, string>,
+  introduction?: string,
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
@@ -926,6 +928,7 @@ export async function addAgent(
     void systemPrompt;
     void model;
     void env;
+    void introduction;
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
@@ -939,6 +942,7 @@ export async function addAgent(
         provider,
         model: model || undefined,
         system_prompt: systemPrompt || undefined,
+        introduction: introduction && introduction.length > 0 ? introduction : undefined,
         env: env && Object.keys(env).length > 0 ? env : undefined,
       }),
     });
@@ -957,6 +961,7 @@ export async function addAgent(
       provider,
       systemPrompt,
       model,
+      introduction,
       env,
       repoPath: "",
       messagesProcessed: 0,
@@ -973,6 +978,7 @@ export async function updateAgent(
   patch: {
     system_prompt?: string | null;
     model?: string | null;
+    introduction?: string | null;
     env?: Record<string, string>;
     dotenv?: string;
   },

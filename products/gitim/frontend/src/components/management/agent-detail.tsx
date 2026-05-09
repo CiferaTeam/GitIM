@@ -6,7 +6,7 @@ import { useAgentStore } from "@/hooks/use-agent-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { PROVIDERS } from "@/lib/providers";
-import type { Agent } from "@/lib/types";
+import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
 import { ArrowLeft, Play, Pause, Trash2, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-status";
@@ -57,6 +57,7 @@ export function AgentDetail() {
   const [mode, setMode] = useState<Mode>("view");
   const [draftModel, setDraftModel] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftIntroduction, setDraftIntroduction] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
 
@@ -69,6 +70,7 @@ export function AgentDetail() {
     if (!agent) return;
     setDraftModel(agent.model ?? "");
     setDraftPrompt(agent.systemPrompt ?? "");
+    setDraftIntroduction(agent.introduction ?? "");
     setDraftEnv(
       Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
     );
@@ -83,6 +85,8 @@ export function AgentDetail() {
       if (draftModel.trim() !== (agent.model ?? "")) return true;
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
+      // Introduction
+      if (draftIntroduction.trim() !== (agent.introduction ?? "").trim()) return true;
       // Env
       const newEnv: Record<string, string> = {};
       for (const { key, value } of draftEnv) {
@@ -120,6 +124,7 @@ export function AgentDetail() {
     const patch: {
       system_prompt?: string | null;
       model?: string | null;
+      introduction?: string | null;
       env?: Record<string, string>;
     } = {};
 
@@ -141,6 +146,13 @@ export function AgentDetail() {
     const promptChanged = newPrompt !== oldPrompt;
     if (promptChanged) {
       patch.system_prompt = newPrompt === "" ? null : newPrompt;
+    }
+
+    const newIntroduction = draftIntroduction.trim();
+    const oldIntroduction = (agent.introduction ?? "").trim();
+    const introductionChanged = newIntroduction !== oldIntroduction;
+    if (introductionChanged) {
+      patch.introduction = newIntroduction === "" ? null : newIntroduction;
     }
 
     const newEnv: Record<string, string> = {};
@@ -186,6 +198,9 @@ export function AgentDetail() {
         lines.push(
           "System prompt → takes effect on next session (auto-rolls when current session fills)",
         );
+      }
+      if (introductionChanged) {
+        lines.push("Introduction → committed to users meta and synced");
       }
       toast.success("Saved", { description: lines.join("\n") });
     } else {
@@ -345,6 +360,36 @@ export function AgentDetail() {
           <span className="text-text-secondary">
             {agent.lastActivity ? relativeTime(agent.lastActivity) : "—"}
           </span>
+        </Field>
+      </div>
+
+      {/* Introduction (display-only blurb on agent card; not fed to LLM) */}
+      <div className="mb-8">
+        <Field label="Introduction">
+          {mode === "view" ? (
+            <div className="mt-2 rounded-xl border border-border bg-card/50 p-4">
+              <p className="text-sm text-text-secondary leading-relaxed whitespace-pre-wrap break-words">
+                {agent.introduction || "(none)"}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5 mt-2">
+              <Textarea
+                value={draftIntroduction}
+                onChange={(e) =>
+                  setDraftIntroduction(
+                    e.target.value.slice(0, MAX_INTRODUCTION_LEN),
+                  )
+                }
+                rows={2}
+                maxLength={MAX_INTRODUCTION_LEN}
+                placeholder="Short blurb shown on the agent card. Not fed to the LLM."
+              />
+              <p className="text-xs text-text-muted text-right">
+                {draftIntroduction.length} / {MAX_INTRODUCTION_LEN}
+              </p>
+            </div>
+          )}
         </Field>
       </div>
 

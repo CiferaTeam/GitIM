@@ -113,6 +113,16 @@ pub enum Request {
         #[serde(default = "default_introduction")]
         introduction: String,
     },
+    /// Overwrite an already-registered user's `introduction` field.
+    /// Used by `PATCH /workspaces/{slug}/agents/{id}` and by the post-onboard
+    /// step in `POST /agents/add` when the WebUI submits an initial blurb.
+    /// Requires the user to already exist (returns error otherwise) — this
+    /// is an update, not a create. Empty string clears the field.
+    #[serde(rename = "update_user")]
+    UpdateUser {
+        handler: String,
+        introduction: String,
+    },
     #[serde(rename = "onboard")]
     Onboard {
         git_server: String,

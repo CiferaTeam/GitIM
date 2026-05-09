@@ -25,6 +25,12 @@ export interface Agent {
   provider?: ProviderId;
   systemPrompt: string;
   model?: string;
+  /**
+   * Human-facing blurb stored in `users/<handler>.meta.yaml::introduction`.
+   * Display-only — never fed to the LLM. Capped at 256 bytes server-side
+   * (see MAX_INTRODUCTION_LEN in gitim-core).
+   */
+  introduction?: string;
   env?: Record<string, string>;
   repoPath: string;
   lastActivity?: string; // ISO8601
@@ -32,6 +38,10 @@ export interface Agent {
   errorMessage?: string;
   sessionUsage?: SessionUsageSnapshot;
 }
+
+/** Hard ceiling for the introduction blurb. Must stay in sync with
+ * `gitim-core::types::MAX_INTRODUCTION_LEN`. */
+export const MAX_INTRODUCTION_LEN = 256;
 
 export type MessageStatus = "sending" | "sent" | "synced" | "failed";
 

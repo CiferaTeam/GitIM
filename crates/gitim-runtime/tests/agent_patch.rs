@@ -114,6 +114,7 @@ fn seed_agent_in_workspace(
             .get("system_prompt")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        introduction: None,
         env,
         error_message: None,
         session_usage: None,

@@ -76,6 +76,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             req,
             Request::Send { .. }
                 | Request::RegisterUser { .. }
+                | Request::UpdateUser { .. }
                 | Request::JoinChannel { .. }
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
@@ -135,6 +136,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             role,
             introduction,
         } => handle_register_user(state, handler, display_name, role, introduction).await,
+        Request::UpdateUser {
+            handler,
+            introduction,
+        } => handle_update_user(state, handler, introduction).await,
         Request::Poll { since } => handle_poll(state, since).await,
         Request::Stop => handle_stop(state).await,
         Request::Onboard {

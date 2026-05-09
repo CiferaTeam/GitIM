@@ -107,6 +107,11 @@ export function AgentCard({ agent }: AgentCardProps) {
         </CardHeader>
 
         <CardContent>
+          {agent.introduction && (
+            <p className="text-sm text-text-secondary mb-3 whitespace-pre-wrap break-words">
+              {agent.introduction}
+            </p>
+          )}
           <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
             <span className="text-text-muted">Last activity</span>
             <span>

@@ -1076,6 +1076,7 @@ mod tests {
                 provider: Some("mock".to_string()),
                 model: None,
                 system_prompt: None,
+                introduction: None,
                 env: Default::default(),
                 error_message: None,
                 session_usage: Some(SessionUsageSnapshot {

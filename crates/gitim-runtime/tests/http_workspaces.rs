@@ -662,6 +662,7 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             provider: Some("claude".into()),
             model: None,
             system_prompt: None,
+            introduction: None,
             env: Default::default(),
             error_message: None,
             session_usage: None,
