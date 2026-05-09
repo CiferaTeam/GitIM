@@ -195,7 +195,7 @@ pub async fn handle_list_archived_users(state: SharedState) -> Response {
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
-/// Scan `archive/dms/*.thread` and return the rows where `author` is one
+/// Scan `archive/dm/*.thread` and return the rows where `author` is one
 /// of the two participants. Filtering by participation is the whole
 /// access-control story for archived DMs at this layer — the daemon does
 /// not expose third-party listings.
@@ -209,7 +209,7 @@ pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Res
     use gitim_core::dm::parse_dm_filename;
     use gitim_core::responses::{ArchivedDmEntry, ListArchivedDmsResponse};
 
-    let arch_dm_dir = state.repo_root.join("archive").join("dms");
+    let arch_dm_dir = state.repo_root.join("archive").join("dm");
     let mut entries: Vec<ArchivedDmEntry> = Vec::new();
     if arch_dm_dir.exists() {
         if let Ok(rd) = std::fs::read_dir(&arch_dm_dir) {

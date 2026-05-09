@@ -142,7 +142,7 @@ async fn test_archive_dm_round_trip() {
     assert!(state.repo_root.join("dm/alice--bob.thread").exists());
     assert!(!state
         .repo_root
-        .join("archive/dms/alice--bob.thread")
+        .join("archive/dm/alice--bob.thread")
         .exists());
 
     // Archive (alice initiating).
@@ -151,11 +151,6 @@ async fn test_archive_dm_round_trip() {
     let data = resp.data.unwrap();
     assert_eq!(data["archived_by"].as_str().unwrap(), "alice");
     assert_eq!(data["dm_pair_stem"].as_str().unwrap(), "alice--bob");
-    // archived_at is a UTC timestamp string; just check it ends with Z.
-    assert!(data["archived_at"]
-        .as_str()
-        .unwrap()
-        .ends_with('Z'));
 
     // File moved.
     assert!(
@@ -165,7 +160,7 @@ async fn test_archive_dm_round_trip() {
     assert!(
         state
             .repo_root
-            .join("archive/dms/alice--bob.thread")
+            .join("archive/dm/alice--bob.thread")
             .exists(),
         "archive dm should exist"
     );
@@ -202,7 +197,7 @@ async fn test_archive_dm_round_trip() {
     assert!(state.repo_root.join("dm/alice--bob.thread").exists());
     assert!(!state
         .repo_root
-        .join("archive/dms/alice--bob.thread")
+        .join("archive/dm/alice--bob.thread")
         .exists());
 
     // Both archive and restore commits present.
@@ -385,7 +380,7 @@ async fn test_archive_dm_rolls_back_on_commit_failure() {
     assert!(
         !state
             .repo_root
-            .join("archive/dms/alice--bob.thread")
+            .join("archive/dm/alice--bob.thread")
             .exists(),
         "archive dm must not remain after rollback"
     );
@@ -410,7 +405,7 @@ async fn test_archive_dm_rolls_back_on_commit_failure() {
     );
     assert!(state
         .repo_root
-        .join("archive/dms/alice--bob.thread")
+        .join("archive/dm/alice--bob.thread")
         .exists());
     assert!(!state.repo_root.join("dm/alice--bob.thread").exists());
 }
@@ -426,7 +421,7 @@ async fn test_either_party_can_archive_dm() {
     assert!(resp.ok, "alice archive failed: {:?}", resp.error);
     assert!(state
         .repo_root
-        .join("archive/dms/alice--bob.thread")
+        .join("archive/dm/alice--bob.thread")
         .exists());
 
     let resp = unarchive_dm(state.clone(), "alice", "bob").await;
@@ -438,7 +433,7 @@ async fn test_either_party_can_archive_dm() {
     assert!(resp.ok, "bob archive failed: {:?}", resp.error);
     assert!(state
         .repo_root
-        .join("archive/dms/alice--bob.thread")
+        .join("archive/dm/alice--bob.thread")
         .exists());
     assert!(!state.repo_root.join("dm/alice--bob.thread").exists());
 

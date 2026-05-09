@@ -55,16 +55,16 @@
 
 **职责**:
 - 解析 sorted-pair `<min(a, b)>--<max(a, b)>.thread`
-- archive_dm:`git mv dms/<a>--<b>.thread → archive/dms/<a>--<b>.thread`
+- archive_dm:`git mv dm/<a>--<b>.thread → archive/dm/<a>--<b>.thread`
 - unarchive_dm:对称
-- list_archived_dms:扫 `archive/dms/*.thread`,filter caller handler 在文件名中
+- list_archived_dms:扫 `archive/dm/*.thread`,filter caller handler 在文件名中
 
 **关键边界**:
 - 单方触发即生效(决策 B1),无对端 confirm
 - caller author 走现有 resolve_author
 
 **验收**:
-- archive_dm peer=bob 后 dms/<sorted>.thread 在 archive/dms/
+- archive_dm peer=bob 后 dm/<sorted>.thread 在 archive/dm/
 - unarchive_dm 回 active
 - 不存在的 DM / 已 archive 的再 archive → 明确错误
 
@@ -80,8 +80,8 @@
 
 **phases**:
 1. 终态判断:`archive/users/<h>.meta.yaml` 存在 → return success
-2. **Phase 1**(写 leave events):扫 active threads + archive/dms/* 找 author=handler 的 thread,逐 thread append `[L<n>][@<h>][<ts>] leave-workspace`(末尾已是 alice 的 leave-workspace 则 skip)。每个 thread 一个 commit,复用 send 路径的 retry/rebase/renumber
-3. **Phase 2**(归档 DMs):扫 dms/*--handler 与 dms/handler--*,git mv 到 archive/dms/(已 archive 跳过)。每个 DM 一个 commit
+2. **Phase 1**(写 leave events):扫 active threads + archive/dm/* 找 author=handler 的 thread,逐 thread append `[L<n>][@<h>][<ts>] leave-workspace`(末尾已是 alice 的 leave-workspace 则 skip)。每个 thread 一个 commit,复用 send 路径的 retry/rebase/renumber
+3. **Phase 2**(归档 DMs):扫 dm/*--handler 与 dm/handler--*,git mv 到 archive/dm/(已 archive 跳过)。每个 DM 一个 commit
 4. **Phase 3**(清 channels meta):扫 channels/*.meta.yaml,members 含 handler 的移除该条目(已无则 skip)。每个 channel 一个 commit
 5. **Phase 4**(归档 user entry):`git mv users/<h>.meta.yaml → archive/users/`(终态)
 
@@ -92,7 +92,7 @@
 - event token:`leave-workspace`(开放问题 3 决策)
 
 **验收**:
-- happy path:alice 在 #dev / #ops 各发过言 + 跟 bob 有 DM + alice 在 #dev members → burn alice → #dev / #ops thread 末尾各 1 行 `@alice leave-workspace`,dms/alice--bob.thread 在 archive/dms/,users/alice 在 archive/users/,#dev meta members 不含 alice
+- happy path:alice 在 #dev / #ops 各发过言 + 跟 bob 有 DM + alice 在 #dev members → burn alice → #dev / #ops thread 末尾各 1 行 `@alice leave-workspace`,dm/alice--bob.thread 在 archive/dm/,users/alice 在 archive/users/,#dev meta members 不含 alice
 - 幂等:已完成时再调 return success,**无新 commit**
 - 半态恢复:Phase 1 写完 5/10 thread 后 abort → 重试 → skip 前 5 + 完成剩下 + Phase 2-4 走完
 - 零发言 agent:Phase 1 0 thread 匹配,直接 Phase 2-4
@@ -108,7 +108,7 @@
 - [crates/gitim-daemon/src/onboard.rs](../../../crates/gitim-daemon/src/onboard.rs)(handler 重用拒绝)
 
 **改动**:
-- handle_send DM 分支:写入前 stat archive/dms/<sorted>.thread,存在 → "DM with @<peer> is archived"
+- handle_send DM 分支:写入前 stat archive/dm/<sorted>.thread,存在 → "DM with @<peer> is archived"
 - handle_send / 任何 author write:verify caller 不在 archive/users/,是 → "user @<h> is departed"
 - onboard / register_user / add_agent:handler 在 archive/users/ → "handler @<h> is reserved (previously departed)"(开放问题 2 决策:不允许重用)
 
@@ -127,7 +127,7 @@
 
 **改动**:
 - handle_list_users:默认只列 `users/`,新增 `include_archived: bool` 参数(对所有 caller 一致,P2.a)
-- handle_read DM 路径:active 不存在时 fallback `archive/dms/<sorted>.thread`,响应附 `archived: true`(对称 channel 已有 fallback)
+- handle_read DM 路径:active 不存在时 fallback `archive/dm/<sorted>.thread`,响应附 `archived: true`(对称 channel 已有 fallback)
 
 **验收**:
 - list_users 默认不见 archived
@@ -143,7 +143,7 @@
 **文件**:[crates/gitim-daemon/src/handlers/poll.rs](../../../crates/gitim-daemon/src/handlers/poll.rs)
 
 **改动**:
-- thread 出现在 `archive/dms/<sorted>.thread` → 标记 `dm_archived` 事件(对称现有 [poll.rs:207](../../../crates/gitim-daemon/src/handlers/poll.rs:207) `archive/channels/` 处理)
+- thread 出现在 `archive/dm/<sorted>.thread` → 标记 `dm_archived` 事件(对称现有 [poll.rs:207](../../../crates/gitim-daemon/src/handlers/poll.rs:207) `archive/channels/` 处理)
 - thread 出现在 `archive/users/<h>.meta.yaml` → 标记 `user_archived` 事件
 - **不**过滤 archived user 在 active thread 里的旧消息(决策 A2)— default 行为,verify 即可
 

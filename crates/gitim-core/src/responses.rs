@@ -139,14 +139,14 @@ pub struct ListArchivedUsersResponse {
 ///
 /// `dm_pair_stem` is the on-disk filename stem `<min>--<max>` (output of
 /// `gitim_core::dm::dm_filename`), so callers can re-derive participants
-/// or display the archive entry without re-deriving the sort.
-/// `archived_at` is the same `%Y%m%dT%H%M%SZ` UTC stamp the daemon uses
-/// in `Event::DmArchived` and other timestamped events.
+/// or display the archive entry without re-deriving the sort. No
+/// timestamp here — RPC responses across `ArchiveUserResponse`,
+/// `ArchiveChannelResponse`, and this one stay aligned. The
+/// `Event::DmArchived` broadcast carries the timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArchiveDmResponse {
     pub archived_by: String,
     pub dm_pair_stem: String,
-    pub archived_at: String,
 }
 
 /// Response payload for `Request::UnarchiveDm`. Symmetric to `ArchiveDmResponse`.
@@ -154,7 +154,6 @@ pub struct ArchiveDmResponse {
 pub struct UnarchiveDmResponse {
     pub unarchived_by: String,
     pub dm_pair_stem: String,
-    pub unarchived_at: String,
 }
 
 /// One row in `ListArchivedDmsResponse.dms`. `peer` is the participant
@@ -593,13 +592,11 @@ mod tests {
         let a = serde_json::to_value(ArchiveDmResponse {
             archived_by: "alice".to_string(),
             dm_pair_stem: "alice--bob".to_string(),
-            archived_at: "20260507T120000Z".to_string(),
         })
         .unwrap();
         let u = serde_json::to_value(UnarchiveDmResponse {
             unarchived_by: "alice".to_string(),
             dm_pair_stem: "alice--bob".to_string(),
-            unarchived_at: "20260507T120000Z".to_string(),
         })
         .unwrap();
         assert_eq!(
@@ -607,13 +604,13 @@ mod tests {
             Some("alice--bob"),
         );
         assert!(a.as_object().unwrap().contains_key("archived_by"));
-        assert!(a.as_object().unwrap().contains_key("archived_at"));
         assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
-        assert!(!a.as_object().unwrap().contains_key("unarchived_at"));
         assert!(u.as_object().unwrap().contains_key("unarchived_by"));
-        assert!(u.as_object().unwrap().contains_key("unarchived_at"));
         assert!(!u.as_object().unwrap().contains_key("archived_by"));
-        assert!(!u.as_object().unwrap().contains_key("archived_at"));
+        // Timestamps live on Event::DmArchived / DmUnarchived, not the
+        // response — kept aligned with ArchiveUser / ArchiveChannel.
+        assert!(!a.as_object().unwrap().contains_key("archived_at"));
+        assert!(!u.as_object().unwrap().contains_key("unarchived_at"));
     }
 
     #[test]

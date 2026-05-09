@@ -6,7 +6,7 @@
 
 - `users/<handler>.meta.yaml`(用户档案)
 - `channels/<X>.thread`(它历史发的所有消息,逐行混在主时间线)
-- `dms/X--<handler>.thread`(它所有 DM,在每个对端 DM 列表里)
+- `dm/X--<handler>.thread`(它所有 DM,在每个对端 DM 列表里)
 - `channels/<X>.meta.yaml` 的 `members:` 列表
 
 **全部完整保留**。结果:你"删"了它,UI 上每条线索都在 — DM 列表、频道滚动、用户列表、mention,处处可见。这是用户痛点的根源。
@@ -49,7 +49,7 @@ surface 实现表:
 | channel | `channels/X.thread` + `.meta.yaml` | `archive/channels/X.*` | 已实现 |
 | card | `channels/X/cards/Y/...` | `archive/channels/X/cards/Y/...` | 已实现 |
 | **user** | `users/X.meta.yaml` | `archive/users/X.meta.yaml` | **本次新增** |
-| **dm** | `dms/X--Y.thread` | `archive/dms/X--Y.thread` | **本次新增** |
+| **dm** | `dm/X--Y.thread` | `archive/dm/X--Y.thread` | **本次新增** |
 
 未来加新 archivable surface(如 reactions、附件、子线程),必须配套补这张表 + 走完 5 条 contract。
 
@@ -77,8 +77,8 @@ happy path:
    
    # Phase 2: 归档 DMs(每个 DM 一个独立 commit)
    for each dm "X--alice":
-     if 已在 archive/dms/: skip             # 幂等
-     else: git mv to archive/dms/
+     if 已在 archive/dm/: skip              # 幂等
+     else: git mv to archive/dm/
    
    # Phase 3: 清理 channels meta(开放问题 1,倾向清)
    for each channels/<ch>.meta.yaml where alice in members:
@@ -123,7 +123,7 @@ happy path:
 文件:
 - [crates/gitim-daemon/src/api.rs](../../../crates/gitim-daemon/src/api.rs) — Request enum 新增多个 variant
 - [crates/gitim-daemon/src/handlers/](../../../crates/gitim-daemon/src/handlers) — 新增 user / dm 处理(可能新建 `user.rs`,DM 复用 `send.rs`)
-- [crates/gitim-daemon/src/handlers/poll.rs](../../../crates/gitim-daemon/src/handlers/poll.rs) — `archive/dms/` + `archive/users/` 路径处理
+- [crates/gitim-daemon/src/handlers/poll.rs](../../../crates/gitim-daemon/src/handlers/poll.rs) — `archive/dm/` + `archive/users/` 路径处理
 - [crates/gitim-daemon/src/handlers/send.rs](../../../crates/gitim-daemon/src/handlers/send.rs) — DM / user 拦截
 
 新增 daemon API:
@@ -133,17 +133,17 @@ happy path:
 - **`depart_user { handler }`** — 复合 API,burn 编排专用,内部走幂等多 commit 模型(见上面 happy path 步骤 3)
 
 写入拦截升级:
-- `handle_send` DM 分支:写入前检查对应 sorted-pair 文件名是否在 `archive/dms/`,是则返回 "DM with @X is archived"
+- `handle_send` DM 分支:写入前检查对应 sorted-pair 文件名是否在 `archive/dm/`,是则返回 "DM with @X is archived"
 - `handle_send` 用户检查:author 或 mention target 在 `archive/users/` → 返回 "user @X is departed"
 - `handle_register_user` / onboard:handler 在 `archive/users/` 则拒绝(开放问题 2,倾向不允许 handler 重用)
 
 读取 fallback:
 - `handle_list_users`:默认只列 `users/`,新增 `--include-archived` 参数;**对所有 caller 一致**(daemon 不区分人 vs agent caller)
-- `handle_read` DM 路径:active 不存在时 fallback `archive/dms/`,响应附 `archived: true`(对称 channel 已有逻辑)
+- `handle_read` DM 路径:active 不存在时 fallback `archive/dm/`,响应附 `archived: true`(对称 channel 已有逻辑)
 - **read 一致性**(P2.a):`poll` **不**过滤 archived user 在 thread 里的旧消息(决策 A2 所需);`list_users` 默认过滤,这是行为差异,要在 spec 文档明示
 
 leave event 写入(由 `depart_user` Phase 1 触发):
-- 扫所有 active thread 与 archive/dms/* 找 author = handler 的 thread
+- 扫所有 active thread 与 archive/dm/* 找 author = handler 的 thread
 - 每个匹配 thread 末尾 append 一行 `[L<下一行号>][@<handler>][<ts>] leave-workspace`(具体 event token 待 plan-eng-review 后定,可选 `leave-workspace` / `depart` / 别)
 - 复用现有 send 路径的 commit + push retry + rebase + renumber 机制
 - **作者是 handler 自己**,与 leave-channel 模型对称,**thread parser 不需要修改**
@@ -151,7 +151,7 @@ leave event 写入(由 `depart_user` Phase 1 触发):
 验收(扩展 channel-archive 测试模式 + 补 4 个 P1.b case):
 - `archive_user` 后 `list_users` 不见 / `list_archived_users` 见
 - `archive_dm` 后 read 该 DM 显示 `archived: true`,send 返回 "is archived"
-- `depart_user` happy path:burn alice → 所有 alice 发过言的 thread 末尾各多一行 alice 的 leave-workspace event,user entry 在 archive/users/,DMs 在 archive/dms/
+- `depart_user` happy path:burn alice → 所有 alice 发过言的 thread 末尾各多一行 alice 的 leave-workspace event,user entry 在 archive/users/,DMs 在 archive/dm/
 - **`depart_user` 幂等性**:已完成时再调返回 success,无副作用
 - **半态恢复**:模拟 Phase 1 写到 5/10 thread 时 abort → 重试时 skip 前 5 个,继续完成剩下 5 个 + Phase 2-4
 - **多 agent 并发 burn**(P1.b):走现有 send 的 retry/rebase 机制
@@ -290,7 +290,7 @@ crates/gitim-daemon/src/api.rs                          — Request enum +6 vari
 crates/gitim-daemon/src/handlers/mod.rs                 — 路由
 crates/gitim-daemon/src/handlers/user.rs                — archive_user / unarchive_user / depart_user / list_archived_users(可能新建)
 crates/gitim-daemon/src/handlers/send.rs                — DM 拦截 + archive_dm / unarchive_dm / list_archived_dms
-crates/gitim-daemon/src/handlers/poll.rs                — archive/dms/ + archive/users/ diff 处理
+crates/gitim-daemon/src/handlers/poll.rs                — archive/dm/ + archive/users/ diff 处理
 
 crates/gitim-runtime/src/http.rs                        — POST /agents/burn endpoint + 编排 + type 校验
                                                           标 agents/remove deprecated
