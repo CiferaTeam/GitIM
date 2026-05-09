@@ -82,6 +82,7 @@ struct HealthResponse {
     service: &'static str,
     version: &'static str,
     workspaces_count: usize,
+    runtime_id: String,
 }
 
 // -----------------------------------------------------------------------------
@@ -364,6 +365,7 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
         workspaces_count: s.workspaces.len(),
+        runtime_id: s.runtime_id.clone(),
     })
 }
 
@@ -3453,5 +3455,37 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["workspaces"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn health_response_includes_runtime_id() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, state) = create_router();
+        // 模拟启动期注入
+        state.lock().unwrap().runtime_id = "test-runtime-id-1234".to_string();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body.get("runtime_id").and_then(|v| v.as_str()),
+            Some("test-runtime-id-1234")
+        );
+        // 现存字段不能被破坏
+        assert_eq!(body["service"], "gitim-runtime");
     }
 }
