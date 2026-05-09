@@ -108,6 +108,16 @@ happy path:
 
 ## 工作分块
 
+> 各 Part 的具体 task 切分见独立文件:
+> - [02-daemon.md](02-daemon.md) — Part A(9 task)
+> - [03-runtime.md](03-runtime.md) — Part B(3 task)
+> - [04-cli.md](04-cli.md) — Part C(3 task)
+> - [05-prompt.md](05-prompt.md) — Part D(3 段文案)
+> - [06-webui.md](06-webui.md) — Part E(3 sub-part)
+> - [07-spec.md](07-spec.md) — Part F(1 task,spec 文档)
+>
+> 本节是高层概览,实施细节不在此处展开。
+
 ### Part A — daemon API:archive 操作 + leave event 写入
 
 文件:
