@@ -120,6 +120,80 @@
     }
   }
 
+  @keyframes agent-liquid-flow {
+    from {
+      transform: translateX(-22%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes agent-liquid-edge {
+    0%, 100% {
+      transform: translateY(-50%) scaleY(0.94);
+    }
+    50% {
+      transform: translateY(-50%) scaleY(1.08);
+    }
+  }
+
+  .agent-usage-liquid {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--agent-usage-fill);
+    pointer-events: none;
+    overflow: hidden;
+    border-radius: inherit;
+    opacity: 0.72;
+    transition: width 320ms ease;
+    background:
+      linear-gradient(90deg, rgba(96, 165, 250, 0.14), rgba(96, 165, 250, 0.34));
+  }
+
+  .agent-usage-liquid::before {
+    content: "";
+    position: absolute;
+    inset: -55% -35% -55% -20%;
+    background:
+      radial-gradient(ellipse at 18% 48%, rgba(255, 255, 255, 0.22) 0 9%, transparent 31%),
+      radial-gradient(ellipse at 52% 55%, rgba(255, 255, 255, 0.14) 0 7%, transparent 28%),
+      radial-gradient(ellipse at 82% 45%, rgba(255, 255, 255, 0.18) 0 8%, transparent 30%);
+    animation: agent-liquid-flow 2.8s linear infinite;
+  }
+
+  .agent-usage-liquid::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: -18px;
+    width: 34px;
+    height: 160%;
+    border-radius: 999px;
+    transform: translateY(-50%);
+    background: rgba(96, 165, 250, 0.38);
+    filter: blur(1px);
+    animation: agent-liquid-edge 2.2s ease-in-out infinite;
+  }
+
+  .agent-usage-liquid[data-tone="warning"] {
+    background:
+      linear-gradient(90deg, rgba(251, 191, 36, 0.15), rgba(251, 191, 36, 0.36));
+  }
+
+  .agent-usage-liquid[data-tone="warning"]::after {
+    background: rgba(251, 191, 36, 0.42);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-usage-liquid,
+    .agent-usage-liquid::before,
+    .agent-usage-liquid::after {
+      animation: none;
+      transition: none;
+    }
+  }
+
   /* Light theme overrides */
   [data-theme="light"] {
     --color-background: #fafafa;

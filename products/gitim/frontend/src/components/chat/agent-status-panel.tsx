@@ -1,4 +1,5 @@
 import { List } from "lucide-react";
+import type { CSSProperties } from "react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
 import type { Agent, AgentActivityEvent } from "../../lib/types";
@@ -38,6 +39,19 @@ function activityTime(event: AgentActivityEvent | undefined): number {
 
 function agentLabel(agent: Agent): string {
   return agent.name || agent.id;
+}
+
+function clampUsagePercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function usageFillValue(agent: Agent): string | null {
+  const usage = agent.sessionUsage;
+  if (!usage) return null;
+
+  const percent = clampUsagePercent(usage.usedPercent);
+  return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
 }
 
 function compareAgentsByActivity(
@@ -134,15 +148,29 @@ function AgentRow({
   const latest = activities[0];
   const showError = agent.status === "error";
   const hasDetail = activities.length > 0;
+  const usageFill = usageFillValue(agent);
+  const usageTone =
+    (agent.sessionUsage?.usedPercent ?? 0) >= 80 ? "warning" : "normal";
 
   const row = (
     <div
-      className="relative rounded-md border border-border/60 bg-background/40 animate-[agent-row-enter_180ms_ease-out]"
+      className="relative overflow-hidden rounded-md border border-border/60 bg-background/40 animate-[agent-row-enter_180ms_ease-out]"
       data-testid={testId}
     >
+      {usageFill && (
+        <div
+          className="agent-usage-liquid"
+          data-testid="agent-usage-liquid"
+          data-tone={usageTone}
+          aria-hidden="true"
+          style={
+            { "--agent-usage-fill": usageFill } as CSSProperties
+          }
+        />
+      )}
       <div
-        className={`flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors ${
-          hasDetail ? "cursor-default hover:bg-surface-hover" : ""
+        className={`relative z-10 flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors ${
+          hasDetail ? "cursor-default hover:bg-surface-hover/60" : ""
         }`}
       >
         <StatusDot status={agent.status} />
