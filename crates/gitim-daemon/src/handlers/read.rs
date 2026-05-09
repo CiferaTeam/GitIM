@@ -173,6 +173,28 @@ pub async fn handle_list_users(state: SharedState) -> Response {
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
+/// Scan `archive/users/*.meta.yaml` and return the handlers (filename
+/// stem) sorted alphabetically. Mirrors `handle_list_archived_channels`
+/// in shape; the response is `ListArchivedUsersResponse` rather than
+/// the channel-summary shape because users have no per-row members.
+pub async fn handle_list_archived_users(state: SharedState) -> Response {
+    let arch_users_dir = state.repo_root.join("archive").join("users");
+    let mut handlers: Vec<String> = Vec::new();
+    if arch_users_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&arch_users_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if let Some(handler) = fname.strip_suffix(".meta.yaml") {
+                    handlers.push(handler.to_string());
+                }
+            }
+        }
+    }
+    handlers.sort();
+    let payload = gitim_core::responses::ListArchivedUsersResponse { users: handlers };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
 pub async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
     if let Err(e) = ChannelName::new(&channel) {
         return Response::error(format!("invalid channel name: {}", e));

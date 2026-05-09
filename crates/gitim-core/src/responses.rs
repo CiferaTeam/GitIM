@@ -115,6 +115,26 @@ pub struct UnarchiveChannelResponse {
     pub unarchived_by: String,
 }
 
+/// Response payload for `Request::ArchiveUser`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveUserResponse {
+    pub handler: String,
+    pub archived_by: String,
+}
+
+/// Response payload for `Request::UnarchiveUser`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveUserResponse {
+    pub handler: String,
+    pub unarchived_by: String,
+}
+
+/// Response payload for `Request::ListArchivedUsers`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedUsersResponse {
+    pub users: Vec<String>,
+}
+
 /// Shared response shape for `Request::JoinChannel` and
 /// `Request::LeaveChannel`. Both go through `write_channel_event` and
 /// emit identical wire fields; `event_type` discriminates.
@@ -508,6 +528,39 @@ mod tests {
         assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
         assert!(u.as_object().unwrap().contains_key("unarchived_by"));
         assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn user_archive_unarchive_response_distinct_fields() {
+        let a = serde_json::to_value(ArchiveUserResponse {
+            handler: "alice".to_string(),
+            archived_by: "alice".to_string(),
+        })
+        .unwrap();
+        let u = serde_json::to_value(UnarchiveUserResponse {
+            handler: "alice".to_string(),
+            unarchived_by: "alice".to_string(),
+        })
+        .unwrap();
+        assert_eq!(a.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert!(a.as_object().unwrap().contains_key("archived_by"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn list_archived_users_response_wire_shape() {
+        let r = ListArchivedUsersResponse {
+            users: vec!["alice".to_string(), "bob".to_string()],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(
+            obj.get("users").unwrap().as_array().map(|a| a.len()),
+            Some(2),
+        );
     }
 
     #[test]
