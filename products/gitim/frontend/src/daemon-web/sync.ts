@@ -29,6 +29,24 @@ function boardHandlerFromPath(path: string): string | null {
   return validateHandler(match[1]) ? null : match[1];
 }
 
+function parentPath(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx <= 0 ? "/" : path.slice(0, idx);
+}
+
+async function mkdirp(
+  path: string,
+  exists: (path: string) => Promise<boolean>,
+  mkdir: (path: string) => Promise<void>,
+): Promise<void> {
+  const parts = path.split("/").filter(Boolean);
+  let current = path.startsWith("/") ? "" : ".";
+  for (const part of parts) {
+    current = current === "" ? `/${part}` : `${current}/${part}`;
+    if (!(await exists(current))) await mkdir(current);
+  }
+}
+
 let syncInFlight: Promise<void> | null = null;
 
 async function runSyncOnce(): Promise<void> {
@@ -136,14 +154,16 @@ async function runSyncOnce(): Promise<void> {
     const resolved = resolveConflicts(localAdditions, remoteContents);
 
     // Write resolved files back
-    const { writeFile } = await import("./storage");
+    const { writeFile, exists, mkdir } = await import("./storage");
     const filePaths: string[] = [];
     for (const [fp, content] of Object.entries(resolved.files)) {
       await writeFile(`${s.repoDir}/${fp}`, content);
       filePaths.push(fp);
     }
     for (const [fp, content] of Object.entries(localBoards)) {
-      await writeFile(`${s.repoDir}/${fp}`, content);
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
       filePaths.push(fp);
     }
 
