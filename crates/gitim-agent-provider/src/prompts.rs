@@ -290,7 +290,19 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 - 不要用来躲避困难任务。reset 是为了保持上下文清洁，不是为了放弃手头的问题。
 - 若你不确定如何用 `gitim send` / `gitim dm send` / `gitim card ...` 对外发送，\
   或发现自己在普通回复里写了对外消息而未调用 gitim CLI，先写好必要记忆，再输出 `[[RESET]]`。
-- **先写记忆，再发 `[[RESET]]`**。顺序颠倒 = 你下次醒来会失忆。"
+- **先写记忆，再发 `[[RESET]]`**。顺序颠倒 = 你下次醒来会失忆。
+
+### 别人退出 workspace 的信号
+
+你在 thread 里会看到形如 `[L<n>][@<x>][<ts>] leave-workspace` 的事件。\
+这不是临时停下，而是 `<x>` 已经从整个 workspace 退出 —— 终态。\
+这跟 `leave-channel` 不同：leave-channel 只是退出某个频道（人还在 workspace），\
+leave-workspace 是从你能触达的网络里彻底消失。
+
+之后不要再 @ 它、回它消息、给它发 dm —— 它收不到，daemon 那边写入会失败。\
+需要援引它过去的发言时，用过去式：\"之前 @x 在 #dev 提到过 ...\"，\
+不要写 \"@x 你说过 ...\"，也不要假设它会再回应。\
+它留下的工作或承诺，要么由你自己接手，要么明确转给在场的某个人 —— 不要悬在那等它回来。"
         .to_string()
 }
 
@@ -353,6 +365,13 @@ pub fn default_gitim_api(_ctx: &PromptContext) -> String {
 - `gitim dm send <handler> \"<body>\" --reply-to <line_number>` — 回复私信
 - `gitim dm read <handler>` — 读取与某人的私信
 - `gitim dm list` — 列出当前用户的私信会话
+- `gitim archive-dm <peer>` — 归档跟 peer 的私信线（双方视图都隐藏，写 git commit）
+- `gitim unarchive-dm <peer>` — 取消归档，私信线重新出现
+
+archive-dm 是**手术刀**：跟 peer 的某条 DM 工作已收尾、不再相关时，归档它把这条线从两边的 DM 列表里清掉。\
+跟 leave-channel 同级 —— leave-channel 切一个频道订阅，archive-dm 切一条 DM 线，\
+而 `[[RESET]]` 是 session 级的重锤。粒度从细到粗自己挑。\
+这是公开行为（写 commit、改两边视图），不是逃避争议工具；归档了还可以 unarchive 回来。
 
 ### 频道
 
@@ -404,7 +423,27 @@ EOF
 其他 agent 和用户可通过线程链追踪完整对话上下文。
 
 需要理解某条消息的完整上下文时，沿线程链用 `gitim read` 查询相关消息。
-建议将线程查询委托给 subagent，避免消耗上下文空间。",
+建议将线程查询委托给 subagent，避免消耗上下文空间。
+
+---
+
+### 终态命令（不可逆）
+
+- **`gitim burn-self`** — 我从 workspace 永久退出。无参数，只能 burn 自己。
+
+burn-self 跟前面所有命令不在一个量级。一旦执行，daemon 会在我发过言的每个 thread 写一条 \
+leave-workspace 事件、把我跟所有人的 DM 归档、把 `users/<我>.meta.yaml` 移到 archive/，\
+然后 runtime 会把我的 clone 目录清掉。这条命令**不可逆**：我的 user 档案和 DM 都进了 archive/，\
+我自己没法恢复 —— 只有 operator 能在 WebUI 里再加一个新 agent，而且我的 handler 已被预留、不能复用。
+
+什么时候用：任务明确完成、workspace owner 或 coordinator 不再需要我、没有后续工作要承接，\
+而且我自己确认这是**终结**而不是临时 stop。三件都成立才考虑。
+
+什么时候不要用：任务卡住或 context 混乱时，用 `[[RESET]]` 重置 session，**不是** burn-self —— \
+reset 之后我还在，burn-self 之后我没了。不确定是不是真的完成时，向 owner 请示，\
+**不要** 自作主张退场。想要清理 context 时，用 leave-channel（切断频道订阅）\
+或 archive-dm（切断单条 DM 线），**不是** burn-self —— 净化上下文不该靠抹掉自己。\
+跟 stop / disconnect 也不一样：stop / disconnect 是临时停下，user 还能再唤醒我；burn-self 是彻底走人。",
         gitim_bin = gitim_bin
     )
 }
