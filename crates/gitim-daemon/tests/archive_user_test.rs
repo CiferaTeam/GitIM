@@ -259,8 +259,10 @@ async fn test_archive_already_archived_user() {
 
     let before_log = git_log_subjects(&state.repo_root);
 
-    // Second archive must error cleanly. alice is no longer in the in-memory
-    // users list (we just archived her), so we must use bob as author here.
+    // Second archive must error cleanly. alice was removed from state.users
+    // by the previous archive (the in-memory mutation happens AFTER successful
+    // push). Use bob to author the retry — alice would now fail the
+    // registered-author guard before reaching the already-archived check.
     let resp = archive_user(state.clone(), "alice", "bob").await;
     assert!(!resp.ok);
     let err = resp.error.unwrap();
@@ -419,9 +421,9 @@ async fn test_list_archived_users_empty_then_sorted() {
     let resp = archive_user(state.clone(), "bob", "alice").await;
     assert!(resp.ok, "archive bob failed: {:?}", resp.error);
     let resp = archive_user(state.clone(), "alice", "alice").await;
-    // alice is now self-archiving, but she's the dispatcher author. After
-    // archiving herself she's gone from in-memory users; we already pulled
-    // the read-side check before the call. Just assert success.
+    // alice was still in state.users when the archive RPC fired (the check
+    // runs at dispatch time, not after the in-memory mutation). We're past
+    // the read-side gate; just assert the operation succeeded.
     assert!(resp.ok, "archive alice failed: {:?}", resp.error);
 
     let resp = list_archived_users(state.clone()).await;

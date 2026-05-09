@@ -67,6 +67,20 @@ pub enum Event {
         author: String,
         timestamp: String,
     },
+
+    #[serde(rename = "user_archived")]
+    UserArchived {
+        handler: String,
+        archived_by: String,
+        timestamp: String,
+    },
+
+    #[serde(rename = "user_unarchived")]
+    UserUnarchived {
+        handler: String,
+        unarchived_by: String,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,6 +446,40 @@ mod tests {
         );
         assert!(json.contains("\"channel\":\"design\""));
         assert!(json.contains("\"author\":\"lewis\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
+
+    #[test]
+    fn test_user_archived_event_roundtrip() {
+        let ev = Event::UserArchived {
+            handler: "alice".to_string(),
+            archived_by: "lewis".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"user_archived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"handler\":\"alice\""));
+        assert!(json.contains("\"archived_by\":\"lewis\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
+
+    #[test]
+    fn test_user_unarchived_event_roundtrip() {
+        let ev = Event::UserUnarchived {
+            handler: "alice".to_string(),
+            unarchived_by: "bob".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"user_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"handler\":\"alice\""));
+        assert!(json.contains("\"unarchived_by\":\"bob\""));
         assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
     }
 

@@ -1,4 +1,4 @@
-use crate::api::Response;
+use crate::api::{Event, Response};
 use crate::state::SharedState;
 use gitim_core::types::{Handler, UserMeta};
 use gitim_sync::git::GitError;
@@ -98,9 +98,9 @@ pub async fn handle_archive_user(
         }
     }
 
-    // 3. Already-archived check first — if the archive entry exists, the
-    //    "user not found" message would mislead callers; report the actual
-    //    state instead.
+    // Check archive path before active path: if both somehow exist (e.g., split-brain
+    // recovery), the user-actionable state is "already archived"; if only archive exists,
+    // reporting "not found" would mislead the caller.
     let archive_dir = state.repo_root.join("archive/users");
     let archive_path = archive_dir.join(format!("{}.meta.yaml", handler));
     if archive_path.exists() {
@@ -119,6 +119,14 @@ pub async fn handle_archive_user(
     if let Err(e) = std::fs::create_dir_all(&archive_dir) {
         return Response::error(format!("failed to create archive/users dir: {}", e));
     }
+
+    // Commit-tree lock: held across git mv + commit + push so a concurrent
+    // `handle_send` (also takes this lock) can't slip a `git add` + `git
+    // commit` in between our staged mv and our `add_and_commit_as`, which
+    // would bundle the unrelated send into our archive commit. Critical
+    // section is all blocking subprocess calls; std::sync::Mutex guard
+    // must not cross any `.await`.
+    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // 6. git mv users/<h>.meta.yaml → archive/users/<h>.meta.yaml
     let from_rel = format!("users/{}.meta.yaml", handler);
@@ -178,6 +186,12 @@ pub async fn handle_archive_user(
         }
     }
 
+    // Commit tree is stable — drop the lock BEFORE any `.await` below.
+    // std::sync::MutexGuard must not cross await points, and everything
+    // from here on (in-memory users update, event broadcast) is non-mutating
+    // for the commit tree.
+    drop(_commit_guard);
+
     // 9. Drop archived handler from in-memory users list. The post-sync
     //    refresh in state.rs already does this from disk after the next
     //    cycle, but updating now keeps `list_users` consistent before sync.
@@ -185,6 +199,15 @@ pub async fn handle_archive_user(
         let mut users = state.users.write().await;
         users.retain(|u| u != &handler);
     }
+
+    // Broadcast SSE event so subscribers (WebUI / runtime) can react without
+    // waiting for the next sync cycle. Symmetric with Event::CardArchived.
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let _ = state.event_tx.send(Event::UserArchived {
+        handler: handler.clone(),
+        archived_by: author.clone(),
+        timestamp,
+    });
 
     info!("user @{} archived by @{}", handler, author);
 
@@ -215,7 +238,11 @@ pub async fn handle_unarchive_user(
         }
     }
 
-    // 3. Validate archive path exists.
+    // Check archive path before active path: the actionable error in the
+    // common case is "no archive entry to restore". If the active path
+    // already exists too (split-brain), the conflict guard below catches it
+    // — but reporting "archive source missing" first when neither exists
+    // matches the user's mental model of unarchive.
     let archive_path = state
         .repo_root
         .join(format!("archive/users/{}.meta.yaml", handler));
@@ -242,6 +269,14 @@ pub async fn handle_unarchive_user(
     if let Err(e) = std::fs::create_dir_all(&users_dir) {
         return Response::error(format!("failed to create users dir: {}", e));
     }
+
+    // Commit-tree lock: held across git mv + commit + push so a concurrent
+    // `handle_send` (also takes this lock) can't slip a `git add` + `git
+    // commit` in between our staged mv and our `add_and_commit_as`, which
+    // would bundle the unrelated send into our unarchive commit. Critical
+    // section is all blocking subprocess calls; std::sync::Mutex guard
+    // must not cross any `.await`.
+    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // 6. git mv archive → active.
     let from_rel = format!("archive/users/{}.meta.yaml", handler);
@@ -301,6 +336,12 @@ pub async fn handle_unarchive_user(
         }
     }
 
+    // Commit tree is stable — drop the lock BEFORE any `.await` below.
+    // std::sync::MutexGuard must not cross await points, and everything
+    // from here on (in-memory users update, event broadcast) is non-mutating
+    // for the commit tree.
+    drop(_commit_guard);
+
     // 9. Re-add restored handler to in-memory users list (mirror archive's
     //    drop above).
     {
@@ -310,6 +351,15 @@ pub async fn handle_unarchive_user(
             users.sort();
         }
     }
+
+    // Broadcast SSE event so subscribers (WebUI / runtime) can react without
+    // waiting for the next sync cycle. Symmetric with Event::CardUnarchived.
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let _ = state.event_tx.send(Event::UserUnarchived {
+        handler: handler.clone(),
+        unarchived_by: author.clone(),
+        timestamp,
+    });
 
     info!("user @{} unarchived by @{}", handler, author);
 
