@@ -25,12 +25,3 @@
 **Context:** Phase 3 eng-review (2026-04-20) 产出。触发信号:项目受众扩大 / 公网人气起来 / maintainer 机器被定向攻击的证据 / 出现 sigstore 类本地友好的方案。选型推荐优先 `minisign` (单文件 key,tiny binary);GPG 为备选 (复杂度高,但用户生态更熟)。
 **Depends on:** 受众量 signal 或攻击证据;公钥首次分发方案确定。
 **Added:** 2026-04-20 via /plan-eng-review (cross-compile-release review)
-
-### release.sh / install.sh shellcheck lint 机制
-**What:** `release.sh` 在 cross-compile 改造后长到 ~200 行 (4 target loop + SHA 生成 + docker smoke test + fail-fast),`install.sh` 也变大。加 `shellcheck` lint 作为 release 前 sanity check,或引入 `bats` 做最小 shell 集成测试。
-**Why:** 长 shell 脚本的经典坑 (quoting 缺失、unset var、subshell 环境泄漏、`set -e` 在 pipeline 中失效等) 只有 lint 能抓。现在改动靠人工 review,量涨之后会漏。
-**Pros:** 便宜,shellcheck 一条命令;CI 友好;lint 修复通常小改动。
-**Cons:** 可能和现有脚本风格有冲突 (需要一次性全面修);学习曲线低。
-**Context:** Phase 3 eng-review (2026-04-20) 产出。本次 plan 选择 defer,因为不想在 cross-compile feature scope 内扩散。未来 release.sh 再做大改时顺带引入。
-**Depends on:** 无。任何时候都能单独做。
-**Added:** 2026-04-20 via /plan-eng-review (cross-compile-release review)
