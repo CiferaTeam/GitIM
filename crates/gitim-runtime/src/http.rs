@@ -1102,6 +1102,55 @@ async fn im_list_archived_channels(
     api_response_to_json(client.list_archived_channels().await)
 }
 
+async fn im_dm_archive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, peer)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.archive_dm(&peer).await)
+}
+
+async fn im_dm_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, peer)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_dm(&peer).await)
+}
+
+async fn im_list_archived_dms(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_dms().await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -3466,6 +3515,9 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/channels/archived", get(im_list_archived_channels))
         .route("/im/channels/{name}/archive", post(im_channel_archive))
         .route("/im/channels/{name}/unarchive", post(im_channel_unarchive))
+        .route("/im/dm/archived", get(im_list_archived_dms))
+        .route("/im/dm/{peer}/archive", post(im_dm_archive))
+        .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))

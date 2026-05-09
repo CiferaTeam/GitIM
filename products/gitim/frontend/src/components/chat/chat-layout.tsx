@@ -62,6 +62,7 @@ export function ChatLayout() {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
+  const archivedDms = useChatStore((s) => s.archivedDms);
   const currentUser = useChatStore((s) => s.currentUser);
   const isGuest = useChatStore((s) => s.isGuest);
   const users = useChatStore((s) => s.users);
@@ -103,14 +104,15 @@ export function ChatLayout() {
   const workspaceKey = activeWorkspace
     ? workspaceIdentity(mode, activeWorkspace)
     : null;
-  // An archived channel is one the user opens from the Archived section — it
-  // never shows up in the active `channels` list. Read-only view: message
+  // An archived channel/DM is one the user opens from an Archived section —
+  // it never shows up in the active `channels` list. Read-only view: message
   // fetch already works (daemon's read handler falls back to archive/
   // automatically), but writes must be blocked.
   const isArchivedView =
     !!currentChannel &&
     !currentChannelData &&
-    archivedChannels.some((c) => c.name === currentChannel);
+    (archivedChannels.some((c) => c.name === currentChannel) ||
+      archivedDms.some((c) => c.name === currentChannel));
   const showJoinBanner =
     !isArchivedView &&
     !!currentChannelData &&
@@ -486,7 +488,19 @@ export function ChatLayout() {
         {isArchivedView && (
           <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
             <span className="text-xs text-muted-foreground">
-              #{currentChannel} is archived — read only. Unarchive from the sidebar to resume the conversation.
+              {(() => {
+                const isDm =
+                  !!currentChannel &&
+                  archivedDms.some((c) => c.name === currentChannel);
+                if (isDm && currentChannel) {
+                  const peer =
+                    currentChannel
+                      .split("--")
+                      .find((p) => p !== currentUser) ?? currentChannel;
+                  return `DM with @${peer} is archived — read only. Unarchive from the sidebar to resume the conversation.`;
+                }
+                return `#${currentChannel} is archived — read only. Unarchive from the sidebar to resume the conversation.`;
+              })()}
             </span>
           </div>
         )}

@@ -14,6 +14,11 @@ interface ChatState {
   channels: Channel[];
   /** Archived channels — populated by explicit fetch, not by /im/channels poll. */
   archivedChannels: Channel[];
+  /** Archived DMs — same fetch-on-expand pattern as `archivedChannels`. The
+   * stored entries are Channel-shaped (kind: "dm", name = sorted-pair stem)
+   * so the existing sidebar / chat-layout code paths keyed off `name` work
+   * unchanged. */
+  archivedDms: Channel[];
   currentChannel: string | null;
   messages: Message[];
   replyTo: Message | null;
@@ -29,10 +34,15 @@ interface ChatState {
   setUsers: (u: string[]) => void;
   setChannels: (c: Channel[]) => void;
   setArchivedChannels: (c: Channel[]) => void;
+  setArchivedDms: (c: Channel[]) => void;
   /** Optimistic: move a channel from `channels` → `archivedChannels`. */
   markChannelArchived: (name: string) => void;
   /** Optimistic: move a channel from `archivedChannels` → `channels`. */
   markChannelUnarchived: (name: string) => void;
+  /** Optimistic: move a DM from `channels` → `archivedDms` (matched by name). */
+  markDmArchived: (name: string) => void;
+  /** Optimistic: move a DM from `archivedDms` → `channels` (kind normalized). */
+  markDmUnarchived: (name: string) => void;
   selectChannel: (name: string) => void;
   incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
@@ -62,6 +72,7 @@ export const useChatStore = create<ChatState>((set) => ({
   users: [],
   channels: [],
   archivedChannels: [],
+  archivedDms: [],
   currentChannel: null,
   messages: [],
   replyTo: null,
@@ -103,6 +114,15 @@ export const useChatStore = create<ChatState>((set) => ({
       })),
     }),
 
+  setArchivedDms: (newDms) =>
+    set({
+      archivedDms: newDms.map((c) => ({
+        ...c,
+        unreadCount: c.unreadCount ?? 0,
+        hasMention: c.hasMention ?? false,
+      })),
+    }),
+
   markChannelArchived: (name) =>
     set((state) => {
       const channel = state.channels.find((c) => c.name === name);
@@ -129,6 +149,28 @@ export const useChatStore = create<ChatState>((set) => ({
           ? [...state.channels, { ...channel, kind: "channel" as const }]
           : state.channels;
       return { channels: nextChannels, archivedChannels: nextArchived };
+    }),
+
+  markDmArchived: (name) =>
+    set((state) => {
+      const dm = state.channels.find((c) => c.name === name && c.kind === "dm");
+      const nextChannels = state.channels.filter((c) => c.name !== name);
+      const alreadyArchived = state.archivedDms.some((c) => c.name === name);
+      const nextArchived =
+        dm && !alreadyArchived ? [...state.archivedDms, dm] : state.archivedDms;
+      return { channels: nextChannels, archivedDms: nextArchived };
+    }),
+
+  markDmUnarchived: (name) =>
+    set((state) => {
+      const dm = state.archivedDms.find((c) => c.name === name);
+      const nextArchived = state.archivedDms.filter((c) => c.name !== name);
+      const alreadyActive = state.channels.some((c) => c.name === name);
+      const nextChannels =
+        dm && !alreadyActive
+          ? [...state.channels, { ...dm, kind: "dm" as const }]
+          : state.channels;
+      return { channels: nextChannels, archivedDms: nextArchived };
     }),
 
   selectChannel: (name) =>
@@ -243,6 +285,7 @@ export const useChatStore = create<ChatState>((set) => ({
       users: [],
       channels: [],
       archivedChannels: [],
+      archivedDms: [],
       currentChannel: null,
       messages: [],
       replyTo: null,

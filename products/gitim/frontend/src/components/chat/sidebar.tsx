@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, ArchiveRestore, ChevronRight, Pin, Plus, Search } from "lucide-react";
+import { Hash, AtSign, Archive, ArchiveRestore, ChevronRight, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
@@ -158,11 +158,15 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
+  const archivedDms = useChatStore((s) => s.archivedDms);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
   const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
+  const setArchivedDms = useChatStore((s) => s.setArchivedDms);
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
+  const markDmArchived = useChatStore((s) => s.markDmArchived);
+  const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
   const activeWorkspace = activeSlug
     ? workspaces.find((workspace) => workspace.slug === activeSlug)
     : undefined;
@@ -172,6 +176,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedDmsOpen, setArchivedDmsOpen] = useState(false);
+  const [archivedDmsLoading, setArchivedDmsLoading] = useState(false);
   const [knownAgentIds, setKnownAgentIds] = useState<Set<string>>(
     () => readKnownAgentIds(activeWorkspaceKey),
   );
@@ -393,6 +399,93 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       }
     } catch {
       /* refresh is best-effort; markChannelUnarchived already seeded the entry */
+    }
+  }
+
+  function peerFromDmName(name: string): string | null {
+    const parts = name.split("--");
+    if (parts.length !== 2) return null;
+    if (parts[0] === currentUser) return parts[1];
+    if (parts[1] === currentUser) return parts[0];
+    return null;
+  }
+
+  async function handleToggleArchivedDmsSection() {
+    const next = !archivedDmsOpen;
+    setArchivedDmsOpen(next);
+    // Always refetch on expand — same rationale as channels: the archive list
+    // can change out-of-band (peer archives, CLI archive, etc.) and a session
+    // cache would hide those events.
+    if (next) {
+      if (!activeSlug) return;
+      setArchivedDmsLoading(true);
+      try {
+        const res = await client.listArchivedDms(activeSlug);
+        if (res.ok && res.data) {
+          // Synthesize Channel-shaped entries keyed by sorted-pair stem so the
+          // existing chat-layout / sidebar code paths (which key on `name`)
+          // work without special casing.
+          const dms: Channel[] = res.data.dms.map((entry) => {
+            const sorted = [currentUser, entry.peer].sort();
+            return {
+              name: `${sorted[0]}--${sorted[1]}`,
+              kind: "dm" as const,
+              unreadCount: 0,
+              hasMention: false,
+              members: sorted,
+            };
+          });
+          setArchivedDms(dms);
+        } else {
+          toast.error(
+            `Failed to load archived DMs: ${res.error ?? "unknown"}`,
+          );
+        }
+      } finally {
+        setArchivedDmsLoading(false);
+      }
+    }
+  }
+
+  async function handleArchiveDm(dmName: string) {
+    if (!activeSlug) return;
+    const peer = peerFromDmName(dmName);
+    if (!peer) {
+      toast.error(`Cannot archive DM: not a participant in ${dmName}`);
+      return;
+    }
+    const res = await client.archiveDm(activeSlug, peer);
+    if (!res.ok) {
+      toast.error(`Failed to archive DM with @${peer}: ${res.error ?? "unknown"}`);
+      return;
+    }
+    markDmArchived(dmName);
+    toast.success(`DM with @${peer} archived`);
+  }
+
+  async function handleUnarchiveDm(dmName: string) {
+    if (!activeSlug) return;
+    const peer = peerFromDmName(dmName);
+    if (!peer) {
+      toast.error(`Cannot unarchive DM: not a participant in ${dmName}`);
+      return;
+    }
+    const res = await client.unarchiveDm(activeSlug, peer);
+    if (!res.ok) {
+      toast.error(`Failed to unarchive DM with @${peer}: ${res.error ?? "unknown"}`);
+      return;
+    }
+    markDmUnarchived(dmName);
+    toast.success(`DM with @${peer} restored`);
+    // Refresh channels list so the restored DM picks up authoritative metadata
+    // (members) the same way channel unarchive does.
+    try {
+      const chRes = await client.channels(activeSlug);
+      if (chRes.ok && chRes.data) {
+        setChannels(chRes.data.channels as Channel[]);
+      }
+    } catch {
+      /* best-effort refresh */
     }
   }
 
@@ -626,6 +719,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
           {myDmChannels.map((ch) => {
             const label = dmDisplayName(ch, currentUser);
+            const peer = peerFromDmName(ch.name);
             return (
               <ChannelItem
                 key={ch.name}
@@ -640,6 +734,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 testId="sidebar-dm-item"
                 onClick={() => onChannelSelect(ch.name)}
                 onTogglePin={() => handleTogglePinnedConversation(ch)}
+                archiveLabel={peer ? `Archive DM with @${peer}` : undefined}
+                onArchive={peer ? () => handleArchiveDm(ch.name) : undefined}
               />
             );
           })}
@@ -652,6 +748,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           )}
           {otherDmChannels.map((ch) => {
             const label = dmDisplayName(ch, currentUser);
+            const peer = peerFromDmName(ch.name);
             return (
               <ChannelItem
                 key={ch.name}
@@ -666,9 +763,82 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 testId="sidebar-dm-item"
                 onClick={() => onChannelSelect(ch.name)}
                 onTogglePin={() => handleTogglePinnedConversation(ch)}
+                archiveLabel={peer ? `Archive DM with @${peer}` : undefined}
+                onArchive={peer ? () => handleArchiveDm(ch.name) : undefined}
               />
             );
           })}
+        </div>
+
+        {/* Archived DMs section — collapsed by default; lazy-loaded on expand. */}
+        <div className="pt-2 mt-2 border-t border-border/60 shrink-0">
+          <button
+            type="button"
+            onClick={handleToggleArchivedDmsSection}
+            className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-text-muted hover:text-text-secondary hover:bg-surface/40 transition-colors"
+            aria-expanded={archivedDmsOpen}
+          >
+            <ChevronRight
+              className={[
+                "size-3 transition-transform duration-150",
+                archivedDmsOpen ? "rotate-90" : "",
+              ].join(" ")}
+            />
+            <span className="uppercase font-semibold tracking-wider">Archived DMs</span>
+            {archivedDms.length > 0 && (
+              <span className="ml-1 text-text-faint font-mono">
+                {archivedDms.length}
+              </span>
+            )}
+          </button>
+          {archivedDmsOpen && (
+            <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
+              {archivedDms.length === 0 ? (
+                <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                  {archivedDmsLoading ? "Loading…" : "No archived DMs"}
+                </li>
+              ) : (
+                archivedDms.map((dm) => {
+                  const isActive = currentChannel === dm.name;
+                  const peer = peerFromDmName(dm.name);
+                  const label = peer ?? dm.name;
+                  return (
+                    <li
+                      key={dm.name}
+                      data-testid="sidebar-archived-dm-item"
+                      className={[
+                        "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
+                        isActive
+                          ? "bg-surface/60 text-foreground opacity-100"
+                          : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
+                      ].join(" ")}
+                      title="Archived — read only. Click to view; use the restore button to unarchive."
+                      onClick={() => onChannelSelect(dm.name)}
+                    >
+                      <AtSign className="size-3 text-text-faint shrink-0" />
+                      <span className="truncate flex-1">{label}</span>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        title={
+                          peer
+                            ? `Unarchive DM with @${peer}`
+                            : `Unarchive DM ${dm.name}`
+                        }
+                        className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleUnarchiveDm(dm.name);
+                        }}
+                      >
+                        <ArchiveRestore className="size-3" />
+                      </Button>
+                    </li>
+                  );
+                })
+              )}
+            </ul>
+          )}
         </div>
       </div>
     </div>
@@ -687,6 +857,11 @@ interface ChannelItemProps {
   testId: string;
   onClick: () => void;
   onTogglePin: () => void;
+  /** Optional archive action — shows an Archive icon button next to the
+   *  pin button on hover. Used by DMs in this revision; channel archive
+   *  has its own dedicated UI in the archived section. */
+  archiveLabel?: string;
+  onArchive?: () => void;
 }
 
 function ChannelItem({
@@ -701,6 +876,8 @@ function ChannelItem({
   testId,
   onClick,
   onTogglePin,
+  archiveLabel,
+  onArchive,
 }: ChannelItemProps) {
   const pinButtonLabel = pinned ? unpinLabel : pinLabel;
   return (
@@ -751,6 +928,22 @@ function ChannelItem({
       >
         <Pin className={["size-3", pinned ? "fill-current" : ""].join(" ")} />
       </Button>
+      {onArchive && archiveLabel && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={archiveLabel}
+          title={archiveLabel}
+          onClick={(e) => {
+            e.stopPropagation();
+            onArchive();
+          }}
+          className="mr-1 text-text-faint opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          <Archive className="size-3" />
+        </Button>
+      )}
     </li>
   );
 }

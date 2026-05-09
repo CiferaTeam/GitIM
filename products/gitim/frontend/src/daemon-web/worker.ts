@@ -100,6 +100,9 @@ const handler: Record<
     handlers.unarchiveChannel(channel as string),
   listArchivedChannels: () =>
     handlers.listArchivedChannels(),
+  archiveDm: (peer: unknown) => handlers.archiveDm(peer as string),
+  unarchiveDm: (peer: unknown) => handlers.unarchiveDm(peer as string),
+  listArchivedDms: () => handlers.listArchivedDms(),
   listCards: (query?: unknown) =>
     handlers.listCards((query ?? {}) as handlers.ListCardsQuery),
   createCard: (channel: unknown, title: unknown, opts?: unknown) =>

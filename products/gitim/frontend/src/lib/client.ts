@@ -17,7 +17,12 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
-import type { Backend, CardBackend, ChannelArchiveBackend } from "./backend";
+import type {
+  Backend,
+  CardBackend,
+  ChannelArchiveBackend,
+  DmArchiveBackend,
+} from "./backend";
 import { HttpBackend, LocalBackend } from "./backend";
 import {
   clearAllBrowserWorkspaces,
@@ -210,6 +215,10 @@ function localCardBackend(): CardBackend {
 
 function localChannelArchiveBackend(): ChannelArchiveBackend {
   return activeBackend as Backend & ChannelArchiveBackend;
+}
+
+function localDmArchiveBackend(): DmArchiveBackend {
+  return activeBackend as Backend & DmArchiveBackend;
 }
 
 function wsBase(slug: string): string {
@@ -823,6 +832,59 @@ export async function listArchivedChannels(
     >;
   }
   const res = await fetch(`${wsBase(slug)}/im/channels/archived`);
+  return await res.json();
+}
+
+export async function archiveDm(
+  slug: string,
+  peer: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return localDmArchiveBackend().archiveDm(peer);
+  }
+  const res = await fetch(
+    `${wsBase(slug)}/im/dm/${encodeURIComponent(peer)}/archive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function unarchiveDm(
+  slug: string,
+  peer: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    void slug;
+    return localDmArchiveBackend().unarchiveDm(peer);
+  }
+  const res = await fetch(
+    `${wsBase(slug)}/im/dm/${encodeURIComponent(peer)}/unarchive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+/**
+ * Each row is `{ peer, dm_pair_stem }` — the stem is the on-disk filename
+ * (`<min>--<max>`) so we can synthesize a Channel-shaped record without
+ * re-deriving the sort. Caller participation filtering is the daemon's job.
+ */
+export interface ArchivedDmEntry {
+  peer: string;
+  dm_pair_stem: string;
+}
+
+export async function listArchivedDms(
+  slug: string,
+): Promise<ApiResponse<{ dms: ArchivedDmEntry[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    return localDmArchiveBackend().listArchivedDms() as Promise<
+      ApiResponse<{ dms: ArchivedDmEntry[] }>
+    >;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/dm/archived`);
   return await res.json();
 }
 

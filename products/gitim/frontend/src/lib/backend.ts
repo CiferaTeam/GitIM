@@ -121,6 +121,12 @@ export interface ChannelArchiveBackend {
   listArchivedChannels(): Promise<ApiResponse>;
 }
 
+export interface DmArchiveBackend {
+  archiveDm(peer: string): Promise<ApiResponse>;
+  unarchiveDm(peer: string): Promise<ApiResponse>;
+  listArchivedDms(): Promise<ApiResponse>;
+}
+
 export class HttpBackend implements Backend {
   private baseUrl: () => string;
 
@@ -370,6 +376,15 @@ export class LocalBackend implements Backend {
   }
   listArchivedChannels(): Promise<ApiResponse> {
     return this.call("listArchivedChannels");
+  }
+  archiveDm(peer: string): Promise<ApiResponse> {
+    return this.call("archiveDm", peer);
+  }
+  unarchiveDm(peer: string): Promise<ApiResponse> {
+    return this.call("unarchiveDm", peer);
+  }
+  listArchivedDms(): Promise<ApiResponse> {
+    return this.call("listArchivedDms");
   }
   createCard(
     channel: string,
