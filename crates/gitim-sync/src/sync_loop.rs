@@ -76,10 +76,10 @@ impl AuthCircuit {
 /// Start the sync loop with push-first strategy.
 ///
 /// - `commit_lock`: serializes every mutation of the local commit tree. Held
-///   only around `git rebase` and the conflict-resolution write+commit
-///   sequence — never around the network-only `fetch`/`push`. The daemon's
-///   write handlers hold the same lock around their own commits, so `rebase`
-///   is guaranteed never to run while a handler is mid-append.
+///   around local unpushed snapshots, `git rebase`, and the conflict-resolution
+///   write+commit sequence — never around the network-only `fetch`/`push`. The
+///   daemon's write handlers hold the same lock around their own commits, so
+///   `rebase` is guaranteed never to run while a handler is mid-append.
 /// - `on_pushed`: called after a successful push (all pending messages are now remote)
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
@@ -328,6 +328,12 @@ where
             Ok(()) => {}
         }
 
+        // Local snapshot + rebase mutates the local commit tree; hold
+        // commit_lock across the whole block so handler writes never interleave
+        // with the snapshot or tree mutation. Push happens *after* the guard
+        // drops so a slow remote can't stall handler writers.
+        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+
         // Capture local additions BEFORE attempting rebase
         let local_additions = match repo.diff_unpushed("*.thread") {
             Ok(v) => v,
@@ -359,12 +365,6 @@ where
                 local_boards.insert(rel_path.clone(), content);
             }
         }
-
-        // Rebase + optional conflict resolution mutates the local commit
-        // tree; hold commit_lock across the whole block so handler writes
-        // never interleave with it. Push happens *after* the guard drops so
-        // a slow remote can't stall handler writers.
-        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
 
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
