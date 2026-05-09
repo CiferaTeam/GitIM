@@ -279,6 +279,12 @@ pub struct RuntimeState {
     /// go through `create_router()` / `create_router_with_exe()` leave the
     /// default; the E2E test overrides it before driving the async phase.
     pub listen_port: u16,
+    /// Stable device-bound UUID for this runtime install. Once-write at
+    /// startup by `bin/runtime.rs::run_shell()` from
+    /// `user_config::ensure_runtime_id`; read-only thereafter. Empty
+    /// string when constructed via `Default::default()` for tests that
+    /// don't go through the boot path. See docs/plans/runtime-id/00-design.md.
+    pub runtime_id: String,
 }
 
 impl RuntimeState {
@@ -324,6 +330,7 @@ impl Default for RuntimeState {
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
             listen_port: DEFAULT_PORT,
+            runtime_id: String::new(),
         }
     }
 }
