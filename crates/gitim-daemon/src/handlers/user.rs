@@ -67,3 +67,27 @@ pub async fn handle_register_user(
     };
     Response::success(serde_json::to_value(payload).unwrap())
 }
+
+pub async fn handle_archive_user(
+    _state: SharedState,
+    _handler: String,
+    _author: String,
+) -> Response {
+    Response::error("not yet implemented (A.2 pending)")
+}
+
+pub async fn handle_unarchive_user(
+    _state: SharedState,
+    _handler: String,
+    _author: String,
+) -> Response {
+    Response::error("not yet implemented (A.2 pending)")
+}
+
+pub async fn handle_list_archived_users(_state: SharedState) -> Response {
+    Response::error("not yet implemented (A.2 pending)")
+}
+
+pub async fn handle_depart_user(_state: SharedState, _handler: String) -> Response {
+    Response::error("not yet implemented (A.4 pending)")
+}
