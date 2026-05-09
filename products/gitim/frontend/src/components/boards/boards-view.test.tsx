@@ -6,6 +6,39 @@ import { createRoot, type Root } from "react-dom/client";
 const listBoardsMock = vi.hoisted(() => vi.fn());
 const showBoardMock = vi.hoisted(() => vi.fn());
 
+const testEnv = vi.hoisted(() => {
+  function createMemoryStorage(): Storage {
+    const values = new Map<string, string>();
+    return {
+      get length() {
+        return values.size;
+      },
+      clear() {
+        values.clear();
+      },
+      getItem(key: string) {
+        return values.get(key) ?? null;
+      },
+      key(index: number) {
+        return Array.from(values.keys())[index] ?? null;
+      },
+      removeItem(key: string) {
+        values.delete(key);
+      },
+      setItem(key: string, value: string) {
+        values.set(key, value);
+      },
+    };
+  }
+
+  const localStorage = createMemoryStorage();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: localStorage,
+  });
+  return { localStorage };
+});
+
 vi.mock("@/lib/client", () => ({
   listBoards: listBoardsMock,
   showBoard: showBoardMock,
@@ -67,6 +100,7 @@ describe("BoardsView", () => {
   let root: Root | null = null;
 
   beforeEach(() => {
+    testEnv.localStorage.clear();
     listBoardsMock.mockReset();
     showBoardMock.mockReset();
     useBoardStore.getState().resetForWorkspaceSwitch();
