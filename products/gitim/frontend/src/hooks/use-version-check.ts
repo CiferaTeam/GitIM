@@ -186,10 +186,14 @@ export function useVersionCheck(): VersionCheckResult {
     if (restartingRef.current) return;
     restartingRef.current = true;
     setUpdateError(null);
+    setIsRestarting(false);
+    setIsUpdating(true);
 
     const accept = await updateAndRestart();
     if (!accept.ok || !accept.data) {
       restartingRef.current = false;
+      setIsUpdating(false);
+      setIsRestarting(false);
       // `already_latest` is an info signal, not a failure: our "latest"
       // state was stale. Refresh silently so hasUpdate corrects itself.
       if (accept.error_code === "already_latest") {
@@ -204,7 +208,6 @@ export function useVersionCheck(): VersionCheckResult {
     }
 
     const targetVersion = accept.data.target_version;
-    setIsUpdating(true);
 
     const startedAt = Date.now();
     let sawDisconnect = false;
