@@ -23,12 +23,6 @@
 **Context:** 见 `docs/plans/group-chat-invite-members/00-requirements.md` Perf P1。
 **Added:** 2026-04-17 via /plan-eng-review
 
-### gitim-runtime HTTP 层 integration test
-**What:** `crates/gitim-runtime/src/http.rs` 加 integration test，覆盖 `/im/create-channel` 带 `invitees`、`/im/join` 带 `targets`、以及两个 endpoint 的 backward compat（旧请求无新字段）。
-**Why:** 群聊邀请 feature 的 HTTP 层只是 2-行透传，风险低，所以本期 defer 测试。但历史 bug（`/im/join` 把 targets 硬编码为 `&[]`）正是这种 regression。daemon 测试覆盖不到 HTTP 层布线。
-**Context:** Phase 6 code review (Claude) Important-I2. runtime tests/ 目录已有 provision / poller 模式可参考。**2026-04-18 update**：multi-workspace 改造顺手补了 `tests/http_workspaces.rs` + `tests/multi_workspace.rs`(共 +24 tests),workspace CRUD + SSE 层已覆盖。剩余 `/im/*` `/agents/*` nested 路由的端到端 integration 覆盖仍缺。
-**Added:** 2026-04-17 via /plan-eng-review (Phase 6 finding)
-
 ### WebUI `activeSlug` 失联时的自动 fallback
 **What:** `products/gitim/frontend/src/hooks/use-workspace-store.ts`: 当 `activeSlug` 引用的 workspace 被其它客户端(或另一台机)删除后,poll 轮询 / SSE 重连发现 404/stream 关闭时,应自动 trigger `fetchAll()` 并切到第一个可用 workspace。当前仅在 `fetchAll` 内部修复(启动 + 本地 create/remove 时触发),线上 workspace 消失时 UI 卡住。
 **Why:** 多设备或多 runtime 实例场景下 workspace 列表会异步变化。
