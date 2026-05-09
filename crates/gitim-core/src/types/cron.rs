@@ -15,10 +15,17 @@ use thiserror::Error;
 
 use super::handler::Handler;
 
-/// Hard cap on prompt size — 8 KiB. Prompts get committed to git on every
-/// fire; an oversized prompt would spam the audit log and stress agent
-/// context windows. The limit is generous enough for a paragraph-length
-/// instruction with a few example links.
+/// Hard cap on prompt size — 8 KiB measured in **bytes**, not characters.
+/// Prompts get committed to git on every fire; an oversized prompt would
+/// spam the audit log and stress agent context windows. The limit is
+/// generous enough for a paragraph-length instruction with a few example
+/// links.
+///
+/// Byte length matters for multi-byte content: a CJK character takes 3
+/// bytes in UTF-8 and most emoji take 4, so an 8 KiB Chinese prompt is
+/// roughly ~2,700 characters and an emoji-heavy prompt is even less. If
+/// you're hitting the cap with what looks like a short prompt, that's
+/// why — it's the byte budget, not the character count.
 pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
 
 /// Current schema version. Stored in spec.yaml so older daemons can
@@ -33,14 +40,14 @@ pub enum CronSpecError {
     InvalidSchedule(String),
     #[error("invalid IANA timezone: {0}")]
     InvalidTimezone(String),
-    #[error("invalid target handler: {0}")]
-    InvalidTarget(String),
     #[error("prompt cannot be empty")]
     EmptyPrompt,
     #[error("prompt exceeds {} bytes (got {len})", MAX_PROMPT_BYTES)]
     OversizedPrompt { len: usize },
     #[error("invalid created_at timestamp: {0}")]
     InvalidCreatedAt(String),
+    #[error("created_at must be UTC (end with 'Z'), got: {0}")]
+    CreatedAtNotUtc(String),
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 }
@@ -106,11 +113,9 @@ impl CronSpec {
         }
 
         // Handler types validate themselves via TryFrom<String> on deserialize,
-        // but if a caller constructed a CronSpec programmatically with a string
-        // that bypassed Handler::new, we'd never get here. Validation of target
-        // is therefore implicit — if Handler exists, it's well-formed.
-        // (We keep InvalidTarget in the error enum for the daemon-side check
-        // that target exists in users/, which is not the spec's job.)
+        // so if `target: Handler` exists at all it's well-formed. Daemon-side
+        // existence checks (does `users/<target>.meta.yaml` exist) live in the
+        // handler, not the spec — that's a runtime fact, not a schema fact.
 
         if self.prompt.is_empty() {
             return Err(CronSpecError::EmptyPrompt);
@@ -123,6 +128,15 @@ impl CronSpec {
 
         DateTime::parse_from_rfc3339(&self.created_at)
             .map_err(|e| CronSpecError::InvalidCreatedAt(format!("{}: {e}", self.created_at)))?;
+
+        // UTC-only invariant: Wave 2's engine derives `<theoretical_ts>.thread`
+        // filenames directly from these timestamps for idempotency, so mixing
+        // offsets here ("2026-05-09T10:00:00+08:00" vs "2026-05-09T02:00:00Z"
+        // — same instant, different filenames) would let two clones fire the
+        // same job twice. Reject anything that doesn't end with Z.
+        if !self.created_at.ends_with('Z') {
+            return Err(CronSpecError::CreatedAtNotUtc(self.created_at.clone()));
+        }
 
         Ok(())
     }
@@ -348,6 +362,36 @@ created_at: "2026-05-09T10:00:00Z"
 "#;
         let err = CronSpec::from_yaml(yaml).unwrap_err();
         assert!(matches!(err, CronSpecError::InvalidVersion(2)));
+    }
+
+    #[test]
+    fn accept_created_at_utc_z() {
+        // A trailing 'Z' is the only accepted form; this is the same
+        // string the existing tests use, but called out explicitly.
+        let spec = CronSpec::from_yaml(&minimal_yaml()).unwrap();
+        assert!(spec.created_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn reject_created_at_non_utc_offset() {
+        // Wave 2's engine derives thread filenames from these timestamps
+        // for idempotency. Same instant under a different offset would
+        // hash to a different filename and let the same fire happen
+        // twice across clones — reject anything but UTC.
+        let yaml = r#"
+schedule: "0 9 * * 1"
+target: alice
+prompt: "x"
+created_by: alice
+created_at: "2026-05-09T10:00:00+08:00"
+"#;
+        let err = CronSpec::from_yaml(yaml).unwrap_err();
+        match err {
+            CronSpecError::CreatedAtNotUtc(s) => {
+                assert!(s.contains("+08:00"), "echoed value: {s}");
+            }
+            other => panic!("expected CreatedAtNotUtc, got {other:?}"),
+        }
     }
 
     fn spec_with(schedule: &str, timezone: Option<&str>) -> CronSpec {

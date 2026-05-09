@@ -113,6 +113,8 @@ loop every 60s:
 ### 选库：croner
 Rust `cron` crate timezone 弱（基本只 UTC + local）；`croner` crate 原生支持 IANA 时区 + DST。`chrono`（runtime 已依赖）作为时间类型基础。新增 dep：`croner`。
 
+DST 行为（记下来防止未来读者以为是 bug）：croner 对 spring-forward gap 里的 fixed-time job 是 **snap to end of gap**，不 skip。例如美国 LA 在 2026-03-08 跳过 02:00–03:00 那一小时，cron `30 2 * * *` 那天会 fire 在 03:00 LA（PDT），不是 skip 整天。这是 croner 默认行为，gitim-core 的 `dst_forward_no_double_fire` 测试 assert 的就是这个语义。
+
 ### Catch-up 策略：不补跑
 runtime/daemon 当时关机错过的 fire = 错过。补跑会让重启后瞬间炸一堆任务（烧 token / 撑爆 context）。
 
