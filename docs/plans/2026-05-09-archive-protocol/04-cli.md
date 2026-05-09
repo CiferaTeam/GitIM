@@ -73,10 +73,9 @@
 
 **与 WebUI burn 的关系**:
 - WebUI 走 runtime POST /agents/burn(B.1),runtime 编排 abort loop / kill daemon / 调 depart_user / rm clone
-- burn-self 直接走 daemon depart_user,不经 runtime — daemon 完成所有 git 写入,clone dir 由谁清?
-- **答**:burn-self 不直接清 clone dir。daemon 完成 depart_user 后,agent loop 下次 poll 会发现自己的 user entry 已 archived → 自然 fail → runtime agent_loop 检测 fail → backoff(参考 memory `project_runtime_daemon_no_self_heal.md` — agent_loop poll 失败只 backoff)。所以 self-burn 后 agent **不会被自动清**(这是 known 缺口)
-- **暂定 v1 接受**:agent self-burn 完成后,user 看到 agent 状态变 idle / failing(因为它自己已 depart),手动从 WebUI 触发 burn 完成 cleanup runtime side。或者 runtime 加一个 post-poll-fail 检测:如果 ctx.agents 里某 agent 的 handler 已在 archive/users/,触发 cleanup
-- 这个缺口 → 加到开放问题(本文件末尾)
+- burn-self 直接走 daemon depart_user,不经 runtime
+- runtime cleanup 由 **B.4(self-departed 自愈)**接管:agent's daemon 在下次 poll 入口 stat archive/users/<self>.meta.yaml,存在 → return `self_departed` error code → runtime agent_loop 识别后自动触发 cleanup(rm clone / 删 hermes profile / 从 ctx.agents 移除 / SSE 通知)
+- 两路 cleanup 结果 idempotent 一致
 
 **验收**:
 - burn-self 调用 daemon 成功执行 depart_user
@@ -93,15 +92,7 @@
 
 ---
 
-## 开放问题(self-burn 引出)
-
-**self-burn 后 runtime side 的 cleanup**:
-- agent self-burn 调用 daemon 完成 depart,但 runtime 的 ctx.agents / clone dir 不被自动清理(daemon 没法跨进程通知 runtime)
-- 候选方案:
-  - A) runtime agent_loop 检测 poll fail + handler 已在 archive/users/ → 自动 burn-cleanup(rm clone, ctx.agents 删除)
-  - B) 接受 user 手动到 WebUI 触发 burn 完成 cleanup(操作冗余但简单)
-  - C) burn-self 同时通知 runtime(需要 agent → runtime 反向 RPC,目前没有)
-- **倾向 A**(runtime 自愈最直观),但实现成本中等 — 留 plan-eng-review / 实施时定
+## 开放问题
 
 **event token 命名**:`leave-workspace` vs `depart` vs 别 — 实施 A.4 时定,只在 daemon / prompt / spec 文档里出现一处约定,改起来零成本
 

@@ -68,6 +68,49 @@
 
 ---
 
+## B.4 — agent_loop self-departed 自愈
+
+**背景**:agent 调 `gitim burn-self`(C.3)→ daemon 完成 depart_user → daemon process 仍在跑,但 alice 自己的 user entry 已经 archived。runtime 的 agent_loop 在 polling alice 的 daemon,目前不会自动发现"alice 已 departed"。这个 task 给 runtime 加自愈检测,让 self-burn 路径不需要 user 再去 WebUI 手动触发 cleanup。
+
+**文件**:
+- [crates/gitim-daemon/src/handlers/poll.rs](../../../crates/gitim-daemon/src/handlers/poll.rs)
+- [crates/gitim-runtime/src/agent_loop.rs](../../../crates/gitim-runtime/src/agent_loop.rs)
+
+**改动**:
+
+daemon 侧(每个 agent 的 daemon 都有 self-handler 上下文):
+- handle_poll 入口加 self-departed 检测:`stat archive/users/<self_handler>.meta.yaml`
+- 存在 → return error response with `error_code: "self_departed"` + message "agent self-departed via burn-self"
+- 检测在 handler 入口最早处,避免无谓的后续 IO
+
+runtime 侧:
+- agent_loop poll 错误处理路径识别 `error_code == "self_departed"`
+- 命中时:**不**走常规 backoff retry,改为触发 self-cleanup
+  - 复用 [crates/gitim-runtime/src/http.rs](../../../crates/gitim-runtime/src/http.rs) `agents_burn` 步骤 4-7(rm clone + 删 hermes profile + ctx.agents 移除 + SSE)
+  - **不**调 daemon depart_user(已经被 self-burn 流程做完,幂等 return 也无意义)
+  - 抽出共享 `cleanup_agent_runtime_side(state, slug, agent_id)` helper,被 burn endpoint 和 self-departed 路径复用
+
+**关键边界**:
+- WebUI burn 路径(B.1) 和 self-burn 自愈路径,**runtime 最终状态一致**(ctx.agents 移除 + clone dir 清理 + SSE 通知)
+- 两路 idempotent:user 在 self-burn 完成前抢先点 WebUI burn → 走 B.1 路径,daemon 走 depart_user 幂等(已完成 → return success)→ runtime cleanup。后续 self-burn 自愈检测发现已 cleanup,no-op
+- agent_loop 触发 self-cleanup 后,自身 task 自然结束(loop_handle.abort 在 cleanup 时调,等同于现有 stop / remove 路径)
+
+**验收**:
+- self-burn e2e:agent CLI burn-self → daemon 完成 depart_user → 下次 runtime poll(几秒内)→ daemon return self_departed → runtime 自动 cleanup → WebUI SSE 收到 burned 事件 + agent 列表刷新
+- WebUI burn 与 self-burn 自愈两路 cleanup 结果一致(ctx.agents 都不见,clone dir 都清,hermes profile 都删)
+- 两路并发触发(罕见 race):user 看到 burn 成功 + self-burn 自愈走 no-op,无 panic / leak
+
+**依赖**:A.4(daemon depart_user 落 archive/users/<handler>.meta.yaml,这是 self-departed 信号源)+ B.1(共享 cleanup helper)
+
+---
+
 ## 整体依赖
 
-B.1 和 B.2 可并行(独立)。B.3 依赖 B.1。B.1 必须等 A.4 完成才能跑。
+```
+B.2 (deprecate remove)         独立,可任意时机
+B.1 (burn endpoint)        ───┬─→ B.3 (runtime 测试)
+A.4 (daemon depart_user)   ───┤
+                              └─→ B.4 (self-departed 自愈) ← 也依赖 B.1 抽 helper
+```
+
+B.2 完全独立。B.1 / B.4 / B.3 都依赖 A.4。B.4 还依赖 B.1 抽出的 cleanup helper。
