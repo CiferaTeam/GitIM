@@ -1941,6 +1941,19 @@ async fn agents_patch(
 
 // -- /agents/remove --
 
+/// **DEPRECATED**: replaced by `POST /workspaces/{slug}/agents/burn` (archive-protocol).
+///
+/// `agents/remove` only deletes the agent's clone directory; it does NOT remove the
+/// agent's user.meta.yaml from the shared repo, archive their DMs, write leave-workspace
+/// events, or clean their channels meta members. The agent's footprint persists in every
+/// other clone of the workspace, defeating the user-facing intent of "remove".
+///
+/// Use `agents/burn` for the full workspace-wide departure (writes audit events,
+/// archives DMs, archives user entry, then physically deletes clone). Use `agents/stop`
+/// for non-destructive pause.
+///
+/// This endpoint is preserved for at least one release for backward compatibility.
+/// WebUI will switch to `agents/burn` in E.3.
 async fn agents_remove(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -1948,6 +1961,12 @@ async fn agents_remove(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    tracing::warn!(
+        agent_id = %req.id,
+        slug = %slug,
+        "agents/remove is deprecated; use POST /agents/burn (archive-protocol) or POST /agents/stop (pause)"
+    );
 
     let (workspace_path, repo_path, loop_handle, provider) = {
         let mut s = state.lock().unwrap();
