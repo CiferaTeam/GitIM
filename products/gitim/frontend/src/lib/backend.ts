@@ -4,8 +4,13 @@
  *   - HttpBackend: talks to gitim-runtime via HTTP (desktop)
  *   - LocalBackend: talks to daemon-web via Web Worker (mobile)
  */
-import type { ApiResponse } from "./types";
-import type { CardStatus } from "./types";
+import type {
+  ApiResponse,
+  BoardReadResponse,
+  BoardSummary,
+  BoardWriteResponse,
+  CardStatus,
+} from "./types";
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -122,13 +127,19 @@ export interface ChannelArchiveBackend {
 }
 
 export interface BoardBackend {
-  listBoards(): Promise<ApiResponse>;
-  showBoard(handler: string): Promise<ApiResponse>;
-  initBoard(): Promise<ApiResponse>;
-  publishBoard(content?: string): Promise<ApiResponse>;
-  setBoard(field: string, value: string): Promise<ApiResponse>;
-  setBoardSection(section: string, value: string): Promise<ApiResponse>;
-  appendBoardSection(section: string, value: string): Promise<ApiResponse>;
+  listBoards(): Promise<ApiResponse<{ boards: BoardSummary[] }>>;
+  showBoard(handler: string): Promise<ApiResponse<BoardReadResponse>>;
+  initBoard(): Promise<ApiResponse<BoardWriteResponse>>;
+  publishBoard(content?: string): Promise<ApiResponse<BoardWriteResponse>>;
+  setBoard(field: string, value: string): Promise<ApiResponse<BoardWriteResponse>>;
+  setBoardSection(
+    section: string,
+    value: string,
+  ): Promise<ApiResponse<BoardWriteResponse>>;
+  appendBoardSection(
+    section: string,
+    value: string,
+  ): Promise<ApiResponse<BoardWriteResponse>>;
 }
 
 export class HttpBackend implements Backend {
@@ -296,7 +307,10 @@ export class LocalBackend implements Backend {
     this.pending.clear();
   }
 
-  private call(method: string, ...args: unknown[]): Promise<ApiResponse> {
+  private call<T = Record<string, unknown>>(
+    method: string,
+    ...args: unknown[]
+  ): Promise<ApiResponse<T>> {
     if (this.closed) {
       return Promise.resolve({
         ok: false,
@@ -304,9 +318,9 @@ export class LocalBackend implements Backend {
       });
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise<ApiResponse<T>>((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve: resolve as (v: ApiResponse) => void, reject });
       const request: WorkerRequest = {
         id,
         method,
@@ -369,25 +383,31 @@ export class LocalBackend implements Backend {
   users(): Promise<ApiResponse> {
     return this.call("users");
   }
-  listBoards(): Promise<ApiResponse> {
+  listBoards(): Promise<ApiResponse<{ boards: BoardSummary[] }>> {
     return this.call("listBoards");
   }
-  showBoard(handler: string): Promise<ApiResponse> {
+  showBoard(handler: string): Promise<ApiResponse<BoardReadResponse>> {
     return this.call("showBoard", handler);
   }
-  initBoard(): Promise<ApiResponse> {
+  initBoard(): Promise<ApiResponse<BoardWriteResponse>> {
     return this.call("initBoard");
   }
-  publishBoard(content?: string): Promise<ApiResponse> {
+  publishBoard(content?: string): Promise<ApiResponse<BoardWriteResponse>> {
     return this.call("publishBoard", content);
   }
-  setBoard(field: string, value: string): Promise<ApiResponse> {
+  setBoard(field: string, value: string): Promise<ApiResponse<BoardWriteResponse>> {
     return this.call("setBoard", field, value);
   }
-  setBoardSection(section: string, value: string): Promise<ApiResponse> {
+  setBoardSection(
+    section: string,
+    value: string,
+  ): Promise<ApiResponse<BoardWriteResponse>> {
     return this.call("setBoardSection", section, value);
   }
-  appendBoardSection(section: string, value: string): Promise<ApiResponse> {
+  appendBoardSection(
+    section: string,
+    value: string,
+  ): Promise<ApiResponse<BoardWriteResponse>> {
     return this.call("appendBoardSection", section, value);
   }
   joinChannel(channel: string): Promise<ApiResponse> {

@@ -28,7 +28,10 @@ export function BoardsView() {
   const [error, setError] = useState<string | null>(null);
   const activeSlugRef = useRef(activeSlug);
   const listRequestIdRef = useRef(0);
-  activeSlugRef.current = activeSlug;
+
+  useEffect(() => {
+    activeSlugRef.current = activeSlug;
+  }, [activeSlug]);
 
   useEffect(() => {
     return () => {
@@ -39,6 +42,7 @@ export function BoardsView() {
   const refreshBoards = useCallback(async () => {
     const requestSlug = activeSlug;
     if (!requestSlug) return;
+    if (activeSlugRef.current !== requestSlug) return;
     const requestId = listRequestIdRef.current + 1;
     listRequestIdRef.current = requestId;
     setListState("loading");
@@ -60,18 +64,31 @@ export function BoardsView() {
   }, [activeSlug, setBoards]);
 
   useEffect(() => {
-    void refreshBoards();
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) void refreshBoards();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [refreshBoards]);
 
   useEffect(() => {
-    if (!activeSlug || !selectedHandler) {
+    const requestSlug = activeSlug;
+    const requestHandler = selectedHandler;
+    if (!requestSlug || !requestHandler) {
       setSelectedBoard(null);
       return;
     }
+    const slug: string = requestSlug;
+    const handler: string = requestHandler;
     let cancelled = false;
-    setDetailState("loading");
-    (async () => {
-      const res = await client.showBoard(activeSlug, selectedHandler);
+    void loadBoard();
+    async function loadBoard() {
+      await Promise.resolve();
+      if (cancelled) return;
+      setDetailState("loading");
+      const res = await client.showBoard(slug, handler);
       if (cancelled) return;
       if (!res.ok || !res.data) {
         setDetailState("error");
@@ -80,7 +97,7 @@ export function BoardsView() {
       }
       setSelectedBoard(res.data);
       setDetailState("idle");
-    })();
+    }
     return () => {
       cancelled = true;
     };

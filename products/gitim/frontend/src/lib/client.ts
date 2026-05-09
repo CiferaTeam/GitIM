@@ -585,7 +585,7 @@ export async function listBoards(
 ): Promise<ApiResponse<{ boards: BoardSummary[] }>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().listBoards() as Promise<ApiResponse<{ boards: BoardSummary[] }>>;
+    return localBoardBackend().listBoards();
   }
   const res = await fetch(`${wsBase(slug)}/im/boards`);
   return await res.json();
@@ -597,7 +597,7 @@ export async function showBoard(
 ): Promise<ApiResponse<BoardReadResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().showBoard(handler) as Promise<ApiResponse<BoardReadResponse>>;
+    return localBoardBackend().showBoard(handler);
   }
   const res = await fetch(`${wsBase(slug)}/im/boards/${encodeURIComponent(handler)}`);
   return await res.json();
@@ -608,7 +608,7 @@ export async function initBoard(
 ): Promise<ApiResponse<BoardWriteResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().initBoard() as Promise<ApiResponse<BoardWriteResponse>>;
+    return localBoardBackend().initBoard();
   }
   const res = await fetch(`${wsBase(slug)}/im/board/init`, { method: "POST" });
   return await res.json();
@@ -620,7 +620,7 @@ export async function publishBoard(
 ): Promise<ApiResponse<BoardWriteResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().publishBoard(content) as Promise<ApiResponse<BoardWriteResponse>>;
+    return localBoardBackend().publishBoard(content);
   }
   const res = await fetch(`${wsBase(slug)}/im/board/publish`, {
     method: "POST",
@@ -637,7 +637,7 @@ export async function setBoard(
 ): Promise<ApiResponse<BoardWriteResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().setBoard(field, value) as Promise<ApiResponse<BoardWriteResponse>>;
+    return localBoardBackend().setBoard(field, value);
   }
   const res = await fetch(`${wsBase(slug)}/im/board/field`, {
     method: "POST",
@@ -654,9 +654,7 @@ export async function setBoardSection(
 ): Promise<ApiResponse<BoardWriteResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().setBoardSection(section, value) as Promise<
-      ApiResponse<BoardWriteResponse>
-    >;
+    return localBoardBackend().setBoardSection(section, value);
   }
   const res = await fetch(`${wsBase(slug)}/im/board/section/set`, {
     method: "POST",
@@ -673,9 +671,7 @@ export async function appendBoardSection(
 ): Promise<ApiResponse<BoardWriteResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localBoardBackend().appendBoardSection(section, value) as Promise<
-      ApiResponse<BoardWriteResponse>
-    >;
+    return localBoardBackend().appendBoardSection(section, value);
   }
   const res = await fetch(`${wsBase(slug)}/im/board/section/append`, {
     method: "POST",

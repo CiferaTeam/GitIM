@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+type StatusMatrixRow = [string, number, number, number];
+
 const fsMock = vi.hoisted(() => ({}));
 const pushMock = vi.hoisted(() => vi.fn(async () => undefined));
 const currentBranchMock = vi.hoisted(() => vi.fn(async () => "main"));
@@ -7,7 +9,9 @@ const resolveRefMock = vi.hoisted(() => vi.fn(async () => "local-head"));
 const writeRefMock = vi.hoisted(() => vi.fn(async () => undefined));
 const readBlobMock = vi.hoisted(() => vi.fn());
 const walkMock = vi.hoisted(() => vi.fn());
-const statusMatrixMock = vi.hoisted(() => vi.fn(async () => []));
+const statusMatrixMock = vi.hoisted(() =>
+  vi.fn<() => Promise<StatusMatrixRow[]>>(async () => []),
+);
 const addMock = vi.hoisted(() => vi.fn(async () => undefined));
 const commitMock = vi.hoisted(() => vi.fn(async () => "new-head"));
 const treeMock = vi.hoisted(() => vi.fn((input: unknown) => input));
