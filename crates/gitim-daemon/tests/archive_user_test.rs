@@ -97,6 +97,15 @@ async fn list_users(state: Arc<AppState>) -> gitim_daemon::api::Response {
     handle_request(req, state).await
 }
 
+async fn list_users_include_archived(state: Arc<AppState>) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "users",
+        "include_archived": true,
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
 async fn list_archived_users(state: Arc<AppState>) -> gitim_daemon::api::Response {
     let req: Request =
         serde_json::from_value(serde_json::json!({"method": "list_archived_users"})).unwrap();
@@ -763,4 +772,74 @@ async fn test_unarchive_user_works_after_departure() {
             .exists(),
         "archive entry should be gone"
     );
+}
+
+// ─── 12. A.6: list_users default omits archived; include_archived returns both ─
+
+#[tokio::test]
+async fn test_list_users_default_excludes_archived() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive bob — alice (still active) authors.
+    let resp = archive_user(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive bob failed: {:?}", resp.error);
+
+    // Default list_users — must omit `archived` and exclude bob from `users`.
+    let resp = list_users(state.clone()).await;
+    assert!(resp.ok);
+    let data = resp.data.unwrap();
+    let obj = data.as_object().unwrap();
+
+    let users: Vec<String> = serde_json::from_value(data["users"].clone()).unwrap();
+    assert_eq!(
+        users,
+        vec!["alice".to_string()],
+        "default list_users should only show active handlers"
+    );
+
+    // Wire-additive contract: `archived` is omitted on the default-call wire,
+    // not present-but-empty.
+    assert!(
+        !obj.contains_key("archived"),
+        "default response must omit `archived` field, got: {:?}",
+        obj.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_list_users_include_archived_returns_both() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive bob — `archive/users/bob.meta.yaml` now exists, alice stays active.
+    let resp = archive_user(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive bob failed: {:?}", resp.error);
+
+    // include_archived=true must return both lists, sorted, mutually exclusive.
+    let resp = list_users_include_archived(state.clone()).await;
+    assert!(resp.ok, "include_archived list failed: {:?}", resp.error);
+    let data = resp.data.unwrap();
+
+    let users: Vec<String> = serde_json::from_value(data["users"].clone()).unwrap();
+    assert_eq!(
+        users,
+        vec!["alice".to_string()],
+        "active list should not contain archived bob"
+    );
+
+    let archived: Vec<String> = serde_json::from_value(data["archived"].clone()).unwrap();
+    assert_eq!(
+        archived,
+        vec!["bob".to_string()],
+        "archived list should contain bob"
+    );
+
+    // No overlap — Contract 2 / write interception keeps a handler in
+    // exactly one place at a time.
+    for h in &archived {
+        assert!(
+            !users.contains(h),
+            "handler @{} appears in both active and archived",
+            h
+        );
+    }
 }

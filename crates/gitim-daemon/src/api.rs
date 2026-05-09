@@ -118,7 +118,15 @@ pub enum Request {
     #[serde(rename = "channels")]
     ListChannels,
     #[serde(rename = "users")]
-    ListUsers,
+    ListUsers {
+        /// When true, daemon also returns the archived handlers in
+        /// the response's `archived` field. Per archive-protocol P2.a
+        /// — caller-uniform: every caller (CLI, WebUI, agent) flips the
+        /// same flag, daemon does not gate on caller type. Default
+        /// false keeps the legacy single-list behavior.
+        #[serde(default)]
+        include_archived: bool,
+    },
     #[serde(rename = "thread")]
     GetThread { channel: String, line_number: u64 },
     #[serde(rename = "status")]
@@ -658,6 +666,39 @@ mod tests {
         let req2: Request = serde_json::from_str(json_no_author).unwrap();
         match req2 {
             Request::ListArchivedDms { author } => assert_eq!(author, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_users_request_roundtrip() {
+        // include_archived omitted — serde(default) deserializes to false.
+        let json = r#"{"method":"users"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListUsers { include_archived } => {
+                assert!(!include_archived, "default should be false");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Explicit false.
+        let json_false = r#"{"method":"users","include_archived":false}"#;
+        let req2: Request = serde_json::from_str(json_false).unwrap();
+        match req2 {
+            Request::ListUsers { include_archived } => {
+                assert!(!include_archived);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Explicit true — caller-uniform per P2.a.
+        let json_true = r#"{"method":"users","include_archived":true}"#;
+        let req3: Request = serde_json::from_str(json_true).unwrap();
+        match req3 {
+            Request::ListUsers { include_archived } => {
+                assert!(include_archived);
+            }
             _ => panic!("wrong variant"),
         }
     }

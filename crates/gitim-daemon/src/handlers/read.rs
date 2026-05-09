@@ -40,12 +40,22 @@ pub async fn handle_read(
         }
     }
 
-    // For non-DM channels, fall back to archive path if the primary path doesn't exist
-    let (thread_path, is_archived) = if !channel.starts_with("dm:") && !thread_path.exists() {
+    // Read fallback (archive-protocol Contract 3): when the active
+    // surface file is missing, try the archive mirror at
+    // `archive/<surface>/<stem>.thread`. `resolve_thread_path` already
+    // returned the canonical sorted stem (`dm_filename` for DMs,
+    // validated channel name otherwise) in `name`, so the archive path
+    // is just the same stem under `archive/<surface>/`.
+    let (thread_path, is_archived) = if !thread_path.exists() {
+        let archive_subdir = if channel.starts_with("dm:") {
+            "dm"
+        } else {
+            "channels"
+        };
         let archive_path = state
             .repo_root
             .join("archive")
-            .join("channels")
+            .join(archive_subdir)
             .join(format!("{}.thread", name));
         if archive_path.exists() {
             (archive_path, true)
@@ -165,11 +175,44 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
     Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
-pub async fn handle_list_users(state: SharedState) -> Response {
+/// List active users. When `include_archived` is true, also scan
+/// `archive/users/*.meta.yaml` and return the archived handlers in
+/// the response's optional `archived` field.
+///
+/// Caller-uniform per archive-protocol P2.a: every caller (human via
+/// CLI/WebUI, agent via runtime) flips the same `include_archived`
+/// flag — daemon does not gate on caller type. The active and archive
+/// dirs are mutually exclusive (Contract 2 / write interception in A.5),
+/// so a handler appears in exactly one list at any moment; no dedup is
+/// needed downstream.
+pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Response {
     let users = state.users.read().await;
     let mut sorted: Vec<String> = users.clone();
     sorted.sort();
-    let payload = gitim_core::responses::ListUsersResponse { users: sorted };
+
+    let archived = if include_archived {
+        let arch_users_dir = state.repo_root.join("archive").join("users");
+        let mut handlers: Vec<String> = Vec::new();
+        if arch_users_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&arch_users_dir) {
+                for entry in entries.flatten() {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if let Some(handler) = fname.strip_suffix(".meta.yaml") {
+                        handlers.push(handler.to_string());
+                    }
+                }
+            }
+        }
+        handlers.sort();
+        Some(handlers)
+    } else {
+        None
+    };
+
+    let payload = gitim_core::responses::ListUsersResponse {
+        users: sorted,
+        archived,
+    };
     Response::success(serde_json::to_value(payload).unwrap())
 }
 

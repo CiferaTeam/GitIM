@@ -80,9 +80,20 @@ pub struct ListChannelsResponse {
 }
 
 /// Response payload for `Request::ListUsers`.
+///
+/// Default call (`include_archived = false`) returns only `users` —
+/// `archived` is omitted on the wire. When the caller opts in with
+/// `include_archived = true`, daemon also returns `archived: Some(_)`
+/// alongside; the two lists are mutually exclusive (write interception
+/// from A.5 keeps a handler in one place at a time, so no dedup needed
+/// downstream).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListUsersResponse {
     pub users: Vec<String>,
+    /// Populated only when the request was `include_archived: true`.
+    /// Wire-additive — old clients see no field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<Vec<String>>,
 }
 
 /// Response payload for `Request::GetThread`. `entries` keep the same
@@ -494,11 +505,35 @@ mod tests {
     fn list_users_response_wire_shape() {
         let r = ListUsersResponse {
             users: vec!["alice".to_string(), "bob".to_string()],
+            archived: None,
         };
         let v = serde_json::to_value(&r).unwrap();
-        let users = v.get("users").unwrap().as_array().unwrap();
+        let obj = v.as_object().unwrap();
+        // Default call: only `users`. `archived` is skipped when None so
+        // wire shape stays backward-compatible with pre-A.6 clients.
+        assert_eq!(obj.len(), 1);
+        let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
         assert_eq!(users[0].as_str(), Some("alice"));
+        assert!(!obj.contains_key("archived"));
+    }
+
+    #[test]
+    fn list_users_response_with_archived_wire_shape() {
+        let r = ListUsersResponse {
+            users: vec!["alice".to_string()],
+            archived: Some(vec!["bob".to_string(), "carol".to_string()]),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(
+            obj.get("users").unwrap().as_array().map(|a| a.len()),
+            Some(1),
+        );
+        let archived = obj.get("archived").unwrap().as_array().unwrap();
+        assert_eq!(archived.len(), 2);
+        assert_eq!(archived[0].as_str(), Some("bob"));
     }
 
     #[test]

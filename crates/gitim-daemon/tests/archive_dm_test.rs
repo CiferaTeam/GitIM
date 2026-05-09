@@ -130,6 +130,15 @@ async fn send_message(
     handle_request(req, state).await
 }
 
+async fn read_thread(state: Arc<AppState>, channel: &str) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "read",
+        "channel": channel,
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
 fn git_log_subjects(root: &std::path::Path) -> String {
     let out = std::process::Command::new("git")
         .args(["log", "--pretty=%s"])
@@ -593,6 +602,115 @@ async fn test_unarchive_dm_works_after_departure() {
         resp.error
     );
     assert!(state.repo_root.join("dm/alice--bob.thread").exists());
+}
+
+// ─── 11. A.6: read fallback on archived DM returns content + archived flag ────
+
+#[tokio::test]
+async fn test_read_archived_dm_returns_content_with_flag() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Add a second message so we have multi-line content to verify on
+    // read; the setup helper put one. Send via the canonical API path so
+    // the message lands in dm/alice--bob.thread with proper formatting.
+    let resp = send_message(state.clone(), "dm:alice,bob", "second line", "bob").await;
+    assert!(resp.ok, "second send failed: {:?}", resp.error);
+
+    // Sanity-read active DM — must return entries, archived=false.
+    let resp = read_thread(state.clone(), "dm:alice,bob").await;
+    assert!(resp.ok, "active read failed: {:?}", resp.error);
+    let data = resp.data.unwrap();
+    assert_eq!(
+        data["archived"].as_bool(),
+        Some(false),
+        "active DM read should report archived=false"
+    );
+    let entries_active = data["entries"].as_array().unwrap().clone();
+    assert!(
+        !entries_active.is_empty(),
+        "active DM must return entries before archive"
+    );
+
+    // Archive the DM. File moves to archive/dm/alice--bob.thread.
+    let resp = archive_dm(state.clone(), "bob", "alice").await;
+    assert!(resp.ok, "archive failed: {:?}", resp.error);
+    assert!(!state.repo_root.join("dm/alice--bob.thread").exists());
+    assert!(state
+        .repo_root
+        .join("archive/dm/alice--bob.thread")
+        .exists());
+
+    // Read again — must transparently fall back to the archive, return
+    // the same entries, and flip `archived` to true.
+    let resp = read_thread(state.clone(), "dm:alice,bob").await;
+    assert!(resp.ok, "archived read failed: {:?}", resp.error);
+    let data = resp.data.unwrap();
+    assert_eq!(
+        data["archived"].as_bool(),
+        Some(true),
+        "archived DM read should report archived=true"
+    );
+    let entries_archived = data["entries"].as_array().unwrap().clone();
+    assert_eq!(
+        entries_archived.len(),
+        entries_active.len(),
+        "archived read should return the same number of entries as active"
+    );
+
+    // Reverse handler order in the channel arg — same archive file, same
+    // result (resolve_thread_path produces the canonical sorted stem).
+    let resp = read_thread(state.clone(), "dm:bob,alice").await;
+    assert!(
+        resp.ok,
+        "archived read with reversed-order DM failed: {:?}",
+        resp.error
+    );
+    let data = resp.data.unwrap();
+    assert_eq!(data["archived"].as_bool(), Some(true));
+    assert_eq!(
+        data["entries"].as_array().unwrap().len(),
+        entries_archived.len(),
+        "reversed-order read should resolve to the same archived thread"
+    );
+}
+
+// ─── 12. A.6: read on a never-existed DM returns the empty / not-found path ───
+
+#[tokio::test]
+async fn test_read_nonexistent_dm_returns_empty() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // alice<->charlie DM never existed, never archived.
+    assert!(!state
+        .repo_root
+        .join("dm/alice--charlie.thread")
+        .exists());
+    assert!(!state
+        .repo_root
+        .join("archive/dm/alice--charlie.thread")
+        .exists());
+
+    // Current handle_read semantics: missing thread file is treated as
+    // empty (read_to_string defaults to "" when not present), so the
+    // response is ok with zero entries and archived=false. The contract
+    // is "no archive fallback can hide content that doesn't exist
+    // anywhere" — assert the read does not spuriously claim archived=true.
+    let resp = read_thread(state.clone(), "dm:alice,charlie").await;
+    assert!(
+        resp.ok,
+        "read of nonexistent DM should not error: {:?}",
+        resp.error
+    );
+    let data = resp.data.unwrap();
+    assert_eq!(
+        data["archived"].as_bool(),
+        Some(false),
+        "missing DM must not report archived=true"
+    );
+    assert!(
+        data["entries"].as_array().unwrap().is_empty(),
+        "missing DM should return zero entries"
+    );
 }
 
 async fn archive_user(

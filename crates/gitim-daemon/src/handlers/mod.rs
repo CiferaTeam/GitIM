@@ -160,7 +160,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             since,
         } => handle_read(state, channel, limit, since).await,
         Request::ListChannels => handle_list_channels(state).await,
-        Request::ListUsers => handle_list_users(state).await,
+        Request::ListUsers { include_archived } => handle_list_users(state, include_archived).await,
         Request::GetThread {
             channel,
             line_number,
