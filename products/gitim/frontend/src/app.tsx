@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 import { Loader2 } from "lucide-react";
+import { BoardsView } from "./components/boards/boards-view";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
@@ -10,12 +11,20 @@ import { AgentList } from "./components/management/agent-list";
 import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useAgentStore } from "./hooks/use-agent-store";
+import { useBoardStore } from "./hooks/use-board-store";
 import { useCardStore, parseCardScope } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useIsMobile } from "./hooks/use-media-query";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
-import type { Agent, Card, Channel, Message, PollChange } from "./lib/types";
+import type {
+  Agent,
+  BoardSummary,
+  Card,
+  Channel,
+  Message,
+  PollChange,
+} from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import { workspaceIdentity } from "./lib/workspace-key";
@@ -107,6 +116,9 @@ export default function App() {
   const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
   const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
+  const setBoards = useBoardStore((s) => s.setBoards);
+  const setSelectedBoard = useBoardStore((s) => s.setSelectedBoard);
+  const resetBoardsForSwitch = useBoardStore((s) => s.resetForWorkspaceSwitch);
   const setCards = useCardStore((s) => s.setCards);
   const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
@@ -241,8 +253,14 @@ export default function App() {
       let needChannelRefresh = false;
       let needArchivedRefresh = false;
       let needCardRefresh = false;
+      let needBoardRefresh = false;
 
       for (const change of changes) {
+        if (change.kind === "board") {
+          needBoardRefresh = true;
+          continue;
+        }
+
         // Card events: channel string is "card:<channel>/<card_id>"
         if (change.kind === "card_meta" || change.kind === "card_thread") {
           if (change.kind === "card_meta") {
@@ -324,6 +342,22 @@ export default function App() {
         }
       }
 
+      if (needBoardRefresh) {
+        const boardRes = await client.listBoards(slug);
+        if (!isCurrentPollTarget()) return;
+        if (boardRes.ok && boardRes.data) {
+          setBoards(boardRes.data.boards as BoardSummary[]);
+          const selected = useBoardStore.getState().selectedHandler;
+          if (selected) {
+            const detailRes = await client.showBoard(slug, selected);
+            if (!isCurrentPollTarget()) return;
+            if (detailRes.ok && detailRes.data) {
+              setSelectedBoard(detailRes.data);
+            }
+          }
+        }
+      }
+
       if (mode === "remote") {
         const agentsRes = await client.listAgents(slug);
         if (!isCurrentPollTarget()) return;
@@ -366,6 +400,8 @@ export default function App() {
     setArchivedChannels,
     setAgents,
     setUsers,
+    setBoards,
+    setSelectedBoard,
     mergeCards,
     addCardMessages,
     setHeadCommit,
@@ -396,6 +432,7 @@ export default function App() {
     resetChatForSwitch();
     resetAgentsForSwitch();
     resetCardsForSwitch();
+    resetBoardsForSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
     consecutiveTransportFailuresRef.current = 0;
@@ -418,6 +455,7 @@ export default function App() {
             resetChatForSwitch();
             resetAgentsForSwitch();
             resetCardsForSwitch();
+            resetBoardsForSwitch();
           },
         });
         if (cancelled) return false;
@@ -431,7 +469,7 @@ export default function App() {
         activationNeedsToken = activation.data?.needs_token === true;
       }
 
-      const [meRes, channelsRes, usersRes, agentsRes, cardsRes] =
+      const [meRes, channelsRes, usersRes, agentsRes, cardsRes, boardsRes] =
         await Promise.all([
           client.me(slug),
           client.channels(slug),
@@ -440,6 +478,7 @@ export default function App() {
             ? client.listAgents(slug)
             : Promise.resolve({ ok: true, data: { agents: [] } }),
           client.listCards(slug),
+          client.listBoards(slug),
         ]);
 
       if (cancelled) return false;
@@ -457,6 +496,8 @@ export default function App() {
         setAgents(agentsRes.data.agents as Agent[]);
       if (cardsRes.ok && cardsRes.data)
         setCards(cardsRes.data.cards as Card[]);
+      if (boardsRes.ok && boardsRes.data)
+        setBoards(boardsRes.data.boards as BoardSummary[]);
 
       if (activationNeedsToken) {
         setConnected(false);
@@ -471,7 +512,8 @@ export default function App() {
         channelsRes.ok &&
         usersRes.ok &&
         agentsRes.ok &&
-        cardsRes.ok;
+        cardsRes.ok &&
+        boardsRes.ok;
       if (bootstrapOk) {
         markConnected();
       }
@@ -518,10 +560,12 @@ export default function App() {
     setUsers,
     setAgents,
     setCards,
+    setBoards,
     setHeadCommit,
     resetChatForSwitch,
     resetAgentsForSwitch,
     resetCardsForSwitch,
+    resetBoardsForSwitch,
     setConnected,
     setConnectionStatus,
     setConnectionError,
@@ -583,6 +627,7 @@ export default function App() {
             )}
             <Route path="/cards" element={<CardKanban />} />
             <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
+            <Route path="/boards" element={<BoardsView />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/docs" element={<DocsPage />} />
             {mode === "local" && (

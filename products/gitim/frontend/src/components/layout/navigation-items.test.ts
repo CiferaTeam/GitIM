@@ -9,19 +9,24 @@ function labelsFor(
 }
 
 describe("getVisibleNavigationItems", () => {
-  it("keeps Cards visible in browser mode on desktop", () => {
-    expect(labelsFor("local", "desktop")).toEqual(["Chat", "Cards"]);
+  it("keeps Cards and Boards visible in browser mode on desktop", () => {
+    expect(labelsFor("local", "desktop")).toEqual(["Chat", "Cards", "Boards"]);
   });
 
-  it("keeps Cards visible in browser mode on mobile", () => {
-    expect(labelsFor("local", "mobile")).toEqual(["Chat", "Cards"]);
+  it("keeps Cards and Boards visible in browser mode on mobile", () => {
+    expect(labelsFor("local", "mobile")).toEqual(["Chat", "Cards", "Boards"]);
   });
 
   it("hides Agents from the mobile tab bar even with the runtime", () => {
-    expect(labelsFor("remote", "mobile")).toEqual(["Chat", "Cards"]);
+    expect(labelsFor("remote", "mobile")).toEqual(["Chat", "Cards", "Boards"]);
   });
 
   it("shows all primary tabs on runtime desktop", () => {
-    expect(labelsFor("remote", "desktop")).toEqual(["Agents", "Chat", "Cards"]);
+    expect(labelsFor("remote", "desktop")).toEqual([
+      "Agents",
+      "Chat",
+      "Cards",
+      "Boards",
+    ]);
   });
 });
