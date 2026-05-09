@@ -121,6 +121,16 @@ export interface ChannelArchiveBackend {
   listArchivedChannels(): Promise<ApiResponse>;
 }
 
+export interface BoardBackend {
+  listBoards(): Promise<ApiResponse>;
+  showBoard(handler: string): Promise<ApiResponse>;
+  initBoard(): Promise<ApiResponse>;
+  publishBoard(content?: string): Promise<ApiResponse>;
+  setBoard(field: string, value: string): Promise<ApiResponse>;
+  setBoardSection(section: string, value: string): Promise<ApiResponse>;
+  appendBoardSection(section: string, value: string): Promise<ApiResponse>;
+}
+
 export class HttpBackend implements Backend {
   private baseUrl: () => string;
 
@@ -358,6 +368,27 @@ export class LocalBackend implements Backend {
   }
   users(): Promise<ApiResponse> {
     return this.call("users");
+  }
+  listBoards(): Promise<ApiResponse> {
+    return this.call("listBoards");
+  }
+  showBoard(handler: string): Promise<ApiResponse> {
+    return this.call("showBoard", handler);
+  }
+  initBoard(): Promise<ApiResponse> {
+    return this.call("initBoard");
+  }
+  publishBoard(content?: string): Promise<ApiResponse> {
+    return this.call("publishBoard", content);
+  }
+  setBoard(field: string, value: string): Promise<ApiResponse> {
+    return this.call("setBoard", field, value);
+  }
+  setBoardSection(section: string, value: string): Promise<ApiResponse> {
+    return this.call("setBoardSection", section, value);
+  }
+  appendBoardSection(section: string, value: string): Promise<ApiResponse> {
+    return this.call("appendBoardSection", section, value);
   }
   joinChannel(channel: string): Promise<ApiResponse> {
     return this.call("joinChannel", channel);

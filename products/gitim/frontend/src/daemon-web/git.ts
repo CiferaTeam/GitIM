@@ -99,6 +99,36 @@ export async function addAndCommit(
   });
 }
 
+/** Stage and commit exactly one file, refusing unrelated staged changes. */
+export async function addAndCommitOnly(
+  dir: string,
+  filepath: string,
+  message: string,
+  author: string,
+): Promise<string> {
+  const fs = getFs();
+  const rejectUnrelatedStaged = async () => {
+    const matrix = await git.statusMatrix({ fs, dir });
+    const staged = matrix
+      .filter(([path, head, , stage]) => path !== filepath && head !== stage)
+      .map(([path]) => path);
+    if (staged.length > 0) {
+      throw new Error(`unrelated staged path(s): ${staged.join(", ")}`);
+    }
+  };
+
+  await rejectUnrelatedStaged();
+  await git.add({ fs, dir, filepath });
+  await rejectUnrelatedStaged();
+
+  return git.commit({
+    fs,
+    dir,
+    message,
+    author: { name: author, email: `${author}@gitim` },
+  });
+}
+
 export async function addRemoveAndCommit(
   dir: string,
   addFilepaths: string[],

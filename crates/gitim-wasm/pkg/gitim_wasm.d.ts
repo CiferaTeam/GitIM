@@ -1,7 +1,11 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export function appendBoardSection(board: any, section: string, value: string): any;
+
 export function buildRebaseCommitMsg(mappings_json: string, additions_json: string): string;
+
+export function defaultBoard(handler: string, timestamp: string): any;
 
 export function dmFilename(a: string, b: string): string;
 
@@ -17,6 +21,8 @@ export function githubIdentityFromUserJson(user_json: string): any;
 
 export function mergeChannelMeta(local_yaml: string, remote_yaml: string): any;
 
+export function parseBoardMarkdown(markdown: string): any;
+
 export function parseCardMeta(yaml: string): any;
 
 export function parseThread(text: string): any;
@@ -24,6 +30,12 @@ export function parseThread(text: string): any;
 export function renumberBatch(batch: string, max_existing: bigint): string;
 
 export function resolveContentPure(additions_json: string, remote_json: string): any;
+
+export function setBoardField(board: any, field: string, value: string): any;
+
+export function setBoardSection(board: any, section: string, value: string): any;
+
+export function stringifyBoardMarkdown(board: any): string;
 
 export function stringifyCardMeta(meta: any): string;
 
@@ -61,6 +73,12 @@ export interface InitOutput {
     readonly validateCardMeta: (a: any) => [number, number];
     readonly validateCardId: (a: number, b: number) => [number, number];
     readonly validateCardLabels: (a: any) => [number, number];
+    readonly parseBoardMarkdown: (a: number, b: number) => [number, number, number];
+    readonly stringifyBoardMarkdown: (a: any) => [number, number, number, number];
+    readonly defaultBoard: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly setBoardField: (a: any, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly setBoardSection: (a: any, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly appendBoardSection: (a: any, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly extractMentions: (a: number, b: number) => [number, number, number];
     readonly extractLinks: (a: number, b: number) => [number, number, number];
     readonly dmFilename: (a: number, b: number, c: number, d: number) => [number, number, number, number];

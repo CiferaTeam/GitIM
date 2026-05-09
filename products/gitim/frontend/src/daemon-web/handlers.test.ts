@@ -43,6 +43,21 @@ function unregisterPath(path: string): void {
 
 vi.mock("gitim-wasm", () => ({
   default: vi.fn(async () => undefined),
+  appendBoardSection: vi.fn((doc: Record<string, unknown>, section: string, value: string) => ({
+    ...doc,
+    body: `${doc.body as string}\n## ${section}\n\n${value}\n`,
+  })),
+  defaultBoard: vi.fn((handler: string, timestamp: string) => ({
+    meta: {
+      version: 1,
+      handler,
+      updated_at: timestamp,
+      status: "idle",
+      summary: "",
+      tags: [],
+    },
+    body: "## 当前状态\n\n## 关注事项\n",
+  })),
   parseCardMeta: vi.fn((yaml: string) => {
     const out: Record<string, unknown> = { labels: [], assignee: null };
     let listKey: string | null = null;
@@ -69,6 +84,65 @@ vi.mock("gitim-wasm", () => ({
       }
     }
     return out;
+  }),
+  parseBoardMarkdown: vi.fn((markdown: string) => {
+    const match = markdown.match(/^---\n([\s\S]*?)---\n([\s\S]*)$/);
+    if (!match) throw new Error("invalid board");
+    const meta = {} as Record<string, unknown>;
+    let listKey: string | null = null;
+    for (const rawLine of match[1].split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (line.startsWith("- ") && listKey) {
+        (meta[listKey] as string[]).push(line.slice(2));
+        continue;
+      }
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const key = line.slice(0, idx);
+      const value = line.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
+      if (value === "[]") {
+        meta[key] = [];
+        listKey = null;
+      } else if (value === "") {
+        meta[key] = [];
+        listKey = key;
+      } else if (key === "version") {
+        meta[key] = Number(value);
+        listKey = null;
+      } else {
+        meta[key] = value;
+        listKey = null;
+      }
+    }
+    return { meta, body: match[2] };
+  }),
+  setBoardField: vi.fn((doc: Record<string, unknown>, field: string, value: string) => ({
+    ...doc,
+    meta: {
+      ...(doc.meta as Record<string, unknown>),
+      [field]: field === "tags" ? value.split(",").map((tag) => tag.trim()).filter(Boolean) : value,
+    },
+  })),
+  setBoardSection: vi.fn((doc: Record<string, unknown>, section: string, value: string) => ({
+    ...doc,
+    body: `## ${section}\n\n${value}\n`,
+  })),
+  stringifyBoardMarkdown: vi.fn((doc: Record<string, unknown>) => {
+    const meta = doc.meta as Record<string, unknown>;
+    const tags = Array.isArray(meta.tags) ? meta.tags : [];
+    return [
+      "---",
+      `version: ${meta.version}`,
+      `handler: ${meta.handler}`,
+      `updated_at: ${meta.updated_at}`,
+      `status: ${meta.status}`,
+      `summary: ${meta.summary}`,
+      "tags:",
+      ...tags.map((tag) => `  - ${tag}`),
+      "---",
+      doc.body as string,
+    ].join("\n");
   }),
   stringifyCardMeta: vi.fn((meta: Record<string, unknown>) => {
     const labels = Array.isArray(meta.labels) ? meta.labels : [];
@@ -134,6 +208,10 @@ vi.mock("./git", () => ({
     commits.push({ filepaths, message });
     return "new-head";
   }),
+  addAndCommitOnly: vi.fn(async (_dir: string, filepath: string, message: string) => {
+    commits.push({ filepaths: [filepath], message });
+    return "new-head";
+  }),
   addRemoveAndCommit: vi.fn(async (
     _dir: string,
     addFilepaths: string[],
@@ -167,17 +245,24 @@ vi.mock("./sync", () => ({
 import {
   archiveChannel,
   archiveCard,
+  appendBoardSectionValue,
   channels,
   createCard,
+  initBoard,
   init,
   listArchivedChannels,
   listArchivedCards,
+  listBoards,
   listCards,
   poll,
+  publishBoard,
   read,
   readCard,
   send,
   sendCardMessage,
+  setBoard,
+  setBoardSectionValue,
+  showBoard,
   thread,
   unarchiveChannel,
   updateCard,
@@ -267,6 +352,21 @@ function seedState() {
     displayName: "Lewis",
   });
   setState({ defaultBranch: "main", headCommit: "base" });
+}
+
+function boardMarkdown(handler: string, body = "## 当前状态\n\n在线\n"): string {
+  return [
+    "---",
+    "version: 1",
+    `handler: ${handler}`,
+    "updated_at: 20260509T120000Z",
+    "status: working",
+    "summary: Browser board",
+    "tags:",
+    "  - mobile",
+    "---",
+    body,
+  ].join("\n");
 }
 
 describe("daemon-web handlers", () => {
@@ -724,6 +824,119 @@ describe("daemon-web handlers", () => {
     expect(getState().syncStatus).toBe("reconnect_required");
     expect(files.get("/repo/channels/general.thread")).toContain("from mobile");
     expect(commits.at(-1)?.message).toContain("L000003");
+  });
+
+  it("initializes, shows, and lists browser boards", async () => {
+    const initRes = await initBoard();
+
+    expect(initRes.ok).toBe(true);
+    expect(initRes.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      status: "committed",
+      commit_id: "new-head",
+      sync_status: "pushed",
+    }));
+    expect(files.get("/repo/showboards/lewis/board.md")).toContain("handler: lewis");
+    expect(commits.at(-1)).toEqual({
+      filepaths: ["showboards/lewis/board.md"],
+      message: "board: init @lewis",
+    });
+
+    const showRes = await showBoard("lewis");
+    expect(showRes.ok).toBe(true);
+    expect(showRes.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      meta: expect.objectContaining({ handler: "lewis", status: "idle" }),
+    }));
+
+    const listRes = await listBoards();
+    expect(listRes.ok).toBe(true);
+    expect(listRes.data?.boards).toEqual([
+      expect.objectContaining({
+        handler: "lewis",
+        path: "showboards/lewis/board.md",
+      }),
+    ]);
+  });
+
+  it("rejects browser board publish content with handler mismatch", async () => {
+    const res = await publishBoard(boardMarkdown("alice"));
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("handler mismatch");
+    expect(files.has("/repo/showboards/lewis/board.md")).toBe(false);
+    expect(commits).toHaveLength(0);
+  });
+
+  it("mutates browser board fields and sections through wasm helpers", async () => {
+    dirs.set("/repo/showboards", ["lewis"]);
+    dirs.set("/repo/showboards/lewis", ["board.md"]);
+    files.set("/repo/showboards/lewis/board.md", boardMarkdown("lewis"));
+
+    await expect(setBoard("summary", "Updated")).resolves.toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    await expect(setBoardSectionValue("当前状态", "Busy")).resolves.toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    await expect(appendBoardSectionValue("待确认", "- one")).resolves.toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+
+    expect(commits.map((commit) => commit.filepaths)).toEqual([
+      ["showboards/lewis/board.md"],
+      ["showboards/lewis/board.md"],
+      ["showboards/lewis/board.md"],
+    ]);
+  });
+
+  it("reports board changes from poll with empty entries", async () => {
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      "showboards/alice/board.md",
+      "showboards/system/board.md",
+      "showboards/bad--name/board.md",
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toContainEqual({
+      channel: "alice",
+      kind: "board",
+      entries: [],
+    });
+    expect(res.data?.changes).not.toContainEqual(
+      expect.objectContaining({ channel: "system", kind: "board" }),
+    );
+  });
+
+  it("includes existing boards in stale cursor poll fallback", async () => {
+    dirs.set("/repo/showboards", ["alice", "system", "bad--name"]);
+    dirs.set("/repo/showboards/alice", ["board.md"]);
+    dirs.set("/repo/showboards/system", ["board.md"]);
+    dirs.set("/repo/showboards/bad--name", ["board.md"]);
+    files.set("/repo/showboards/alice/board.md", boardMarkdown("alice"));
+    files.set("/repo/showboards/system/board.md", boardMarkdown("system"));
+    files.set("/repo/showboards/bad--name/board.md", boardMarkdown("bad--name"));
+    vi.mocked(await import("./git")).diffTrees.mockRejectedValueOnce(
+      new Error("stale cursor"),
+    );
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toContainEqual({
+      channel: "alice",
+      kind: "board",
+      entries: [],
+    });
+    expect(res.data?.changes).not.toContainEqual(
+      expect.objectContaining({ channel: "system", kind: "board" }),
+    );
   });
 
   it("lists cards from channels/<channel>/cards", async () => {

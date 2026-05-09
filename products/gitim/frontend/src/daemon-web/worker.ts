@@ -92,6 +92,18 @@ const handler: Record<
   thread: (channel: unknown, line: unknown) =>
     handlers.thread(channel as string, line as number),
   users: () => handlers.users(),
+  listBoards: () => handlers.listBoards(),
+  showBoard: (handler: unknown) =>
+    handlers.showBoard(handler as string),
+  initBoard: () => handlers.initBoard(),
+  publishBoard: (content?: unknown) =>
+    handlers.publishBoard(content as string | undefined),
+  setBoard: (field: unknown, value: unknown) =>
+    handlers.setBoard(field as string, value as string),
+  setBoardSection: (section: unknown, value: unknown) =>
+    handlers.setBoardSectionValue(section as string, value as string),
+  appendBoardSection: (section: unknown, value: unknown) =>
+    handlers.appendBoardSectionValue(section as string, value as string),
   joinChannel: (channel: unknown) =>
     handlers.joinChannel(channel as string),
   archiveChannel: (channel: unknown) =>

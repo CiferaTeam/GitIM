@@ -7,14 +7,20 @@ const resolveRefMock = vi.hoisted(() => vi.fn(async () => "local-head"));
 const writeRefMock = vi.hoisted(() => vi.fn(async () => undefined));
 const readBlobMock = vi.hoisted(() => vi.fn());
 const walkMock = vi.hoisted(() => vi.fn());
+const statusMatrixMock = vi.hoisted(() => vi.fn(async () => []));
+const addMock = vi.hoisted(() => vi.fn(async () => undefined));
+const commitMock = vi.hoisted(() => vi.fn(async () => "new-head"));
 const treeMock = vi.hoisted(() => vi.fn((input: unknown) => input));
 
 vi.mock("isomorphic-git", () => ({
   default: {
+    add: addMock,
+    commit: commitMock,
     push: pushMock,
     currentBranch: currentBranchMock,
     readBlob: readBlobMock,
     resolveRef: resolveRefMock,
+    statusMatrix: statusMatrixMock,
     TREE: treeMock,
     walk: walkMock,
     writeRef: writeRefMock,
@@ -29,7 +35,7 @@ vi.mock("./storage", () => ({
   getFs: () => fsMock,
 }));
 
-import { diffTrees, push, readFileAtCommit } from "./git";
+import { addAndCommitOnly, diffTrees, push, readFileAtCommit } from "./git";
 
 function entry(type: "blob" | "tree", oid: string) {
   return {
@@ -45,6 +51,10 @@ describe("daemon-web git operations", () => {
     writeRefMock.mockClear();
     readBlobMock.mockReset();
     walkMock.mockReset();
+    statusMatrixMock.mockReset();
+    statusMatrixMock.mockResolvedValue([]);
+    addMock.mockClear();
+    commitMock.mockClear();
     treeMock.mockClear();
     currentBranchMock.mockReset();
     currentBranchMock.mockResolvedValue("main");
@@ -137,5 +147,48 @@ describe("daemon-web git operations", () => {
 
     await expect(readFileAtCommit("/repo", "base", "channels/general.thread"))
       .rejects.toThrow("corrupt object");
+  });
+
+  it("commits exactly one board path with addAndCommitOnly", async () => {
+    statusMatrixMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        ["showboards/alice/board.md", 1, 2, 2],
+      ]);
+
+    await expect(addAndCommitOnly(
+      "/repo",
+      "showboards/alice/board.md",
+      "board: update @alice",
+      "alice",
+    )).resolves.toBe("new-head");
+
+    expect(addMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      filepath: "showboards/alice/board.md",
+    });
+    expect(commitMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      message: "board: update @alice",
+      author: { name: "alice", email: "alice@gitim" },
+    });
+  });
+
+  it("rejects unrelated staged paths before addAndCommitOnly commits", async () => {
+    statusMatrixMock.mockResolvedValueOnce([
+      ["unrelated.txt", 1, 2, 2],
+    ]);
+
+    await expect(addAndCommitOnly(
+      "/repo",
+      "showboards/alice/board.md",
+      "board: update @alice",
+      "alice",
+    )).rejects.toThrow("unrelated staged path");
+
+    expect(addMock).not.toHaveBeenCalled();
+    expect(commitMock).not.toHaveBeenCalled();
   });
 });

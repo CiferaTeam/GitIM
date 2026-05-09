@@ -9,6 +9,9 @@
 import type {
   Agent,
   ApiResponse,
+  BoardReadResponse,
+  BoardSummary,
+  BoardWriteResponse,
   Card,
   CardStatus,
   Channel,
@@ -17,7 +20,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
-import type { Backend, CardBackend, ChannelArchiveBackend } from "./backend";
+import type { Backend, BoardBackend, CardBackend, ChannelArchiveBackend } from "./backend";
 import { HttpBackend, LocalBackend } from "./backend";
 import {
   clearAllBrowserWorkspaces,
@@ -210,6 +213,10 @@ function localCardBackend(): CardBackend {
 
 function localChannelArchiveBackend(): ChannelArchiveBackend {
   return activeBackend as Backend & ChannelArchiveBackend;
+}
+
+function localBoardBackend(): BoardBackend {
+  return activeBackend as Backend & BoardBackend;
 }
 
 function wsBase(slug: string): string {
@@ -568,6 +575,113 @@ export async function users(slug: string): Promise<ApiResponse> {
     return activeBackend.users();
   }
   const res = await fetch(`${wsBase(slug)}/im/users`);
+  return await res.json();
+}
+
+// --- Board API: real runtime HTTP (all scoped to a workspace) ---
+
+export async function listBoards(
+  slug: string,
+): Promise<ApiResponse<{ boards: BoardSummary[] }>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().listBoards() as Promise<ApiResponse<{ boards: BoardSummary[] }>>;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/boards`);
+  return await res.json();
+}
+
+export async function showBoard(
+  slug: string,
+  handler: string,
+): Promise<ApiResponse<BoardReadResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().showBoard(handler) as Promise<ApiResponse<BoardReadResponse>>;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/boards/${encodeURIComponent(handler)}`);
+  return await res.json();
+}
+
+export async function initBoard(
+  slug: string,
+): Promise<ApiResponse<BoardWriteResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().initBoard() as Promise<ApiResponse<BoardWriteResponse>>;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/board/init`, { method: "POST" });
+  return await res.json();
+}
+
+export async function publishBoard(
+  slug: string,
+  content?: string,
+): Promise<ApiResponse<BoardWriteResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().publishBoard(content) as Promise<ApiResponse<BoardWriteResponse>>;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/board/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  return await res.json();
+}
+
+export async function setBoard(
+  slug: string,
+  field: string,
+  value: string,
+): Promise<ApiResponse<BoardWriteResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().setBoard(field, value) as Promise<ApiResponse<BoardWriteResponse>>;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/board/field`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field, value }),
+  });
+  return await res.json();
+}
+
+export async function setBoardSection(
+  slug: string,
+  section: string,
+  value: string,
+): Promise<ApiResponse<BoardWriteResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().setBoardSection(section, value) as Promise<
+      ApiResponse<BoardWriteResponse>
+    >;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/board/section/set`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ section, value }),
+  });
+  return await res.json();
+}
+
+export async function appendBoardSection(
+  slug: string,
+  section: string,
+  value: string,
+): Promise<ApiResponse<BoardWriteResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localBoardBackend().appendBoardSection(section, value) as Promise<
+      ApiResponse<BoardWriteResponse>
+    >;
+  }
+  const res = await fetch(`${wsBase(slug)}/im/board/section/append`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ section, value }),
+  });
   return await res.json();
 }
 
