@@ -145,6 +145,15 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // single writer; nothing else in the crate needs to mutate this.
     state.lock().unwrap().listen_port = port;
 
+    // Materialize the device-bound runtime ID. First boot generates and
+    // persists; subsequent boots read the existing UUID. Either way it lands
+    // in RuntimeState before recover_from_config so /health responds with the
+    // real ID even during the recovery window.
+    // See docs/plans/runtime-id/00-design.md.
+    let runtime_id = gitim_runtime::user_config::ensure_runtime_id();
+    state.lock().unwrap().runtime_id = runtime_id.clone();
+    eprintln!("runtime started, id: {runtime_id}");
+
     // Token + email propagation MUST run before `recover_from_config`, because
     // recovery spawns per-agent daemons and each daemon reads `me.json` /
     // `.git/config` into memory at startup. If we propagate after, the daemons
