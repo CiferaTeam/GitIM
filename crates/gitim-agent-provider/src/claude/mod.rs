@@ -11,8 +11,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
+    ProviderError, ProviderUsage, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -30,6 +30,22 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl Provider for ClaudeProvider {
+    fn prompt_identity(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_identity(ctx).replace("AGENTS.md", "CLAUDE.md")
+    }
+
+    fn prompt_memory(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_memory(ctx).replace("AGENTS.md", "CLAUDE.md")
+    }
+
+    fn prompt_reset_protocol(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_reset_protocol(ctx).replace("AGENTS.md", "CLAUDE.md")
+    }
+
+    fn prompt_cold_start(&self, ctx: &PromptContext) -> String {
+        crate::prompts::default_cold_start(ctx).replace("AGENTS.md", "CLAUDE.md")
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config

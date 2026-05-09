@@ -3,7 +3,7 @@ use gitim_agent_provider::{
     ExecOptions, PromptContext, Provider, ProviderConfig, ProviderError, Session,
 };
 
-/// A test provider that overrides prompt_memory to use AGENTS.md.
+/// A test provider that overrides prompt_memory with a minimal stub.
 struct TestOverrideProvider;
 
 #[async_trait]
@@ -13,7 +13,7 @@ impl Provider for TestOverrideProvider {
     }
 
     fn prompt_memory(&self, _ctx: &PromptContext) -> String {
-        "## 记忆\n\n你的工作目录下有 `AGENTS.md`，它是你的记忆文件。".to_string()
+        "## 记忆\n\n这是被 override 的最小记忆段。".to_string()
     }
 }
 
@@ -41,14 +41,53 @@ fn default_prompt_contains_all_sections() {
 }
 
 #[test]
-fn default_memory_references_claude_md() {
-    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+fn default_memory_uses_agents_md() {
+    // Default memory text references AGENTS.md — that's the industry-wide
+    // baseline most coding agents understand. Claude is the only provider
+    // that swaps it to CLAUDE.md.
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "bot",
         model: None,
     };
     let memory = provider.prompt_memory(&ctx);
+    assert!(memory.contains("AGENTS.md"));
+    assert!(!memory.contains("CLAUDE.md"));
+
+    let cold_start = provider.prompt_cold_start(&ctx);
+    assert!(cold_start.contains("AGENTS.md"));
+    assert!(!cold_start.contains("CLAUDE.md"));
+
+    let identity = provider.prompt_identity(&ctx);
+    assert!(identity.contains("AGENTS.md"));
+    assert!(!identity.contains("CLAUDE.md"));
+}
+
+#[test]
+fn claude_provider_uses_claude_md() {
+    // Claude provider rewrites the default file name back to CLAUDE.md so the
+    // agent reads/writes the conventional Claude memory file.
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let memory = provider.prompt_memory(&ctx);
     assert!(memory.contains("CLAUDE.md"));
+    assert!(!memory.contains("AGENTS.md"));
+
+    let cold_start = provider.prompt_cold_start(&ctx);
+    assert!(cold_start.contains("CLAUDE.md"));
+    assert!(!cold_start.contains("AGENTS.md"));
+
+    let identity = provider.prompt_identity(&ctx);
+    assert!(identity.contains("CLAUDE.md"));
+    assert!(!identity.contains("AGENTS.md"));
+
+    let reset = provider.prompt_reset_protocol(&ctx);
+    assert!(reset.contains("CLAUDE.md"));
+    assert!(!reset.contains("AGENTS.md"));
 }
 
 #[test]
@@ -60,12 +99,11 @@ fn override_replaces_single_section() {
     };
     let prompt = provider.build_system_prompt(&ctx);
 
-    // Overridden memory section references AGENTS.md
-    assert!(prompt.contains("AGENTS.md"));
+    // The override stub appears.
+    assert!(prompt.contains("这是被 override 的最小记忆段"));
 
-    // Default memory wording ("它是你的记忆文件" paired with CLAUDE.md) is gone —
-    // verify by checking the exact default phrasing is absent.
-    assert!(!prompt.contains("你的工作目录下有 `CLAUDE.md`，它是你的记忆文件"));
+    // Default memory's signature phrasing is gone — proves the override took effect.
+    assert!(!prompt.contains("它是你的记忆主入口"));
 
     // Other sections still use defaults
     assert!(prompt.contains("你是 codex-bot"));
@@ -124,6 +162,8 @@ fn gitim_api_exposes_card_and_archive_commands() {
 
 #[test]
 fn codex_provider_uses_agents_md() {
+    // Codex inherits the default — AGENTS.md is the conventional file name
+    // for Codex CLI and most non-Claude coding agents.
     let provider = gitim_agent_provider::create("codex", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "codex-bot",
