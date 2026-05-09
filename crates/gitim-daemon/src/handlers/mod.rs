@@ -1,4 +1,5 @@
 mod channel;
+mod depart;
 mod dm;
 mod poll;
 mod read;
@@ -8,6 +9,7 @@ pub(crate) mod serde;
 mod user;
 
 pub use channel::*;
+pub use depart::*;
 pub use dm::*;
 pub use poll::*;
 pub use read::*;
