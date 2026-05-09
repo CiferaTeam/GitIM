@@ -784,7 +784,7 @@ async fn test_list_users_default_excludes_archived() {
     let resp = archive_user(state.clone(), "bob", "alice").await;
     assert!(resp.ok, "archive bob failed: {:?}", resp.error);
 
-    // Default list_users — must omit `archived` and exclude bob from `users`.
+    // Default list_users — must omit `archived_users` and exclude bob from `users`.
     let resp = list_users(state.clone()).await;
     assert!(resp.ok);
     let data = resp.data.unwrap();
@@ -797,11 +797,18 @@ async fn test_list_users_default_excludes_archived() {
         "default list_users should only show active handlers"
     );
 
-    // Wire-additive contract: `archived` is omitted on the default-call wire,
-    // not present-but-empty.
+    // Wire-additive contract: `archived_users` is omitted on the default-call
+    // wire, not present-but-empty.
+    assert!(
+        !obj.contains_key("archived_users"),
+        "default response must omit `archived_users` field, got: {:?}",
+        obj.keys().collect::<Vec<_>>()
+    );
+    // Disambiguation guard: bare `archived` (the bool semantic on
+    // `ReadResponse`) must never appear here either.
     assert!(
         !obj.contains_key("archived"),
-        "default response must omit `archived` field, got: {:?}",
+        "default response must not surface bare `archived` (would clash with ReadResponse.archived: bool), got: {:?}",
         obj.keys().collect::<Vec<_>>()
     );
 }
@@ -826,19 +833,30 @@ async fn test_list_users_include_archived_returns_both() {
         "active list should not contain archived bob"
     );
 
-    let archived: Vec<String> = serde_json::from_value(data["archived"].clone()).unwrap();
+    let archived: Vec<String> =
+        serde_json::from_value(data["archived_users"].clone()).unwrap();
     assert_eq!(
         archived,
         vec!["bob".to_string()],
-        "archived list should contain bob"
+        "archived_users list should contain bob"
     );
 
     // No overlap — Contract 2 / write interception keeps a handler in
-    // exactly one place at a time.
+    // exactly one place at a time. Check both directions: an archived
+    // handler must not appear in `users`, AND an active handler must not
+    // appear in `archived_users`. A regression that double-lists in one
+    // direction would slip past a single-direction loop.
     for h in &archived {
         assert!(
             !users.contains(h),
-            "handler @{} appears in both active and archived",
+            "archived handler @{} appeared in active users",
+            h
+        );
+    }
+    for h in &users {
+        assert!(
+            !archived.contains(h),
+            "active handler @{} appeared in archived_users",
             h
         );
     }

@@ -656,6 +656,31 @@ async fn test_read_archived_dm_returns_content_with_flag() {
         entries_active.len(),
         "archived read should return the same number of entries as active"
     );
+    // Tighter than length-only: assert each entry's body / author /
+    // line_number match. Catches a regression where the fallback reads
+    // a DIFFERENT file with coincidentally the same number of entries.
+    for (i, (active_entry, archived_entry)) in
+        entries_active.iter().zip(entries_archived.iter()).enumerate()
+    {
+        assert_eq!(
+            active_entry.get("body").and_then(|v| v.as_str()),
+            archived_entry.get("body").and_then(|v| v.as_str()),
+            "entry {} body mismatch between active and archived read",
+            i,
+        );
+        assert_eq!(
+            active_entry.get("author").and_then(|v| v.as_str()),
+            archived_entry.get("author").and_then(|v| v.as_str()),
+            "entry {} author mismatch between active and archived read",
+            i,
+        );
+        assert_eq!(
+            active_entry.get("line_number").and_then(|v| v.as_u64()),
+            archived_entry.get("line_number").and_then(|v| v.as_u64()),
+            "entry {} line_number mismatch between active and archived read",
+            i,
+        );
+    }
 
     // Reverse handler order in the channel arg — same archive file, same
     // result (resolve_thread_path produces the canonical sorted stem).
@@ -667,11 +692,24 @@ async fn test_read_archived_dm_returns_content_with_flag() {
     );
     let data = resp.data.unwrap();
     assert_eq!(data["archived"].as_bool(), Some(true));
+    let entries_reversed = data["entries"].as_array().unwrap().clone();
     assert_eq!(
-        data["entries"].as_array().unwrap().len(),
+        entries_reversed.len(),
         entries_archived.len(),
         "reversed-order read should resolve to the same archived thread"
     );
+    // Same body-by-body equality as above — proves resolve_thread_path
+    // canonicalizes to the identical archive file regardless of arg order.
+    for (i, (forward, reversed)) in
+        entries_archived.iter().zip(entries_reversed.iter()).enumerate()
+    {
+        assert_eq!(
+            forward.get("body").and_then(|v| v.as_str()),
+            reversed.get("body").and_then(|v| v.as_str()),
+            "entry {} body mismatch between forward and reversed-order read",
+            i,
+        );
+    }
 }
 
 // ─── 12. A.6: read on a never-existed DM returns the empty / not-found path ───

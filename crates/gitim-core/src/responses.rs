@@ -79,21 +79,29 @@ pub struct ListChannelsResponse {
     pub channels: Vec<ChannelSummary>,
 }
 
-/// Response payload for `Request::ListUsers`.
+/// Active users with optional archived users in a single payload.
+///
+/// `include_archived` on the request controls whether `archived_users` is
+/// populated. We merge both lists into one response (rather than the two-shape
+/// pattern used by `ListChannelsResponse` / `ListArchivedChannelsResponse`)
+/// because Contract 2 enforces strict mutual exclusion: a handler can be in
+/// `users/` xor `archive/users/`, never both. The single shape makes the
+/// invariant explicit at the wire level — clients see `users ∩ archived_users
+/// = ∅` by construction.
 ///
 /// Default call (`include_archived = false`) returns only `users` —
-/// `archived` is omitted on the wire. When the caller opts in with
-/// `include_archived = true`, daemon also returns `archived: Some(_)`
-/// alongside; the two lists are mutually exclusive (write interception
-/// from A.5 keeps a handler in one place at a time, so no dedup needed
-/// downstream).
+/// `archived_users` is omitted on the wire. When the caller opts in with
+/// `include_archived = true`, daemon also returns `archived_users: Some(_)`
+/// alongside. Field name is `archived_users` (not bare `archived`) to keep it
+/// distinct from `ReadResponse.archived: bool` — same word, very different
+/// shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListUsersResponse {
     pub users: Vec<String>,
     /// Populated only when the request was `include_archived: true`.
     /// Wire-additive — old clients see no field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived: Option<Vec<String>>,
+    pub archived_users: Option<Vec<String>>,
 }
 
 /// Response payload for `Request::GetThread`. `entries` keep the same
@@ -505,16 +513,19 @@ mod tests {
     fn list_users_response_wire_shape() {
         let r = ListUsersResponse {
             users: vec!["alice".to_string(), "bob".to_string()],
-            archived: None,
+            archived_users: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        // Default call: only `users`. `archived` is skipped when None so
-        // wire shape stays backward-compatible with pre-A.6 clients.
+        // Default call: only `users`. `archived_users` is skipped when None
+        // so wire shape stays backward-compatible with pre-A.6 clients.
         assert_eq!(obj.len(), 1);
         let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
         assert_eq!(users[0].as_str(), Some("alice"));
+        assert!(!obj.contains_key("archived_users"));
+        // Also assert no bare `archived` — keeps us honest if someone reverts
+        // the rename without updating both sides.
         assert!(!obj.contains_key("archived"));
     }
 
@@ -522,7 +533,7 @@ mod tests {
     fn list_users_response_with_archived_wire_shape() {
         let r = ListUsersResponse {
             users: vec!["alice".to_string()],
-            archived: Some(vec!["bob".to_string(), "carol".to_string()]),
+            archived_users: Some(vec!["bob".to_string(), "carol".to_string()]),
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
@@ -531,9 +542,12 @@ mod tests {
             obj.get("users").unwrap().as_array().map(|a| a.len()),
             Some(1),
         );
-        let archived = obj.get("archived").unwrap().as_array().unwrap();
-        assert_eq!(archived.len(), 2);
-        assert_eq!(archived[0].as_str(), Some("bob"));
+        let archived_users = obj.get("archived_users").unwrap().as_array().unwrap();
+        assert_eq!(archived_users.len(), 2);
+        assert_eq!(archived_users[0].as_str(), Some("bob"));
+        // Disambiguation guard: no bare `archived` key — that's reserved for
+        // `ReadResponse.archived: bool` semantics.
+        assert!(!obj.contains_key("archived"));
     }
 
     #[test]

@@ -177,7 +177,7 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
 
 /// List active users. When `include_archived` is true, also scan
 /// `archive/users/*.meta.yaml` and return the archived handlers in
-/// the response's optional `archived` field.
+/// the response's optional `archived_users` field.
 ///
 /// Caller-uniform per archive-protocol P2.a: every caller (human via
 /// CLI/WebUI, agent via runtime) flips the same `include_archived`
@@ -190,7 +190,7 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
     let mut sorted: Vec<String> = users.clone();
     sorted.sort();
 
-    let archived = if include_archived {
+    let archived_users = if include_archived {
         let arch_users_dir = state.repo_root.join("archive").join("users");
         let mut handlers: Vec<String> = Vec::new();
         if arch_users_dir.exists() {
@@ -211,7 +211,7 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
 
     let payload = gitim_core::responses::ListUsersResponse {
         users: sorted,
-        archived,
+        archived_users,
     };
     Response::success(serde_json::to_value(payload).unwrap())
 }
