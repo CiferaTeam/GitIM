@@ -535,7 +535,201 @@ async fn test_register_user_rejects_departed_handler() {
     assert!(resp.ok, "register fresh handler failed: {:?}", resp.error);
 }
 
-// ─── 10. A.5: unarchive_user works even when the target was departed ──────────
+// ─── 10. A.5: card handlers gate departed authors ────────────────────────────
+//
+// Locks in `ensure_author_not_departed` wiring inside
+// `crates/gitim-daemon/src/card_handlers.rs` so a future refactor that drops
+// the gate from any of the four mutating card handlers (`handle_create_card`,
+// `handle_send_card_message`, `handle_update_card`, `handle_archive_card`)
+// trips this test instead of silently violating Contract 2.
+//
+// Coverage:
+//   - alice (departed) → each of the four handlers must reject with "is departed"
+//   - bob (active)     → the gate must NOT fire (positive control). For
+//     handlers without other permission constraints (`handle_create_card`,
+//     `handle_send_card_message`, `handle_update_card`) bob's call succeeds.
+//     `handle_archive_card` carries a creator/assignee permission check; the
+//     positive control there is simply that bob's rejection message is the
+//     permission error, not "is departed".
+
+#[tokio::test]
+async fn test_card_writes_by_departed_user_fail() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // The shared archive_user_test setup_test_repo doesn't create a channel
+    // thread; add one + commit so card handlers can find it.
+    std::fs::create_dir_all(state.repo_root.join("channels")).unwrap();
+    std::fs::write(state.repo_root.join("channels").join("dev.thread"), "").unwrap();
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&state.repo_root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+    run_git(&["add", "channels/dev.thread"]);
+    run_git(&["commit", "-m", "add dev channel"]);
+
+    // Helper: invoke each card handler via the dispatch path so we exercise
+    // the same surface end-to-end.
+    let create_card = |author: &str| {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "method": "create_card",
+            "channel": "dev",
+            "title": format!("card by {}", author),
+            "author": author,
+        }))
+        .unwrap();
+        req
+    };
+    let send_card_msg = |author: &str, card_id: &str, body: &str| {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "method": "send_card_message",
+            "channel": "dev",
+            "card_id": card_id,
+            "body": body,
+            "author": author,
+        }))
+        .unwrap();
+        req
+    };
+    let update_card = |author: &str, card_id: &str| {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "method": "update_card",
+            "channel": "dev",
+            "card_id": card_id,
+            "status": "doing",
+            "author": author,
+        }))
+        .unwrap();
+        req
+    };
+    let archive_card = |author: &str, card_id: &str| {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "method": "archive_card",
+            "channel": "dev",
+            "card_id": card_id,
+            "author": author,
+        }))
+        .unwrap();
+        req
+    };
+
+    // Step 1 (control): alice (active) creates a card — must succeed.
+    let resp = handle_request(create_card("alice"), state.clone()).await;
+    assert!(
+        resp.ok,
+        "control: alice's create_card should succeed: {:?}",
+        resp.error
+    );
+    let alice_card_id = resp
+        .data
+        .as_ref()
+        .and_then(|d| d["card_id"].as_str())
+        .unwrap()
+        .to_string();
+
+    // Step 2: archive alice. Post-archive the meta yaml lives at
+    // `archive/users/alice.meta.yaml` — that's the gate's signal.
+    let resp = archive_user(state.clone(), "alice", "alice").await;
+    assert!(resp.ok, "archive alice failed: {:?}", resp.error);
+
+    // Restore alice in the in-memory users list so the dispatch path's
+    // "unknown user" check doesn't preempt the departed gate. The on-disk
+    // archive marker is what we're verifying against.
+    {
+        let mut users = state.users.write().await;
+        if !users.contains(&"alice".to_string()) {
+            users.push("alice".to_string());
+            users.sort();
+        }
+    }
+
+    // Step 3: each card handler must reject alice with "is departed".
+    // (Request is not Clone, so each case rebuilds its own request.)
+    let assert_departed = |label: &str, resp: gitim_daemon::api::Response| {
+        assert!(
+            !resp.ok,
+            "{}: departed alice should be rejected, got ok",
+            label
+        );
+        let err = resp.error.unwrap();
+        assert!(
+            err.contains("is departed"),
+            "{}: error should mention 'is departed', got: {}",
+            label,
+            err
+        );
+    };
+    let resp = handle_request(create_card("alice"), state.clone()).await;
+    assert_departed("create_card", resp);
+    let resp = handle_request(
+        send_card_msg("alice", &alice_card_id, "ping"),
+        state.clone(),
+    )
+    .await;
+    assert_departed("send_card_message", resp);
+    let resp = handle_request(update_card("alice", &alice_card_id), state.clone()).await;
+    assert_departed("update_card", resp);
+    let resp = handle_request(archive_card("alice", &alice_card_id), state.clone()).await;
+    assert_departed("archive_card", resp);
+
+    // Step 4 (positive control): bob is active, gate must NOT fire on him.
+    //   - create_card: bob's call succeeds.
+    //   - send_card_message on alice's card: bob's call succeeds (no
+    //     creator/assignee gate on this handler).
+    //   - update_card on alice's card: bob's call succeeds (same).
+    //   - archive_card on alice's card: bob hits the permission error, not
+    //     the departed gate — that's the assertion.
+
+    let resp = handle_request(create_card("bob"), state.clone()).await;
+    assert!(
+        resp.ok,
+        "positive control: bob's create_card should succeed: {:?}",
+        resp.error
+    );
+
+    let resp = handle_request(
+        send_card_msg("bob", &alice_card_id, "hello from bob"),
+        state.clone(),
+    )
+    .await;
+    assert!(
+        resp.ok,
+        "positive control: bob's send_card_message should succeed: {:?}",
+        resp.error
+    );
+
+    let resp = handle_request(update_card("bob", &alice_card_id), state.clone()).await;
+    assert!(
+        resp.ok,
+        "positive control: bob's update_card should succeed: {:?}",
+        resp.error
+    );
+
+    let resp = handle_request(archive_card("bob", &alice_card_id), state.clone()).await;
+    assert!(
+        !resp.ok,
+        "positive control: bob's archive_card lacks permission, expected failure"
+    );
+    let err = resp.error.unwrap();
+    assert!(
+        !err.contains("is departed"),
+        "bob is active — error must NOT be 'is departed', got: {}",
+        err
+    );
+    assert!(
+        err.contains("only creator or assignee"),
+        "bob's archive_card should fail with permission error, got: {}",
+        err
+    );
+}
+
+// ─── 11. A.5: unarchive_user works even when the target was departed ──────────
 
 #[tokio::test]
 async fn test_unarchive_user_works_after_departure() {

@@ -47,6 +47,17 @@ pub(super) async fn resolve_author(
 /// Skip this guard on unarchive paths (we still need a way back) and
 /// on read-only / system-internal entries (poll, status). Apply it on
 /// every active-path mutation that takes an author.
+///
+/// **Best-effort, not strictly atomic with `commit_lock`.** This gate runs
+/// *before* the lock is acquired, so a write that passes the gate at T0
+/// can race a concurrent `archive_user` at T1 and still commit at T2
+/// attributed to a now-departed author. The in-handler archive checks
+/// (e.g. `handle_archive_user`'s archive-path stat under the lock) are
+/// the second line of defense for the operations they protect. For other
+/// writes, the eventual-consistency model accepts that one cycle of
+/// writes may slip past archive transitions; sync_loop and Contract 2's
+/// "departed actor can't author further commits" remain true within a
+/// sync window.
 pub(crate) fn ensure_author_not_departed(
     state: &SharedState,
     author: &str,
