@@ -169,6 +169,7 @@ impl GitimClient {
         auth: Option<AuthPayload>,
         admin: bool,
         guest: bool,
+        join_general: bool,
     ) -> Result<ApiResponse, ClientError> {
         self.request(
             "onboard",
@@ -177,6 +178,7 @@ impl GitimClient {
                 "auth": auth,
                 "admin": admin,
                 "guest": guest,
+                "join_general": join_general,
             }),
         )
         .await
