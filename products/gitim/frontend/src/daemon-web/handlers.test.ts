@@ -545,9 +545,7 @@ describe("daemon-web handlers", () => {
   });
 
   it("turns auth failures during poll into cached reconnect state", async () => {
-    vi.mocked(await import("./git")).fetchOrigin.mockRejectedValueOnce(
-      new Error("HTTP Error: 401 Unauthorized"),
-    );
+    runSyncMock.mockRejectedValueOnce(new Error("HTTP Error: 401 Unauthorized"));
     setState({ headCommit: "cached-head" });
 
     const res = await poll("cached-head");
@@ -959,14 +957,7 @@ describe("daemon-web handlers", () => {
     );
   });
 
-  it("includes existing boards in stale cursor poll fallback", async () => {
-    dirs.set("/repo/showboards", ["alice", "system", "bad--name"]);
-    dirs.set("/repo/showboards/alice", ["board.md"]);
-    dirs.set("/repo/showboards/system", ["board.md"]);
-    dirs.set("/repo/showboards/bad--name", ["board.md"]);
-    files.set("/repo/showboards/alice/board.md", boardMarkdown("alice"));
-    files.set("/repo/showboards/system/board.md", boardMarkdown("system"));
-    files.set("/repo/showboards/bad--name/board.md", boardMarkdown("bad--name"));
+  it("returns reset on stale poll cursor", async () => {
     vi.mocked(await import("./git")).diffTrees.mockRejectedValueOnce(
       new Error("stale cursor"),
     );
@@ -975,14 +966,11 @@ describe("daemon-web handlers", () => {
     const res = await poll("base");
 
     expect(res.ok).toBe(true);
-    expect(res.data?.changes).toContainEqual({
-      channel: "alice",
-      kind: "board",
-      entries: [],
+    expect(res.data).toEqual({
+      commit_id: "next-head",
+      changes: [],
+      reset: true,
     });
-    expect(res.data?.changes).not.toContainEqual(
-      expect.objectContaining({ channel: "system", kind: "board" }),
-    );
   });
 
   it("lists cards from channels/<channel>/cards", async () => {
@@ -1126,35 +1114,41 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
-  it("fast-forwards poll by updating the local branch", async () => {
+  it("poll delegates git state ownership to runSync", async () => {
     const git = vi.mocked(await import("./git"));
-    setState({ defaultBranch: "trunk", headCommit: "local-head" });
-    git.resolveRemoteHead.mockResolvedValueOnce("remote-head");
-    git.resolveHead
-      .mockResolvedValueOnce("local-head")
-      .mockResolvedValueOnce("remote-head");
+    git.resolveHead.mockResolvedValueOnce("remote-head");
+    git.diffTrees.mockResolvedValueOnce(["channels/general.thread"]);
 
-    const res = await poll("local-head");
+    const res = await poll("base");
 
     expect(res.ok).toBe(true);
-    expect(git.resetToRemote).toHaveBeenCalledWith(
-      "/repo",
-      "refs/remotes/origin/trunk",
-    );
-    expect(git.checkout).not.toHaveBeenCalled();
+    expect(runSyncMock).toHaveBeenCalledWith();
+    expect(git.fetchOrigin).not.toHaveBeenCalled();
+    expect(git.resetToRemote).not.toHaveBeenCalled();
+    expect(res.data?.commit_id).toBe("remote-head");
+    expect(res.data?.changes).toEqual([
+      {
+        channel: "general",
+        kind: "new_messages",
+        entries: [
+          expect.objectContaining({ line_number: 1, body: "hello" }),
+          expect.objectContaining({ line_number: 2, body: "reply" }),
+        ],
+      },
+    ]);
   });
 
-  it("does not mark local-ahead commits as synced during poll", async () => {
+  it("poll reports the current Worker-owned head without mutating sync baseline", async () => {
     const git = vi.mocked(await import("./git"));
     setState({ defaultBranch: "main", headCommit: "remote-base" });
-    git.resolveRemoteHead.mockResolvedValueOnce("remote-base");
-    git.resolveHead
-      .mockResolvedValueOnce("local-unsynced-head")
-      .mockResolvedValueOnce("local-unsynced-head");
+    git.resolveHead.mockResolvedValueOnce("local-unsynced-head");
 
     const res = await poll("remote-base");
 
     expect(res.ok).toBe(true);
+    expect(runSyncMock).toHaveBeenCalledWith();
+    expect(git.fetchOrigin).not.toHaveBeenCalled();
+    expect(git.resetToRemote).not.toHaveBeenCalled();
     expect(getState().headCommit).toBe("remote-base");
   });
 

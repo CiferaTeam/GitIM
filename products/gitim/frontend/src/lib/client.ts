@@ -17,6 +17,7 @@ import type {
   Channel,
   CreateWorkspaceRequest,
   Message,
+  PollResponse,
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
@@ -455,11 +456,15 @@ export async function me(slug: string): Promise<ApiResponse> {
   return await res.json();
 }
 
-export async function poll(slug: string, since?: string, signal?: AbortSignal): Promise<ApiResponse> {
+export async function poll(
+  slug: string,
+  since?: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<PollResponse>> {
   if (isLocalMode()) {
     void slug;
     void signal;
-    return activeBackend.poll(since);
+    return activeBackend.poll(since) as unknown as Promise<ApiResponse<PollResponse>>;
   }
   const res = await fetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",

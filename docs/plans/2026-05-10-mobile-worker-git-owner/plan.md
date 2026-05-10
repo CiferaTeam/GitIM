@@ -1,6 +1,6 @@
 # Mobile Worker Git Owner Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Prevent mobile/browser local mode from blanking the workspace when Worker sync observes remote changes, then make Worker sync the single Git state owner for local polling.
 
@@ -54,16 +54,16 @@
 **Files:**
 - Modify: `products/gitim/frontend/src/app.tsx`
 
-- [ ] **Step 1: Add `setArchivedDms` and `selectChannel` store actions in App**
+- [x] **Step 1: Add message reload and channel selection store actions in App**
 
 Add selectors next to existing chat store selectors:
 
 ```ts
-const setArchivedDms = useChatStore((s) => s.setArchivedDms);
+const setMessages = useChatStore((s) => s.setMessages);
 const selectChannel = useChatStore((s) => s.selectChannel);
 ```
 
-- [ ] **Step 2: Extract active workspace data loader**
+- [x] **Step 2: Extract active workspace data loader**
 
 Create a `reloadActiveWorkspaceState` callback before `runPoll`:
 
@@ -132,7 +132,11 @@ const reloadActiveWorkspaceState = useCallback(
     if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
     if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
     if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
-    if (cardsRes.ok && cardsRes.data) setCards(cardsRes.data.cards as Card[]);
+    if (cardsRes.ok && cardsRes.data) {
+      const cards = cardsRes.data.cards as Card[];
+      if (options.preserveSelection) mergeCards(cards);
+      else setCards(cards);
+    }
     if (boardsRes.ok && boardsRes.data) setBoards(boardsRes.data.boards as BoardSummary[]);
 
     if (nextChannel && nextChannel !== previousChannel) {
@@ -157,7 +161,7 @@ const reloadActiveWorkspaceState = useCallback(
 );
 ```
 
-- [ ] **Step 3: Replace init bootstrap fetches with the loader**
+- [x] **Step 3: Replace init bootstrap fetches with the loader**
 
 In the `init(slug)` function, set:
 
@@ -171,39 +175,45 @@ const bootstrapOk = await reloadActiveWorkspaceState(slug, workspaceKey, {
 
 Then remove the duplicated `Promise.all([...client.me, client.channels, ...])` block and the duplicated store writes.
 
-- [ ] **Step 4: Change local sync reset callback**
+- [x] **Step 4: Change local sync reset callback**
 
 Replace the current `onSyncReset` callback with:
 
 ```ts
 onSyncReset: () => {
-  clearCursor(workspaceKey);
-  sinceRef.current = undefined;
   void reloadActiveWorkspaceState(slug, workspaceKey, {
     preserveSelection: true,
+  }).catch(() => {
+    markTransportUnavailable();
   });
 },
 ```
 
 Do not call `resetChatForSwitch`, `resetAgentsForSwitch`, `resetCardsForSwitch`, or `resetBoardsForSwitch` from this callback.
+Do not clear the poll cursor from this callback; the next poll can still diff from the previous cursor if detail revalidation fails.
 
-- [ ] **Step 5: Handle poll reset responses**
+- [x] **Step 5: Handle poll reset responses**
 
-After saving `commit_id`, add:
+Only save the new `commit_id` after the full reload succeeds:
 
 ```ts
 if (pollRes.data.reset === true) {
   clearCursor(requestWorkspaceKey);
-  sinceRef.current = pollRes.data.commit_id as string;
-  saveCursor(requestWorkspaceKey, sinceRef.current);
-  await reloadActiveWorkspaceState(slug, requestWorkspaceKey, {
+  sinceRef.current = undefined;
+  const reloaded = await reloadActiveWorkspaceState(slug, requestWorkspaceKey, {
     preserveSelection: true,
   });
+  if (reloaded) {
+    sinceRef.current = nextCommitId;
+    saveCursor(requestWorkspaceKey, sinceRef.current);
+    setHeadCommit(sinceRef.current);
+    markConnected();
+  }
   return;
 }
 ```
 
-- [ ] **Step 6: Run targeted frontend tests**
+- [x] **Step 6: Run targeted frontend tests**
 
 Run:
 
@@ -223,7 +233,7 @@ Expected: PASS.
 - Modify: `products/gitim/frontend/src/daemon-web/sync.ts`
 - Modify: `products/gitim/frontend/src/daemon-web/sync.test.ts`
 
-- [ ] **Step 1: Update Worker event types**
+- [x] **Step 1: Update Worker event types**
 
 In `worker.ts`, change:
 
@@ -244,7 +254,7 @@ needs_token?: boolean;
 
 Also update `isUnscopedWorkerEvent` to recognize all four event names.
 
-- [ ] **Step 2: Update LocalBackend event handling tests**
+- [x] **Step 2: Update LocalBackend event handling tests**
 
 In `backend.test.ts`, add a test that emits stale and current `repo_changed` events and expects exactly one `onSyncReset` call:
 
@@ -278,7 +288,7 @@ it("treats repo_changed as the scoped sync reset successor", () => {
 });
 ```
 
-- [ ] **Step 3: Implement LocalBackend event handling**
+- [x] **Step 3: Implement LocalBackend event handling**
 
 In `backend.ts`, treat both `sync_reset` and `repo_changed` as reset callbacks:
 
@@ -300,7 +310,7 @@ if ("type" in data && data.type === "reconnect_required") {
 }
 ```
 
-- [ ] **Step 4: Add `SyncResult` in `sync.ts`**
+- [x] **Step 4: Add `SyncResult` in `sync.ts`**
 
 Add exported types:
 
@@ -322,7 +332,7 @@ export interface SyncResult {
 
 Change `syncInFlight` to `Promise<SyncResult> | null`.
 
-- [ ] **Step 5: Make `runSyncOnce` return `SyncResult`**
+- [x] **Step 5: Make `runSyncOnce` return `SyncResult`**
 
 Use this status mapping:
 
@@ -334,7 +344,7 @@ Use this status mapping:
 
 Keep throwing for non-auth sync failures so `syncAfterCommit` still returns `commit_only`.
 
-- [ ] **Step 6: Add sync tests**
+- [x] **Step 6: Add sync tests**
 
 Add tests in `sync.test.ts`:
 
@@ -398,7 +408,7 @@ it("shares an in-flight sync for concurrent non-forced calls", async () => {
 });
 ```
 
-- [ ] **Step 7: Run sync/backend tests**
+- [x] **Step 7: Run sync/backend tests**
 
 Run:
 
@@ -416,7 +426,7 @@ Expected: PASS.
 - Modify: `products/gitim/frontend/src/daemon-web/handlers.test.ts`
 - Modify: `products/gitim/frontend/src/lib/types.ts`
 
-- [ ] **Step 1: Add poll reset typing**
+- [x] **Step 1: Add poll reset typing**
 
 In `types.ts`, add:
 
@@ -432,7 +442,7 @@ export interface PollResponse {
 
 This keeps `ApiResponse<PollResponse>` available to new tests without changing the generic `ApiResponse` shape.
 
-- [ ] **Step 2: Update handler tests for sync ownership**
+- [x] **Step 2: Update handler tests for sync ownership**
 
 In `handlers.test.ts`, add:
 
@@ -481,7 +491,7 @@ it("returns reset on stale poll cursor instead of synthesizing full changes", as
 });
 ```
 
-- [ ] **Step 3: Implement `handlers.poll` delegation**
+- [x] **Step 3: Implement `handlers.poll` delegation**
 
 Replace direct fetch/reset logic in `poll` with:
 
@@ -507,7 +517,7 @@ try {
 }
 ```
 
-- [ ] **Step 4: Run handler tests**
+- [x] **Step 4: Run handler tests**
 
 Run:
 
@@ -524,21 +534,15 @@ Expected: PASS.
 - Modify: `docs/plans/2026-05-10-mobile-worker-git-owner/design.md`
 - Modify: `docs/plans/2026-05-10-mobile-worker-git-owner/plan.md`
 
-- [ ] **Step 1: Mark design status approved**
+- [x] **Step 1: Mark design status approved**
 
-Change:
-
-```md
-Status: DRAFT
-```
-
-to:
+Design status now reads:
 
 ```md
-Status: APPROVED (post engineering review)
+Status: APPROVED (implementation complete)
 ```
 
-- [ ] **Step 2: Run all frontend checks**
+- [x] **Step 2: Run all frontend checks**
 
 Run:
 
@@ -553,7 +557,7 @@ Expected:
 - `npm test`: all frontend tests pass.
 - `npm run build`: `tsc -b && vite build` succeeds.
 
-- [ ] **Step 3: Run diff checks**
+- [x] **Step 3: Run diff checks**
 
 Run:
 
@@ -564,7 +568,7 @@ git status --short
 
 Expected: no whitespace errors. Status should only show the intended files.
 
-- [ ] **Step 4: Commit implementation**
+- [x] **Step 4: Commit implementation**
 
 Run:
 

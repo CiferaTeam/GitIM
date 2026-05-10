@@ -127,6 +127,7 @@ export interface CreateWorkspaceRequest {
 }
 
 export type PollChangeKind =
+  | "new_messages"
   | "channel"
   | "channel_meta"
   | "dm"
@@ -138,6 +139,14 @@ export interface PollChange {
   channel: string;
   kind: PollChangeKind;
   entries?: Message[];
+}
+
+export interface PollResponse {
+  commit_id: string;
+  changes: PollChange[];
+  reset?: boolean;
+  sync_enabled?: boolean;
+  needs_token?: boolean;
 }
 
 export type CardStatus = "todo" | "doing" | "done";

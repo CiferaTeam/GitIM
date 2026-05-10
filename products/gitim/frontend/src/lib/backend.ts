@@ -273,13 +273,21 @@ export class LocalBackend implements Backend {
         return;
       }
 
-      // Unsolicited events from sync loop
-      if ("type" in data && data.type === "sync_reset") {
-        this.onSyncReset?.();
-        const reset = (globalThis as unknown as Record<string, unknown>)
-          .__gitimSyncReset;
-        if (typeof reset === "function") reset();
-        return;
+      if ("type" in data) {
+        if (data.type === "sync_reset" || data.type === "repo_changed") {
+          this.onSyncReset?.();
+          const reset = (globalThis as unknown as Record<string, unknown>)
+            .__gitimSyncReset;
+          if (typeof reset === "function") reset();
+          return;
+        }
+        if (data.type === "reconnect_required") {
+          clearSessionToken(this.workspaceId);
+          return;
+        }
+        if (data.type === "sync_error") {
+          return;
+        }
       }
 
       // RPC response

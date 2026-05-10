@@ -126,7 +126,7 @@ describe("daemon-web sync", () => {
       .mockResolvedValueOnce(baseThread)
       .mockResolvedValueOnce(remoteThread);
 
-    await runSync({ forceNewCycle: true });
+    const result = await runSync({ forceNewCycle: true });
 
     expect(files.get("/repo/channels/general.thread")).toBe(
       remoteThread +
@@ -138,8 +138,85 @@ describe("daemon-web sync", () => {
       "msg: @lewis -> general L000003(rebased)",
       "lewis",
     );
+    expect(result).toEqual({
+      beforeHead: "base",
+      afterHead: "merged-head",
+      changed: true,
+      status: "rebased",
+    });
     expect(getState().headCommit).toBe("merged-head");
     expect(getState().syncStatus).toBe("idle");
+  });
+
+  it("returns fast_forwarded and emits repo_changed for remote-only changes", async () => {
+    setState({ headCommit: "local-head", defaultBranch: "main" });
+    gitMocks.resolveHead.mockResolvedValueOnce("local-head");
+    gitMocks.resolveRemoteHead.mockResolvedValueOnce("remote-head");
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(result).toEqual({
+      beforeHead: "local-head",
+      afterHead: "remote-head",
+      changed: true,
+      status: "fast_forwarded",
+    });
+    expect(postMessageMock).toHaveBeenCalledWith({
+      type: "repo_changed",
+      commit_id: "remote-head",
+      reason: "fast_forward",
+    });
+  });
+
+  it("shares an in-flight sync for concurrent non-forced calls", async () => {
+    let releaseFetch!: () => void;
+    gitMocks.fetchOrigin.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseFetch = () => resolve(undefined);
+        }),
+    );
+    setState({ headCommit: "local-head" });
+    gitMocks.resolveHead.mockResolvedValue("local-head");
+    gitMocks.resolveRemoteHead.mockResolvedValue("local-head");
+
+    const first = runSync();
+    const second = runSync();
+    await Promise.resolve();
+    releaseFetch();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      {
+        beforeHead: "local-head",
+        afterHead: "local-head",
+        changed: false,
+        status: "idle",
+      },
+      {
+        beforeHead: "local-head",
+        afterHead: "local-head",
+        changed: false,
+        status: "idle",
+      },
+    ]);
+    expect(gitMocks.fetchOrigin).toHaveBeenCalledTimes(1);
+  });
+
+  it("advances the sync baseline when remote already has the local head", async () => {
+    setState({ headCommit: "base" });
+    gitMocks.resolveHead.mockResolvedValueOnce("local-head");
+    gitMocks.push.mockRejectedValueOnce(new Error("non-fast-forward"));
+    gitMocks.resolveRemoteHead.mockResolvedValueOnce("local-head");
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(result).toEqual({
+      beforeHead: "base",
+      afterHead: "local-head",
+      changed: true,
+      status: "idle",
+    });
+    expect(getState().headCommit).toBe("local-head");
   });
 
   it("fails safe before reset when local conflicts are not append-only threads", async () => {
@@ -187,7 +264,7 @@ describe("daemon-web sync", () => {
       .mockResolvedValueOnce(undefined);
     gitMocks.diffTrees.mockResolvedValueOnce(["showboards/lewis/board.md"]);
 
-    await runSync({ forceNewCycle: true });
+    const result = await runSync({ forceNewCycle: true });
 
     expect(files.get("/repo/showboards/lewis/board.md")).toBe(localBoard);
     expect(gitMocks.resetToRemote).toHaveBeenCalledWith(
@@ -200,6 +277,7 @@ describe("daemon-web sync", () => {
       "board: sync after rebase",
       "lewis",
     );
+    expect(result.status).toBe("rebased");
     expect(getState().headCommit).toBe("merged-head");
     expect(getState().syncStatus).toBe("idle");
   });
@@ -218,7 +296,7 @@ describe("daemon-web sync", () => {
       dirs.delete("/repo/showboards/lewis");
     });
 
-    await runSync({ forceNewCycle: true });
+    const result = await runSync({ forceNewCycle: true });
 
     expect(dirs.has("/repo/showboards/lewis")).toBe(true);
     expect(files.get("/repo/showboards/lewis/board.md")).toBe(localBoard);
@@ -228,6 +306,7 @@ describe("daemon-web sync", () => {
       "board: sync after rebase",
       "lewis",
     );
+    expect(result.status).toBe("rebased");
     expect(getState().headCommit).toBe("merged-head");
     expect(getState().syncStatus).toBe("idle");
   });
