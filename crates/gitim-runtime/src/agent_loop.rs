@@ -706,6 +706,32 @@ impl AgentLoop {
             );
             self.session_token = None;
             let mut state = AgentState::load(&self.repo_root)?;
+
+            // Accumulate the final pre-reset turn into the usage log before
+            // we wipe the session. The token statistics layer is supposed
+            // to survive resets — skipping this branch would silently drop
+            // the very turns that triggered the reset (high context
+            // pressure → biggest tokens of the session). Reuses
+            // update_session_usage so the in-memory mirror also reflects
+            // this turn briefly; clear_runtime_session_usage immediately
+            // below clears it again, which is the correct end state.
+            let sid_for_accumulate: String = exec_result
+                .session_token
+                .clone()
+                .or_else(|| state.session_token.clone())
+                .unwrap_or_default();
+            if !sid_for_accumulate.is_empty() {
+                state.estimated_tokens += crate::context_window::tokenize_for_provider(
+                    &self.provider_type,
+                    &assistant_text_buf,
+                );
+                self.update_session_usage(
+                    &mut state,
+                    exec_result.usage.as_ref(),
+                    &sid_for_accumulate,
+                )?;
+            }
+
             let sid_for_log = state.session_usage.as_ref().map(|s| s.session_id.clone());
             state.clear_session();
             state.save(&self.repo_root)?;

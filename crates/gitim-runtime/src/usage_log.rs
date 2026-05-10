@@ -126,12 +126,20 @@ impl AgentUsageLog {
         let path = Self::path(workspace_root, handler);
         match std::fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str::<AgentUsageLog>(&content) {
-                Ok(mut log) => {
-                    // Provider/model are immutable per CLAUDE.md, so we trust
-                    // the file's stamp over the caller's hint. If they ever
-                    // diverge it's a bug elsewhere; surface in logs but don't
-                    // overwrite the audit trail.
-                    if log.provider != provider || log.model != model {
+                Ok(log) => {
+                    // Provider / model / provider_reports_usage are all
+                    // stamped by the agent loop the first time it writes the
+                    // file and are immutable thereafter (provider/model per
+                    // CLAUDE.md; reports_usage is a pure function of provider).
+                    // Trust the file over the caller's hint — recovery passes
+                    // empty strings + `true` because it doesn't know the
+                    // provider, and overwriting would silently flip
+                    // gemini/openclaw to reports_usage=true and the WebUI
+                    // would render the numeric path instead of the "该
+                    // provider 不上报 token" degradation.
+                    if !provider.is_empty()
+                        && (log.provider != provider || log.model != model)
+                    {
                         tracing::warn!(
                             handler = %handler,
                             file_provider = %log.provider,
@@ -141,7 +149,7 @@ impl AgentUsageLog {
                             "usage log provider/model differs from caller"
                         );
                     }
-                    log.provider_reports_usage = provider_reports_usage;
+                    let _ = provider_reports_usage; // intentional: file is canonical
                     log
                 }
                 Err(e) => {
@@ -227,9 +235,15 @@ impl AgentUsageLog {
     }
 
     /// 30-entry slice ending today, zero-filling missing days. Returns an
-    /// empty vec if `today` is unparseable (the WebUI then renders nothing).
+    /// empty vec if `today` is unparseable. In production callers always
+    /// pass `chrono::Utc::now().format("%Y-%m-%d")` so this branch is
+    /// unreachable; the assertion catches a future refactor that swaps in
+    /// a malformed date format before it silently ships an empty
+    /// sparkline.
     pub fn last_30_days(&self, today: &str) -> Vec<DayEntry> {
         let Ok(today_dt) = NaiveDate::parse_from_str(today, "%Y-%m-%d") else {
+            debug_assert!(false, "last_30_days got unparseable date: {today}");
+            tracing::error!(today = %today, "last_30_days: unparseable date string");
             return Vec::new();
         };
         let mut out = Vec::with_capacity(SUMMARY_WINDOW_DAYS as usize);
@@ -546,6 +560,42 @@ mod tests {
         log.save(dir.path(), "2026-05-10").expect("save");
         AgentUsageLog::delete(dir.path(), "alice").expect("delete");
         assert!(!AgentUsageLog::path(dir.path(), "alice").exists());
+    }
+
+    #[test]
+    fn load_or_default_trusts_disk_provider_reports_usage_over_caller_hint() {
+        // Recovery passes `provider_reports_usage: true` because it doesn't
+        // know the provider. A gemini/openclaw agent has `false` stamped on
+        // disk; the loader must keep the file's value, otherwise the WebUI
+        // renders the numeric path instead of the "该 provider 不上报"
+        // degradation.
+        let dir = TempDir::new().unwrap();
+        let path = AgentUsageLog::path(dir.path(), "ada");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let initial = AgentUsageLog {
+            version: 1,
+            handler: "ada".into(),
+            provider: "gemini".into(),
+            model: "gemini-2.0".into(),
+            provider_reports_usage: false,
+            first_seen: "2026-05-09T12:00:00Z".into(),
+            last_updated: "2026-05-09T12:00:00Z".into(),
+            totals: UsageBucket {
+                turns: 3,
+                ..Default::default()
+            },
+            by_day: BTreeMap::new(),
+        };
+        std::fs::write(&path, serde_json::to_string(&initial).unwrap()).unwrap();
+
+        // Caller hint says reports_usage = true; loader must ignore that.
+        let loaded =
+            AgentUsageLog::load_or_default(dir.path(), "ada", "", "", true);
+        assert!(
+            !loaded.provider_reports_usage,
+            "disk value must win, otherwise gemini/openclaw recovery silently flips the UI path"
+        );
+        assert_eq!(loaded.provider, "gemini");
     }
 
     #[test]
