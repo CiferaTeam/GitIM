@@ -46,6 +46,20 @@ impl Handler {
         Ok(Self(s.to_string()))
     }
 
+    /// Construct the reserved `system` handler.
+    ///
+    /// `Handler::new` rejects `"system"` because users cannot register or
+    /// claim that handle — it's the protocol-level voice for daemon-emitted
+    /// content (cron fires, future broadcast events). Daemon code that
+    /// needs to format such a line goes through this constructor instead.
+    /// Keeping the rejection in `new()` while still exposing this factory
+    /// preserves the user-facing invariant: every parsed `[@system]` line
+    /// originated from daemon code, not from any user clone, because no
+    /// CLI / user-input path can construct one.
+    pub fn system() -> Self {
+        Self("system".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

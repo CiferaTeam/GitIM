@@ -43,10 +43,23 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
 
             let line_number: u64 = caps[1].parse().unwrap();
             let point_to: u64 = caps[2].parse().unwrap();
-            let author = Handler::new(&caps[3]).map_err(|e| ParseError::InvalidHandler {
-                line: file_line_idx + 1,
-                source: e,
-            })?;
+            // `system` is rejected by `Handler::new` (it's reserved so no
+            // user can claim it), but the daemon's cron engine emits
+            // `[@system]` lines for cron fires. Reading those back has to
+            // succeed — without this carve-out, parsing any thread file
+            // containing a system message would fail. The factory
+            // `Handler::system()` preserves the "no user-input path can
+            // forge `system`" invariant; this parser just treats the
+            // already-emitted token as the protocol-level constant.
+            let raw_handler = &caps[3];
+            let author = if raw_handler == "system" {
+                Handler::system()
+            } else {
+                Handler::new(raw_handler).map_err(|e| ParseError::InvalidHandler {
+                    line: file_line_idx + 1,
+                    source: e,
+                })?
+            };
             let timestamp = caps[4].to_string();
             let event_type = caps.get(5).map(|m| m.as_str().to_string());
             let body_first_line = caps[6].to_string();
