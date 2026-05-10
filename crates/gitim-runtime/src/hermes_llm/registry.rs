@@ -85,14 +85,9 @@ mod tests {
     #[test]
     fn registry_ids_unique() {
         let mut ids: Vec<&str> = BUILTIN_PROVIDERS.iter().map(|p| p.id).collect();
-        let original_len = ids.len();
+        ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), original_len, "duplicate provider ids detected");
-        // dedup only removes consecutive duplicates; sort first to catch any dups
-        let mut ids_sorted: Vec<&str> = BUILTIN_PROVIDERS.iter().map(|p| p.id).collect();
-        ids_sorted.sort_unstable();
-        ids_sorted.dedup();
-        assert_eq!(ids_sorted.len(), BUILTIN_PROVIDERS.len(), "duplicate provider ids detected after sort");
+        assert_eq!(ids.len(), BUILTIN_PROVIDERS.len(), "duplicate provider ids detected");
     }
 
     #[test]
@@ -117,8 +112,12 @@ mod tests {
             "anthropic provider missing ANTHROPIC_API_KEY"
         );
         assert!(
-            anthropic.env_vars.len() >= 2,
-            "anthropic provider should have at least 2 env_var aliases"
+            anthropic.env_vars.contains(&"ANTHROPIC_TOKEN"),
+            "anthropic provider missing ANTHROPIC_TOKEN"
+        );
+        assert!(
+            anthropic.env_vars.contains(&"CLAUDE_CODE_OAUTH_TOKEN"),
+            "anthropic provider missing CLAUDE_CODE_OAUTH_TOKEN"
         );
     }
 
