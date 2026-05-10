@@ -225,7 +225,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             auth,
             admin,
             guest,
-        } => crate::onboard::handle_onboard(state, git_server, auth, admin, guest).await,
+            join_general,
+        } => {
+            crate::onboard::handle_onboard(state, git_server, auth, admin, guest, join_general)
+                .await
+        }
         Request::JoinChannel {
             channel,
             targets,

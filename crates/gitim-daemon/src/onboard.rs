@@ -10,12 +10,19 @@ use tracing::{info, warn};
 const MAX_PUSH_RETRIES: u32 = 3;
 
 /// Full onboard orchestration: identity -> me.json -> ensure_repo -> register_user -> sync loop.
+///
+/// `join_general` gates the Step E auto_join_general call. Default-true
+/// callers (human workspace owner via CLI / WebUI) join general on first
+/// registration as before; opt-out callers (runtime agent provision when
+/// the user unticks "join #general") pass `false` and the daemon leaves
+/// `channels/general.{meta.yaml,thread}` untouched.
 pub async fn handle_onboard(
     state: SharedState,
     git_server: String,
     auth: Option<AuthPayload>,
     admin: bool,
     guest: bool,
+    join_general: bool,
 ) -> Response {
     // --- Guest mode: write me.json and start sync, skip everything else ---
     if guest {
@@ -112,7 +119,10 @@ pub async fn handle_onboard(
     );
 
     // --- Step E: Auto-join general channel (for newly created users) ---
-    if created {
+    // Skipped when caller sets join_general=false — currently used by
+    // runtime agent provision when the user opts out at the WebUI
+    // "join #general" checkbox.
+    if created && join_general {
         if let Err(resp) = auto_join_general(&state, &handler) {
             return resp;
         }
@@ -725,6 +735,7 @@ mod tests {
             Some(git_auth("alice", "Alice")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
@@ -758,6 +769,7 @@ mod tests {
             Some(git_auth("alice", "Alice")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp2.ok);
@@ -842,6 +854,7 @@ mod tests {
             Some(git_auth("bot-a", "Bot A")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -854,6 +867,7 @@ mod tests {
             Some(git_auth("bot-b", "Bot B")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -866,6 +880,7 @@ mod tests {
             Some(git_auth("bot-c", "Bot C")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp_c.ok, "bot-c onboard failed: {:?}", resp_c.error);
@@ -1022,6 +1037,7 @@ mod tests {
             Some(git_auth("bot-a", "Bot A")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -1037,6 +1053,7 @@ mod tests {
             Some(git_auth("bot-b", "Bot B")),
             false,
             false,
+            true,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -1066,6 +1083,104 @@ mod tests {
         );
     }
 
+    /// Reverse coverage for `test_onboard_new_user_joins_general`. When a
+    /// caller (Task 2: runtime add_agent) opts out by passing
+    /// `join_general=false`, the daemon must NOT add the new user to
+    /// `channels/general.meta.yaml.members` and must NOT append a join
+    /// event to `channels/general.thread`. Bot A still joins normally so
+    /// we can compare bot-A-present vs bot-B-absent on the same files.
+    #[tokio::test]
+    async fn test_onboard_skip_general_when_join_general_false() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create bare remote with initial commit
+        let bare = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+
+        let seed = tmp.path().join("seed");
+        clone_from_bare(&bare, &seed);
+        std::fs::write(seed.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(&seed)
+            .output()
+            .unwrap();
+
+        // Bot A onboards normally (join_general = true) — creates general
+        // channel and joins it.
+        let bot_a_path = tmp.path().join("bot-a");
+        clone_from_bare(&bare, &bot_a_path);
+        let state_a = make_state(bot_a_path.clone());
+
+        let resp_a = handle_onboard(
+            state_a.clone(),
+            "git".to_string(),
+            Some(git_auth("bot-a", "Bot A")),
+            false,
+            false,
+            true,
+        )
+        .await;
+        assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
+
+        // Bot B onboards with join_general = false — must skip auto_join_general.
+        let bot_b_path = tmp.path().join("bot-b");
+        clone_from_bare(&bare, &bot_b_path);
+        let state_b = make_state(bot_b_path.clone());
+
+        let resp_b = handle_onboard(
+            state_b.clone(),
+            "git".to_string(),
+            Some(git_auth("bot-b", "Bot B")),
+            false,
+            false,
+            false,
+        )
+        .await;
+        assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
+
+        // bot-b's local general.meta.yaml must NOT list bot-b as a member.
+        // (bot-a is still expected — they joined normally.)
+        let meta_content =
+            std::fs::read_to_string(bot_b_path.join("channels/general.meta.yaml")).unwrap();
+        let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
+        assert!(
+            meta.members.contains(&"bot-a".to_string()),
+            "bot-a should still be a member"
+        );
+        assert!(
+            !meta.members.contains(&"bot-b".to_string()),
+            "bot-b must NOT be a member when join_general=false, got: {:?}",
+            meta.members
+        );
+
+        // bot-b's general.thread must NOT contain a join event for bot-b.
+        let thread_content =
+            std::fs::read_to_string(bot_b_path.join("channels/general.thread")).unwrap();
+        let file = gitim_core::parser::parse_thread(&thread_content).unwrap();
+        let events = file.events();
+        assert!(
+            !events.iter().any(|e| e.author.as_str() == "bot-b"),
+            "general.thread must NOT contain a join event for bot-b when join_general=false, got events: {:?}",
+            events
+        );
+    }
+
     #[tokio::test]
     async fn onboard_admin_mode_sets_flag() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1077,6 +1192,7 @@ mod tests {
             Some(git_auth("admin-user", "Admin")),
             true,
             false,
+            true,
         )
         .await;
         assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
@@ -1096,6 +1212,7 @@ mod tests {
             "git".to_string(),
             None,
             false,
+            true,
             true,
         )
         .await;

@@ -173,6 +173,13 @@ pub enum Request {
         admin: bool,
         #[serde(default)]
         guest: bool,
+        /// When false, daemon skips the auto_join_general step on first
+        /// registration. Default true preserves the legacy behavior for
+        /// any caller (CLI human onboard, runtime workspace owner) that
+        /// doesn't set the field — only opt-out callers (Task 2: runtime
+        /// agent provision) need to send `false`.
+        #[serde(default = "default_true")]
+        join_general: bool,
     },
     #[serde(rename = "join_channel")]
     JoinChannel {
@@ -390,6 +397,10 @@ fn default_role() -> String {
 
 fn default_introduction() -> String {
     "GitIM user".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
