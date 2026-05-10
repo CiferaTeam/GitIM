@@ -379,6 +379,28 @@ pub async fn fire(state: &AppState, request: FireRequest) -> Result<(), CronEngi
     {
         let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
+        // Delete-then-fire race guard. Between scan_due and this point a
+        // concurrent `delete_cron` may have moved the spec dir to
+        // `archive/crons/<name>/`. If we proceed, `create_dir_all` would
+        // resurrect an empty active dir and `fs::write` would land an
+        // orphan thread file with no spec.yaml beside it — engine would
+        // then re-fire it on every subsequent tick (no spec → no anchor
+        // → bootstrap path can't recover).
+        //
+        // Re-stat spec.yaml under the lock; if it's gone, treat the fire
+        // as cancelled. Use `Ok(())` (not Err) because the operator
+        // intent is "this cron no longer exists" — that's a successful
+        // resolution, not a fault. Log a warn so a steady stream of
+        // these surfaces in monitoring (legitimate post-delete
+        // last-tick races vs. a bug producing them constantly).
+        if !spec_dir.join("spec.yaml").exists() {
+            warn!(
+                spec_name = %spec_name,
+                "cron spec was deleted between scan and fire, skipping"
+            );
+            return Ok(());
+        }
+
         // Race-safe idempotency check: another scan loop on this same
         // daemon could have raced us between scan_due and now. We skip
         // rather than overwrite — file existence is the canonical proof

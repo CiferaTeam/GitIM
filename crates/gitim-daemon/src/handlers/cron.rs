@@ -24,6 +24,7 @@ use tracing::info;
 
 use crate::api::Response;
 use crate::cron_paths::parse_thread_filename_ts;
+use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 
 /// Reject names that would alias the archive convention or shadow the
@@ -125,6 +126,21 @@ pub async fn handle_create_cron(
             )
         }
     };
+
+    // Departed-author guard. Same shape as send / channel / dm / card /
+    // user mutation handlers — once `archive/users/<author>.meta.yaml`
+    // exists the actor identity is terminally retired and cannot author
+    // new cron specs (or any active-path commit). The error_code lets
+    // the CLI surface the reason without parsing English.
+    if let Err(resp) = ensure_author_not_departed(&state, author_handler.as_str()) {
+        // The shared helper returns a generic error without a code; we
+        // re-wrap with `self_departed` so cron-aware clients can branch.
+        let _ = resp; // keep for parity if helper ever grows codes
+        return Response::error_with_code(
+            format!("user @{} is departed", author_handler.as_str()),
+            "self_departed",
+        );
+    }
 
     // 3. Resolve `@self` → author. Anything else must parse as a Handler
     //    and exist in `users/<target>.meta.yaml`. We don't allow creating
@@ -603,6 +619,16 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
         }
     };
 
+    // Departed-author guard — same as create / enable / disable. Without
+    // this, a departed user (or someone editing me.json to a departed
+    // handler) could still archive crons.
+    if ensure_author_not_departed(&state, author_handler.as_str()).is_err() {
+        return Response::error_with_code(
+            format!("user @{} is departed", author_handler.as_str()),
+            "self_departed",
+        );
+    }
+
     let cron_dir = state.repo_root.join("crons").join(&name);
     let active_spec = cron_dir.join("spec.yaml");
     if !active_spec.exists() {
@@ -718,6 +744,16 @@ async fn toggle_enabled(
             )
         }
     };
+
+    // Departed-author guard — disable / enable mutate spec.yaml.enabled
+    // and commit; both are active-path writes that must respect the
+    // archive-protocol Contract 2 rule.
+    if ensure_author_not_departed(&state, author_handler.as_str()).is_err() {
+        return Response::error_with_code(
+            format!("user @{} is departed", author_handler.as_str()),
+            "self_departed",
+        );
+    }
 
     let spec_path = state
         .repo_root
