@@ -34,6 +34,7 @@ export function AddAgentDialog() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [introduction, setIntroduction] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
+  const [joinGeneral, setJoinGeneral] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectResult, setDetectResult] = useState<PreflightResult | null>(null);
@@ -52,6 +53,7 @@ export function AddAgentDialog() {
     setSystemPrompt("");
     setIntroduction("");
     setEnvVars([]);
+    setJoinGeneral(true);
     setSubmitting(false);
     setDetecting(false);
     setDetectResult(null);
@@ -134,6 +136,7 @@ export function AddAgentDialog() {
         model,
         envMap,
         introduction.trim(),
+        joinGeneral,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -311,6 +314,27 @@ export function AddAgentDialog() {
                 Environment Variables
               </label>
               <EnvVarsEditor value={envVars} onChange={setEnvVars} />
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="agent-join-general"
+                className="flex items-start gap-2 text-sm cursor-pointer"
+              >
+                <input
+                  id="agent-join-general"
+                  type="checkbox"
+                  checked={joinGeneral}
+                  onChange={(e) => setJoinGeneral(e.target.checked)}
+                  className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
+                />
+                <span className="font-medium">
+                  Auto-join #general channel
+                </span>
+              </label>
+              <p className="text-xs text-text-muted pl-6">
+                Uncheck if this agent should only post in specific channels.
+              </p>
             </div>
 
             <DialogFooter>

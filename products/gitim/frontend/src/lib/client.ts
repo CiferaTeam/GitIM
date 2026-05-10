@@ -1093,6 +1093,7 @@ export async function addAgent(
   model?: string,
   env?: Record<string, string>,
   introduction?: string,
+  joinGeneral: boolean = true,
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
@@ -1102,6 +1103,7 @@ export async function addAgent(
     void model;
     void env;
     void introduction;
+    void joinGeneral;
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
@@ -1117,6 +1119,7 @@ export async function addAgent(
         system_prompt: systemPrompt || undefined,
         introduction: introduction && introduction.length > 0 ? introduction : undefined,
         env: env && Object.keys(env).length > 0 ? env : undefined,
+        join_general: joinGeneral,
       }),
     });
     const data = await res.json();
