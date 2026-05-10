@@ -1310,6 +1310,214 @@ async fn im_board_section_append(
     api_response_to_json(client.board_section_append(&req.section, &req.value).await)
 }
 
+// -- /workspaces/{slug}/crons (read endpoints) --
+//
+// These routes proxy to the workspace's human-clone daemon for spec metadata
+// (list / show / runs lists). The single-run body endpoint reads the thread
+// file straight off disk — there is no per-thread-path daemon IPC, and the
+// runtime already trusts the workspace path with full read access. Reading
+// `crons/<name>/<ts>.thread` directly keeps the path simple without forcing
+// a daemon-side change.
+//
+// Error mapping: daemon-side `error_code: "not_found"` (cron name unknown)
+// becomes HTTP 404. Other daemon errors travel through `ErrorBody` with the
+// daemon's `error_code` preserved for the WebUI to branch on.
+
+/// Validate the `<ts>` URL parameter shape: filesystem-safe ISO 8601 UTC
+/// with `:` swapped for `-` (matches the on-disk `<ts>.thread` filename).
+/// Hand-rolled against `YYYY-MM-DDTHH-MM-SSZ` — 20 ASCII chars, fixed-width
+/// digits + literal separators. Cheaper and clearer than pulling a regex
+/// crate for one validation site.
+fn cron_ts_is_valid(ts: &str) -> bool {
+    if ts.len() != 20 {
+        return false;
+    }
+    let bytes = ts.as_bytes();
+    let digit_positions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    for i in digit_positions {
+        if !bytes[i].is_ascii_digit() {
+            return false;
+        }
+    }
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b'-'
+        && bytes[16] == b'-'
+        && bytes[19] == b'Z'
+}
+
+#[derive(Serialize)]
+struct CronListResponse {
+    crons: Vec<gitim_core::responses::CronSummary>,
+}
+
+#[derive(Serialize)]
+struct CronRunsListResponse {
+    runs: Vec<gitim_core::responses::CronRunEntry>,
+}
+
+#[derive(Serialize)]
+struct CronRunBodyResponse {
+    body: String,
+}
+
+/// Map a `ClientError::Api` with `error_code = "not_found"` to an HTTP 404,
+/// other daemon errors to a 200 with `ok: false` payload (matching the rest
+/// of `api_response_to_json`'s convention so WebUI can branch on `body.ok`),
+/// and unrelated transport errors to a 200 `ok: false`.
+fn cron_client_error_to_response(err: gitim_client::ClientError) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use gitim_client::ClientError;
+    match err {
+        ClientError::Api {
+            ref message,
+            code: Some(ref code),
+        } if code == "not_found" => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ErrorBody::with_code(message.clone(), code.clone())),
+        )
+            .into_response(),
+        ClientError::Api { message, code } => {
+            let body = match code {
+                Some(c) => ErrorBody::with_code(message, c),
+                None => ErrorBody::new(message),
+            };
+            Json(body).into_response()
+        }
+        other => Json(ErrorBody::new(other.to_string())).into_response(),
+    }
+}
+
+async fn crons_list(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client.list_crons().await {
+        Ok(crons) => Json(CronListResponse { crons }).into_response(),
+        Err(e) => cron_client_error_to_response(e),
+    }
+}
+
+async fn crons_show(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, name)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client.show_cron(&name).await {
+        Ok(detail) => Json(detail).into_response(),
+        Err(e) => cron_client_error_to_response(e),
+    }
+}
+
+async fn crons_runs_list(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, name)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    // `None` limit means "daemon default" (50, capped at 1000) — same
+    // ceiling history_cron applies. Explicit caps live behind the
+    // /timeline endpoint.
+    match client.history_cron(&name, None).await {
+        Ok(runs) => Json(CronRunsListResponse { runs }).into_response(),
+        Err(e) => cron_client_error_to_response(e),
+    }
+}
+
+async fn crons_run_body(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, name, ts)): axum::extract::Path<(String, String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    if !cron_ts_is_valid(&ts) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                "invalid run timestamp; expected YYYY-MM-DDTHH-MM-SSZ",
+                "invalid_ts",
+            )),
+        )
+            .into_response();
+    }
+
+    // Reuse the cron-name validation that the daemon also runs, so we don't
+    // touch disk on a clearly bad name.
+    if name.is_empty() || name.len() > 63 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                "invalid cron name",
+                "invalid_name",
+            )),
+        )
+            .into_response();
+    }
+
+    let human_repo = match with_workspace_snapshot(&state, &slug, human_repo_path) {
+        Ok(Some(p)) => p,
+        Ok(None) => return human_not_initialized(),
+        Err(r) => return r,
+    };
+
+    // Only look in the active path; archived crons are out of v1 scope for
+    // the run viewer (they don't appear in /crons/list anyway).
+    let thread_path = human_repo
+        .join("crons")
+        .join(&name)
+        .join(format!("{ts}.thread"));
+    if !thread_path.is_file() {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ErrorBody::with_code(
+                format!("run '{ts}' for cron '{name}' not found"),
+                "not_found",
+            )),
+        )
+            .into_response();
+    }
+    match std::fs::read_to_string(&thread_path) {
+        Ok(body) => Json(CronRunBodyResponse { body }).into_response(),
+        Err(e) => Json(ErrorBody::new(format!(
+            "failed to read run body: {e}"
+        )))
+        .into_response(),
+    }
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -4162,6 +4370,15 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
         .route("/users/archived", get(users_list_archived))
         .route("/users/{handler}/unarchive", post(users_unarchive))
+        // Cron read endpoints — list / detail / run history / single-run body.
+        // Concrete prefix-segments must come before the dynamic
+        // `/crons/{name}` route so axum doesn't try to match e.g. `timeline`
+        // as a name segment (timeline lives in Task 4.2; reserve the path
+        // here to keep the ordering invariant explicit).
+        .route("/crons", get(crons_list))
+        .route("/crons/{name}", get(crons_show))
+        .route("/crons/{name}/runs", get(crons_runs_list))
+        .route("/crons/{name}/runs/{ts}", get(crons_run_body))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
