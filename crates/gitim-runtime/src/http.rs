@@ -2632,13 +2632,27 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
     }
 }
 
+/// Query parameters for `GET /preflight/{provider}`.
+///
+/// Currently only consumed by the `hermes` branch, which forwards them to
+/// `preflight_hermes_with`. All other providers silently ignore the fields.
+#[derive(Deserialize, Default)]
+struct PreflightQuery {
+    llm_provider: Option<String>,
+    llm_model: Option<String>,
+}
+
 /// HTTP handler for `GET /preflight/{provider}`.
 ///
 /// Dispatches to the matching provider's real-hello preflight. Unknown
 /// providers return 400 with a stable `{"ok": false, "error": ...}` shape so
 /// the WebUI can branch without parsing provider-specific fields.
+///
+/// The `hermes` branch accepts optional `llm_provider` and `llm_model` query
+/// parameters to override the LLM used for the preflight hello.
 async fn preflight_handler(
     axum::extract::Path(provider): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<PreflightQuery>,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -2661,7 +2675,14 @@ async fn preflight_handler(
             (StatusCode::OK, Json(result)).into_response()
         }
         "hermes" => {
-            let result = crate::preflight::preflight_hermes().await;
+            let result = crate::preflight::preflight_hermes_with(
+                "hermes",
+                std::time::Duration::from_secs(30),
+                None,
+                params.llm_provider.as_deref(),
+                params.llm_model.as_deref(),
+            )
+            .await;
             (StatusCode::OK, Json(result)).into_response()
         }
         _ => (

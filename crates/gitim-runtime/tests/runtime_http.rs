@@ -160,6 +160,86 @@ async fn test_preflight_codex_returns_result_shape() {
     );
 }
 
+// -- /preflight/{provider}?llm_provider=...&llm_model=... query param tests --
+
+/// Test 1: GET /preflight/hermes?llm_provider=X&llm_model=Y
+///
+/// The handler must accept the query params (not 400), return 200, and include
+/// the standard PreflightResult shape. The hermes CLI is stripped from PATH so
+/// preflight_hermes_with returns `available: false` with `not_installed` — this
+/// exercises the full HTTP path including query parsing without a real hermes.
+#[tokio::test]
+#[serial(path_env)]
+async fn preflight_hermes_query_param_passed_through() {
+    let _path_guard = PathGuard::install_empty();
+    let (router, _state) = create_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/preflight/hermes?llm_provider=minimax-cn&llm_model=MiniMax-M2.7-highspeed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Must be 200, not 400 (i.e. query params are parsed correctly and not rejected).
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    // Standard PreflightResult fields must be present.
+    assert_eq!(
+        body["provider"],
+        serde_json::Value::String("hermes".into()),
+        "body: {body}"
+    );
+    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
+    assert!(body.get("available").is_some(), "available field missing: {body}");
+    // With PATH empty, hermes binary not found → not_installed.
+    assert_eq!(
+        body["error_kind"],
+        serde_json::Value::String("not_installed".into()),
+        "body: {body}"
+    );
+}
+
+/// Test 2: GET /preflight/claude?llm_provider=garbage&llm_model=garbage
+///
+/// Non-hermes providers must silently ignore query params. The response must be
+/// identical in shape to a plain `/preflight/claude` call.
+#[tokio::test]
+#[serial(path_env)]
+async fn preflight_other_provider_ignores_query_params() {
+    let _path_guard = PathGuard::install_empty();
+    let (router, _state) = create_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/preflight/claude?llm_provider=garbage&llm_model=garbage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Must be 200 — query params must not break non-hermes providers.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(
+        body["provider"],
+        serde_json::Value::String("claude".into()),
+        "body: {body}"
+    );
+    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
+    // PATH is empty → claude not found → not_installed.
+    assert_eq!(
+        body["error_kind"],
+        serde_json::Value::String("not_installed".into()),
+        "body: {body}"
+    );
+}
+
 // -- /agents/add provider-field guardrails --
 //
 // These tests rely on the fact that provider validation runs *before* any
