@@ -1,0 +1,261 @@
+# Mobile Worker Git Owner 设计
+
+## 背景
+
+GitIM 桌面端的运行边界是清晰的：React App 只负责 UI 和状态编排，Rust runtime/daemon 负责 Git 仓库同步、变更检测和冲突处理。App 通过 HTTP `poll` 消费 runtime 已整理好的增量结果。
+
+手机端使用浏览器 local mode，runtime 被搬进 Web Worker：React App 通过 `LocalBackend` RPC 调用 Worker，Worker 使用 `isomorphic-git` 和 IndexedDB/LightningFS 操作本地仓库。现有实现中，App 的 local `poll` RPC 会触发 Worker 执行 `fetch/reset/diff`，Worker 自己的后台 `sync_loop` 也会定时执行 `fetch/reset/push/rebase`。这让同一份 Git state 同时存在两个调度入口。
+
+用户可见症状是：手机端 poll 到新信息时，偶发出现整个空间无频道或无消息的空白状态，刷新页面后恢复。
+
+## 根因判断
+
+当前 mobile/local 链路存在一个竞态：
+
+1. App 每 7 秒调用 local `poll`。
+2. Worker 的 `sync_loop` 也每 7 秒运行。
+3. Worker `sync_loop` 如果先 fast-forward 到远端新 HEAD，会发送 `sync_reset` 事件。
+4. App 收到 `sync_reset` 后清空 workspace-scoped stores，包括 `channels`、`currentChannel`、`messages`。
+5. 清空后 active workspace 没有变化，初始化 effect 不会重新执行。
+6. 下一次 `poll(undefined)` 只建立 cursor baseline，返回空 `changes`，UI 继续停在空状态。
+
+问题的直接触发点是 `sync_reset` 事件被 App 解释成“清空 UI 状态”。更底层的问题是 mobile/local mode 没有像桌面端一样让 runtime 层独占 Git 状态推进。
+
+## 设计目标
+
+本设计把手机端边界收敛为：
+
+```text
+React App = UI 状态编排和结果消费
+Web Worker = 浏览器内 runtime，唯一 Git state owner
+```
+
+具体目标：
+
+- Worker 内部只有一个会推进 Git HEAD 的同步调度器。
+- App 可以请求更新，但 fetch、push、reset、rebase 的顺序由 Worker 串行管理。
+- `sync_reset` 类事件表示“仓库 HEAD 已变化，请重新校验 UI 数据”，不再表示“清空 UI”。
+- App 重新加载数据时保留当前可见内容，成功拿到新快照后再替换，避免闪白。
+- 网络、鉴权、stale cursor、冲突失败都保留可读缓存，并向 UI 暴露明确状态。
+
+## 组件边界
+
+### React App
+
+App 继续负责：
+
+- 连接模式、workspace、路由和当前 channel/card/board 选择。
+- Zustand store 的 UI 状态。
+- poll cursor 的持久化。
+- 渲染消息、未读数、连接状态、错误提示。
+- 收到 Worker 事件后触发 UI revalidate。
+
+App 不直接拥有 Git 同步时序。local mode 下的 `poll` 只是一次“向 Worker 请求最新变化”的 RPC。
+
+### LocalBackend
+
+`LocalBackend` 是 App 和 Worker 的稳定桥：
+
+- 为每个 browser workspace 创建带 `workspaceId/generation` 的 Worker session。
+- 过滤 stale Worker response/event。
+- 把 Worker 事件转换成 App 可消费的回调。
+- 在 reconnect-required 场景清理当前 workspace 的 session token。
+
+### Web Worker
+
+Worker 是 browser runtime：
+
+- 维护内存 `DaemonWebState`。
+- 操作 IndexedDB/LightningFS 中的 Git repository。
+- 实现 `me/channels/users/read/send/poll/thread/cards/boards` 等 API。
+- 通过一个同步调度器串行执行 fetch、push、reset、rebase。
+- 发送 repo changed、sync error、reconnect required 等事件。
+
+## Worker 同步调度器
+
+在 `daemon-web/sync.ts` 中引入统一的 sync manager。现有 `syncInFlight` 机制保留并扩展为唯一 Git mutation queue。
+
+同步入口统一为：
+
+```text
+runSync(options) -> SyncResult
+```
+
+`SyncResult` 包含：
+
+- `beforeHead`
+- `afterHead`
+- `changed`
+- `status`: `idle | pushed | fast_forwarded | rebased | reconnect_required | error`
+- `error`
+- `errorCode`
+
+所有会推进 Git 状态的路径都通过 `runSync`：
+
+- Worker 定时 sync loop。
+- App local `poll` RPC。
+- `send`、board/card 写入后的同步。
+- 页面回到前台后的主动刷新。
+
+`runSync` 保证：
+
+- 同一时间最多一个同步周期真正执行 Git 操作。
+- 新请求遇到 in-flight sync 时等待已有周期，必要时排队启动下一轮。
+- `headCommit` 只在 push、fast-forward、rebase 成功后推进。
+- 鉴权失败将 state 标记为 `reconnect_required`，保留本地 repo。
+- 无法安全合并的冲突保留本地状态并返回 error。
+
+## Poll 语义
+
+local mode 下的 `poll(since)` 调整为“同步后读取变化”：
+
+```text
+poll(since):
+  result = runSync()
+  currentHead = resolveHead()
+  if since is empty:
+    return { commit_id: currentHead, changes: [], reset: false }
+  if since == currentHead:
+    return { commit_id: currentHead, changes: [], reset: false }
+  diff since..currentHead
+  if diff succeeds:
+    return { commit_id: currentHead, changes, reset: false }
+  if diff fails because cursor is stale:
+    return { commit_id: currentHead, changes: [], reset: true }
+```
+
+这样 App 的 poll 仍然是主 UI 更新节奏，但 Git 状态推进已经被 Worker 内部串行化。
+
+## Worker 事件契约
+
+Worker 事件改为表达状态变化，而不是要求 App 清空 store。
+
+### `repo_changed`
+
+仓库 HEAD 已被 Worker 同步调度器推进。App 收到后执行 active workspace revalidate。
+
+字段：
+
+- `type: "repo_changed"`
+- `commit_id`
+- `reason: "fast_forward" | "rebase" | "push"`
+
+### `sync_error`
+
+同步失败，但缓存 repo 仍可读。App 保留旧 UI，并展示连接或同步错误。
+
+字段：
+
+- `type: "sync_error"`
+- `error`
+- `error_code`
+- `needs_token`
+
+### `reconnect_required`
+
+鉴权失败或 token 缺失。App 切到 reconnect required 状态，但保留 cached data 的只读浏览体验。
+
+字段：
+
+- `type: "reconnect_required"`
+- `commit_id`
+
+`sync_reset` 可以作为兼容别名暂时保留，但 App 内部按 `repo_changed` 处理。
+
+## App Revalidate
+
+App 抽出一个可复用的 active workspace reload 函数：
+
+```text
+reloadActiveWorkspaceState({ preserveSelection: true })
+```
+
+流程：
+
+1. 记录当前 workspace identity、currentChannel、selected card/board。
+2. 并发读取 `me/channels/users/cards/boards`。
+3. 根据新 channel 列表决定保留哪个 channel。
+4. 对保留的 channel 调用 `read(channel, 50)`。
+5. 请求仍属于当前 workspace 时，一次性更新 stores。
+6. 更新 cursor/headCommit。
+
+channel 保留规则：
+
+- 当前 channel 仍存在于 active 或 archived 列表中，继续显示当前 channel。
+- 当前 channel 已不可见且 `general` 存在，切到 `general`。
+- 没有可显示 channel 时，显示 no-scope 状态。
+
+revalidate 期间旧消息和旧列表保持可见。只有新快照成功返回后才替换 UI store。
+
+## Stale Cursor 与 Full Reload
+
+当 `poll` 返回 `reset: true`：
+
+1. App 清掉当前 workspace cursor。
+2. App 调 `reloadActiveWorkspaceState({ preserveSelection: true })`。
+3. reload 成功后保存新 `commit_id`。
+4. 未读状态按 fresh snapshot 处理。
+
+这与 daemon-web 架构文档中“cursor reset 需要 full reload 事件”的方向一致。
+
+## 分阶段落地
+
+### 阶段一：止血
+
+先修改 App 对 `sync_reset` 的处理：
+
+- 不调用 `resetForWorkspaceSwitch`。
+- 改为触发 `reloadActiveWorkspaceState({ preserveSelection: true })`。
+- reload 失败时保留旧 UI 并显示同步错误。
+
+阶段一解决用户可见的空白状态。
+
+### 阶段二：收敛 Git owner
+
+重构 Worker local poll：
+
+- `handlers.poll` 移除直接 `fetchOrigin/resetToRemote` 的推进逻辑。
+- `handlers.poll` 通过 `runSync` 获取同步后的 HEAD。
+- `runSync` 返回结构化 `SyncResult`。
+- Worker 定时 sync loop、poll、send 后同步共享同一队列。
+
+阶段二消除 App poll RPC 与 Worker sync loop 的 Git state 竞争。
+
+### 阶段三：事件和错误补齐
+
+- Worker 发送 `repo_changed`、`sync_error`、`reconnect_required`。
+- `LocalBackend` 继续按 workspace session 过滤事件。
+- App 将 sync error 映射到连接状态和 toast/banner。
+- reconnect required 保留 cached repo 的只读浏览。
+
+## 测试计划
+
+### 单元测试
+
+- `LocalBackend` 忽略 stale generation 的 `repo_changed` 和 `sync_error`。
+- `runSync` 对并发调用只执行一个真实 sync 周期。
+- `poll(since)` 在 sync 后 diff 成功时返回新增 messages。
+- `poll(since)` 在 stale cursor 时返回 `reset: true`。
+- 鉴权失败时 state 进入 `reconnect_required`，repo cache 保留。
+
+### App 级测试
+
+- active channel 有消息时收到 `sync_reset/repo_changed`，最终仍显示 channel 和 messages。
+- revalidate 期间旧消息不闪白。
+- 当前 channel 仍存在时 reload 后保持选择。
+- 当前 channel 消失时切到 `general`。
+- reconnect required 后仍能看到 cached read-only data。
+
+### E2E 测试
+
+- mobile local workspace 收到远端新消息后不出现空白空间。
+- App poll 与 Worker sync loop 同时触发时，消息只出现一次。
+- 页面刷新后能恢复 active workspace 和 current channel。
+
+## 验收标准
+
+- 手机端在远端消息到达时不会把 workspace UI 清成空白。
+- Worker 是 local mode 中唯一推进 Git HEAD 的组件。
+- App 只消费 Worker API/事件，不承担 Git 同步时序。
+- stale cursor、网络错误、鉴权错误都有明确 UI 状态。
+- 桌面 remote mode 的 poll 行为保持不变。
