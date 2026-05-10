@@ -114,6 +114,7 @@ export function BoardsView() {
       await Promise.resolve();
       if (cancelled) return;
       setDetailState("loading");
+      setError(null);
       const res = await client.showBoard(slug, handler);
       if (cancelled) return;
       if (!res.ok || !res.data) {
@@ -122,6 +123,7 @@ export function BoardsView() {
         return;
       }
       setSelectedBoard(res.data);
+      setError(null);
       setDetailState("idle");
     }
     return () => {

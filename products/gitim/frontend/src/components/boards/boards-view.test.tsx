@@ -254,6 +254,52 @@ describe("BoardsView", () => {
     expect(container.textContent).not.toContain("Old detail");
   });
 
+  it("clears a stale detail error after a later board loads", async () => {
+    listBoardsMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        boards: [
+          boardSummary("alice", "Alice summary"),
+          boardSummary("bob", "Bob summary"),
+        ],
+      },
+    });
+    showBoardMock
+      .mockResolvedValueOnce({
+        ok: false,
+        error: "Alice detail failed",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: boardRead("bob", "Bob detail"),
+      });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<BoardsView />);
+      await flushPromises();
+    });
+
+    expect(container.textContent).toContain("Alice detail failed");
+
+    const bobButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("@bob"),
+    );
+    expect(bobButton).toBeDefined();
+
+    await act(async () => {
+      bobButton?.click();
+      await flushPromises();
+    });
+
+    expect(showBoardMock).toHaveBeenNthCalledWith(2, "phone", "bob");
+    expect(container.textContent).toContain("Bob detail");
+    expect(container.textContent).not.toContain("Alice detail failed");
+  });
+
   it("ignores a stale list response after the workspace changes", async () => {
     const stalePhoneList = deferred<ApiResponse<{ boards: BoardSummary[] }>>();
     listBoardsMock
