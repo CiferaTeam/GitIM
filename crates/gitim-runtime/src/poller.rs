@@ -1,6 +1,22 @@
-use gitim_client::GitimClient;
+use gitim_client::{ApiResponse, GitimClient};
 
 use crate::error::RuntimeError;
+
+/// Map a non-ok daemon poll response to a typed `RuntimeError`.
+///
+/// Single source of truth for the `error_code` wire contract — both
+/// `poll()` and `peek()` route through here so a new tagged code only
+/// has to be wired in one place. Caller must have already checked
+/// `!resp.ok` before calling; passing an `ok=true` response would
+/// silently produce a `PollFailed` with whatever `resp.error` happened
+/// to be (which is fine — it's nonsensical input).
+fn map_response_error(resp: ApiResponse) -> RuntimeError {
+    if resp.error_code.as_deref() == Some("self_departed") {
+        RuntimeError::SelfDeparted
+    } else {
+        RuntimeError::PollFailed(resp.error.unwrap_or_else(|| "poll failed".into()))
+    }
+}
 
 #[derive(Debug)]
 pub struct ChannelChange {
@@ -47,8 +63,11 @@ impl Poller {
             .map_err(|e| RuntimeError::PollFailed(e.to_string()))?;
 
         if !resp.ok {
-            let msg = resp.error.unwrap_or_else(|| "poll failed".into());
-            return Err(RuntimeError::PollFailed(msg));
+            // Map daemon's tagged error codes to typed RuntimeError variants
+            // so call sites (agent_loop) can pattern-match on the failure
+            // mode instead of substring-grepping the human message. The
+            // wire-level "error_code" contract lives in `map_response_error`.
+            return Err(map_response_error(resp));
         }
 
         let data = resp
@@ -95,8 +114,15 @@ impl Poller {
             .map_err(|e| RuntimeError::PollFailed(e.to_string()))?;
 
         if !resp.ok {
-            let msg = resp.error.unwrap_or_else(|| "poll failed".into());
-            return Err(RuntimeError::PollFailed(msg));
+            // Mirror `poll`'s mapping for symmetry of the wire contract.
+            // Note: `peek` callers (agent_loop steering checks during
+            // provider execution) currently treat all peek errors as
+            // warn+continue — the typed `SelfDeparted` variant is here
+            // for future-proofing, NOT yet wired to trigger mid-session
+            // self-heal. The next full `poll()` cycle catches a
+            // self-departed handler and routes it through the agent_loop
+            // SelfDeparted arm correctly.
+            return Err(map_response_error(resp));
         }
 
         let data = resp

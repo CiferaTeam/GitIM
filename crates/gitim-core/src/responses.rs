@@ -79,10 +79,29 @@ pub struct ListChannelsResponse {
     pub channels: Vec<ChannelSummary>,
 }
 
-/// Response payload for `Request::ListUsers`.
+/// Active users with optional archived users in a single payload.
+///
+/// `include_archived` on the request controls whether `archived_users` is
+/// populated. We merge both lists into one response (rather than the two-shape
+/// pattern used by `ListChannelsResponse` / `ListArchivedChannelsResponse`)
+/// because Contract 2 enforces strict mutual exclusion: a handler can be in
+/// `users/` xor `archive/users/`, never both. The single shape makes the
+/// invariant explicit at the wire level — clients see `users ∩ archived_users
+/// = ∅` by construction.
+///
+/// Default call (`include_archived = false`) returns only `users` —
+/// `archived_users` is omitted on the wire. When the caller opts in with
+/// `include_archived = true`, daemon also returns `archived_users: Some(_)`
+/// alongside. Field name is `archived_users` (not bare `archived`) to keep it
+/// distinct from `ReadResponse.archived: bool` — same word, very different
+/// shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListUsersResponse {
     pub users: Vec<String>,
+    /// Populated only when the request was `include_archived: true`.
+    /// Wire-additive — old clients see no field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_users: Option<Vec<String>>,
 }
 
 /// Response payload for `Request::GetThread`. `entries` keep the same
@@ -113,6 +132,99 @@ pub struct ArchiveChannelResponse {
 pub struct UnarchiveChannelResponse {
     pub channel: String,
     pub unarchived_by: String,
+}
+
+/// Response payload for `Request::ArchiveUser`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveUserResponse {
+    pub handler: String,
+    pub archived_by: String,
+}
+
+/// Response payload for `Request::UnarchiveUser`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveUserResponse {
+    pub handler: String,
+    pub unarchived_by: String,
+}
+
+/// One row in `ListArchivedUsersResponse.users`. The handler is
+/// structurally guaranteed (it's the file stem under `archive/users/`);
+/// `display_name` is best-effort — the daemon parses the archived
+/// `UserMeta` yaml on each list call and omits the field when the file
+/// is absent or unparseable. Frontends must render gracefully when
+/// `display_name` is `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchivedUserEntry {
+    pub handler: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// Response payload for `Request::ListArchivedUsers`.
+///
+/// Wire shape: `users` is a list of `{handler, display_name?}` objects.
+/// The pre-archive-protocol shape — bare handler strings — was a dead
+/// contract: the WebUI's `ArchivedUserEntry` already typed `display_name`
+/// optional, but the daemon never emitted it, so archived agent cards
+/// always fell back to bare handler. Promoting the row to an object is
+/// a hard wire change; the only client is the WebUI we control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedUsersResponse {
+    pub users: Vec<ArchivedUserEntry>,
+}
+
+/// Response payload for `Request::DepartUser`.
+///
+/// `commits` reports how many commits this invocation produced. On a
+/// fresh burn this counts every phase that did real work; on an
+/// idempotent retry the count drops as already-completed steps skip.
+/// `already_departed` flags the terminal-state shortcut — the caller
+/// can distinguish "depart just finished" from "depart was already
+/// done before this call" without diffing git logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DepartUserResponse {
+    pub handler: String,
+    pub commits: u64,
+    pub already_departed: bool,
+}
+
+/// Response payload for `Request::ArchiveDm`.
+///
+/// `dm_pair_stem` is the on-disk filename stem `<min>--<max>` (output of
+/// `gitim_core::dm::dm_filename`), so callers can re-derive participants
+/// or display the archive entry without re-deriving the sort. No
+/// timestamp here — RPC responses across `ArchiveUserResponse`,
+/// `ArchiveChannelResponse`, and this one stay aligned. The
+/// `Event::DmArchived` broadcast carries the timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveDmResponse {
+    pub archived_by: String,
+    pub dm_pair_stem: String,
+}
+
+/// Response payload for `Request::UnarchiveDm`. Symmetric to `ArchiveDmResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnarchiveDmResponse {
+    pub unarchived_by: String,
+    pub dm_pair_stem: String,
+}
+
+/// One row in `ListArchivedDmsResponse.dms`. `peer` is the participant
+/// other than the caller; `dm_pair_stem` is the canonical sorted-pair
+/// filename stem so the client can reconstruct the storage key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchivedDmEntry {
+    pub peer: String,
+    pub dm_pair_stem: String,
+}
+
+/// Response payload for `Request::ListArchivedDms`. Daemon filters to
+/// rows where the caller participated in the DM; third parties never
+/// appear here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedDmsResponse {
+    pub dms: Vec<ArchivedDmEntry>,
 }
 
 /// Shared response shape for `Request::JoinChannel` and
@@ -436,11 +548,41 @@ mod tests {
     fn list_users_response_wire_shape() {
         let r = ListUsersResponse {
             users: vec!["alice".to_string(), "bob".to_string()],
+            archived_users: None,
         };
         let v = serde_json::to_value(&r).unwrap();
-        let users = v.get("users").unwrap().as_array().unwrap();
+        let obj = v.as_object().unwrap();
+        // Default call: only `users`. `archived_users` is skipped when None
+        // so wire shape stays backward-compatible with pre-A.6 clients.
+        assert_eq!(obj.len(), 1);
+        let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
         assert_eq!(users[0].as_str(), Some("alice"));
+        assert!(!obj.contains_key("archived_users"));
+        // Also assert no bare `archived` — keeps us honest if someone reverts
+        // the rename without updating both sides.
+        assert!(!obj.contains_key("archived"));
+    }
+
+    #[test]
+    fn list_users_response_with_archived_wire_shape() {
+        let r = ListUsersResponse {
+            users: vec!["alice".to_string()],
+            archived_users: Some(vec!["bob".to_string(), "carol".to_string()]),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(
+            obj.get("users").unwrap().as_array().map(|a| a.len()),
+            Some(1),
+        );
+        let archived_users = obj.get("archived_users").unwrap().as_array().unwrap();
+        assert_eq!(archived_users.len(), 2);
+        assert_eq!(archived_users[0].as_str(), Some("bob"));
+        // Disambiguation guard: no bare `archived` key — that's reserved for
+        // `ReadResponse.archived: bool` semantics.
+        assert!(!obj.contains_key("archived"));
     }
 
     #[test]
@@ -467,8 +609,14 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 2);
-        assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("engineering"));
-        assert_eq!(obj.get("created_by").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            obj.get("channel").and_then(|v| v.as_str()),
+            Some("engineering")
+        );
+        assert_eq!(
+            obj.get("created_by").and_then(|v| v.as_str()),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -508,6 +656,115 @@ mod tests {
         assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
         assert!(u.as_object().unwrap().contains_key("unarchived_by"));
         assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn user_archive_unarchive_response_distinct_fields() {
+        let a = serde_json::to_value(ArchiveUserResponse {
+            handler: "alice".to_string(),
+            archived_by: "alice".to_string(),
+        })
+        .unwrap();
+        let u = serde_json::to_value(UnarchiveUserResponse {
+            handler: "alice".to_string(),
+            unarchived_by: "alice".to_string(),
+        })
+        .unwrap();
+        assert_eq!(a.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert!(a.as_object().unwrap().contains_key("archived_by"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(!u.as_object().unwrap().contains_key("archived_by"));
+    }
+
+    #[test]
+    fn dm_archive_unarchive_response_distinct_fields() {
+        let a = serde_json::to_value(ArchiveDmResponse {
+            archived_by: "alice".to_string(),
+            dm_pair_stem: "alice--bob".to_string(),
+        })
+        .unwrap();
+        let u = serde_json::to_value(UnarchiveDmResponse {
+            unarchived_by: "alice".to_string(),
+            dm_pair_stem: "alice--bob".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            a.get("dm_pair_stem").and_then(|v| v.as_str()),
+            Some("alice--bob"),
+        );
+        assert!(a.as_object().unwrap().contains_key("archived_by"));
+        assert!(!a.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(u.as_object().unwrap().contains_key("unarchived_by"));
+        assert!(!u.as_object().unwrap().contains_key("archived_by"));
+        // Timestamps live on Event::DmArchived / DmUnarchived, not the
+        // response — kept aligned with ArchiveUser / ArchiveChannel.
+        assert!(!a.as_object().unwrap().contains_key("archived_at"));
+        assert!(!u.as_object().unwrap().contains_key("unarchived_at"));
+    }
+
+    #[test]
+    fn list_archived_dms_response_wire_shape() {
+        let r = ListArchivedDmsResponse {
+            dms: vec![
+                ArchivedDmEntry {
+                    peer: "alice".to_string(),
+                    dm_pair_stem: "alice--charlie".to_string(),
+                },
+                ArchivedDmEntry {
+                    peer: "bob".to_string(),
+                    dm_pair_stem: "bob--charlie".to_string(),
+                },
+            ],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let arr = v.get("dms").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let first = arr[0].as_object().unwrap();
+        assert_eq!(first.get("peer").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            first.get("dm_pair_stem").and_then(|v| v.as_str()),
+            Some("alice--charlie"),
+        );
+    }
+
+    #[test]
+    fn list_archived_users_response_wire_shape() {
+        let r = ListArchivedUsersResponse {
+            users: vec![
+                ArchivedUserEntry {
+                    handler: "alice".to_string(),
+                    display_name: Some("Alice".to_string()),
+                },
+                ArchivedUserEntry {
+                    handler: "bob".to_string(),
+                    display_name: None,
+                },
+            ],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        let arr = obj.get("users").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // Row with display_name: present on the wire.
+        let alice = arr[0].as_object().unwrap();
+        assert_eq!(alice.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            alice.get("display_name").and_then(|v| v.as_str()),
+            Some("Alice"),
+        );
+
+        // Row without display_name: field skipped on the wire (no `null`).
+        // `skip_serializing_if = Option::is_none` keeps the payload minimal
+        // and matches the rest of the response module's conventions.
+        let bob = arr[1].as_object().unwrap();
+        assert_eq!(bob.get("handler").and_then(|v| v.as_str()), Some("bob"));
+        assert!(
+            !bob.contains_key("display_name"),
+            "absent display_name must be omitted, not serialized as null"
+        );
     }
 
     #[test]

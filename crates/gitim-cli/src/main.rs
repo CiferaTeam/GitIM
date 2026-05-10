@@ -103,6 +103,28 @@ enum Commands {
     /// List archived channels
     ArchivedChannels,
 
+    /// Archive a direct-message thread with a peer
+    ArchiveDm {
+        /// Peer handler
+        peer: String,
+    },
+
+    /// Unarchive a direct-message thread with a peer
+    UnarchiveDm {
+        /// Peer handler
+        peer: String,
+    },
+
+    /// List archived DMs the caller participates in
+    ListArchivedDms,
+
+    /// List handlers that have departed the workspace
+    ListArchivedUsers,
+
+    /// Self-burn: depart this clone's own handler from the workspace.
+    /// Reads handler from local me.json — no parameters accepted.
+    BurnSelf,
+
     /// Direct message commands
     Dm {
         #[command(subcommand)]
@@ -450,6 +472,19 @@ async fn main() {
         Commands::ArchivedChannels => {
             commands::channels::cmd_archived_channels(&client, &mode).await
         }
+        Commands::ArchiveDm { peer } => {
+            commands::dm::cmd_archive_dm(&client, &mode, &peer).await
+        }
+        Commands::UnarchiveDm { peer } => {
+            commands::dm::cmd_unarchive_dm(&client, &mode, &peer).await
+        }
+        Commands::ListArchivedDms => {
+            commands::dm::cmd_list_archived_dms(&client, &mode).await
+        }
+        Commands::ListArchivedUsers => {
+            commands::dm::cmd_list_archived_users(&client, &mode).await
+        }
+        Commands::BurnSelf => commands::burn::cmd_burn_self(&client, &mode).await,
         Commands::Users => commands::admin::cmd_users(&client, &mode).await,
         Commands::Search {
             query,

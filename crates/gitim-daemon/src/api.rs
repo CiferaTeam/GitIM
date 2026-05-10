@@ -67,6 +67,34 @@ pub enum Event {
         author: String,
         timestamp: String,
     },
+
+    #[serde(rename = "user_archived")]
+    UserArchived {
+        handler: String,
+        archived_by: String,
+        timestamp: String,
+    },
+
+    #[serde(rename = "user_unarchived")]
+    UserUnarchived {
+        handler: String,
+        unarchived_by: String,
+        timestamp: String,
+    },
+
+    #[serde(rename = "dm_archived")]
+    DmArchived {
+        peer: String,
+        archived_by: String,
+        timestamp: String,
+    },
+
+    #[serde(rename = "dm_unarchived")]
+    DmUnarchived {
+        peer: String,
+        unarchived_by: String,
+        timestamp: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +118,15 @@ pub enum Request {
     #[serde(rename = "channels")]
     ListChannels,
     #[serde(rename = "users")]
-    ListUsers,
+    ListUsers {
+        /// When true, daemon also returns the archived handlers in
+        /// the response's `archived` field. Per archive-protocol P2.a
+        /// — caller-uniform: every caller (CLI, WebUI, agent) flips the
+        /// same flag, daemon does not gate on caller type. Default
+        /// false keeps the legacy single-list behavior.
+        #[serde(default)]
+        include_archived: bool,
+    },
     #[serde(rename = "thread")]
     GetThread { channel: String, line_number: u64 },
     #[serde(rename = "status")]
@@ -269,6 +305,39 @@ pub enum Request {
         #[serde(default)]
         channel: Option<String>,
     },
+    #[serde(rename = "archive_user")]
+    ArchiveUser {
+        handler: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "unarchive_user")]
+    UnarchiveUser {
+        handler: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "archive_dm")]
+    ArchiveDm {
+        peer: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "unarchive_dm")]
+    UnarchiveDm {
+        peer: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "list_archived_users")]
+    ListArchivedUsers,
+    #[serde(rename = "list_archived_dms")]
+    ListArchivedDms {
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "depart_user")]
+    DepartUser { handler: String },
 }
 
 fn default_limit() -> usize {
@@ -411,6 +480,250 @@ mod tests {
         assert!(json.contains("\"author\":\"lewis\""));
         assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
     }
+
+    #[test]
+    fn test_user_archived_event_roundtrip() {
+        let ev = Event::UserArchived {
+            handler: "alice".to_string(),
+            archived_by: "lewis".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"user_archived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"handler\":\"alice\""));
+        assert!(json.contains("\"archived_by\":\"lewis\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
+
+    #[test]
+    fn test_user_unarchived_event_roundtrip() {
+        let ev = Event::UserUnarchived {
+            handler: "alice".to_string(),
+            unarchived_by: "bob".to_string(),
+            timestamp: "20260418T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"user_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"handler\":\"alice\""));
+        assert!(json.contains("\"unarchived_by\":\"bob\""));
+        assert!(json.contains("\"timestamp\":\"20260418T120000Z\""));
+    }
+
+    #[test]
+    fn test_dm_archived_event_roundtrip() {
+        let ev = Event::DmArchived {
+            peer: "bob".to_string(),
+            archived_by: "alice".to_string(),
+            timestamp: "20260509T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"dm_archived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"peer\":\"bob\""));
+        assert!(json.contains("\"archived_by\":\"alice\""));
+        assert!(json.contains("\"timestamp\":\"20260509T120000Z\""));
+    }
+
+    #[test]
+    fn test_dm_unarchived_event_roundtrip() {
+        let ev = Event::DmUnarchived {
+            peer: "bob".to_string(),
+            unarchived_by: "alice".to_string(),
+            timestamp: "20260509T120000Z".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"dm_unarchived\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"peer\":\"bob\""));
+        assert!(json.contains("\"unarchived_by\":\"alice\""));
+        assert!(json.contains("\"timestamp\":\"20260509T120000Z\""));
+    }
+
+    #[test]
+    fn test_archive_user_request_roundtrip() {
+        let json = r#"{"method":"archive_user","handler":"alice","author":"lewis"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ArchiveUser { handler, author } => {
+                assert_eq!(handler, "alice");
+                assert_eq!(author, Some("lewis".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"archive_user","handler":"alice"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::ArchiveUser { handler, author } => {
+                assert_eq!(handler, "alice");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_unarchive_user_request_roundtrip() {
+        let json = r#"{"method":"unarchive_user","handler":"bob","author":"carol"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::UnarchiveUser { handler, author } => {
+                assert_eq!(handler, "bob");
+                assert_eq!(author, Some("carol".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"unarchive_user","handler":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::UnarchiveUser { handler, author } => {
+                assert_eq!(handler, "bob");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_archive_dm_request_roundtrip() {
+        let json = r#"{"method":"archive_dm","peer":"bob","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ArchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"archive_dm","peer":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::ArchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_unarchive_dm_request_roundtrip() {
+        let json = r#"{"method":"unarchive_dm","peer":"bob","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::UnarchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Author omitted — serde(default) deserializes to None; resolve_author
+        // fills it in dispatch.
+        let json_no_author = r#"{"method":"unarchive_dm","peer":"bob"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::UnarchiveDm { peer, author } => {
+                assert_eq!(peer, "bob");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_archived_users_request_roundtrip() {
+        let json = r#"{"method":"list_archived_users"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedUsers => {}
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_archived_dms_request_roundtrip() {
+        // With author
+        let json = r#"{"method":"list_archived_dms","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedDms { author } => {
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Without author — resolved by dispatch via resolve_author
+        let json_no_author = r#"{"method":"list_archived_dms"}"#;
+        let req2: Request = serde_json::from_str(json_no_author).unwrap();
+        match req2 {
+            Request::ListArchivedDms { author } => assert_eq!(author, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_users_request_roundtrip() {
+        // include_archived omitted — serde(default) deserializes to false.
+        let json = r#"{"method":"users"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListUsers { include_archived } => {
+                assert!(!include_archived, "default should be false");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Explicit false.
+        let json_false = r#"{"method":"users","include_archived":false}"#;
+        let req2: Request = serde_json::from_str(json_false).unwrap();
+        match req2 {
+            Request::ListUsers { include_archived } => {
+                assert!(!include_archived);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Explicit true — caller-uniform per P2.a.
+        let json_true = r#"{"method":"users","include_archived":true}"#;
+        let req3: Request = serde_json::from_str(json_true).unwrap();
+        match req3 {
+            Request::ListUsers { include_archived } => {
+                assert!(include_archived);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_depart_user_request_roundtrip() {
+        let json = r#"{"method":"depart_user","handler":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::DepartUser { handler } => {
+                assert_eq!(handler, "alice");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -420,6 +733,12 @@ pub struct Response {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional machine-readable error tag. Wire-additive: existing clients
+    /// that only read `error` are unaffected. New code that needs to branch
+    /// on a specific failure mode (e.g. runtime self-heal on
+    /// `self_departed`) reads this instead of parsing the human message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl Response {
@@ -428,6 +747,7 @@ impl Response {
             ok: true,
             data: Some(data),
             error: None,
+            error_code: None,
         }
     }
 
@@ -436,6 +756,19 @@ impl Response {
             ok: false,
             data: None,
             error: Some(msg.into()),
+            error_code: None,
+        }
+    }
+
+    /// Tagged error variant. Use when a downstream consumer needs to
+    /// distinguish this failure from generic ones — e.g. the runtime
+    /// agent_loop checking for `self_departed` to trigger self-cleanup.
+    pub fn error_with_code(msg: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: Some(code.into()),
         }
     }
 }

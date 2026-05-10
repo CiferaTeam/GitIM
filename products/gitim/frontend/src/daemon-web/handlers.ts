@@ -32,6 +32,7 @@ import {
   dmApiNameFromThreadPath,
   resolveThreadTarget,
   validateChannelName,
+  validateHandler,
 } from "./paths";
 import type { Card, CardStatus } from "../lib/types";
 import { tokenAuth } from "./auth";
@@ -730,6 +731,145 @@ export async function listArchivedChannels(): Promise<ApiResponse> {
 
     archivedChannels.sort((a, b) => a.name.localeCompare(b.name));
     return ok({ channels: archivedChannels });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+// --- DM archive handlers ---
+//
+// Mirrors `archive_channel` semantics from daemon's `handlers/dm.rs`, adapted
+// to the browser bridge:
+//   - DM threads are single-file (no meta), keyed by sorted-pair stem
+//   - active path: `dm/<min>--<max>.thread`
+//   - archive path: `archive/dm/<min>--<max>.thread`
+// The stem is built via the same dm sort the rest of the bridge uses
+// (`resolveThreadTarget` for `<a>--<b>`).
+
+function dmStemForPeer(peer: string): string {
+  const me = getState().me.handler;
+  const peerError = validateHandler(peer);
+  if (peerError) throw new Error(peerError);
+  const target = resolveThreadTarget(`${me}--${peer}`);
+  if (target.kind !== "dm") {
+    throw new Error("internal: expected dm target");
+  }
+  return target.name;
+}
+
+async function moveDmThread(
+  fromRel: string,
+  toRel: string,
+  message: string,
+): Promise<void> {
+  const s = getState();
+  const fromAbs = `${s.repoDir}/${fromRel}`;
+  const toAbs = `${s.repoDir}/${toRel}`;
+  const thread = await readFile(fromAbs);
+  await mkdirp(parentPath(toAbs));
+  await writeFile(toAbs, thread);
+  await gitOps.addRemoveAndCommit(
+    s.repoDir,
+    [toRel],
+    [fromRel],
+    message,
+    s.me.handler,
+  );
+  await removeTrackedFile(fromAbs);
+}
+
+export async function archiveDm(peer: string): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    if (!s.token) return reconnectRequired();
+    const stem = dmStemForPeer(peer);
+
+    const archiveRel = `archive/dm/${stem}.thread`;
+    const archiveAbs = `${s.repoDir}/${archiveRel}`;
+    if (await exists(archiveAbs)) {
+      return err(`DM with @${peer} is already archived`);
+    }
+
+    const activeRel = `dm/${stem}.thread`;
+    const activeAbs = `${s.repoDir}/${activeRel}`;
+    if (!(await exists(activeAbs))) {
+      return err(`DM with @${peer} not found`);
+    }
+
+    await moveDmThread(activeRel, archiveRel, `archive: dm with @${peer}`);
+
+    const sync = await syncAfterCommit();
+    return ok({
+      archived_by: s.me.handler,
+      dm_pair_stem: stem,
+      ...sync,
+    });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function unarchiveDm(peer: string): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    if (!s.token) return reconnectRequired();
+    const stem = dmStemForPeer(peer);
+
+    const activeRel = `dm/${stem}.thread`;
+    const activeAbs = `${s.repoDir}/${activeRel}`;
+    if (await exists(activeAbs)) {
+      return err(`DM with @${peer} is not archived`);
+    }
+
+    const archiveRel = `archive/dm/${stem}.thread`;
+    const archiveAbs = `${s.repoDir}/${archiveRel}`;
+    if (!(await exists(archiveAbs))) {
+      return err(`DM with @${peer} not found in archive`);
+    }
+
+    await moveDmThread(archiveRel, activeRel, `archive: restore dm with @${peer}`);
+
+    const sync = await syncAfterCommit();
+    return ok({
+      unarchived_by: s.me.handler,
+      dm_pair_stem: stem,
+      ...sync,
+    });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function listArchivedDms(): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    const archiveDmDir = `${s.repoDir}/archive/dm`;
+    if (!(await exists(archiveDmDir))) return ok({ dms: [] });
+
+    const items = await readdir(archiveDmDir);
+    const me = s.me.handler;
+    const entries: Array<{ peer: string; dm_pair_stem: string }> = [];
+
+    for (const item of items) {
+      if (!item.endsWith(".thread")) continue;
+      const stem = item.slice(0, -".thread".length);
+      const parts = stem.split("--");
+      if (parts.length !== 2) continue;
+      const [a, b] = parts;
+      // Daemon-side filter: only return DMs the caller participated in.
+      let peer: string;
+      if (a === me) {
+        peer = b;
+      } else if (b === me) {
+        peer = a;
+      } else {
+        continue;
+      }
+      entries.push({ peer, dm_pair_stem: stem });
+    }
+
+    entries.sort((x, y) => x.peer.localeCompare(y.peer));
+    return ok({ dms: entries });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }

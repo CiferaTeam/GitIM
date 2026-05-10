@@ -1212,7 +1212,13 @@ async fn guest_read_operations_are_allowed() {
     let resp = handle_request(Request::ListChannels, state.clone()).await;
     assert!(resp.ok, "guest list_channels should succeed");
 
-    let resp = handle_request(Request::ListUsers, state.clone()).await;
+    let resp = handle_request(
+        Request::ListUsers {
+            include_archived: false,
+        },
+        state.clone(),
+    )
+    .await;
     assert!(resp.ok, "guest list_users should succeed");
 }
 

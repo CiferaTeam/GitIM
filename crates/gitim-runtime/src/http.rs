@@ -212,7 +212,7 @@ struct AgentAddResponse {
 pub struct AgentActivityEvent {
     pub agent_id: String,
     pub workspace_id: String,
-    pub event_type: String, // "tool_use", "thinking", "done", "error"
+    pub event_type: String, // "tool_use", "thinking", "done", "error", "usage", "burned"
     pub detail: String,
     pub timestamp: String, // ISO8601
 }
@@ -1105,6 +1105,96 @@ async fn im_list_archived_channels(
     api_response_to_json(client.list_archived_channels().await)
 }
 
+async fn im_dm_archive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, peer)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.archive_dm(&peer).await)
+}
+
+async fn im_dm_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, peer)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_dm(&peer).await)
+}
+
+async fn im_list_archived_dms(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_dms().await)
+}
+
+// -- /users/archived + /users/{handler}/unarchive --
+//
+// Used by WebUI's E.3 "show archived" toggle on the agent list, and by
+// the unarchive recovery action on archived agents. Both proxy directly
+// to the human-clone daemon — no runtime-side state is involved, since
+// archived users are an artifact of `archive/users/<handler>.meta.yaml`
+// in the shared repo. The runtime keeps no metadata for archived
+// agents (provider / model / messages_processed are gone with the
+// daemon's clone delete), so the WebUI renders the list with only
+// handler / display_name from the daemon response.
+
+async fn users_list_archived(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_archived_users().await)
+}
+
+async fn users_unarchive(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, handler)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.unarchive_user(&handler).await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -1241,6 +1331,27 @@ async fn agents_add(
                 req.handler
             ),
             "handler_conflict",
+        ))
+        .into_response();
+    }
+
+    // Archive Contract 2: handlers are terminally unique once departed.
+    // The daemon enforces this at register_user / onboard time, but the
+    // runtime checks it here too — we'd otherwise let the user pick a
+    // handler the daemon will reject after we've already kicked off
+    // provisioning. Distinct error_code so the WebUI can surface a clear
+    // "previously departed" message instead of conflating it with a live
+    // conflict.
+    let archived_meta_path = human_dir
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", req.handler));
+    if archived_meta_path.exists() {
+        return Json(ErrorBody::with_code(
+            format!(
+                "handler @{} is reserved (previously departed in this workspace)",
+                req.handler
+            ),
+            "handler_reserved",
         ))
         .into_response();
     }
@@ -1575,16 +1686,74 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     let state_clone = state.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = agent_loop.init().await {
-            tracing::error!(error = %e, "agent loop init failed");
-            let mut s = state_clone.lock().unwrap();
-            if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
-                if let Some(info) = ctx.agents.get_mut(&owned_id) {
-                    info.loop_handle = None;
-                    info.status = "error".to_string();
+        match agent_loop.init().await {
+            Ok(()) => {}
+            Err(crate::error::RuntimeError::SelfDeparted) => {
+                // Edge case: runtime restarted AFTER this agent self-burned.
+                // Recovery walked the agent back into ctx.agents and
+                // start_agent_loop spawned us — but the daemon's first
+                // poll trips the self_departed gate immediately. Mirror
+                // the run_once SelfDeparted arm: drive cleanup once, then
+                // exit. Without this, the agent would sit in ctx.agents
+                // with status="error" forever (or until the user
+                // manually clicked burn in the WebUI).
+                tracing::info!(
+                    agent = %owned_id,
+                    slug = %owned_slug,
+                    "agent self-departed before runtime startup, triggering cleanup"
+                );
+                let cleanup_inputs = {
+                    let s = state_clone.lock().unwrap();
+                    s.workspaces.get(&owned_slug).and_then(|ctx| {
+                        ctx.agents.get(&owned_id).map(|info| {
+                            (
+                                ctx.path.clone(),
+                                PathBuf::from(&info.repo_path),
+                                info.provider.clone(),
+                                ctx.activity_tx.clone(),
+                            )
+                        })
+                    })
+                };
+                if let Some((workspace_path, repo_path, provider, activity_tx)) = cleanup_inputs {
+                    if let Err(e) = cleanup_agent_runtime_side(
+                        &state_clone,
+                        &owned_slug,
+                        &owned_id,
+                        &workspace_path,
+                        &repo_path,
+                        provider.as_deref(),
+                        &activity_tx,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            agent = %owned_id,
+                            slug = %owned_slug,
+                            error = %e,
+                            "self-departed cleanup failed during init"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        agent = %owned_id,
+                        slug = %owned_slug,
+                        "self-departed at init but agent already removed from state — nothing to clean"
+                    );
                 }
+                return;
             }
-            return;
+            Err(e) => {
+                tracing::error!(error = %e, "agent loop init failed");
+                let mut s = state_clone.lock().unwrap();
+                if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
+                    if let Some(info) = ctx.agents.get_mut(&owned_id) {
+                        info.loop_handle = None;
+                        info.status = "error".to_string();
+                    }
+                }
+                return;
+            }
         }
 
         let poll_interval = agent_loop.poll_interval;
@@ -1607,6 +1776,62 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
+                }
+                Err(crate::error::RuntimeError::SelfDeparted) => {
+                    // Archive-protocol B.4: this agent's own user.meta.yaml
+                    // landed in archive/users/, so the daemon refuses
+                    // further polls. Don't back off — drive the same
+                    // cleanup the WebUI burn endpoint runs (kill daemon,
+                    // rm clone, hermes profile, ctx.agents removal, SSE)
+                    // and exit the loop. Any further iteration would just
+                    // re-trip the same self_departed gate.
+                    tracing::info!(
+                        agent = %owned_id,
+                        slug = %owned_slug,
+                        "agent self-departed, triggering runtime cleanup"
+                    );
+                    let cleanup_inputs = {
+                        let s = state_clone.lock().unwrap();
+                        s.workspaces.get(&owned_slug).and_then(|ctx| {
+                            ctx.agents.get(&owned_id).map(|info| {
+                                (
+                                    ctx.path.clone(),
+                                    PathBuf::from(&info.repo_path),
+                                    info.provider.clone(),
+                                    ctx.activity_tx.clone(),
+                                )
+                            })
+                        })
+                    };
+                    if let Some((workspace_path, repo_path, provider, activity_tx)) =
+                        cleanup_inputs
+                    {
+                        if let Err(e) = cleanup_agent_runtime_side(
+                            &state_clone,
+                            &owned_slug,
+                            &owned_id,
+                            &workspace_path,
+                            &repo_path,
+                            provider.as_deref(),
+                            &activity_tx,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                agent = %owned_id,
+                                slug = %owned_slug,
+                                error = %e,
+                                "self-departed cleanup failed"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            agent = %owned_id,
+                            slug = %owned_slug,
+                            "self-departed but agent already removed from state — nothing to clean"
+                        );
+                    }
+                    return;
                 }
                 Err(e) => {
                     consecutive_errors += 1;
@@ -2050,6 +2275,19 @@ async fn agents_patch(
 
 // -- /agents/remove --
 
+/// **DEPRECATED**: replaced by `POST /workspaces/{slug}/agents/burn` (archive-protocol).
+///
+/// `agents/remove` only deletes the agent's clone directory; it does NOT remove the
+/// agent's user.meta.yaml from the shared repo, archive their DMs, write leave-workspace
+/// events, or clean their channels meta members. The agent's footprint persists in every
+/// other clone of the workspace, defeating the user-facing intent of "remove".
+///
+/// Use `agents/burn` for the full workspace-wide departure (writes audit events,
+/// archives DMs, archives user entry, then physically deletes clone). Use `agents/stop`
+/// for non-destructive pause.
+///
+/// This endpoint is preserved for at least one release for backward compatibility.
+/// WebUI will switch to `agents/burn` in E.3.
 async fn agents_remove(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -2057,6 +2295,12 @@ async fn agents_remove(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    tracing::warn!(
+        agent_id = %req.id,
+        slug = %slug,
+        "agents/remove is deprecated; use POST /agents/burn (archive-protocol) or POST /agents/stop (pause)"
+    );
 
     let (workspace_path, repo_path, loop_handle, provider) = {
         let mut s = state.lock().unwrap();
@@ -2112,6 +2356,251 @@ async fn agents_remove(
     Json(OkAckResponse { ok: true }).into_response()
 }
 
+// -- /agents/burn --
+
+/// `POST /workspaces/{slug}/agents/burn { id }` — full archive-protocol
+/// departure. See `docs/plans/2026-05-09-archive-protocol/01-plan.md`
+/// "Agent burn 工作流" for the contract.
+///
+/// Steps:
+///   1. type-check `id` is in `ctx.agents` — burn is strictly for agents
+///      (humans are out of v1 scope; daemon is type-agnostic but the
+///      runtime entry point gates on agent-membership here)
+///   2. abort the agent loop (so it stops polling/sending)
+///   3. ensure the target's daemon is alive, then RPC `depart_user` to it
+///      — daemon walks A.4's idempotent multi-commit chain and uses
+///      `archive/users/<h>.meta.yaml` as the single source of truth for
+///      "depart complete". A daemon RPC failure short-circuits steps
+///      4-7; the user retries and the daemon resumes from the first
+///      incomplete phase
+///   4-7. delegate to [`cleanup_agent_runtime_side`]: kill daemon, rm -rf
+///        clone, best-effort hermes profile delete, drop from `ctx.agents`,
+///        broadcast `AgentActivityEvent::burned` SSE
+///
+/// Error codes:
+/// - `not_an_agent` — `id` is not an agent in `ctx.agents` (404)
+/// - `daemon_unreachable` — couldn't reach daemon: spawn failed,
+///   `ensure_daemon_with_log` errored, `spawn_blocking` panicked, or the
+///   `depart_user` RPC IO failed (500)
+/// - `daemon_depart_failed` — daemon was reachable and replied `ok=false`
+///   from `depart_user` (e.g. partial commit chain failure mid-depart);
+///   client may retry safely, daemon resumes from first incomplete phase (500)
+/// - (filesystem cleanup errors return 500 with no error_code; rare and
+///   typically fatal — a permission issue or a stale handle on the clone)
+async fn agents_burn(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<AgentIdRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Step 1: type-check the target id is an agent in this workspace.
+    // The daemon's depart_user is type-agnostic (so unarchive_user/
+    // archive_user can serve future "human leaves workspace" needs), but
+    // the burn endpoint is strictly for agents. Returning 404 +
+    // not_an_agent makes WebUI's "Burn" button safe even if the operator
+    // somehow types a human handler — it can't accidentally archive a
+    // human user via this path.
+    let (workspace_path, repo_path, loop_handle, provider, activity_tx) = {
+        let mut s = state.lock().unwrap();
+        let ctx = match s.workspaces.get_mut(&slug) {
+            Some(c) => c,
+            None => return not_found_workspace(),
+        };
+        match ctx.agents.get_mut(&req.id) {
+            Some(info) => {
+                let loop_handle = info.loop_handle.take();
+                info.status = "idle".to_string();
+                (
+                    ctx.path.clone(),
+                    PathBuf::from(&info.repo_path),
+                    loop_handle,
+                    info.provider.clone(),
+                    ctx.activity_tx.clone(),
+                )
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody::with_code(
+                        format!("agent not found: {}", req.id),
+                        "not_an_agent",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Step 2: abort the in-process agent loop. Stops the agent from
+    // sending or polling while the daemon performs its multi-commit
+    // depart sequence. We deliberately leave the daemon process
+    // running for now — depart_user needs a live socket.
+    if let Some(handle) = loop_handle {
+        handle.abort();
+    }
+
+    // Step 3: ensure the daemon is up, then RPC depart_user.
+    //
+    // The agent's daemon may have been stopped by a prior `agents/stop`
+    // call. We respawn it so the depart_user RPC has a target — it
+    // will be killed in step 4 immediately afterward, so this is a
+    // brief, scoped revival.
+    {
+        let repo_root = repo_path.clone();
+        let log_path = crate::daemon_log::daemon_log_path(&repo_path);
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            gitim_client::ensure_daemon_with_log(&repo_root, &log_path)
+        })
+        .await;
+        match spawn_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!("failed to start agent daemon for burn: {e}"),
+                        "daemon_unreachable",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!("agent daemon spawn task panicked: {e}"),
+                        "daemon_unreachable",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let client = GitimClient::new(&repo_path);
+    match client.depart_user(&req.id).await {
+        Ok(resp) if resp.ok => {}
+        Ok(resp) => {
+            // Daemon was reachable but replied `ok=false`. Semantically
+            // distinct from RPC IO failure: daemon is up, we got a
+            // response, the depart logic itself refused or failed
+            // partway. We don't execute steps 4-7 — leaving the clone +
+            // ctx.agents intact lets the user retry, and the daemon's
+            // terminal-state judgment (archive/users/<h>) makes the
+            // retry idempotent.
+            let detail = resp
+                .error
+                .unwrap_or_else(|| "daemon returned ok=false without error message".to_string());
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("daemon depart_user failed: {detail}"),
+                    "daemon_depart_failed",
+                )),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("daemon depart_user RPC failed: {e}"),
+                    "daemon_unreachable",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    // Steps 4-7: shared cleanup with the self-departed self-heal path
+    // (B.4). Both call sites must produce identical end state — see
+    // `cleanup_agent_runtime_side` for the contract.
+    match cleanup_agent_runtime_side(
+        &state,
+        &slug,
+        &req.id,
+        &workspace_path,
+        &repo_path,
+        provider.as_deref(),
+        &activity_tx,
+    )
+    .await
+    {
+        Ok(()) => Json(OkAckResponse { ok: true }).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response(),
+    }
+}
+
+/// Steps 4-7 of the burn workflow, factored out so the self-departed
+/// self-heal path (B.4) can reuse it. Both call sites must converge on
+/// identical end state: agent daemon dead, clone dir gone, hermes profile
+/// gone (if applicable), `ctx.agents` does not contain `agent_id`, and a
+/// `burned` `AgentActivityEvent` was broadcast on `activity_tx`.
+///
+/// Hard-delete failure is the only condition that returns `Err` — hermes
+/// cleanup is best-effort (warn on failure) and `ctx.agents.remove` /
+/// SSE broadcast cannot fail in a way the caller could recover from.
+///
+/// Concurrency: re-locks `SharedRuntimeState` at the end to remove the
+/// agent. If the workspace was dropped mid-flight, the remove is a no-op
+/// — this matches the pre-extraction behavior, which assumed the
+/// workspace would still be present (it almost always is, since the
+/// caller already verified it before this point).
+pub(crate) async fn cleanup_agent_runtime_side(
+    state: &SharedRuntimeState,
+    slug: &str,
+    agent_id: &str,
+    workspace_path: &Path,
+    repo_path: &Path,
+    provider: Option<&str>,
+    activity_tx: &tokio::sync::broadcast::Sender<AgentActivityEvent>,
+) -> Result<(), String> {
+    // Step 4: kill the agent's daemon process.
+    kill_agent_daemon(repo_path);
+
+    // Step 5: rm -rf the clone dir. Daemon already wrote the depart
+    // commits to the shared remote (in the burn path) or self-burn
+    // already wrote them (in the B.4 self-heal path), so losing the
+    // local clone's working tree is safe.
+    hard_delete_agent_dir(workspace_path, agent_id, repo_path)?;
+
+    // Step 6: best-effort hermes profile cleanup. Failures only warn —
+    // a missing/broken hermes CLI must not block cleanup since the
+    // workspace-side depart already succeeded.
+    if provider == Some("hermes") {
+        if let Err(e) = crate::hermes_profile::delete_profile(agent_id).await {
+            tracing::warn!(
+                agent = %agent_id,
+                error = %e,
+                "failed to delete hermes profile during cleanup"
+            );
+        }
+    }
+
+    // Step 7: drop from in-memory ctx.agents + emit SSE so the WebUI
+    // refreshes its agent list without polling. Workspace-not-found at
+    // this stage is a no-op (workspace was dropped concurrently — rare,
+    // and the agent is already gone from a user-visible standpoint).
+    {
+        let mut s = state.lock().unwrap();
+        if let Some(ctx) = s.workspaces.get_mut(slug) {
+            ctx.agents.remove(agent_id);
+        }
+    }
+
+    let _ = activity_tx.send(AgentActivityEvent {
+        agent_id: agent_id.to_string(),
+        workspace_id: slug.to_string(),
+        event_type: "burned".to_string(),
+        detail: format!("agent @{agent_id} departed the workspace"),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+
+    Ok(())
+}
+
 fn kill_agent_daemon(repo_path: &Path) {
     let pid_file = repo_path.join(".gitim/run/gitim.pid");
     if let Ok(content) = std::fs::read_to_string(&pid_file) {
@@ -2159,9 +2648,57 @@ fn hard_delete_agent_dir(workspace: &Path, agent_id: &str, repo_path: &Path) -> 
         return Err("agent repo path is not a directory".to_string());
     }
 
-    std::fs::remove_dir_all(&target)
-        .map_err(|e| format!("failed to delete agent directory: {e}"))?;
-    Ok(())
+    // Retry on ENOTEMPTY / EBUSY — the SIGTERM-vs-rm race.
+    //
+    // `cleanup_agent_runtime_side` SIGTERMs the agent's daemon
+    // (`kill_agent_daemon`) without waiting for exit, then immediately
+    // calls into here. On macOS (and occasionally Linux under load) the
+    // daemon's signal handler is still tearing down `.gitim/run/` while
+    // `remove_dir_all` walks it, surfacing as `ENOTEMPTY` (errno 66) on
+    // an intermediate directory. The daemon finishes exiting within
+    // ~hundreds of ms, so a few retries with short backoff is enough to
+    // converge — and `remove_dir_all` itself is idempotent over partial
+    // state, so the second pass picks up where the first left off.
+    //
+    // 50 / 100 / 150 ms backoff fits inside a normal cleanup turn (the
+    // `tests/burn_test.rs::burn_with_idempotent_retry` helper waits 500 ms
+    // between attempts, so we're well under that even in the worst case).
+    // Past 3 attempts: bubble the error up. The caller sees the same 5xx
+    // it would have without retry, plus we've at least proven this isn't
+    // the daemon-shutdown race (which never takes >450 ms in practice).
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF_MS: u64 = 50;
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let retriable = matches!(
+                    e.raw_os_error(),
+                    // ENOTEMPTY (Linux 39, macOS 66) and EBUSY (Linux/macOS 16):
+                    // the daemon is still releasing handles or its signal
+                    // handler is mid-flight. ENOENT means a parallel cleanup
+                    // beat us to it; we treat that as success below.
+                    Some(39) | Some(66) | Some(16)
+                );
+                let already_gone = e.kind() == std::io::ErrorKind::NotFound;
+                if already_gone {
+                    return Ok(());
+                }
+                if retriable && attempt < MAX_ATTEMPTS {
+                    let backoff = std::time::Duration::from_millis(BACKOFF_MS * attempt as u64);
+                    std::thread::sleep(backoff);
+                    last_err = Some(format!("{e}"));
+                    continue;
+                }
+                return Err(format!("failed to delete agent directory: {e}"));
+            }
+        }
+    }
+    Err(format!(
+        "failed to delete agent directory after {MAX_ATTEMPTS} attempts: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string()),
+    ))
 }
 
 // -- /agents/stop --
@@ -3236,12 +3773,18 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/channels/archived", get(im_list_archived_channels))
         .route("/im/channels/{name}/archive", post(im_channel_archive))
         .route("/im/channels/{name}/unarchive", post(im_channel_unarchive))
+        .route("/im/dm/archived", get(im_list_archived_dms))
+        .route("/im/dm/{peer}/archive", post(im_dm_archive))
+        .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
+        .route("/users/archived", get(users_list_archived))
+        .route("/users/{handler}/unarchive", post(users_unarchive))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
         .route("/agents/start", post(agents_start))
         .route("/agents/stop", post(agents_stop))
         .route("/agents/remove", post(agents_remove))
+        .route("/agents/burn", post(agents_burn))
         .route("/agents/{id}", get(agents_get).patch(agents_patch));
 
     let router = Router::new()

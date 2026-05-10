@@ -336,6 +336,20 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
 // ---------------------------------------------------------------------------
 
 fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Result<bool, Response> {
+    // Archive Contract 2: terminal handler uniqueness — onboard mirrors
+    // handle_register_user's archive guard so the workflow that drives the
+    // composite path can't smuggle a departed handler back in.
+    let archive_meta = state
+        .repo_root
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", handler));
+    if archive_meta.exists() {
+        return Err(Response::error(format!(
+            "handler @{} is reserved (previously departed)",
+            handler
+        )));
+    }
+
     let users_dir = state.repo_root.join("users");
     std::fs::create_dir_all(&users_dir)
         .map_err(|e| Response::error(format!("failed to create users dir: {}", e)))?;

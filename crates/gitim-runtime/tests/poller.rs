@@ -1,7 +1,7 @@
 mod common;
 
 use gitim_client::GitimClient;
-use gitim_runtime::{provision_agent, AgentConfig, Poller};
+use gitim_runtime::{provision_agent, AgentConfig, Poller, RuntimeError};
 use serial_test::serial;
 
 use common::{ensure_daemon_in_path, setup_bare_remote, short_tempdir, stop_daemon};
@@ -136,6 +136,59 @@ async fn test_poll_cursor_survives_empty() {
         cursor1, cursor2,
         "cursor should not change when no new messages"
     );
+
+    stop_daemon(&repo_root).await;
+}
+
+/// Wire-contract test for B.4 self-departed self-heal.
+///
+/// Departing the daemon's own `current_user` lands `users/<self>.meta.yaml`
+/// in `archive/users/`. The next poll request hits the
+/// `handle_poll` self-departure gate, which short-circuits with
+/// `error_code: "self_departed"`. The poller must surface that as the
+/// typed `RuntimeError::SelfDeparted` variant — substring-grepping the
+/// human message would be brittle.
+///
+/// This nails down the integration-level wire mapping that the
+/// agent_loop SelfDeparted arm depends on. A unit-level mapping test
+/// for the helper itself would be redundant given this end-to-end check.
+#[tokio::test]
+#[serial]
+async fn test_poll_returns_self_departed_after_depart_user() {
+    ensure_daemon_in_path();
+    let tmp = short_tempdir();
+    let (repo_root, client) = setup_agent(&tmp).await;
+
+    let mut poller = Poller::new(GitimClient::new(&repo_root));
+
+    // Initialize cursor under normal conditions — proves the poller
+    // works pre-depart, isolating the failure mode under test.
+    let _ = poller.poll().await.unwrap();
+    assert!(poller.cursor().is_some(), "cursor should initialize");
+
+    // Depart the daemon's own handler. setup_agent provisions with
+    // handler="poll-agent" and onboarding sets the daemon's current_user
+    // to that handler — so this trip is "self" from the daemon's POV.
+    let depart = client
+        .depart_user("poll-agent")
+        .await
+        .expect("depart_user request");
+    assert!(
+        depart.ok,
+        "depart_user must succeed: {:?}",
+        depart.error
+    );
+
+    // Now poll: the daemon's self-departure gate trips, error_code is
+    // "self_departed", and the poller maps it to the typed variant.
+    let result = poller.poll().await;
+    match result {
+        Err(RuntimeError::SelfDeparted) => {}
+        other => panic!(
+            "expected RuntimeError::SelfDeparted, got: {:?}",
+            other
+        ),
+    }
 
     stop_daemon(&repo_root).await;
 }

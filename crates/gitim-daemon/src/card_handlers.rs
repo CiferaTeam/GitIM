@@ -1,4 +1,5 @@
 use crate::api::{Event, Response};
+use crate::handlers::ensure_author_not_departed;
 use crate::state::{PendingMessage, PushResult, SharedState};
 use crate::thread_io;
 use gitim_core::types::{validate_labels, CardMeta, CardStatus, ChannelName, Handler};
@@ -143,6 +144,9 @@ pub async fn handle_create_card(
     status: Option<String>,
     author: String,
 ) -> Response {
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
@@ -248,7 +252,10 @@ pub async fn handle_archive_card(
     card_id: String,
     author: String,
 ) -> Response {
-    // 1. Validate user
+    // 1. Validate user (departed gate + registered membership)
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
@@ -744,6 +751,9 @@ pub async fn handle_send_card_message(
         Ok(h) => h,
         Err(e) => return Response::error(format!("invalid author: {}", e)),
     };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
@@ -896,6 +906,9 @@ pub async fn handle_update_card(
     assignee: Option<String>,
     author: String,
 ) -> Response {
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }

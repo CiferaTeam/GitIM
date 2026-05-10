@@ -14,6 +14,16 @@ pub enum RuntimeError {
     #[error("poll failed: {0}")]
     PollFailed(String),
 
+    /// The agent's own user.meta.yaml has been moved to `archive/users/`
+    /// — the agent self-departed via `gitim burn-self`, or another clone
+    /// burned this handler and the change has synced in. Daemon surfaces
+    /// this with `error_code: "self_departed"`; the runtime agent_loop
+    /// must NOT back off and retry — it must drive self-cleanup
+    /// (kill daemon + rm clone + ctx.agents removal + SSE) and exit
+    /// the loop. See archive-protocol B.4.
+    #[error("agent self-departed via burn-self")]
+    SelfDeparted,
+
     #[error("provider failed: {0}")]
     ProviderFailed(String),
 

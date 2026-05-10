@@ -1,7 +1,8 @@
 use crate::api::{Event, Response};
-use crate::handlers::resolve_thread_path;
+use crate::handlers::{ensure_author_not_departed, resolve_thread_path};
 use crate::state::{PendingMessage, PushResult, SharedState};
 
+use gitim_core::dm::dm_filename;
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, Handler};
@@ -21,6 +22,14 @@ pub async fn handle_send(
         Err(e) => return Response::error(format!("invalid author: {}", e)),
     };
 
+    // Archive Contract 2: any active-path mutation by a departed author
+    // must fail closed. Run BEFORE the in-memory users check so the error
+    // message is precise (state.users may already lag the on-disk archive
+    // immediately after handle_archive_user but before sync refresh).
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
+
     // Check author is registered
     let user_list: Vec<String> = {
         let users = state.users.read().await;
@@ -30,6 +39,33 @@ pub async fn handle_send(
         users.clone()
     };
     let user_refs: Vec<&str> = user_list.iter().map(|s| s.as_str()).collect();
+
+    // Archive Contract 2: writes to an archived DM thread are rejected.
+    // Symmetric with the "channel is archived" check below in the channel
+    // branch — but the DM check has no meta.yaml to reach for, so we stat
+    // the archived thread file directly. Resolve the canonical sorted-pair
+    // stem via dm_filename so we never rely on caller ordering.
+    if channel.starts_with("dm:") {
+        let parts: Vec<&str> = channel[3..].split(',').collect();
+        if parts.len() == 2 {
+            // Both handlers must parse; resolve_thread_path below will produce
+            // a clean error for malformed input. Skip the archive stat in that
+            // case so users still see the more specific format error.
+            if let (Ok(h1), Ok(h2)) = (Handler::new(parts[0]), Handler::new(parts[1])) {
+                let stem = dm_filename(&h1, &h2);
+                let archive_dm_path = state
+                    .repo_root
+                    .join("archive/dm")
+                    .join(format!("{}.thread", stem));
+                if archive_dm_path.exists() {
+                    // Pick whichever participant is NOT the author for the error
+                    // message — matches CLI mental model ("DM with @bob is archived").
+                    let peer = if parts[0] == author { parts[1] } else { parts[0] };
+                    return Response::error(format!("DM with @{} is archived", peer));
+                }
+            }
+        }
+    }
 
     // Resolve file path
     let (thread_path, thread_name) = match resolve_thread_path(&state, &channel) {

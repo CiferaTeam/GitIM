@@ -93,6 +93,15 @@ export function useAgentActivitySSE(slug: string | null) {
           }
           return; // do NOT push usage events to the activity log
         }
+        if (event.event_type === "burned") {
+          // archive-protocol terminal event: agent was burned (either via
+          // the WebUI burn button or the B.4 self-departed self-heal).
+          // Drop it from the active store so the agent disappears from
+          // the management list. The detail-page burn dialog also calls
+          // removeAgent eagerly to avoid a ghost row when SSE is delayed.
+          useAgentStore.getState().removeAgent(event.agent_id);
+          return; // skip activity-log push — the agent is gone
+        }
         push(event);
       } catch {
         // ignore malformed events

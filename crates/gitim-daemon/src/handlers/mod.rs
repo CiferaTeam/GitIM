@@ -1,4 +1,6 @@
 mod channel;
+mod depart;
+mod dm;
 mod poll;
 mod read;
 mod search;
@@ -7,6 +9,8 @@ pub(crate) mod serde;
 mod user;
 
 pub use channel::*;
+pub use depart::*;
+pub use dm::*;
 pub use poll::*;
 pub use read::*;
 pub use search::*;
@@ -35,6 +39,39 @@ pub(super) async fn resolve_author(
             }
         }
     }
+}
+
+/// Reject any author write whose `archive/users/<author>.meta.yaml`
+/// exists. Per archive-protocol Contract 2: once a handler is departed,
+/// the actor identity is terminally retired — any subsequent attempt
+/// to author a commit under that handle must fail closed.
+///
+/// Skip this guard on unarchive paths (we still need a way back) and
+/// on read-only / system-internal entries (poll, status). Apply it on
+/// every active-path mutation that takes an author.
+///
+/// **Best-effort, not strictly atomic with `commit_lock`.** This gate runs
+/// *before* the lock is acquired, so a write that passes the gate at T0
+/// can race a concurrent `archive_user` at T1 and still commit at T2
+/// attributed to a now-departed author. The in-handler archive checks
+/// (e.g. `handle_archive_user`'s archive-path stat under the lock) are
+/// the second line of defense for the operations they protect. For other
+/// writes, the eventual-consistency model accepts that one cycle of
+/// writes may slip past archive transitions; sync_loop and Contract 2's
+/// "departed actor can't author further commits" remain true within a
+/// sync window.
+pub(crate) fn ensure_author_not_departed(
+    state: &SharedState,
+    author: &str,
+) -> Result<(), Response> {
+    let archive_path = state
+        .repo_root
+        .join("archive/users")
+        .join(format!("{}.meta.yaml", author));
+    if archive_path.exists() {
+        return Err(Response::error(format!("user @{} is departed", author)));
+    }
+    Ok(())
 }
 
 /// Resolve a channel string to a filesystem path and a cache key.
@@ -87,6 +124,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::UpdateCard { .. }
                 | Request::ArchiveCard { .. }
                 | Request::UnarchiveCard { .. }
+                | Request::ArchiveUser { .. }
+                | Request::UnarchiveUser { .. }
+                | Request::ArchiveDm { .. }
+                | Request::UnarchiveDm { .. }
+                | Request::DepartUser { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -121,7 +163,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             since,
         } => handle_read(state, channel, limit, since).await,
         Request::ListChannels => handle_list_channels(state).await,
-        Request::ListUsers => handle_list_users(state).await,
+        Request::ListUsers { include_archived } => handle_list_users(state, include_archived).await,
         Request::GetThread {
             channel,
             line_number,
@@ -322,5 +364,42 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::ListArchivedCards { channel } => {
             crate::card_handlers::handle_list_archived_cards(state, channel).await
         }
+        Request::ArchiveUser { handler, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_archive_user(state, handler, resolved_author).await
+        }
+        Request::UnarchiveUser { handler, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_unarchive_user(state, handler, resolved_author).await
+        }
+        Request::ArchiveDm { peer, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_archive_dm(state, peer, resolved_author).await
+        }
+        Request::UnarchiveDm { peer, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_unarchive_dm(state, peer, resolved_author).await
+        }
+        Request::ListArchivedUsers => handle_list_archived_users(state).await,
+        Request::ListArchivedDms { author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_list_archived_dms(state, resolved_author).await
+        }
+        Request::DepartUser { handler } => handle_depart_user(state, handler).await,
     }
 }

@@ -3,7 +3,7 @@ use crate::handlers::{entry_to_json, resolve_thread_path};
 use crate::state::SharedState;
 
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry};
+use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry, UserMeta};
 
 pub async fn handle_read(
     state: SharedState,
@@ -40,12 +40,22 @@ pub async fn handle_read(
         }
     }
 
-    // For non-DM channels, fall back to archive path if the primary path doesn't exist
-    let (thread_path, is_archived) = if !channel.starts_with("dm:") && !thread_path.exists() {
+    // Read fallback (archive-protocol Contract 3): when the active
+    // surface file is missing, try the archive mirror at
+    // `archive/<surface>/<stem>.thread`. `resolve_thread_path` already
+    // returned the canonical sorted stem (`dm_filename` for DMs,
+    // validated channel name otherwise) in `name`, so the archive path
+    // is just the same stem under `archive/<surface>/`.
+    let (thread_path, is_archived) = if !thread_path.exists() {
+        let archive_subdir = if channel.starts_with("dm:") {
+            "dm"
+        } else {
+            "channels"
+        };
         let archive_path = state
             .repo_root
             .join("archive")
-            .join("channels")
+            .join(archive_subdir)
             .join(format!("{}.thread", name));
         if archive_path.exists() {
             (archive_path, true)
@@ -165,11 +175,129 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
     Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
-pub async fn handle_list_users(state: SharedState) -> Response {
+/// List active users. When `include_archived` is true, also scan
+/// `archive/users/*.meta.yaml` and return the archived handlers in
+/// the response's optional `archived_users` field.
+///
+/// Caller-uniform per archive-protocol P2.a: every caller (human via
+/// CLI/WebUI, agent via runtime) flips the same `include_archived`
+/// flag — daemon does not gate on caller type. The active and archive
+/// dirs are mutually exclusive (Contract 2 / write interception in A.5),
+/// so a handler appears in exactly one list at any moment; no dedup is
+/// needed downstream.
+pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Response {
     let users = state.users.read().await;
     let mut sorted: Vec<String> = users.clone();
     sorted.sort();
-    let payload = gitim_core::responses::ListUsersResponse { users: sorted };
+
+    let archived_users = if include_archived {
+        let arch_users_dir = state.repo_root.join("archive").join("users");
+        let mut handlers: Vec<String> = Vec::new();
+        if arch_users_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&arch_users_dir) {
+                for entry in entries.flatten() {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if let Some(handler) = fname.strip_suffix(".meta.yaml") {
+                        handlers.push(handler.to_string());
+                    }
+                }
+            }
+        }
+        handlers.sort();
+        Some(handlers)
+    } else {
+        None
+    };
+
+    let payload = gitim_core::responses::ListUsersResponse {
+        users: sorted,
+        archived_users,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
+/// Scan `archive/users/*.meta.yaml` and return one `ArchivedUserEntry`
+/// per file, sorted by handler. Mirrors `handle_list_archived_channels`
+/// in shape; the per-row payload carries `handler` (always) and
+/// `display_name` (best-effort — parsed from the archived `UserMeta`
+/// yaml, omitted when the file is missing or unparseable). Frontends
+/// fall back to rendering the bare handler when `display_name` is
+/// absent.
+pub async fn handle_list_archived_users(state: SharedState) -> Response {
+    use gitim_core::responses::{ArchivedUserEntry, ListArchivedUsersResponse};
+    let arch_users_dir = state.repo_root.join("archive").join("users");
+    let mut entries: Vec<ArchivedUserEntry> = Vec::new();
+    if arch_users_dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(&arch_users_dir) {
+            for entry in rd.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                let Some(handler) = fname.strip_suffix(".meta.yaml") else {
+                    continue;
+                };
+                // Best-effort display_name lookup. A read or parse failure
+                // means the entry simply has no display_name on the wire —
+                // not an error condition for the list call.
+                let display_name = std::fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|c| serde_yaml::from_str::<UserMeta>(&c).ok())
+                    .map(|m| m.display_name);
+                entries.push(ArchivedUserEntry {
+                    handler: handler.to_string(),
+                    display_name,
+                });
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.handler.cmp(&b.handler));
+    let payload = ListArchivedUsersResponse { users: entries };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
+/// Scan `archive/dm/*.thread` and return the rows where `author` is one
+/// of the two participants. Filtering by participation is the whole
+/// access-control story for archived DMs at this layer — the daemon does
+/// not expose third-party listings.
+///
+/// The peer is the participant other than `author`. Self-DMs (handler
+/// equal to itself, which `dm_filename` produces as `<h>--<h>`) report
+/// `author` as the peer; this branch is unreachable through normal
+/// `archive_dm` flow because that requires `author != peer`, but the
+/// listing tolerates the malformed file shape rather than panicking.
+pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Response {
+    use gitim_core::dm::parse_dm_filename;
+    use gitim_core::responses::{ArchivedDmEntry, ListArchivedDmsResponse};
+
+    let arch_dm_dir = state.repo_root.join("archive").join("dm");
+    let mut entries: Vec<ArchivedDmEntry> = Vec::new();
+    if arch_dm_dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(&arch_dm_dir) {
+            for entry in rd.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                let stem = match fname.strip_suffix(".thread") {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let (first, second) = match parse_dm_filename(&stem) {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+                let peer = if first == author {
+                    second
+                } else if second == author {
+                    first
+                } else {
+                    // Caller did not participate in this DM — skip.
+                    continue;
+                };
+                entries.push(ArchivedDmEntry {
+                    peer: peer.to_string(),
+                    dm_pair_stem: stem,
+                });
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.peer.cmp(&b.peer));
+    let payload = ListArchivedDmsResponse { dms: entries };
     Response::success(serde_json::to_value(payload).unwrap())
 }
 

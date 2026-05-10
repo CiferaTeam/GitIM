@@ -86,6 +86,166 @@ pub async fn cmd_dm_read(
     }
 }
 
+pub async fn cmd_archive_dm(client: &GitimClient, mode: &OutputMode, peer: &str) {
+    match client.archive_dm(peer).await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("归档失败: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => println!("已归档与 @{peer} 的私信"),
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("归档失败: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_unarchive_dm(client: &GitimClient, mode: &OutputMode, peer: &str) {
+    match client.unarchive_dm(peer).await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("取消归档失败: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => println!("已恢复与 @{peer} 的私信"),
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("取消归档失败: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_list_archived_dms(client: &GitimClient, mode: &OutputMode) {
+    match client.list_archived_dms().await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("Error: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => {
+                    let dms = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("dms"))
+                        .and_then(|c| c.as_array());
+
+                    match dms {
+                        Some(arr) if !arr.is_empty() => {
+                            for entry in arr {
+                                if let Some(peer) =
+                                    entry.get("peer").and_then(|p| p.as_str())
+                                {
+                                    println!("{peer}");
+                                }
+                            }
+                        }
+                        _ => println!("暂无已归档私信"),
+                    }
+                }
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_list_archived_users(client: &GitimClient, mode: &OutputMode) {
+    match client.list_archived_users().await {
+        Ok(resp) => {
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("Error: {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => {
+                    let users = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("users"))
+                        .and_then(|u| u.as_array());
+
+                    match users {
+                        Some(arr) if !arr.is_empty() => {
+                            // Wire shape: `[{handler, display_name?}]`. Print
+                            // `display_name (@handler)` when display_name is
+                            // present, else just `@handler`.
+                            for entry in arr {
+                                let handler = entry
+                                    .get("handler")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                match entry.get("display_name").and_then(|v| v.as_str()) {
+                                    Some(name) => println!("{name} (@{handler})"),
+                                    None => println!("@{handler}"),
+                                }
+                            }
+                        }
+                        _ => println!("暂无已退出用户"),
+                    }
+                }
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 pub fn cmd_dm_list(mode: &OutputMode) {
     let repo_root = get_repo_root();
     let dm_dir = repo_root.join("dm");

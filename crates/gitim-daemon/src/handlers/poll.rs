@@ -9,6 +9,40 @@ use std::collections::HashMap;
 use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
+    // Self-departure check (archive-protocol B.4).
+    //
+    // If `archive/users/<self_handler>.meta.yaml` exists, this daemon's
+    // own agent has been departed — most commonly via `gitim burn-self`
+    // (C.3) writing the depart commits, but also reachable when another
+    // clone burns this handler and the change syncs in. Either way the
+    // agent_loop on the runtime side has nothing useful to do here:
+    // every other poll branch would either return stale data or trip
+    // the existing per-author commit-time guard. Surfacing a tagged
+    // `self_departed` error lets the runtime fast-path into self-cleanup
+    // (kill daemon + rm clone + ctx.agents removal + SSE) instead of
+    // falling into exponential backoff on a corpse.
+    //
+    // Placed at the very top so we skip the rest of the I/O (rev-parse,
+    // diff, membership cache) once the agent is gone — there's no
+    // reason to do the work when the response is going to be discarded.
+    //
+    // Guest sessions never write the user.meta.yaml in the first place,
+    // so this check is a no-op for them; admin/system identity is also
+    // unaffected because it isn't tracked in users/.
+    let self_handler_snapshot = state.current_user.read().await.clone();
+    if let Some(handler) = self_handler_snapshot.as_deref() {
+        let archive_path = state
+            .repo_root
+            .join("archive/users")
+            .join(format!("{}.meta.yaml", handler));
+        if archive_path.exists() {
+            return Response::error_with_code(
+                "agent self-departed via burn-self",
+                "self_departed",
+            );
+        }
+    }
+
     // Use @{upstream} (current branch's tracking ref) when available, else HEAD.
     let ref_name =
         if state.git_storage.has_remote() && state.git_storage.rev_parse("@{upstream}").is_ok() {
@@ -226,6 +260,76 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                     entries: Vec::new(),
                 });
             }
+            continue;
+        } else if let Some(name) = path_str.strip_prefix("archive/dm/") {
+            // A DM thread showing up in `archive/dm/<sorted>.thread` means it
+            // was just archived. Mirror the `archive/channels/` branch above:
+            // emit a path-shaped event with no entries, keyed off the
+            // canonical `dm:<a>,<b>` channel form so clients can reconcile
+            // against their existing DM index.
+            //
+            // Visibility: archived DMs are still private to the two
+            // participants — third parties must not learn the pair existed.
+            // Apply the same filter as the active `dm/` branch.
+            //
+            // Unarchive (active path re-appears) flows through the normal
+            // `dm/` branch above and emits `kind: "dm"` with the thread
+            // content — symmetric with how channel unarchive surfaces, no
+            // dedicated event needed.
+            if name.contains('/') {
+                // Future-proof: archive/dm/<X>/<...> isn't a thing in v1
+                // but the strippers below would mangle the stem. Skip.
+                continue;
+            }
+            let stem = match name.strip_suffix(".thread") {
+                Some(s) => s,
+                None => continue,
+            };
+            let (a, b) = match parse_dm_filename(stem) {
+                Some(pair) => pair,
+                None => continue,
+            };
+            if !skip_filter {
+                match &current_user_snapshot {
+                    Some(me) if me == a || me == b => { /* allowed */ }
+                    _ => continue,
+                }
+            }
+            changes.push(gitim_core::responses::PollChange {
+                channel: format!("dm:{},{}", a, b),
+                kind: "dm_archived".to_string(),
+                entries: Vec::new(),
+            });
+            continue;
+        } else if let Some(name) = path_str.strip_prefix("archive/users/") {
+            // A user meta showing up in `archive/users/<handler>.meta.yaml`
+            // means the handler departed. Workspace-wide event — anyone
+            // polling needs to know so the active-user list refetches and
+            // departed indicators surface. No participant filter (mirrors
+            // channel_meta which is also broadcast to all callers).
+            //
+            // The plan keys the event by `handler`; the wire field is
+            // `channel` because PollChange has no dedicated handler slot.
+            // `kind: "user_archived"` is the discriminator.
+            //
+            // Note: user *unarchive* (active `users/<h>.meta.yaml` re-
+            // appearing) currently emits nothing — poll has never had a
+            // branch for `users/`, so user creates/updates also don't
+            // surface. That's a pre-existing systemic gap, not a A.7
+            // regression; introducing an explicit user_unarchived without
+            // also surfacing user creates would be asymmetric.
+            if name.contains('/') {
+                continue;
+            }
+            let handler = match name.strip_suffix(".meta.yaml") {
+                Some(h) => h,
+                None => continue,
+            };
+            changes.push(gitim_core::responses::PollChange {
+                channel: handler.to_string(),
+                kind: "user_archived".to_string(),
+                entries: Vec::new(),
+            });
             continue;
         } else {
             continue;
