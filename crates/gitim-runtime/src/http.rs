@@ -3152,6 +3152,28 @@ async fn workspaces_create(
         .into_response()
 }
 
+/// HTTP handler for `GET /hermes/llm/providers`.
+///
+/// Resolves the hermes home directory from `HERMES_HOME` (or `~/.hermes`),
+/// delegates to `hermes_llm::list_providers`, and returns the result as
+/// `{"providers": [...]}`. Always 200 — introspection failures return an
+/// empty list rather than a 5xx so the WebUI degrades gracefully.
+async fn list_hermes_llm_providers() -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let hermes_home = std::env::var_os("HERMES_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(".hermes")
+        });
+
+    let providers = crate::hermes_llm::list_providers(&hermes_home);
+    (StatusCode::OK, Json(serde_json::json!({ "providers": providers }))).into_response()
+}
+
 /// Assemble the axum router with a fresh `RuntimeState`. The canonical exe
 /// path is resolved from `RuntimeState::default()` — fine for tests, but
 /// production must call `create_router_with_exe` so the pre-replacement
@@ -3222,6 +3244,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         )
         .nest("/workspaces/{slug}", ws_router)
         .route("/preflight/{provider}", get(preflight_handler))
+        .route("/hermes/llm/providers", get(list_hermes_llm_providers))
         .route(
             "/runtime/update-and-restart",
             post(crate::update::update_and_restart),
