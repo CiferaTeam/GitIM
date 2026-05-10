@@ -6,6 +6,7 @@ use gitim_agent_provider::{
     create, ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage,
 };
 use gitim_client::GitimClient;
+use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -14,7 +15,8 @@ use crate::error::RuntimeError;
 use crate::hermes_profile;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
-use crate::state::{AgentState, SessionUsageSnapshot, UsageSource};
+use crate::state::{AgentState, LastSessionUsage, SessionUsageSnapshot, UsageSource};
+use crate::usage_log::{AgentUsageLog, UsageSummary};
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentLoopConfig {
@@ -23,6 +25,19 @@ pub struct AgentLoopConfig {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub env: HashMap<String, String>,
+}
+
+/// SSE `"usage"` event payload. The existing SessionUsageSnapshot fields
+/// are flattened to keep frontends that destructure them (e.g. older
+/// `use-agent-activity.ts`) working unchanged. `usage_summary` is added as
+/// a sibling for clients that need cumulative+today numbers without an
+/// extra HTTP round-trip.
+#[derive(Serialize)]
+struct UsageEventPayload<'a> {
+    #[serde(flatten)]
+    snap: &'a SessionUsageSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_summary: Option<&'a UsageSummary>,
 }
 
 pub struct AgentLoop {
@@ -43,6 +58,11 @@ pub struct AgentLoop {
     /// re-reading `.gitim/agent-state.json` on each request. None in tests
     /// and standalone CLI use where no HTTP state exists.
     runtime_state: Option<SharedRuntimeState>,
+    /// Workspace root used to locate the per-agent token usage log at
+    /// `<workspace>/.gitim-runtime/usage/<handler>.json`. None when running
+    /// outside the runtime HTTP shell (CLI / unit tests); the accumulator
+    /// path is skipped in that case.
+    workspace_root: Option<PathBuf>,
 }
 
 impl AgentLoop {
@@ -91,6 +111,7 @@ impl AgentLoop {
             activity_tx: None,
             workspace_id: String::new(),
             runtime_state: None,
+            workspace_root: None,
         })
     }
 
@@ -128,6 +149,7 @@ impl AgentLoop {
             activity_tx: None,
             workspace_id: String::new(),
             runtime_state: None,
+            workspace_root: None,
         })
     }
 
@@ -137,6 +159,14 @@ impl AgentLoop {
     /// that don't drive HTTP handlers can skip this entirely.
     pub fn set_runtime_state(&mut self, state: SharedRuntimeState) {
         self.runtime_state = Some(state);
+    }
+
+    /// Attach the workspace root so the per-agent token usage log can be
+    /// resolved to `<workspace>/.gitim-runtime/usage/<handler>.json`.
+    /// Standalone CLI and unit-test paths skip this; the accumulator gates
+    /// on the field being `Some`.
+    pub fn set_workspace_root(&mut self, root: PathBuf) {
+        self.workspace_root = Some(root);
     }
 
     /// Attach a broadcast sender and tag emitted events with a workspace slug.
@@ -264,29 +294,171 @@ impl AgentLoop {
         }
 
         state.session_usage = new_snapshot.clone();
+
+        // Step A — Normalize provider_reported into a per-turn delta. We do
+        // this *here*, after compute_snapshot has already used the raw value
+        // for percentage display, so the visible HUD remains driven by the
+        // provider's authoritative cumulative number. The delta is what the
+        // statistics layer accumulates.
+        let delta = self.normalize_to_delta(state, session_id, provider_reported);
+
+        // Persist updated last_session_usage baseline alongside session_usage.
         state.save(&self.repo_root)?;
 
-        // Patch the in-memory AgentInfo so polling clients (GET /agents/:id)
-        // see fresh data without re-reading disk on every request, and
-        // broadcast the snapshot as a "usage" SSE event on the existing
-        // activity channel so reactive clients (/agents/events subscribers)
-        // can patch their local store. A missing runtime_state or
-        // activity_tx is fine — standalone CLI / tests skip silently.
+        // Step B — Accumulate the delta into the per-agent usage log. Save
+        // failures bump a counter and warn-log; they cannot fail the turn.
+        let usage_summary = self.accumulate_usage_log(delta.as_ref());
+
+        // Step C — Patch the in-memory AgentInfo so polling clients
+        // (GET /agents/:id) see fresh data without re-reading disk on every
+        // request. session_usage is unconditional; usage_summary is only
+        // patched when we actually computed one (i.e. workspace_root was
+        // wired in).
         if let Some(snap) = &new_snapshot {
             if let Some(rs) = &self.runtime_state {
                 if let Ok(mut s) = rs.lock() {
                     if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
                         if let Some(info) = ctx.agents.get_mut(&self.handler) {
                             info.session_usage = Some(snap.clone());
+                            if let Some(summary) = &usage_summary {
+                                info.usage_summary = Some(summary.clone());
+                            }
                         }
                     }
                 }
             }
-            let detail = serde_json::to_string(snap).unwrap_or_default();
+
+            // Step D — Broadcast the "usage" SSE event. Payload keeps the
+            // existing SessionUsageSnapshot fields inline (so older WebUI
+            // clients that destructure them keep working) and adds
+            // `usage_summary` as a sibling for new clients.
+            let payload = UsageEventPayload {
+                snap,
+                usage_summary: usage_summary.as_ref(),
+            };
+            let detail = serde_json::to_string(&payload).unwrap_or_default();
             self.emit_activity("usage", &detail);
         }
 
         Ok(())
+    }
+
+    /// Convert the provider's raw `ProviderUsage` into a per-turn delta.
+    ///
+    /// - When the provider declares `reports_usage() == false` (gemini,
+    ///   openclaw), there is no delta — the accumulator will only count
+    ///   turns.
+    /// - When `usage_is_cumulative() == true` (codex), subtract the
+    ///   `last_session_usage` baseline and update it. saturating_sub makes
+    ///   non-monotone counters (cache invalidation upstream) safe; we warn
+    ///   when we see the regression so it doesn't pass silently.
+    /// - Otherwise the provider already reports per-turn deltas, so we
+    ///   forward as-is.
+    fn normalize_to_delta(
+        &self,
+        state: &mut AgentState,
+        session_id: &str,
+        provider_reported: Option<&ProviderUsage>,
+    ) -> Option<ProviderUsage> {
+        if !self.provider.reports_usage() {
+            return None;
+        }
+        let current = provider_reported?.clone();
+        if !self.provider.usage_is_cumulative() {
+            return Some(current);
+        }
+        let baseline = match &state.last_session_usage {
+            Some(prev) if prev.session_id == session_id => prev.usage.clone(),
+            _ => ProviderUsage::default(),
+        };
+
+        let delta = ProviderUsage {
+            input_tokens: Some(
+                current
+                    .input_tokens
+                    .unwrap_or(0)
+                    .saturating_sub(baseline.input_tokens.unwrap_or(0)),
+            ),
+            output_tokens: Some(
+                current
+                    .output_tokens
+                    .unwrap_or(0)
+                    .saturating_sub(baseline.output_tokens.unwrap_or(0)),
+            ),
+            cache_read_tokens: Some(
+                current
+                    .cache_read_tokens
+                    .unwrap_or(0)
+                    .saturating_sub(baseline.cache_read_tokens.unwrap_or(0)),
+            ),
+            cache_creation_tokens: Some(
+                current
+                    .cache_creation_tokens
+                    .unwrap_or(0)
+                    .saturating_sub(baseline.cache_creation_tokens.unwrap_or(0)),
+            ),
+            // used_percent is provider-authoritative; passing through but the
+            // accumulator ignores it.
+            used_percent: current.used_percent,
+        };
+
+        // Cache reads aren't monotone (Anthropic's prompt cache can be
+        // invalidated upstream). Warn loudly so a sustained regression is
+        // visible without scraping all turn logs.
+        if current.cache_read_tokens.unwrap_or(0) < baseline.cache_read_tokens.unwrap_or(0) {
+            tracing::warn!(
+                handler = %self.handler,
+                session_id = %session_id,
+                current = current.cache_read_tokens.unwrap_or(0),
+                baseline = baseline.cache_read_tokens.unwrap_or(0),
+                "cache_read decreased between turns; likely upstream cache invalidation"
+            );
+        }
+
+        state.last_session_usage = Some(LastSessionUsage {
+            session_id: session_id.to_string(),
+            usage: current,
+        });
+
+        Some(delta)
+    }
+
+    /// Load the agent's usage log, accumulate the turn delta, save back.
+    /// Returns the freshly computed `UsageSummary` so callers can patch
+    /// in-memory state and broadcast it. Returns `None` when no workspace
+    /// root is wired (CLI / unit tests).
+    ///
+    /// Save failures bump `usage_save_failures` on `RuntimeState` and warn —
+    /// they never propagate. The runtime's HUD percentage still works off
+    /// the per-turn snapshot regardless of accumulator health.
+    fn accumulate_usage_log(&self, delta: Option<&ProviderUsage>) -> Option<UsageSummary> {
+        let workspace_root = self.workspace_root.as_ref()?;
+        let model = self.model.as_deref().unwrap_or("");
+        let mut log = AgentUsageLog::load_or_default(
+            workspace_root,
+            &self.handler,
+            &self.provider_type,
+            model,
+            self.provider.reports_usage(),
+        );
+        let now = chrono::Utc::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let now_iso = now.to_rfc3339();
+        log.accumulate(&today, delta, &now_iso);
+        if let Err(e) = log.save(workspace_root, &today) {
+            tracing::warn!(
+                handler = %self.handler,
+                error = %e,
+                "failed to save token usage log"
+            );
+            if let Some(rs) = &self.runtime_state {
+                if let Ok(s) = rs.lock() {
+                    s.usage_save_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        Some(log.summary(&today))
     }
 
     /// Clear the in-memory mirror of `session_usage` on the runtime's shared
@@ -1113,6 +1285,7 @@ mod tests {
                     source: UsageSource::ProviderReported,
                     updated_at: "2026-04-21T07:34:02Z".to_string(),
                 }),
+                usage_summary: None,
                 loop_handle: None,
             },
         );

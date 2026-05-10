@@ -218,6 +218,7 @@ fn insert_agent(
             env: HashMap::new(),
             error_message: None,
             session_usage: None,
+            usage_summary: None,
             loop_handle: None,
         },
     );

@@ -118,6 +118,7 @@ fn seed_agent_in_workspace(
         env,
         error_message: None,
         session_usage: None,
+        usage_summary: None,
         loop_handle: None,
     };
 
