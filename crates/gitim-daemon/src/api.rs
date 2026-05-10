@@ -385,6 +385,69 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
+
+    // -- Cron triggers --
+    //
+    // `name` semantics for these variants: the on-disk directory stem
+    // under `crons/<name>/`. Validation rules (length, charset, reserved
+    // words) live in the handler — surfacing here as `String` keeps the
+    // wire schema flat and lets the daemon return a typed
+    // `error_code: invalid_name` rather than a serde failure.
+    /// Create a new cron trigger. `target` accepts the literal handler
+    /// or the special string `@self`, which the daemon resolves to the
+    /// author handler at create time.
+    #[serde(rename = "create_cron")]
+    CreateCron {
+        name: String,
+        schedule: String,
+        #[serde(default)]
+        timezone: Option<String>,
+        target: String,
+        prompt: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    /// List all active (non-archived) cron triggers in the workspace,
+    /// sorted by name.
+    #[serde(rename = "list_crons")]
+    ListCrons,
+    /// Read full spec for a single cron, plus its most-recent past fires
+    /// and the computed next-fire timestamp.
+    #[serde(rename = "show_cron")]
+    ShowCron { name: String },
+    /// Read past fires for a cron, newest first. `limit` defaults to 50
+    /// and is capped at the daemon side.
+    #[serde(rename = "history_cron")]
+    HistoryCron {
+        name: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Flip `spec.yaml#enabled` to `true`. Idempotent: re-enable on an
+    /// already-enabled spec produces no commit.
+    #[serde(rename = "enable_cron")]
+    EnableCron {
+        name: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    /// Flip `spec.yaml#enabled` to `false`. Idempotent: disable on an
+    /// already-disabled spec produces no commit.
+    #[serde(rename = "disable_cron")]
+    DisableCron {
+        name: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    /// Soft-delete: `git mv crons/<name>/ archive/crons/<name>/`. Mirrors
+    /// the channel-archive precedent — history is preserved under
+    /// `archive/`, not `git rm`'d.
+    #[serde(rename = "delete_cron")]
+    DeleteCron {
+        name: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
 }
 
 fn default_limit() -> usize {
@@ -789,6 +852,32 @@ mod tests {
         }
     }
 
+    // -- Cron request roundtrip tests --
+
+    #[test]
+    fn test_create_cron_request_roundtrip_full() {
+        let json = r#"{"method":"create_cron","name":"weekly-report","schedule":"0 9 * * 1","timezone":"America/Los_Angeles","target":"alice","prompt":"weekly checkin","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::CreateCron {
+                name,
+                schedule,
+                timezone,
+                target,
+                prompt,
+                author,
+            } => {
+                assert_eq!(name, "weekly-report");
+                assert_eq!(schedule, "0 9 * * 1");
+                assert_eq!(timezone, Some("America/Los_Angeles".to_string()));
+                assert_eq!(target, "alice");
+                assert_eq!(prompt, "weekly checkin");
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[test]
     fn test_board_updated_event_roundtrip() {
         let ev = Event::BoardUpdated {
@@ -819,6 +908,33 @@ mod tests {
     }
 
     #[test]
+    fn test_create_cron_request_minimal_optionals_default_none() {
+        // timezone + author both omitted — `serde(default)` deserializes them
+        // to `None`, which the handler interprets as UTC + dispatch-resolved
+        // author respectively.
+        let json = r#"{"method":"create_cron","name":"daily","schedule":"@daily","target":"@self","prompt":"hi"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::CreateCron {
+                name,
+                schedule,
+                timezone,
+                target,
+                prompt,
+                author,
+            } => {
+                assert_eq!(name, "daily");
+                assert_eq!(schedule, "@daily");
+                assert_eq!(timezone, None);
+                assert_eq!(target, "@self");
+                assert_eq!(prompt, "hi");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn request_onboard_join_general_explicit_false_deserializes() {
         // Opt-out caller (runtime agent provision) sends join_general=false
         // explicitly — the daemon must honor it.
@@ -827,6 +943,89 @@ mod tests {
         match req {
             Request::Onboard { join_general, .. } => {
                 assert!(!join_general, "explicit false must deserialize as false");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_list_crons_request_roundtrip() {
+        let json = r#"{"method":"list_crons"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListCrons => {}
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_show_cron_request_roundtrip() {
+        let json = r#"{"method":"show_cron","name":"weekly-report"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ShowCron { name } => {
+                assert_eq!(name, "weekly-report");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_history_cron_request_roundtrip() {
+        // With explicit limit.
+        let json = r#"{"method":"history_cron","name":"daily","limit":10}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::HistoryCron { name, limit } => {
+                assert_eq!(name, "daily");
+                assert_eq!(limit, Some(10));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Without limit — `serde(default)` → `None`, handler applies its default.
+        let json_no_limit = r#"{"method":"history_cron","name":"daily"}"#;
+        let req2: Request = serde_json::from_str(json_no_limit).unwrap();
+        match req2 {
+            Request::HistoryCron { name, limit } => {
+                assert_eq!(name, "daily");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_enable_disable_cron_request_roundtrip() {
+        let json = r#"{"method":"enable_cron","name":"weekly","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::EnableCron { name, author } => {
+                assert_eq!(name, "weekly");
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let json = r#"{"method":"disable_cron","name":"weekly"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::DisableCron { name, author } => {
+                assert_eq!(name, "weekly");
+                assert_eq!(author, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_delete_cron_request_roundtrip() {
+        let json = r#"{"method":"delete_cron","name":"old-job","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::DeleteCron { name, author } => {
+                assert_eq!(name, "old-job");
+                assert_eq!(author, Some("alice".to_string()));
             }
             _ => panic!("wrong variant"),
         }

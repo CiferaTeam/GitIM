@@ -476,6 +476,113 @@ pub struct PollResponse {
     pub changes: Vec<PollChange>,
 }
 
+// -- Cron responses --
+
+/// One row in `ListCronsResponse.crons`. Lightweight summary suitable for
+/// list views — full spec body and history live behind `show_cron`.
+///
+/// `next_fire` is computed at list time (no mutable state on disk) so it
+/// reflects the same croner+timezone resolution that the engine will use
+/// at fire time. Disabled specs still expose a `next_fire` so the calendar
+/// UI can grey out future occurrences without recomputing the schedule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CronSummary {
+    pub name: String,
+    pub schedule: String,
+    /// IANA timezone string, or `None` for UTC. Stays optional to mirror
+    /// `CronSpec.timezone` — the wire shape is "absent" not "explicit UTC".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    pub target: String,
+    pub enabled: bool,
+    pub created_by: String,
+    pub created_at: String,
+    /// Computed via `next_fire_after(spec, now)`. `None` only on a spec
+    /// whose schedule somehow fails to parse at list time (defensive — the
+    /// daemon already validated on create, but a hand-edited spec.yaml
+    /// could regress).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_fire: Option<String>,
+}
+
+/// Response payload for `Request::ListCrons`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListCronsResponse {
+    pub crons: Vec<CronSummary>,
+}
+
+/// One past-fire entry in `CronDetail.recent_runs` and
+/// `HistoryCronResponse.runs`. Each row corresponds to one
+/// `crons/<name>/<ts>.thread` file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CronRunEntry {
+    /// Theoretical fire timestamp baked into the thread filename, ISO 8601
+    /// UTC with `:` rewritten to `-` (e.g. `2026-05-11T09-00-00Z`). Same
+    /// string used as the URL-safe id in the runtime HTTP layer.
+    pub ts: String,
+    /// On-disk filename relative to the cron directory (matches `ts +
+    /// ".thread"`). Useful for clients that fetch the raw thread.
+    pub filename: String,
+}
+
+/// Response payload for `Request::ShowCron`. `spec` holds the full
+/// validated body; `recent_runs` carries the last few past fires (most
+/// recent first); `next_fire` is the computed next theoretical fire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CronDetail {
+    /// Job name (filesystem stem under `crons/<name>/`). Surfaced
+    /// separately so callers don't have to read it back out of the file
+    /// path.
+    pub name: String,
+    /// Full spec body. Matches the on-disk `spec.yaml`.
+    pub spec: serde_yaml::Value,
+    pub recent_runs: Vec<CronRunEntry>,
+    /// Same shape as `CronSummary.next_fire`. `None` when schedule fails
+    /// to parse (defensive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_fire: Option<String>,
+}
+
+/// Response payload for `Request::HistoryCron`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryCronResponse {
+    pub name: String,
+    pub runs: Vec<CronRunEntry>,
+}
+
+/// Response payload for `Request::CreateCron`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateCronResponse {
+    pub name: String,
+    pub created_by: String,
+    /// Resolved target — `@self` is replaced with the author handler at
+    /// create time, so the response always reflects the literal handler
+    /// stored in `spec.yaml`.
+    pub target: String,
+}
+
+/// Response payload for `Request::EnableCron` / `Request::DisableCron`.
+/// Idempotent: when the spec is already in the requested state, the
+/// daemon returns `changed: false` and produces no commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToggleCronResponse {
+    pub name: String,
+    pub enabled: bool,
+    /// `true` when this call mutated `spec.yaml` and produced a commit;
+    /// `false` on the no-op idempotent path.
+    pub changed: bool,
+}
+
+/// Response payload for `Request::DeleteCron`. Soft delete — `git mv` of
+/// `crons/<name>/` into `archive/crons/<name>/`. Mirrors the
+/// `ArchiveChannelResponse` shape so the wire stays uniform across
+/// archive operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteCronResponse {
+    pub name: String,
+    pub deleted_by: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

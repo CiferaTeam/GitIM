@@ -1,4 +1,5 @@
 mod channel;
+pub mod cron;
 mod depart;
 mod dm;
 mod poll;
@@ -9,6 +10,7 @@ pub(crate) mod serde;
 mod user;
 
 pub use channel::*;
+pub use cron::*;
 pub use depart::*;
 pub use dm::*;
 pub use poll::*;
@@ -165,6 +167,10 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::BoardSet { .. }
                 | Request::BoardSectionSet { .. }
                 | Request::BoardSectionAppend { .. }
+                | Request::CreateCron { .. }
+                | Request::EnableCron { .. }
+                | Request::DisableCron { .. }
+                | Request::DeleteCron { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -498,6 +504,45 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 value,
             )
             .await
+        }
+        Request::CreateCron {
+            name,
+            schedule,
+            timezone,
+            target,
+            prompt,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_create_cron(state, name, schedule, timezone, target, prompt, resolved_author)
+                .await
+        }
+        Request::ListCrons => handle_list_crons(state).await,
+        Request::ShowCron { name } => handle_show_cron(state, name).await,
+        Request::HistoryCron { name, limit } => handle_history_cron(state, name, limit).await,
+        Request::EnableCron { name, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_enable_cron(state, name, resolved_author).await
+        }
+        Request::DisableCron { name, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_disable_cron(state, name, resolved_author).await
+        }
+        Request::DeleteCron { name, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            handle_delete_cron(state, name, resolved_author).await
         }
     }
 }
