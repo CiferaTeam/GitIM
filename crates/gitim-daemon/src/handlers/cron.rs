@@ -23,6 +23,7 @@ use gitim_core::types::{CronSpec, Handler};
 use tracing::info;
 
 use crate::api::Response;
+use crate::cron_paths::parse_thread_filename_ts;
 use crate::state::SharedState;
 
 /// Reject names that would alias the archive convention or shadow the
@@ -510,22 +511,6 @@ fn list_thread_runs(
         entries.truncate(n);
     }
     entries
-}
-
-/// Parse a thread filename stem like `2026-05-11T09-00-00Z` back into a
-/// `DateTime<Utc>`. Returns `None` on any parse failure — used both to
-/// filter non-fire thread files in `list_thread_runs` and to derive
-/// `last_fire` for `compute_next_fire`.
-fn parse_thread_filename_ts(stem: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    // Filename format: `YYYY-MM-DDTHH-MM-SSZ`. Convert the time-portion
-    // hyphens back to colons before parsing as RFC 3339.
-    // We split on 'T' first to preserve the date hyphens.
-    let (date_part, time_part) = stem.split_once('T')?;
-    let time_with_colons = time_part.replace('-', ":");
-    let rfc3339 = format!("{date_part}T{time_with_colons}");
-    chrono::DateTime::parse_from_rfc3339(&rfc3339)
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 /// Compute the next theoretical fire after `now`, anchored from the
