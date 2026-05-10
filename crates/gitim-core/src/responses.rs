@@ -485,18 +485,30 @@ pub struct PollResponse {
 /// reflects the same croner+timezone resolution that the engine will use
 /// at fire time. Disabled specs still expose a `next_fire` so the calendar
 /// UI can grey out future occurrences without recomputing the schedule.
+///
+/// NOTE: The runtime's timeline endpoint
+/// (`gitim-runtime::http::crons_timeline` via
+/// `synthesize_spec_for_iteration`) builds an in-memory `CronSpec` from
+/// these fields to drive `next_fire_after` iteration without a second
+/// IPC round trip. The fields tagged `// timeline: required` below are
+/// load-bearing for that synthesis — dropping or renaming any of them
+/// silently degrades the timeline endpoint (future / missed entries
+/// vanish for affected crons). A unit test in the runtime
+/// (`synthesize_spec_for_iteration_locks_summary_contract`) re-fires
+/// synthesis end-to-end so a breaking change here fails CI rather than
+/// drifting unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CronSummary {
     pub name: String,
-    pub schedule: String,
+    pub schedule: String, // timeline: required
     /// IANA timezone string, or `None` for UTC. Stays optional to mirror
     /// `CronSpec.timezone` — the wire shape is "absent" not "explicit UTC".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-    pub target: String,
+    pub timezone: Option<String>, // timeline: required (Option preserved verbatim)
+    pub target: String, // timeline: required
     pub enabled: bool,
-    pub created_by: String,
-    pub created_at: String,
+    pub created_by: String, // timeline: required
+    pub created_at: String, // timeline: required (RFC 3339 UTC, ends with 'Z')
     /// Computed via `next_fire_after(spec, now)`. `None` only on a spec
     /// whose schedule somehow fails to parse at list time (defensive — the
     /// daemon already validated on create, but a hand-edited spec.yaml

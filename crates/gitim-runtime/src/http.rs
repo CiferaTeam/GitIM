@@ -1829,11 +1829,39 @@ async fn crons_timeline(
         }
         let spec = match synthesize_spec_for_iteration(summary) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                // Synthesis can only fail if the daemon's CronSummary
+                // shape drifts from what `synthesize_spec_for_iteration`
+                // expects (a missing/renamed `target` / `created_by` /
+                // `created_at` / etc.). Past entries already emitted from
+                // disk above; the cron's future + missed projections will
+                // be silently absent. Logging here is the only signal a
+                // future debugger gets — without it, "this cron's future
+                // entries vanished" requires source reading to diagnose.
+                tracing::warn!(
+                    cron_name = %summary.name,
+                    error = %e,
+                    "timeline: failed to synthesize spec for future-fire iteration; cron's future/missed entries omitted"
+                );
+                continue;
+            }
         };
         let created_at_dt = match DateTime::parse_from_rfc3339(&spec.created_at) {
             Ok(dt) => dt.with_timezone(&Utc),
-            Err(_) => continue,
+            Err(e) => {
+                // Same failure mode as the synthesis branch — RFC 3339
+                // parse should already be guaranteed by daemon-side
+                // CronSpec::validate, but a hand-edited spec.yaml could
+                // regress. Log with the same shape so dashboards can
+                // group them.
+                tracing::warn!(
+                    cron_name = %summary.name,
+                    created_at = %spec.created_at,
+                    error = %e,
+                    "timeline: created_at failed RFC 3339 parse; cron's future/missed entries omitted"
+                );
+                continue;
+            }
         };
         // Anchor selection mirrors the engine's strictly-after-created_at
         // contract:
@@ -5302,5 +5330,76 @@ mod tests {
         let body = serde_json::json!({ "introduction": "AI assistant" });
         let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
         assert_eq!(req.introduction, Some(Some("AI assistant".to_string())));
+    }
+
+    // ─── Cron timeline coupling guard ────────────────────────────────────────
+    //
+    // `synthesize_spec_for_iteration` is the load-bearing bridge from
+    // `CronSummary` (daemon-owned wire shape) to `CronSpec` (engine
+    // contract). The doc comment on `CronSummary` enumerates the fields
+    // marked "timeline: required". This test locks the relationship: it
+    // builds a default-shaped summary, runs synthesis, and proves the
+    // result is usable by `next_fire_after`. If a future refactor drops
+    // or renames any of those fields, this test fails — surfacing the
+    // breakage at compile/test time rather than as a silent drop in
+    // future / missed entries on the calendar.
+
+    #[test]
+    fn cron_synthesis_succeeds_for_default_summary() {
+        // Minimum-viable summary: every field the synthesizer reads is
+        // populated with the simplest valid value. Any future drift in
+        // `CronSummary`'s required-for-timeline fields fails this test.
+        let summary = gitim_core::responses::CronSummary {
+            name: "test-job".to_string(),
+            schedule: "0 9 * * *".to_string(),
+            timezone: None,
+            target: "alice".to_string(),
+            enabled: true,
+            created_by: "alice".to_string(),
+            created_at: "2026-05-09T10:00:00Z".to_string(),
+            next_fire: None,
+        };
+        let spec = synthesize_spec_for_iteration(&summary)
+            .expect("default-shaped summary must synthesize");
+        assert_eq!(spec.schedule, "0 9 * * *");
+        assert_eq!(spec.target.as_str(), "alice");
+        assert_eq!(spec.created_by.as_str(), "alice");
+        assert_eq!(spec.created_at, "2026-05-09T10:00:00Z");
+        assert_eq!(spec.timezone, None);
+        assert!(spec.enabled);
+    }
+
+    #[test]
+    fn synthesize_spec_for_iteration_locks_summary_contract() {
+        // End-to-end: feed a CronSummary into synthesis, then into
+        // `next_fire_after`, and assert the predicted instant matches
+        // the schedule. This proves the synthesized spec is more than
+        // just well-formed — it's actually usable by the engine's
+        // iteration entry point. A refactor that, say, drops `timezone`
+        // from CronSummary would break the synthesis call AND any
+        // future-fire iteration that hangs off it.
+        use chrono::{DateTime, Utc};
+        let summary = gitim_core::responses::CronSummary {
+            name: "morning-task".to_string(),
+            schedule: "0 9 * * *".to_string(),
+            timezone: Some("America/Los_Angeles".to_string()),
+            target: "alice".to_string(),
+            enabled: true,
+            created_by: "alice".to_string(),
+            created_at: "2026-05-09T10:00:00Z".to_string(),
+            next_fire: None,
+        };
+        let spec = synthesize_spec_for_iteration(&summary).expect("synthesize OK");
+        // 9am LA on a non-DST day = UTC 17:00 (PDT, UTC-7) or 16:00 (PST,
+        // UTC-8). Pick a known PDT date and assert the predicted next
+        // fire lands on that instant.
+        let after: DateTime<Utc> = "2026-05-10T00:00:00Z".parse().unwrap();
+        let next = gitim_core::types::cron::next_fire_after(&spec, after)
+            .expect("next_fire_after on synthesized spec");
+        let expected: DateTime<Utc> = "2026-05-10T16:00:00Z".parse().unwrap();
+        assert_eq!(
+            next, expected,
+            "synthesized spec must drive next_fire_after the same way a parsed spec.yaml would"
+        );
     }
 }
