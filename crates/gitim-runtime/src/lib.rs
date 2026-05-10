@@ -10,6 +10,7 @@ pub mod error;
 pub mod git_config;
 pub mod github;
 pub mod gitignore;
+pub mod hermes_llm;
 pub mod hermes_profile;
 pub mod http;
 pub mod poller;
