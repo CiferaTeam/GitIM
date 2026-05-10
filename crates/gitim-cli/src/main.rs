@@ -219,6 +219,12 @@ enum Commands {
         #[command(subcommand)]
         command: BoardCommands,
     },
+
+    /// Cron trigger commands
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -427,6 +433,76 @@ enum BoardSectionCommands {
         /// Read appended section content from stdin
         #[arg(long, required = true)]
         stdin: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// Create a new cron trigger.
+    ///
+    /// Provide exactly one of `--prompt` (inline) or `--prompt-file`
+    /// (read from disk; useful for multi-line prompts that are awkward
+    /// to shell-quote).
+    Create {
+        /// Cron job name (lowercase a-z 0-9 hyphen, 1–63 chars)
+        name: String,
+        /// 5-field cron expression or alias (`@daily`, `@weekly`, ...)
+        #[arg(long)]
+        schedule: String,
+        /// Target handler. Accepts `@self`, `@bob`, or bare `bob`.
+        #[arg(long)]
+        target: String,
+        /// Inline prompt body. Mutually exclusive with --prompt-file.
+        #[arg(long, conflicts_with = "prompt_file", required_unless_present = "prompt_file")]
+        prompt: Option<String>,
+        /// Path to a UTF-8 prompt file. Mutually exclusive with --prompt.
+        #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
+        prompt_file: Option<std::path::PathBuf>,
+        /// IANA timezone (e.g. `America/Los_Angeles`); defaults to UTC.
+        #[arg(long)]
+        timezone: Option<String>,
+    },
+
+    /// List all active cron triggers
+    List,
+
+    /// Show full spec + recent runs + next fire for a single cron
+    Show {
+        /// Cron job name
+        name: String,
+    },
+
+    /// List past fires (newest first) for a cron
+    History {
+        /// Cron job name
+        name: String,
+        /// Maximum number of past fires to return (default 50, max 1000)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
+    /// Pause a cron (keeps spec, suppresses fires)
+    Disable {
+        /// Cron job name
+        name: String,
+    },
+
+    /// Resume a paused cron
+    Enable {
+        /// Cron job name
+        name: String,
+    },
+
+    /// Soft-delete: move spec + history into archive/crons/
+    Delete {
+        /// Cron job name
+        name: String,
+    },
+
+    /// Print the next fire timestamp (ISO 8601 UTC) on a single line
+    Next {
+        /// Cron job name
+        name: String,
     },
 }
 
@@ -740,6 +816,52 @@ async fn main() {
                 }
             },
         },
+        Commands::Cron { command } => match command {
+            CronCommands::Create {
+                name,
+                schedule,
+                target,
+                prompt,
+                prompt_file,
+                timezone,
+            } => {
+                let prompt_body = match commands::cron::load_prompt(
+                    prompt.as_deref(),
+                    prompt_file.as_deref(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    }
+                };
+                commands::cron::cmd_create(
+                    &client,
+                    &mode,
+                    &name,
+                    &schedule,
+                    &target,
+                    timezone.as_deref(),
+                    &prompt_body,
+                )
+                .await
+            }
+            CronCommands::List => commands::cron::cmd_list(&client, &mode).await,
+            CronCommands::Show { name } => commands::cron::cmd_show(&client, &mode, &name).await,
+            CronCommands::History { name, limit } => {
+                commands::cron::cmd_history(&client, &mode, &name, limit).await
+            }
+            CronCommands::Disable { name } => {
+                commands::cron::cmd_disable(&client, &mode, &name).await
+            }
+            CronCommands::Enable { name } => {
+                commands::cron::cmd_enable(&client, &mode, &name).await
+            }
+            CronCommands::Delete { name } => {
+                commands::cron::cmd_delete(&client, &mode, &name).await
+            }
+            CronCommands::Next { name } => commands::cron::cmd_next(&client, &mode, &name).await,
+        },
     }
 }
 
@@ -877,5 +999,197 @@ mod tests {
         let parsed = Cli::try_parse_from(["gitim", "board", "section", "append", "当前状态"]);
 
         assert!(parsed.is_err(), "section append should require --stdin");
+    }
+
+    // -- cron subcommand parsing -----------------------------------------
+    //
+    // These lock the clap surface: required flags, mutually-exclusive
+    // pairs, and the canonical syntax Lane D's prompt template will tell
+    // agents to type. Drift in any of these would either break the docs
+    // or bury an error behind clap's generic "unexpected argument".
+
+    #[test]
+    fn cron_create_with_inline_prompt_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "weekly-report",
+            "--schedule",
+            "0 9 * * 1",
+            "--target",
+            "@self",
+            "--prompt",
+            "summarize",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn cron_create_with_prompt_file_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "weekly-report",
+            "--schedule",
+            "@weekly",
+            "--target",
+            "alice",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn cron_create_with_timezone_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "daily-standup",
+            "--schedule",
+            "0 9 * * *",
+            "--target",
+            "@self",
+            "--prompt",
+            "standup",
+            "--timezone",
+            "America/Los_Angeles",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    /// Both --prompt and --prompt-file → clap reports conflict (exit 2).
+    /// The point: clap, not custom code, enforces mutual exclusion.
+    #[test]
+    fn cron_create_rejects_both_prompt_and_prompt_file() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "x",
+            "--schedule",
+            "@daily",
+            "--target",
+            "@self",
+            "--prompt",
+            "inline",
+            "--prompt-file",
+            "/tmp/p",
+        ]);
+        // Cli doesn't derive Debug; collapse Ok(_) to a sentinel error so
+        // we can still assert via `match`.
+        let err = match r {
+            Ok(_) => panic!("expected clap to reject conflicting prompt flags"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// Neither --prompt nor --prompt-file → clap reports required (exit 2).
+    #[test]
+    fn cron_create_rejects_missing_prompt_source() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "x",
+            "--schedule",
+            "@daily",
+            "--target",
+            "@self",
+        ]);
+        let err = match r {
+            Ok(_) => panic!("expected clap to require --prompt or --prompt-file"),
+            Err(e) => e,
+        };
+        // Clap reports MissingRequiredArgument when required_unless_present
+        // chains both come up empty.
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cron_create_rejects_missing_schedule() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "x",
+            "--target",
+            "@self",
+            "--prompt",
+            "p",
+        ]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn cron_create_rejects_missing_target() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "cron",
+            "create",
+            "x",
+            "--schedule",
+            "@daily",
+            "--prompt",
+            "p",
+        ]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn cron_list_parses() {
+        let r = Cli::try_parse_from(["gitim", "cron", "list"]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_list_with_global_json_flag_parses() {
+        // --json is global, so it works on cron list too.
+        let r = Cli::try_parse_from(["gitim", "--json", "cron", "list"]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_show_parses() {
+        let r = Cli::try_parse_from(["gitim", "cron", "show", "weekly-report"]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_history_parses_with_limit() {
+        let r = Cli::try_parse_from([
+            "gitim", "cron", "history", "weekly-report", "--limit", "10",
+        ]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_history_parses_without_limit() {
+        let r = Cli::try_parse_from(["gitim", "cron", "history", "weekly-report"]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_disable_enable_delete_parse() {
+        for sub in ["disable", "enable", "delete"] {
+            let r = Cli::try_parse_from(["gitim", "cron", sub, "weekly-report"]);
+            assert!(r.is_ok(), "{sub} failed to parse");
+        }
+    }
+
+    #[test]
+    fn cron_next_parses() {
+        let r = Cli::try_parse_from(["gitim", "cron", "next", "weekly-report"]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn cron_subcommand_requires_a_subcommand() {
+        let r = Cli::try_parse_from(["gitim", "cron"]);
+        assert!(r.is_err());
     }
 }

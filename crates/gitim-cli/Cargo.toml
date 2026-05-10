@@ -11,6 +11,7 @@ path = "src/main.rs"
 gitim-client = { path = "../gitim-client" }
 gitim-core = { path = "../gitim-core" }
 gitim-updater = { path = "../gitim-updater" }
+chrono.workspace = true
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 serde_json.workspace = true

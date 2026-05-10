@@ -3,6 +3,7 @@ pub mod board;
 pub mod burn;
 pub mod card;
 pub mod channels;
+pub mod cron;
 pub mod dm;
 pub mod messaging;
 pub mod onboard;
