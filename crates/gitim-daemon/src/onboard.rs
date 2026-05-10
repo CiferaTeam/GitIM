@@ -284,6 +284,13 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
         .map_err(|e| Response::error(format!("failed to create channels dir: {}", e)))?;
 
     let meta_path = channels_dir.join("general.meta.yaml");
+    // Note: this seed runs unconditionally on a fresh repo, regardless of the
+    // caller's join_general flag. In practice the agent provisioning path
+    // always sees this file already present (workspace owner onboards first
+    // and pushes), so the gate at handle_onboard's Step E is sufficient. If
+    // a future caller opts out as the FIRST onboarder on a brand-new repo,
+    // they would still end up in #general — file a follow-up if that flow
+    // becomes a real use case.
     if !meta_path.exists() {
         let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
         let meta = ChannelMeta {
@@ -1084,7 +1091,7 @@ mod tests {
     }
 
     /// Reverse coverage for `test_onboard_new_user_joins_general`. When a
-    /// caller (Task 2: runtime add_agent) opts out by passing
+    /// caller (runtime add_agent via POST /agents/add) opts out by passing
     /// `join_general=false`, the daemon must NOT add the new user to
     /// `channels/general.meta.yaml.members` and must NOT append a join
     /// event to `channels/general.thread`. Bot A still joins normally so

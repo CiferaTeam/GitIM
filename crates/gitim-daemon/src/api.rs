@@ -176,8 +176,8 @@ pub enum Request {
         /// When false, daemon skips the auto_join_general step on first
         /// registration. Default true preserves the legacy behavior for
         /// any caller (CLI human onboard, runtime workspace owner) that
-        /// doesn't set the field — only opt-out callers (Task 2: runtime
-        /// agent provision) need to send `false`.
+        /// doesn't set the field — only opt-out callers (runtime agent
+        /// provision via POST /agents/add) need to send `false`.
         #[serde(default = "default_true")]
         join_general: bool,
     },
@@ -800,6 +800,36 @@ mod tests {
             "json was: {json}"
         );
         assert!(json.contains("\"handler\":\"alice\""));
+    }
+
+    #[test]
+    fn request_onboard_join_general_omitted_defaults_to_true() {
+        // Caller omits join_general entirely — must deserialize to true to
+        // preserve legacy CLI / workspace-owner behavior. This pins the
+        // default_true semantic at the daemon's wire boundary so a future
+        // non-Rust IPC client can rely on the same default.
+        let json = r#"{"method":"onboard","git_server":"git","auth":{"type":"git","handler":"alice","display_name":"Alice"}}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::Onboard { join_general, .. } => {
+                assert!(join_general, "omitted join_general must default to true");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn request_onboard_join_general_explicit_false_deserializes() {
+        // Opt-out caller (runtime agent provision) sends join_general=false
+        // explicitly — the daemon must honor it.
+        let json = r#"{"method":"onboard","git_server":"git","auth":{"type":"git","handler":"bob","display_name":"Bob"},"join_general":false}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::Onboard { join_general, .. } => {
+                assert!(!join_general, "explicit false must deserialize as false");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
 
