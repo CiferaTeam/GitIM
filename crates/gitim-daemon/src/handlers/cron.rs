@@ -298,23 +298,282 @@ pub async fn handle_create_cron(
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
-/// Stub for [`Request::ListCrons`]. Real implementation lands in Task 2.3.
-pub async fn handle_list_crons(_state: SharedState) -> Response {
-    not_implemented("list_crons")
+/// Default for `Request::HistoryCron.limit` when the client omits the
+/// field. 50 mirrors the daemon's other `default_limit` and matches the
+/// "show recent runs" mental model — a year of weekly fires fits.
+const DEFAULT_HISTORY_LIMIT: u32 = 50;
+
+/// Hard cap so a malicious or buggy client can't ask for unbounded I/O.
+/// 1000 is generous: even at one fire per minute that's ~17 hours of
+/// uninterrupted history.
+const MAX_HISTORY_LIMIT: u32 = 1000;
+
+/// Number of recent runs surfaced by `show_cron`. Larger queries should
+/// go through `history_cron` instead — `show` is the "at a glance"
+/// endpoint, history is the paginated one.
+const SHOW_RECENT_RUNS: usize = 5;
+
+/// List all active (non-archived) cron triggers, sorted by name.
+/// Archived crons under `archive/crons/` are intentionally skipped — the
+/// design says the active list excludes archived (mirrors
+/// `ListChannelsResponse` vs `ListArchivedChannelsResponse`).
+///
+/// `next_fire` is computed at list time via `next_fire_after`, anchored
+/// from the latest existing `<ts>.thread` filename or, on a fresh spec,
+/// from `created_at`. Disabled specs still expose `next_fire` so the UI
+/// can render greyed-out future occurrences without recomputing.
+///
+/// Specs that fail to parse or whose schedule fails to evaluate are
+/// **silently dropped** with a warn-log — the list endpoint should never
+/// crash on a single bad spec. Defensive: validation runs at create
+/// time, but a hand-edited spec.yaml could regress.
+pub async fn handle_list_crons(state: SharedState) -> Response {
+    use gitim_core::responses::{CronSummary, ListCronsResponse};
+
+    let crons_dir = state.repo_root.join("crons");
+    let mut summaries: Vec<CronSummary> = Vec::new();
+    let now = chrono::Utc::now();
+
+    if let Ok(entries) = std::fs::read_dir(&crons_dir) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let ft = e.file_type().ok()?;
+                if !ft.is_dir() {
+                    return None;
+                }
+                Some(e.file_name().to_string_lossy().to_string())
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            let spec_path = crons_dir.join(&name).join("spec.yaml");
+            let spec = match read_spec(&spec_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let next_fire = compute_next_fire(&crons_dir.join(&name), &spec, now);
+            summaries.push(CronSummary {
+                name: name.clone(),
+                schedule: spec.schedule.clone(),
+                timezone: spec.timezone.clone(),
+                target: spec.target.as_str().to_string(),
+                enabled: spec.enabled,
+                created_by: spec.created_by.as_str().to_string(),
+                created_at: spec.created_at.clone(),
+                next_fire,
+            });
+        }
+    }
+
+    let payload = ListCronsResponse { crons: summaries };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
-/// Stub for [`Request::ShowCron`]. Real implementation lands in Task 2.3.
-pub async fn handle_show_cron(_state: SharedState, _name: String) -> Response {
-    not_implemented("show_cron")
+/// Read a single cron spec + the most recent `SHOW_RECENT_RUNS` past
+/// fires + the computed next-fire timestamp. 404 on missing or
+/// unreadable spec.yaml.
+pub async fn handle_show_cron(state: SharedState, name: String) -> Response {
+    use gitim_core::responses::CronDetail;
+
+    if let Err(resp) = validate_cron_name(&name) {
+        return resp;
+    }
+
+    let cron_dir = state.repo_root.join("crons").join(&name);
+    let spec_path = cron_dir.join("spec.yaml");
+    if !spec_path.exists() {
+        return Response::error_with_code(
+            format!("cron '{}' does not exist", name),
+            "not_found",
+        );
+    }
+    let spec = match read_spec(&spec_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("failed to read cron '{}': {}", name, e),
+                "spec_unreadable",
+            )
+        }
+    };
+
+    // Surface the raw yaml as a structured value rather than re-serializing
+    // the typed `CronSpec` — this preserves any `extra` (forward-compat)
+    // fields verbatim and avoids a double round-trip through the type.
+    let raw_yaml = std::fs::read_to_string(&spec_path).unwrap_or_default();
+    let spec_value: serde_yaml::Value = match serde_yaml::from_str(&raw_yaml) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("failed to parse cron '{}' yaml: {}", name, e),
+                "spec_unreadable",
+            )
+        }
+    };
+
+    let runs = list_thread_runs(&cron_dir, Some(SHOW_RECENT_RUNS));
+    let now = chrono::Utc::now();
+    let next_fire = compute_next_fire(&cron_dir, &spec, now);
+
+    let payload = CronDetail {
+        name,
+        spec: spec_value,
+        recent_runs: runs,
+        next_fire,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
 
-/// Stub for [`Request::HistoryCron`]. Real implementation lands in Task 2.3.
+/// List `<ts>.thread` files for a cron, newest first, capped by `limit`
+/// (default 50, max 1000). 404 on missing cron directory.
 pub async fn handle_history_cron(
-    _state: SharedState,
-    _name: String,
-    _limit: Option<u32>,
+    state: SharedState,
+    name: String,
+    limit: Option<u32>,
 ) -> Response {
-    not_implemented("history_cron")
+    use gitim_core::responses::HistoryCronResponse;
+
+    if let Err(resp) = validate_cron_name(&name) {
+        return resp;
+    }
+
+    let cron_dir = state.repo_root.join("crons").join(&name);
+    if !cron_dir.is_dir() {
+        return Response::error_with_code(
+            format!("cron '{}' does not exist", name),
+            "not_found",
+        );
+    }
+    if !cron_dir.join("spec.yaml").exists() {
+        // A bare directory without spec.yaml shouldn't happen in normal
+        // operation but treat it as a not-found rather than returning
+        // possibly-stale runs from an orphaned dir.
+        return Response::error_with_code(
+            format!("cron '{}' does not exist", name),
+            "not_found",
+        );
+    }
+
+    let limit_u = limit
+        .unwrap_or(DEFAULT_HISTORY_LIMIT)
+        .min(MAX_HISTORY_LIMIT) as usize;
+    let runs = list_thread_runs(&cron_dir, Some(limit_u));
+
+    let payload = HistoryCronResponse { name, runs };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
+/// Read + parse a `spec.yaml`. Errors are surfaced as `String` because
+/// callers (list / show / history) handle them differently — list just
+/// skips, show returns 404-ish.
+fn read_spec(path: &std::path::Path) -> Result<CronSpec, String> {
+    let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    CronSpec::from_yaml(&body).map_err(|e| e.to_string())
+}
+
+/// Glob `<cron_dir>/*.thread`, parse each filename as a theoretical fire
+/// timestamp, sort newest-first, optionally truncate to `limit`. The
+/// filename stem doubles as the canonical `ts` field in the response.
+fn list_thread_runs(
+    cron_dir: &std::path::Path,
+    limit: Option<usize>,
+) -> Vec<gitim_core::responses::CronRunEntry> {
+    use gitim_core::responses::CronRunEntry;
+
+    let mut entries: Vec<CronRunEntry> = Vec::new();
+    let rd = match std::fs::read_dir(cron_dir) {
+        Ok(r) => r,
+        Err(_) => return entries,
+    };
+    for entry in rd.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let stem = match fname.strip_suffix(".thread") {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // Skip non-fire thread files defensively — we don't expect any
+        // (cron threads are always `<ts>.thread`) but a stray file
+        // shouldn't crash the listing.
+        if parse_thread_filename_ts(&stem).is_none() {
+            continue;
+        }
+        entries.push(CronRunEntry {
+            ts: stem,
+            filename: fname,
+        });
+    }
+    // Newest first — the filename stems are ISO 8601 UTC with `:` → `-`,
+    // which sorts lexicographically the same as chronologically.
+    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+    if let Some(n) = limit {
+        entries.truncate(n);
+    }
+    entries
+}
+
+/// Parse a thread filename stem like `2026-05-11T09-00-00Z` back into a
+/// `DateTime<Utc>`. Returns `None` on any parse failure — used both to
+/// filter non-fire thread files in `list_thread_runs` and to derive
+/// `last_fire` for `compute_next_fire`.
+fn parse_thread_filename_ts(stem: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Filename format: `YYYY-MM-DDTHH-MM-SSZ`. Convert the time-portion
+    // hyphens back to colons before parsing as RFC 3339.
+    // We split on 'T' first to preserve the date hyphens.
+    let (date_part, time_part) = stem.split_once('T')?;
+    let time_with_colons = time_part.replace('-', ":");
+    let rfc3339 = format!("{date_part}T{time_with_colons}");
+    chrono::DateTime::parse_from_rfc3339(&rfc3339)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Compute the next theoretical fire after `now`, anchored from the
+/// latest existing `<ts>.thread` filename or, if none exist,
+/// `spec.created_at`. Mirrors the engine's `last_fire` resolution
+/// precisely so list/show stay consistent with what scan_due will see.
+fn compute_next_fire(
+    cron_dir: &std::path::Path,
+    spec: &CronSpec,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    use gitim_core::types::cron::next_fire_after;
+
+    let mut latest: Option<chrono::DateTime<chrono::Utc>> = None;
+    if let Ok(rd) = std::fs::read_dir(cron_dir) {
+        for entry in rd.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let stem = match fname.strip_suffix(".thread") {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if let Some(ts) = parse_thread_filename_ts(&stem) {
+                latest = Some(latest.map_or(ts, |cur| cur.max(ts)));
+            }
+        }
+    }
+
+    let anchor = match latest {
+        Some(ts) => ts,
+        None => match chrono::DateTime::parse_from_rfc3339(&spec.created_at) {
+            Ok(dt) => dt.with_timezone(&chrono::Utc),
+            Err(_) => return None,
+        },
+    };
+
+    // Start from the later of `anchor` and `now` — if the anchor is in
+    // the past (e.g. a fresh spec whose created_at is older than the
+    // current time), we still want the next fire strictly after now.
+    // This matches the engine semantic: `next_due = next_fire_after(spec,
+    // last_fire)` and then the engine fires when `next_due <= now`.
+    // For UI display we want "the upcoming theoretical fire" — strictly
+    // after now if the anchor was historical, strictly after anchor if
+    // anchor is itself in the future (not currently possible but
+    // defensive).
+    let from = anchor.max(now);
+    next_fire_after(spec, from)
+        .ok()
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 /// Stub for [`Request::EnableCron`]. Real implementation lands in Task 2.4.
@@ -408,42 +667,6 @@ mod tests {
             msg.contains(method),
             "{method}: error message should mention method name, got {msg}",
         );
-    }
-
-    #[tokio::test]
-    async fn list_crons_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "list_crons",
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "list_crons");
-    }
-
-    #[tokio::test]
-    async fn show_cron_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "show_cron",
-            "name": "weekly",
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "show_cron");
-    }
-
-    #[tokio::test]
-    async fn history_cron_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "history_cron",
-            "name": "weekly",
-            "limit": 5,
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "history_cron");
     }
 
     #[tokio::test]
