@@ -4,6 +4,8 @@
 //! hermes runtime understands, plus the runtime introspection logic that
 //! maps available API keys to live provider/model lists.
 
+mod introspect;
 mod registry;
 
+pub use introspect::{list_providers, LlmProvider, ProviderKind};
 pub use registry::{ApiProtocol, BuiltinProvider, BUILTIN_PROVIDERS};

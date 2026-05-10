@@ -5,7 +5,8 @@
 /// MiniMax series has no `/models` endpoint (Anthropic-protocol), so
 /// `fetch_models` short-circuits based on this field rather than attempting
 /// a list call that would always fail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApiProtocol {
     OpenAI,
     Anthropic,
