@@ -52,6 +52,70 @@ pub enum CronSpecError {
     Yaml(#[from] serde_yaml::Error),
 }
 
+/// Reject names that would alias the archive convention or shadow the
+/// `crons/` root. `archive` and `crons` are the two top-level neighbors a
+/// stem could collide with after `git mv`; `.`-prefixed names would clash
+/// with hidden-file discipline (`.gitim/`, `.git/`).
+const RESERVED_CRON_NAMES: &[&str] = &["archive", "crons"];
+
+/// Why a candidate cron name was rejected. Stable variants — runtime and
+/// daemon both map these onto the wire `error_code: "invalid_name"`, so
+/// reordering or splitting variants is a wire-visible change.
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum CronNameError {
+    #[error("cron name cannot be empty")]
+    Empty,
+    #[error("cron name exceeds 63 characters (got {0})")]
+    TooLong(usize),
+    #[error("cron name '{0}' cannot start with '.'")]
+    DotPrefix(String),
+    #[error("cron name '{0}' is reserved")]
+    Reserved(String),
+    #[error("cron name '{0}' must start with a lowercase letter or digit")]
+    BadFirstChar(String),
+    #[error("cron name '{name}' contains invalid character '{ch}' (allowed: a-z 0-9 -)")]
+    BadChar { name: String, ch: char },
+}
+
+/// Validate `<name>` against `^[a-z0-9][a-z0-9-]{0,62}$` plus the reserved
+/// list. Lifted from the daemon so the runtime HTTP layer (which constructs
+/// disk paths from the URL `<name>` segment in `crons/<name>/<ts>` reads)
+/// can enforce the same rule before any path join — preventing path
+/// traversal via `..`, percent-encoded slashes, or any other shape the
+/// regex would reject.
+///
+/// Same shape as channel names (`ChannelName::new`) but kept separate
+/// because cron names live in their own namespace and we don't want a
+/// future channel-name policy change to silently re-shape cron rules.
+pub fn validate_cron_name(name: &str) -> Result<(), CronNameError> {
+    if name.is_empty() {
+        return Err(CronNameError::Empty);
+    }
+    if name.len() > 63 {
+        return Err(CronNameError::TooLong(name.len()));
+    }
+    if name.starts_with('.') {
+        return Err(CronNameError::DotPrefix(name.to_string()));
+    }
+    if RESERVED_CRON_NAMES.contains(&name) {
+        return Err(CronNameError::Reserved(name.to_string()));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !matches!(first, 'a'..='z' | '0'..='9') {
+        return Err(CronNameError::BadFirstChar(name.to_string()));
+    }
+    for ch in std::iter::once(first).chain(chars) {
+        if !matches!(ch, 'a'..='z' | '0'..='9' | '-') {
+            return Err(CronNameError::BadChar {
+                name: name.to_string(),
+                ch,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn default_version() -> u32 {
     CURRENT_VERSION
 }
@@ -518,6 +582,124 @@ created_at: "2026-05-09T10:00:00+08:00"
             spec.schedule = "totally bogus".to_string();
             let err = next_fire_after(&spec, Utc::now()).unwrap_err();
             assert!(matches!(err, CronSpecError::InvalidSchedule(_)));
+        }
+    }
+
+    mod name_validation {
+        //! Lock the wire-shape: every variant of `CronNameError` is reachable
+        //! from a single inputs, and the daemon + runtime both rely on the
+        //! `^[a-z0-9][a-z0-9-]{0,62}$` rule plus the reserved-word list. If
+        //! any of these tests breaks, both consumers will surface a different
+        //! `error_code` and the WebUI / CLI rendering will drift.
+        //!
+        //! `use super::*` is avoided here so the parent module's
+        //! `pretty_assertions::assert_eq` re-export doesn't collide with
+        //! the prelude version on every macro invocation. We import the
+        //! handful of names we need explicitly.
+        use super::super::{validate_cron_name, CronNameError};
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn rejects_empty() {
+            assert!(matches!(
+                validate_cron_name(""),
+                Err(CronNameError::Empty)
+            ));
+        }
+
+        #[test]
+        fn rejects_too_long() {
+            let n = "a".repeat(64);
+            match validate_cron_name(&n) {
+                Err(CronNameError::TooLong(64)) => {}
+                other => panic!("expected TooLong(64), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn rejects_dot_prefix() {
+            // `.hidden` would shadow `.gitim`/`.git` discipline.
+            assert!(matches!(
+                validate_cron_name(".hidden"),
+                Err(CronNameError::DotPrefix(_))
+            ));
+        }
+
+        #[test]
+        fn rejects_reserved() {
+            for n in ["archive", "crons"] {
+                match validate_cron_name(n) {
+                    Err(CronNameError::Reserved(s)) => assert_eq!(s, n),
+                    other => panic!("expected Reserved({n}), got {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn rejects_uppercase() {
+            // Case sensitivity matters for fs-portability across case-
+            // insensitive macOS volumes vs case-sensitive Linux.
+            assert!(matches!(
+                validate_cron_name("WeeklyReport"),
+                Err(CronNameError::BadFirstChar(_)) | Err(CronNameError::BadChar { .. })
+            ));
+        }
+
+        #[test]
+        fn rejects_leading_hyphen() {
+            assert!(matches!(
+                validate_cron_name("-leading"),
+                Err(CronNameError::BadFirstChar(_))
+            ));
+        }
+
+        #[test]
+        fn rejects_dotdot() {
+            // The path-traversal canary. A runtime that joins the URL `<name>`
+            // segment onto `crons/...` without this check would resolve `..`
+            // to the parent of `crons/`, escaping the workspace's cron tree.
+            assert!(matches!(
+                validate_cron_name(".."),
+                Err(CronNameError::DotPrefix(_))
+            ));
+        }
+
+        #[test]
+        fn rejects_slash() {
+            assert!(matches!(
+                validate_cron_name("a/b"),
+                Err(CronNameError::BadChar { ch: '/', .. })
+            ));
+        }
+
+        #[test]
+        fn rejects_null_byte() {
+            // NUL would terminate the C-style path mid-string and leak into
+            // the parent directory. Don't trust the URL decoder upstream.
+            assert!(matches!(
+                validate_cron_name("a\0b"),
+                Err(CronNameError::BadChar { ch: '\0', .. })
+            ));
+        }
+
+        #[test]
+        fn accepts_canonical_shapes() {
+            for n in ["a", "weekly-report", "j0", "0-9", "abc-1-23"] {
+                validate_cron_name(n).unwrap_or_else(|e| {
+                    panic!("expected '{n}' to validate, got {e:?}")
+                });
+            }
+        }
+
+        #[test]
+        fn boundary_63_chars_ok_64_chars_rejected() {
+            let ok = "a".repeat(63);
+            validate_cron_name(&ok).unwrap();
+            let too_long = "a".repeat(64);
+            assert!(matches!(
+                validate_cron_name(&too_long),
+                Err(CronNameError::TooLong(64))
+            ));
         }
     }
 }

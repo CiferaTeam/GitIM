@@ -20,7 +20,7 @@ pub use card::{
 };
 pub use channel::ChannelName;
 pub use config::Config;
-pub use cron::{CronSpec, CronSpecError};
+pub use cron::{validate_cron_name, CronNameError, CronSpec, CronSpecError};
 pub use handler::Handler;
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};

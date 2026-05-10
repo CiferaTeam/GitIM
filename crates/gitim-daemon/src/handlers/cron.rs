@@ -8,8 +8,12 @@
 //!
 //! Validation is layered:
 //!   - `Handler::new` for any handler-shaped string (target, author).
-//!   - `validate_cron_name` for the directory stem (lowercase a-z 0-9 hyphen,
-//!     1–63 chars, no leading hyphen, not a reserved word).
+//!   - `gitim_core::types::validate_cron_name` for the directory stem
+//!     (lowercase a-z 0-9 hyphen, 1–63 chars, no leading hyphen, not a
+//!     reserved word). Lifted to gitim-core so the runtime HTTP layer
+//!     (which builds `crons/<name>/<ts>.thread` paths from URL segments)
+//!     enforces the exact same rule before any path join — single source
+//!     of truth for the path-traversal canary.
 //!   - `CronSpec::validate` (in gitim-core) for schedule, timezone, prompt
 //!     size, version, created_at format. We construct an in-memory spec and
 //!     hand it through that single source of truth so the daemon and
@@ -19,7 +23,7 @@ use std::collections::BTreeMap;
 
 use chrono::SecondsFormat;
 use gitim_core::responses::CreateCronResponse;
-use gitim_core::types::{CronSpec, Handler};
+use gitim_core::types::{validate_cron_name as core_validate_cron_name, CronSpec, Handler};
 use tracing::info;
 
 use crate::api::Response;
@@ -27,64 +31,14 @@ use crate::cron_paths::parse_thread_filename_ts;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 
-/// Reject names that would alias the archive convention or shadow the
-/// crons/ root. `archive` and `crons` are the two top-level neighbors a
-/// stem could collide with after `git mv`; `.`-prefixed names would clash
-/// with hidden-file discipline (`.gitim/`, `.git/`).
-const RESERVED_CRON_NAMES: &[&str] = &["archive", "crons"];
-
-/// `^[a-z0-9][a-z0-9-]{0,62}$` enforced by hand to avoid a regex dep here.
-/// Same shape as channel names (see `ChannelName::new`) but kept separate
-/// because cron names live in their own namespace and we don't want a
-/// future channel-name policy change to silently re-shape cron rules.
+/// Wrap the shared validator so daemon call sites can keep their existing
+/// `Result<(), Response>` shape. The `error_code: "invalid_name"` contract
+/// is identical across every variant — clients only ever differentiate on
+/// the code, not the human message.
 fn validate_cron_name(name: &str) -> Result<(), Response> {
-    if name.is_empty() {
-        return Err(Response::error_with_code(
-            "cron name cannot be empty",
-            "invalid_name",
-        ));
-    }
-    if name.len() > 63 {
-        return Err(Response::error_with_code(
-            format!("cron name exceeds 63 characters (got {})", name.len()),
-            "invalid_name",
-        ));
-    }
-    if name.starts_with('.') {
-        return Err(Response::error_with_code(
-            format!("cron name '{}' cannot start with '.'", name),
-            "invalid_name",
-        ));
-    }
-    if RESERVED_CRON_NAMES.contains(&name) {
-        return Err(Response::error_with_code(
-            format!("cron name '{}' is reserved", name),
-            "invalid_name",
-        ));
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !matches!(first, 'a'..='z' | '0'..='9') {
-        return Err(Response::error_with_code(
-            format!(
-                "cron name '{}' must start with a lowercase letter or digit",
-                name
-            ),
-            "invalid_name",
-        ));
-    }
-    for ch in std::iter::once(first).chain(chars) {
-        if !matches!(ch, 'a'..='z' | '0'..='9' | '-') {
-            return Err(Response::error_with_code(
-                format!(
-                    "cron name '{}' contains invalid character '{}' (allowed: a-z 0-9 -)",
-                    name, ch
-                ),
-                "invalid_name",
-            ));
-        }
-    }
-    Ok(())
+    core_validate_cron_name(name).map_err(|e| {
+        Response::error_with_code(e.to_string(), "invalid_name")
+    })
 }
 
 /// Create `crons/<name>/spec.yaml` with the given schedule + target +

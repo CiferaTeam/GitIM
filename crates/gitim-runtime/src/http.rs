@@ -1474,15 +1474,16 @@ async fn crons_run_body(
             .into_response();
     }
 
-    // Reuse the cron-name validation that the daemon also runs, so we don't
-    // touch disk on a clearly bad name.
-    if name.is_empty() || name.len() > 63 {
+    // Same validator the daemon runs on the IPC surface, lifted to
+    // gitim-core so a regex drift can't open a path-traversal hole here.
+    // Charset rule (`^[a-z0-9][a-z0-9-]{0,62}$`) means `..`, `/`, `\`,
+    // null bytes, percent-encoded escapes — none of them survive past
+    // this point, so the `crons/<name>/<ts>.thread` join below cannot
+    // escape `crons/`.
+    if let Err(e) = gitim_core::types::validate_cron_name(&name) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(ErrorBody::with_code(
-                "invalid cron name",
-                "invalid_name",
-            )),
+            Json(ErrorBody::with_code(e.to_string(), "invalid_name")),
         )
             .into_response();
     }
@@ -1499,6 +1500,31 @@ async fn crons_run_body(
         .join("crons")
         .join(&name)
         .join(format!("{ts}.thread"));
+
+    // Defense in depth: the charset check above already rejects every
+    // shape that could escape, but if the runtime's view of the
+    // workspace ever races with a symlink swap (e.g. an attacker with
+    // local fs access points `crons/<name>` at `/etc`) the canonical
+    // path check still catches it. The cost — one extra stat — only
+    // pays out on an existing file path, so the happy-path overhead is
+    // a single syscall per request.
+    let crons_root = human_repo.join("crons");
+    if let (Ok(canon_path), Ok(canon_root)) = (
+        std::fs::canonicalize(&thread_path),
+        std::fs::canonicalize(&crons_root),
+    ) {
+        if !canon_path.starts_with(&canon_root) {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "cron name resolved outside workspace cron root",
+                    "invalid_name",
+                )),
+            )
+                .into_response();
+        }
+    }
+
     if !thread_path.is_file() {
         return (
             axum::http::StatusCode::NOT_FOUND,
@@ -1511,10 +1537,30 @@ async fn crons_run_body(
     }
     match std::fs::read_to_string(&thread_path) {
         Ok(body) => Json(CronRunBodyResponse { body }).into_response(),
-        Err(e) => Json(ErrorBody::new(format!(
-            "failed to read run body: {e}"
-        )))
-        .into_response(),
+        Err(e) => {
+            // Status code matches the failure mode:
+            //   NotFound  → 404 (TOCTOU disappear between is_file and read)
+            //   anything else → 500 (perm denied, IO error, etc.)
+            // Previously this returned `Json(ErrorBody...)` with no status,
+            // which axum maps to 200 OK — a misleading success on the wire.
+            let (status, code) = match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    (axum::http::StatusCode::NOT_FOUND, "not_found")
+                }
+                _ => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "read_failed",
+                ),
+            };
+            (
+                status,
+                Json(ErrorBody::with_code(
+                    format!("failed to read run body: {e}"),
+                    code,
+                )),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1740,14 +1786,12 @@ async fn crons_timeline(
     let mut any_truncated = false;
 
     for summary in &summaries {
-        if !summary.enabled {
-            // Disabled specs don't fire — we skip future / missed but still
-            // surface their past runs so historical context isn't lost on
-            // disable. (Matches the daemon's list_thread_runs semantics:
-            // run files persist after disable.)
-        }
-
         // -- Past entries: glob the on-disk thread files --
+        // Disabled specs still surface past runs here so historical
+        // context isn't lost on disable (matches the daemon's
+        // list_thread_runs semantics — run files persist after disable).
+        // The future/missed arm below skips disabled specs at the
+        // live `if !summary.enabled { continue }` check.
         let cron_dir = human_repo.join("crons").join(&summary.name);
         let mut past_ts_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Ok(rd) = std::fs::read_dir(&cron_dir) {

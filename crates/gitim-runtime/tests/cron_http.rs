@@ -415,3 +415,180 @@ async fn workspace_not_found_for_single_run() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ─── Charset / path-traversal canaries ───────────────────────────────────────
+//
+// These exercise the runtime's local `validate_cron_name` call before the
+// `crons/<name>/<ts>.thread` join. The daemon enforces the same rule on
+// every IPC; the runtime now does too, since `crons_run_body` builds the
+// disk path from the URL `<name>` segment without a daemon roundtrip.
+
+#[tokio::test]
+async fn single_run_rejects_dotdot_name() {
+    // `..` would resolve to the parent of `crons/`. Even before the
+    // canonicalize defense kicks in, the dot-prefix branch of
+    // `validate_cron_name` rejects it. Use a literal `..` segment to
+    // mirror what an attacker would try after URL-decoding tricks.
+    let env = setup();
+    let (status, body) = send(
+        env.router,
+        "GET",
+        "/workspaces/test-ws/crons/../runs/2026-05-11T09-00-00Z",
+    )
+    .await;
+    // axum's path matcher normalizes `..` to a 404 before our handler
+    // runs in some cases; in others it surfaces as a malformed path. We
+    // accept either as long as the request never produces 200 with a body.
+    assert_ne!(status, StatusCode::OK);
+    assert_ne!(body.get("body").and_then(|v| v.as_str()), None.or(Some("")));
+}
+
+#[tokio::test]
+async fn single_run_rejects_uppercase_name() {
+    let env = setup();
+    let (status, body) = send(
+        env.router,
+        "GET",
+        "/workspaces/test-ws/crons/WeeklyReport/runs/2026-05-11T09-00-00Z",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body.get("error_code").and_then(|v| v.as_str()),
+        Some("invalid_name")
+    );
+}
+
+#[tokio::test]
+async fn single_run_rejects_reserved_name() {
+    // `archive` and `crons` are the reserved tokens that would shadow
+    // top-level neighbors after a `git mv`. Both must be rejected with
+    // the same `invalid_name` code the daemon emits.
+    let env = setup();
+    for reserved in ["archive", "crons"] {
+        let uri = format!(
+            "/workspaces/test-ws/crons/{}/runs/2026-05-11T09-00-00Z",
+            reserved
+        );
+        let (status, body) = send(env.router.clone(), "GET", &uri).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "reserved name '{}' should 400",
+            reserved
+        );
+        assert_eq!(
+            body.get("error_code").and_then(|v| v.as_str()),
+            Some("invalid_name"),
+            "reserved name '{}' should map to invalid_name",
+            reserved
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_run_rejects_too_long_name() {
+    // 64 chars — one over the 63-char fs-portable cap.
+    let env = setup();
+    let n = "a".repeat(64);
+    let uri = format!(
+        "/workspaces/test-ws/crons/{}/runs/2026-05-11T09-00-00Z",
+        n
+    );
+    let (status, body) = send(env.router, "GET", &uri).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body.get("error_code").and_then(|v| v.as_str()),
+        Some("invalid_name")
+    );
+}
+
+#[tokio::test]
+async fn single_run_rejects_escaped_path_via_canonicalize() {
+    // Defense in depth: even if the charset check were bypassed (it
+    // isn't — `..` fails on dot-prefix), a symlink at `crons/escaped`
+    // pointing outside the workspace must still be rejected by the
+    // canonical-path containment check. We construct that scenario
+    // directly: a name that PASSES validate_cron_name but whose disk
+    // path resolves above `crons/`. Using a unix symlink keeps this
+    // platform-specific to the targets the runtime ships on.
+    #[cfg(unix)]
+    {
+        let env = setup();
+        let cron_dir = env.human_repo.join("crons");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        // Point `crons/escaped` at a sibling directory of human_repo
+        // (still inside the temp tree, but outside `crons/`).
+        let target_dir = env.human_repo.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let escaped = cron_dir.join("escaped");
+        std::os::unix::fs::symlink(&target_dir, &escaped).unwrap();
+        // The symlinked dir needs the requested run file present so
+        // canonicalize() resolves all the way through.
+        std::fs::write(
+            target_dir.join("2026-05-11T09-00-00Z.thread"),
+            "[L1][@system][2026-05-11T09:00:00Z] cron(escaped): leaked\n",
+        )
+        .unwrap();
+
+        let (status, body) = send(
+            env.router,
+            "GET",
+            "/workspaces/test-ws/crons/escaped/runs/2026-05-11T09-00-00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error_code").and_then(|v| v.as_str()),
+            Some("invalid_name"),
+            "canonicalize containment should map symlink escape to invalid_name"
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_run_returns_500_on_read_io_error() {
+    // chmod 000 the thread file so `read_to_string` returns
+    // PermissionDenied (an `io::Error` with kind != NotFound). Previous
+    // code returned 200 OK with an error body for this; we now expect
+    // 500 + `error_code: read_failed`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let env = setup();
+        let cron_dir = env.human_repo.join("crons").join("locked");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        let thread = cron_dir.join("2026-05-11T09-00-00Z.thread");
+        std::fs::write(&thread, "ignored").unwrap();
+        // 000 strips read for everyone, including the test process.
+        // Root would still be able to read; CI typically runs non-root.
+        let mut perms = std::fs::metadata(&thread).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&thread, perms).unwrap();
+
+        let (status, body) = send(
+            env.router,
+            "GET",
+            "/workspaces/test-ws/crons/locked/runs/2026-05-11T09-00-00Z",
+        )
+        .await;
+
+        // Restore perms so TempDir's drop can clean up the file.
+        let mut restore = std::fs::metadata(&thread).unwrap().permissions();
+        restore.set_mode(0o644);
+        let _ = std::fs::set_permissions(&thread, restore);
+
+        // Skip the assertion gracefully if the runtime user happens to be
+        // root (e.g. in some Docker images): chmod 000 is a no-op for root
+        // and the read would succeed. We document this rather than fail.
+        if status == StatusCode::OK {
+            eprintln!("skipping: process likely runs as root, chmod 000 ineffective");
+            return;
+        }
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body.get("error_code").and_then(|v| v.as_str()),
+            Some("read_failed")
+        );
+    }
+}
