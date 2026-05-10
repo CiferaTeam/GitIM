@@ -249,6 +249,12 @@ pub struct AgentInfo {
     /// `GET /agents/:id` returns fresh data without re-reading disk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_usage: Option<crate::state::SessionUsageSnapshot>,
+    /// Hermes-only: the selected LLM provider id (e.g. "deepseek", "custom:myendpoint").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_provider: Option<String>,
+    /// Hermes-only: the selected LLM model id (e.g. "deepseek-chat").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -1185,8 +1191,9 @@ async fn agents_add(
         if missing {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorBody::new(
-                    "missing llm_provider/llm_model for hermes".to_string(),
+                Json(ErrorBody::with_code(
+                    "missing llm_provider/llm_model for hermes",
+                    "missing_llm_provider",
                 )),
             )
                 .into_response();
@@ -1212,18 +1219,20 @@ async fn agents_add(
             if !providers.iter().any(|p| p.id == llm_provider_str) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(ErrorBody::new(format!(
-                        "custom provider {custom_name} not found in hermes config.yaml"
-                    ))),
+                    Json(ErrorBody::with_code(
+                        format!("custom provider {custom_name} not found in hermes config.yaml"),
+                        "custom_provider_not_found",
+                    )),
                 )
                     .into_response();
             }
         } else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorBody::new(format!(
-                    "unknown llm_provider: {llm_provider_str}"
-                ))),
+                Json(ErrorBody::with_code(
+                    format!("unknown llm_provider: {llm_provider_str}"),
+                    "unknown_llm_provider",
+                )),
             )
                 .into_response();
         }
@@ -1511,7 +1520,10 @@ async fn agents_add(
                     cleanup_agent_dir(&workspace, &req.handler);
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorBody::new(format!("apply_model_config failed: {e}"))),
+                        Json(ErrorBody::with_code(
+                            format!("apply_model_config failed: {e}"),
+                            "apply_model_config_failed",
+                        )),
                     )
                         .into_response();
                 }
@@ -1569,6 +1581,8 @@ async fn agents_add(
                 env: req.env.clone(),
                 error_message: None,
                 session_usage: None,
+                llm_provider: if req.provider == "hermes" { req.llm_provider.clone() } else { None },
+                llm_model: if req.provider == "hermes" { req.llm_model.clone() } else { None },
                 loop_handle: None,
             };
             {
@@ -2513,6 +2527,8 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
             .get("env")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let llm_provider_val = me["llm_provider"].as_str().map(|s| s.to_string());
+        let llm_model_val = me["llm_model"].as_str().map(|s| s.to_string());
 
         let provider_raw = me["provider"].as_str();
         let provider_error = match provider_raw {
@@ -2571,6 +2587,8 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                         session_usage: crate::state::AgentState::load(&dir)
                             .ok()
                             .and_then(|s| s.session_usage),
+                        llm_provider: llm_provider_val.clone(),
+                        llm_model: llm_model_val.clone(),
                         loop_handle: None,
                     },
                 );
@@ -2620,6 +2638,8 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                         session_usage: crate::state::AgentState::load(&dir)
                             .ok()
                             .and_then(|s| s.session_usage),
+                        llm_provider: llm_provider_val,
+                        llm_model: llm_model_val,
                         loop_handle: None,
                     },
                 );

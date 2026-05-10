@@ -41,6 +41,7 @@ export function AddAgentDialog() {
   // Generation counter guards against stale preflight responses when the user
   // switches provider mid-flight or fires Detect multiple times in succession.
   const detectSeq = useRef(0);
+  const modelFetchSeq = useRef(0);
 
   // Hermes-specific LLM selection state
   const [llmProvider, setLlmProvider] = useState("");
@@ -83,26 +84,28 @@ export function AddAgentDialog() {
 
   // When llmProvider changes, fetch models for that provider
   useEffect(() => {
-    if (llmProvider) {
-      setLlmModel("");
-      setCustomModelInput("");
-      setLlmModelsLoading(true);
-      setLlmModelsError(null);
-      client.listHermesLlmModels(llmProvider).then((res) => {
-        if (res.ok && res.data) {
-          setLlmModels(res.data.models);
-          setLlmModelsError(res.data.error);
-        } else {
-          setLlmModels([]);
-          setLlmModelsError(res.error?.message ?? "fetch failed");
-        }
-        setLlmModelsLoading(false);
-      });
-    } else {
+    if (!llmProvider) {
       setLlmModels([]);
       setLlmModelsError(null);
       setCustomModelInput("");
+      return;
     }
+    setLlmModel("");
+    setCustomModelInput("");
+    setLlmModelsLoading(true);
+    setLlmModelsError(null);
+    const seq = ++modelFetchSeq.current;
+    client.listHermesLlmModels(llmProvider).then((res) => {
+      if (seq !== modelFetchSeq.current) return; // stale, drop
+      if (res.ok && res.data) {
+        setLlmModels(res.data.models);
+        setLlmModelsError(res.data.error);
+      } else {
+        setLlmModels([]);
+        setLlmModelsError(res.error ?? "fetch failed");
+      }
+      setLlmModelsLoading(false);
+    });
   }, [llmProvider]);
 
   function resetForm() {

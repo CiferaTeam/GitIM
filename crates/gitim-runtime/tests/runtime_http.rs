@@ -298,6 +298,8 @@ fn insert_agent(
             env: HashMap::new(),
             error_message: None,
             session_usage: None,
+            llm_provider: None,
+            llm_model: None,
             loop_handle: None,
         },
     );

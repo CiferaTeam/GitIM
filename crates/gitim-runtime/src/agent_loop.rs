@@ -1088,6 +1088,8 @@ mod tests {
                     source: UsageSource::ProviderReported,
                     updated_at: "2026-04-21T07:34:02Z".to_string(),
                 }),
+                llm_provider: None,
+                llm_model: None,
                 loop_handle: None,
             },
         );
