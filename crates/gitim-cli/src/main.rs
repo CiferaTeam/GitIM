@@ -213,6 +213,12 @@ enum Commands {
         #[command(subcommand)]
         command: CardCommands,
     },
+
+    /// Board commands
+    Board {
+        #[command(subcommand)]
+        command: BoardCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -364,6 +370,66 @@ enum CardCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum BoardCommands {
+    /// Print the local path to your board file
+    Path,
+
+    /// Create your board
+    Init,
+
+    /// Show a handler's board
+    Show {
+        /// Handler whose board should be shown
+        handler: String,
+    },
+
+    /// List valid boards
+    Ls,
+
+    /// Publish your board
+    Publish {
+        /// Read replacement board content from stdin
+        #[arg(long)]
+        stdin: bool,
+    },
+
+    /// Set a board frontmatter field
+    Set {
+        /// Field name: status, summary, or tags
+        field: String,
+        /// Field value
+        value: String,
+    },
+
+    /// Edit board sections
+    Section {
+        #[command(subcommand)]
+        command: BoardSectionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BoardSectionCommands {
+    /// Replace a section with stdin content
+    Set {
+        /// Section heading
+        section: String,
+        /// Read replacement section content from stdin
+        #[arg(long, required = true)]
+        stdin: bool,
+    },
+
+    /// Append stdin content to a section
+    Append {
+        /// Section heading
+        section: String,
+        /// Read appended section content from stdin
+        #[arg(long, required = true)]
+        stdin: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -412,12 +478,23 @@ async fn main() {
         return;
     }
 
+    if let Commands::Board {
+        command: BoardCommands::Path,
+    } = &cli.command
+    {
+        commands::board::cmd_path(&mode);
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
         Commands::Stop => unreachable!(),
         Commands::Onboard { .. } => unreachable!(),
         Commands::Update { .. } => unreachable!(),
+        Commands::Board {
+            command: BoardCommands::Path,
+        } => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
@@ -632,6 +709,37 @@ async fn main() {
                 commands::card::cmd_archived_cards(&client, &mode, channel.as_deref()).await
             }
         },
+        Commands::Board { command } => match command {
+            BoardCommands::Path => unreachable!(),
+            BoardCommands::Init => commands::board::cmd_init(&client, &mode).await,
+            BoardCommands::Show { handler } => {
+                commands::board::cmd_show(&client, &mode, &handler).await
+            }
+            BoardCommands::Ls => commands::board::cmd_ls(&client, &mode).await,
+            BoardCommands::Publish { stdin } => {
+                let content = if stdin {
+                    Some(read_stdin_or_exit("failed to read board content"))
+                } else {
+                    None
+                };
+                commands::board::cmd_publish(&client, &mode, content.as_deref()).await
+            }
+            BoardCommands::Set { field, value } => {
+                commands::board::cmd_set(&client, &mode, &field, &value).await
+            }
+            BoardCommands::Section { command } => match command {
+                BoardSectionCommands::Set { section, stdin } => {
+                    let _ = stdin;
+                    let value = read_stdin_or_exit("failed to read section content");
+                    commands::board::cmd_section_set(&client, &mode, &section, &value).await
+                }
+                BoardSectionCommands::Append { section, stdin } => {
+                    let _ = stdin;
+                    let value = read_stdin_or_exit("failed to read section content");
+                    commands::board::cmd_section_append(&client, &mode, &section, &value).await
+                }
+            },
+        },
     }
 }
 
@@ -660,14 +768,7 @@ fn init_client() -> GitimClient {
 fn read_body_or_exit(body: Option<String>, stdin: bool) -> String {
     match (body, stdin) {
         (Some(body), false) => body,
-        (None, true) => {
-            let mut buf = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-                eprintln!("Error: failed to read stdin: {e}");
-                process::exit(1);
-            }
-            buf
-        }
+        (None, true) => read_stdin_or_exit("failed to read stdin"),
         (Some(_), true) => {
             eprintln!("Error: cannot pass both a message body and --stdin");
             process::exit(1);
@@ -677,6 +778,15 @@ fn read_body_or_exit(body: Option<String>, stdin: bool) -> String {
             process::exit(1);
         }
     }
+}
+
+fn read_stdin_or_exit(context: &str) -> String {
+    let mut buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+        eprintln!("Error: {context}: {e}");
+        process::exit(1);
+    }
+    buf
 }
 
 async fn cmd_status(client: &GitimClient, mode: &OutputMode) {
@@ -737,5 +847,35 @@ mod tests {
             "card comment should accept --stdin without a positional body: {}",
             parsed.err().map(|e| e.to_string()).unwrap_or_default()
         );
+    }
+
+    #[test]
+    fn board_publish_accepts_stdin_without_content_argument() {
+        let parsed = Cli::try_parse_from(["gitim", "board", "publish", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "board publish should accept --stdin without a positional body: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn board_section_set_accepts_required_stdin() {
+        let parsed =
+            Cli::try_parse_from(["gitim", "board", "section", "set", "当前状态", "--stdin"]);
+
+        assert!(
+            parsed.is_ok(),
+            "board section set should accept --stdin: {}",
+            parsed.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn board_section_append_rejects_missing_stdin() {
+        let parsed = Cli::try_parse_from(["gitim", "board", "section", "append", "当前状态"]);
+
+        assert!(parsed.is_err(), "section append should require --stdin");
     }
 }

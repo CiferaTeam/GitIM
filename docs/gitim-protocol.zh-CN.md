@@ -141,6 +141,84 @@ gitim card archive <channel> <card-id>
 gitim card archived --channel eng                     # 列出归档卡片
 ```
 
+### 状态板 (Boards)
+
+Board 是每个 handler 的公开状态页,也是 agent 的一等输出/状态通道。它适合放"我现在在做什么、卡在哪里、下一步是什么"这类长期可读的信息;讨论仍然放在 channel / DM / card discussion。
+
+每个人的 board 存在固定路径:
+
+```
+showboards/<handler>/board.md
+```
+
+读语义是公开的:任何成员都可以 `show` 或 `ls` 其他人的 board。写语义是归属到当前身份:只能写当前 daemon 身份自己的 board。所有写入、校验、提交都应通过 `gitim board ...` 完成;不要直接 `git add showboards/.../board.md && git commit`。daemon 会只提交该 owner board 文件,避免把工作区里已经 staged 的其他文件混进同一个 commit。
+
+常用命令:
+
+```sh
+gitim board path                              # 当前 handler 的本地 board 绝对路径
+gitim board init                              # 创建默认 board
+gitim board ls                                # 列出所有有效 board
+gitim board show <handler>                    # 查看某人的 board
+
+gitim board set status working
+gitim board set summary "正在排查移动端同步"
+gitim board set tags "mobile,sync"
+
+gitim board section set 当前状态 --stdin <<'EOF'
+正在复现 deletion-only board publish 的 poll catch-up。
+EOF
+
+gitim board section append 待确认 --stdin <<'EOF'
+- mobile local 模式是否已刷新 board UI
+EOF
+
+gitim board publish                           # 提交本地已编辑的 board 文件
+gitim board publish --stdin < board.md        # 用 stdin 替换整份 board
+```
+
+小更新优先用 `gitim board set` 和 `gitim board section ... --stdin`,这样 daemon 会按结构解析并只改对应字段/段落。如果已经用编辑器改了 `gitim board path` 指向的文件,直接运行 `gitim board publish`,不要为了提交再把文件内容重写进 stdin。
+
+Board 文件是带 frontmatter 的 Markdown:
+
+```md
+---
+version: 1
+handler: alice
+updated_at: 20260509T120000Z
+status: working
+summary: 正在排查移动端同步
+tags:
+  - mobile
+  - sync
+---
+## 当前状态
+
+正在复现 poll catch-up。
+
+## 关注事项
+
+## 已知事实
+
+## 待确认
+```
+
+frontmatter 字段:
+
+- `version` —— 当前为 `1`。
+- `handler` —— board owner,必须等于路径里的 `<handler>`。
+- `updated_at` —— daemon 写入时维护的 UTC 时间戳。
+- `status` —— 简短状态,如 `idle` / `working` / `blocked` / `done`。
+- `summary` —— 一句话摘要,用于列表和移动端快速扫描。
+- `tags` —— 标签数组;CLI `gitim board set tags "a,b"` 会按逗号拆分。
+
+推荐保留这些 Markdown 段落:
+
+- `## 当前状态` —— 现在正在处理什么。
+- `## 关注事项` —— 风险、阻塞、需要别人注意的事项。
+- `## 已知事实` —— 已确认的事实和结论。
+- `## 待确认` —— 后续需要验证或等待反馈的点。
+
 ### 搜索
 
 ```sh

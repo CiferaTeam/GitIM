@@ -76,10 +76,10 @@ impl AuthCircuit {
 /// Start the sync loop with push-first strategy.
 ///
 /// - `commit_lock`: serializes every mutation of the local commit tree. Held
-///   only around `git rebase` and the conflict-resolution write+commit
-///   sequence — never around the network-only `fetch`/`push`. The daemon's
-///   write handlers hold the same lock around their own commits, so `rebase`
-///   is guaranteed never to run while a handler is mid-append.
+///   around local unpushed snapshots, `git rebase`, and the conflict-resolution
+///   write+commit sequence — never around the network-only `fetch`/`push`. The
+///   daemon's write handlers hold the same lock around their own commits, so
+///   `rebase` is guaranteed never to run while a handler is mid-append.
 /// - `on_pushed`: called after a successful push (all pending messages are now remote)
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
@@ -328,6 +328,12 @@ where
             Ok(()) => {}
         }
 
+        // Local snapshot + rebase mutates the local commit tree; hold
+        // commit_lock across the whole block so handler writes never interleave
+        // with the snapshot or tree mutation. Push happens *after* the guard
+        // drops so a slow remote can't stall handler writers.
+        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+
         // Capture local additions BEFORE attempting rebase
         let local_additions = match repo.diff_unpushed("*.thread") {
             Ok(v) => v,
@@ -364,11 +370,16 @@ where
             }
         };
 
-        // Rebase + optional conflict resolution mutates the local commit
-        // tree; hold commit_lock across the whole block so handler writes
-        // never interleave with it. Push happens *after* the guard drops so
-        // a slow remote can't stall handler writers.
-        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+        let changed_board_files = repo
+            .changed_files_since_merge_base("showboards/*/board.md")
+            .unwrap_or_default();
+        let mut local_boards: HashMap<PathBuf, String> = HashMap::new();
+        for rel_path in &changed_board_files {
+            let abs_path = repo.root().join(rel_path);
+            if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                local_boards.insert(rel_path.clone(), content);
+            }
+        }
 
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
@@ -408,7 +419,8 @@ where
                 // Rebase failed. Two failure modes from here:
                 //
                 //   1. All local unpushed files belong to the resolvable set
-                //      (`*.thread` additions, `*.meta.yaml` changes). Discard
+                //      (`*.thread` additions, `*.meta.yaml` changes, board
+                //      documents). Discard
                 //      the partial rebase, re-apply via the content-aware
                 //      resolvers below.
                 //   2. Any local unpushed file is OUTSIDE that set
@@ -422,7 +434,7 @@ where
                 //      retry. The user keeps their commit.
                 //
                 // The detection is "did the unpushed range touch any file
-                // outside `*.thread` and `*.meta.yaml`" — not "is the
+                // outside the resolvable set" — not "is the
                 // conflict on a non-resolvable file". A single unpushed
                 // commit that touches both a thread file and a cron spec
                 // would otherwise have its spec destroyed even when only the
@@ -436,7 +448,11 @@ where
                 // exact data-loss path this guard exists to prevent.
                 let has_unresolvable = all_unpushed_before_rebase.iter().any(|p| {
                     let path_str = p.to_string_lossy();
-                    !path_str.ends_with(".thread") && !path_str.ends_with(".meta.yaml")
+                    let is_board =
+                        path_str.starts_with("showboards/") && path_str.ends_with("/board.md");
+                    !path_str.ends_with(".thread")
+                        && !path_str.ends_with(".meta.yaml")
+                        && !is_board
                 });
                 if has_unresolvable {
                     let _ = repo.abort_rebase();
@@ -448,8 +464,9 @@ where
                     return SyncOutcome::Normal;
                 }
 
-                // Rebase failed — use thread-aware + meta conflict resolution
-                if local_additions.is_empty() && local_metas.is_empty() {
+                // Rebase failed — use thread-aware + meta + board conflict resolution
+                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty()
+                {
                     let _ = repo.abort_rebase();
                     warn!("sync: rebase conflict with no resolvable changes, aborted");
                     return SyncOutcome::Normal;
@@ -486,6 +503,25 @@ where
                 } else {
                     Vec::new()
                 };
+
+                for (rel_path, local_content) in &local_boards {
+                    let abs_path = repo.root().join(rel_path);
+                    if let Some(parent) = abs_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            warn!(
+                                "sync: failed to create board dir {}: {}",
+                                parent.display(),
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&abs_path, local_content) {
+                        warn!("sync: failed to write back local board: {}", e);
+                        continue;
+                    }
+                    modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
+                }
 
                 // Meta resolution
                 for (rel_path, local_content) in &local_metas {
@@ -555,6 +591,10 @@ where
                     let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
                     let commit_msg = if !thread_mappings.is_empty() {
                         build_rebase_commit_msg(&thread_mappings, &local_additions)
+                    } else if !local_boards.is_empty() && local_metas.is_empty() {
+                        "board: sync after rebase".to_string()
+                    } else if !local_boards.is_empty() {
+                        "sync: board/meta after rebase".to_string()
                     } else {
                         "meta: sync after rebase".to_string()
                     };

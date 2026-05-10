@@ -91,6 +91,45 @@ impl GitStorage {
         Ok(())
     }
 
+    pub fn add_and_commit_only_as(
+        &self,
+        path: &str,
+        message: &str,
+        author: Option<(&str, &str)>,
+    ) -> Result<String, GitError> {
+        let output = Command::new("git")
+            .args(["add", "--", path])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let mut commit_args = vec!["commit", "--only", "-m", message];
+        let author_str;
+        if let Some((name, email)) = author {
+            author_str = format!("{} <{}>", name, email);
+            commit_args.push("--author");
+            commit_args.push(&author_str);
+        }
+        commit_args.push("--");
+        commit_args.push(path);
+
+        let output = Command::new("git")
+            .args(&commit_args)
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        self.rev_parse("HEAD")
+    }
+
     pub fn push(&self) -> Result<(), GitError> {
         let output = Command::new("git")
             .args(["push", "-u", "origin", "HEAD"])
@@ -176,6 +215,24 @@ impl GitStorage {
         Ok(Self::parse_diff_output(&String::from_utf8_lossy(
             &output.stdout,
         )))
+    }
+
+    pub fn changed_files_range(&self, from: &str, to: &str) -> Result<Vec<PathBuf>, GitError> {
+        let range = format!("{}..{}", from, to);
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", &range])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .collect())
     }
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
@@ -265,6 +322,34 @@ impl GitStorage {
     pub fn changed_files_unpushed_all(&self) -> Result<Vec<PathBuf>, GitError> {
         let output = Command::new("git")
             .args(["diff", "--name-only", "@{upstream}..HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
+        let output = Command::new("git")
+            .args(["merge-base", "@{upstream}", "HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let range = format!("{}..HEAD", merge_base);
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", &range, "--", pattern])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {

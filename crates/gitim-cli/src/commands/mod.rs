@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod board;
 pub mod burn;
 pub mod card;
 pub mod channels;

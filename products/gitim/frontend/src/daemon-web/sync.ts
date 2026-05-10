@@ -6,6 +6,7 @@ import * as gitOps from "./git";
 import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
 import { isAuthFailure } from "./auth-errors";
+import { validateHandler } from "./paths";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -20,6 +21,30 @@ function isNonFastForward(e: unknown): boolean {
     msg.includes("non-fast-forward") ||
     msg.includes("rejected")
   );
+}
+
+function boardHandlerFromPath(path: string): string | null {
+  const match = /^showboards\/([^/]+)\/board\.md$/.exec(path);
+  if (!match) return null;
+  return validateHandler(match[1]) ? null : match[1];
+}
+
+function parentPath(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx <= 0 ? "/" : path.slice(0, idx);
+}
+
+async function mkdirp(
+  path: string,
+  exists: (path: string) => Promise<boolean>,
+  mkdir: (path: string) => Promise<void>,
+): Promise<void> {
+  const parts = path.split("/").filter(Boolean);
+  let current = path.startsWith("/") ? "" : ".";
+  for (const part of parts) {
+    current = current === "" ? `/${part}` : `${current}/${part}`;
+    if (!(await exists(current))) await mkdir(current);
+  }
 }
 
 let syncInFlight: Promise<void> | null = null;
@@ -83,7 +108,17 @@ async function runSyncOnce(): Promise<void> {
     const { extractThreadAdditions } = await import("./conflict");
     const localAdditions: Record<string, string> = {};
     const remoteContents: Record<string, string> = {};
+    const localBoards: Record<string, string> = {};
     for (const fp of changedFiles) {
+      if (boardHandlerFromPath(fp)) {
+        try {
+          localBoards[fp] = await readFile(`${s.repoDir}/${fp}`);
+        } catch {
+          throw new Error(`Cannot auto-merge local browser sync change: ${fp}`);
+        }
+        continue;
+      }
+
       try {
         const [localContent, baseContent, remoteContent] = await Promise.all([
           readFile(`${s.repoDir}/${fp}`),
@@ -119,18 +154,29 @@ async function runSyncOnce(): Promise<void> {
     const resolved = resolveConflicts(localAdditions, remoteContents);
 
     // Write resolved files back
-    const { writeFile } = await import("./storage");
+    const { writeFile, exists, mkdir } = await import("./storage");
     const filePaths: string[] = [];
     for (const [fp, content] of Object.entries(resolved.files)) {
       await writeFile(`${s.repoDir}/${fp}`, content);
       filePaths.push(fp);
     }
+    for (const [fp, content] of Object.entries(localBoards)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
+      filePaths.push(fp);
+    }
 
     // Commit the merge result
+    const hasThreadFiles = Object.keys(resolved.files).length > 0;
+    const hasBoardFiles = Object.keys(localBoards).length > 0;
+    const commitMessage = hasBoardFiles && !hasThreadFiles
+      ? "board: sync after rebase"
+      : resolved.commitMessage;
     await gitOps.addAndCommit(
       s.repoDir,
       filePaths,
-      resolved.commitMessage,
+      commitMessage,
       s.me.handler,
     );
 

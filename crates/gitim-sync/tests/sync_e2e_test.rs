@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, Handler};
 use gitim_sync::conflict::{merge_channel_meta, resolve_content};
 use gitim_sync::git::GitStorage;
+use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 use tempfile::TempDir;
 
 fn run_git(dir: &Path, args: &[&str]) {
@@ -360,6 +363,188 @@ fn test_sync_resolves_concurrent_meta_changes() {
         vec!["alice".to_string(), "bob".to_string(), "god".to_string()],
         "merged members should be union of both sides, sorted"
     );
+}
+
+#[test]
+fn test_sync_preserves_local_board_after_rebase_conflict() {
+    let (bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let board_rel = PathBuf::from("showboards/alice/board.md");
+    let board_a = clone_a_dir.path().join(&board_rel);
+    let board_b = clone_b_dir.path().join(&board_rel);
+
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    let repo_b = GitStorage::new(clone_b_dir.path());
+
+    let base_board = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: base\ntags: []\n---\n## 当前状态\n\nbase\n";
+    std::fs::create_dir_all(board_a.parent().unwrap()).unwrap();
+    std::fs::write(&board_a, base_board).unwrap();
+    repo_a
+        .add_and_commit(&["showboards/alice/board.md"], "board: base")
+        .unwrap();
+    repo_a.push().unwrap();
+    repo_b.pull_rebase().unwrap();
+
+    let remote_board = base_board
+        .replace("summary: base", "summary: remote")
+        .replace("\nbase\n", "\nremote board\n");
+    std::fs::write(&board_a, remote_board).unwrap();
+    repo_a
+        .add_and_commit(&["showboards/alice/board.md"], "board: remote")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    let local_board = base_board
+        .replace("summary: base", "summary: local")
+        .replace("\nbase\n", "\nlocal board\n");
+    std::fs::write(&board_b, local_board).unwrap();
+    repo_b
+        .add_and_commit(&["showboards/alice/board.md"], "board: local")
+        .unwrap();
+
+    let auth_failed = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(auth_failed);
+    let commit_lock = Mutex::new(());
+    let pushed = Arc::new(AtomicBool::new(false));
+    let pushed_flag = pushed.clone();
+    let synced_head = Arc::new(Mutex::new(None::<String>));
+    let synced_head_flag = synced_head.clone();
+
+    run_sync_cycle(
+        &repo_b,
+        &mut circuit,
+        &commit_lock,
+        &|| pushed_flag.store(true, Ordering::SeqCst),
+        &|_, _, _| {},
+        &|head| *synced_head_flag.lock().unwrap() = Some(head),
+        &|| {},
+        Some(&("Alice".to_string(), "alice@test.com".to_string())),
+    );
+
+    assert!(
+        pushed.load(Ordering::SeqCst),
+        "resolved board commit should push"
+    );
+    assert!(
+        synced_head.lock().unwrap().is_some(),
+        "sync cycle should report a head"
+    );
+
+    let local_after_sync = std::fs::read_to_string(&board_b).unwrap();
+    assert!(local_after_sync.contains("summary: local"));
+    assert!(local_after_sync.contains("local board"));
+    assert!(
+        !local_after_sync.contains("remote board"),
+        "local board publish should be preserved as the latest board snapshot"
+    );
+
+    let verify_clone = TempDir::new().unwrap();
+    run_git(
+        verify_clone.path().parent().unwrap(),
+        &[
+            "clone",
+            bare_dir.path().to_str().unwrap(),
+            verify_clone.path().to_str().unwrap(),
+        ],
+    );
+    let remote_after_sync = std::fs::read_to_string(verify_clone.path().join(board_rel)).unwrap();
+    assert!(remote_after_sync.contains("summary: local"));
+    assert!(remote_after_sync.contains("local board"));
+}
+
+#[test]
+fn test_sync_keeps_remote_only_board_after_thread_rebase_conflict() {
+    let (bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let board_rel = PathBuf::from("showboards/alice/board.md");
+    let board_a = clone_a_dir.path().join(&board_rel);
+    let board_b = clone_b_dir.path().join(&board_rel);
+    let thread_a = clone_a_dir.path().join("channels/general.thread");
+    let thread_b = clone_b_dir.path().join("channels/general.thread");
+
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    let repo_b = GitStorage::new(clone_b_dir.path());
+
+    let base_board = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: base\ntags: []\n---\n## 当前状态\n\nbase\n";
+    std::fs::create_dir_all(board_a.parent().unwrap()).unwrap();
+    std::fs::write(&board_a, base_board).unwrap();
+    repo_a
+        .add_and_commit(&["showboards/alice/board.md"], "board: base")
+        .unwrap();
+    repo_a.push().unwrap();
+    repo_b.pull_rebase().unwrap();
+
+    let alice = Handler::new("alice").unwrap();
+    let bob = Handler::new("bob").unwrap();
+
+    let remote_board = base_board
+        .replace("summary: base", "summary: remote")
+        .replace("\nbase\n", "\nremote board\n");
+    std::fs::write(&board_a, remote_board).unwrap();
+    std::fs::write(
+        &thread_a,
+        format_message(1, 0, &alice, "20260317T100000Z", "alice remote"),
+    )
+    .unwrap();
+    repo_a
+        .add_and_commit(
+            &["showboards/alice/board.md", "channels/general.thread"],
+            "remote board and thread",
+        )
+        .unwrap();
+    repo_a.push().unwrap();
+
+    assert!(std::fs::read_to_string(&board_b)
+        .unwrap()
+        .contains("summary: base"));
+    std::fs::write(
+        &thread_b,
+        format_message(1, 0, &bob, "20260317T100100Z", "bob local"),
+    )
+    .unwrap();
+    repo_b
+        .add_and_commit(&["channels/general.thread"], "local thread")
+        .unwrap();
+
+    let auth_failed = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(auth_failed);
+    let commit_lock = Mutex::new(());
+    let pushed = Arc::new(AtomicBool::new(false));
+    let pushed_flag = pushed.clone();
+
+    run_sync_cycle(
+        &repo_b,
+        &mut circuit,
+        &commit_lock,
+        &|| pushed_flag.store(true, Ordering::SeqCst),
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        Some(&("Bob".to_string(), "bob@test.com".to_string())),
+    );
+
+    assert!(pushed.load(Ordering::SeqCst));
+
+    let local_after_sync = std::fs::read_to_string(&board_b).unwrap();
+    assert!(local_after_sync.contains("summary: remote"));
+    assert!(local_after_sync.contains("remote board"));
+    assert!(
+        !local_after_sync.contains("summary: base"),
+        "remote-only board change should not be reverted by local thread conflict recovery"
+    );
+
+    let verify_clone = TempDir::new().unwrap();
+    run_git(
+        verify_clone.path().parent().unwrap(),
+        &[
+            "clone",
+            bare_dir.path().to_str().unwrap(),
+            verify_clone.path().to_str().unwrap(),
+        ],
+    );
+    let remote_after_sync = std::fs::read_to_string(verify_clone.path().join(board_rel)).unwrap();
+    assert!(remote_after_sync.contains("summary: remote"));
+    assert!(remote_after_sync.contains("remote board"));
 }
 
 #[test]

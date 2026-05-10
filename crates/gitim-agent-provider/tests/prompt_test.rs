@@ -161,6 +161,26 @@ fn gitim_api_exposes_card_and_archive_commands() {
 }
 
 #[test]
+fn gitim_api_exposes_board_commands() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let identity = provider.prompt_identity(&ctx);
+    assert!(identity.contains("gitim board"));
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("gitim board path"));
+    assert!(api.contains("gitim board init"));
+    assert!(api.contains("gitim board publish"));
+    assert!(api.contains("gitim board set"));
+    assert!(api.contains("gitim board section set"));
+    assert!(api.contains("gitim board show <handler>"));
+}
+
+#[test]
 fn reset_protocol_handles_lost_gitim_output_contract() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {

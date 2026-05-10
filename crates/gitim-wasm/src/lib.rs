@@ -172,6 +172,58 @@ pub fn validate_card_labels(labels: JsValue) -> Result<(), JsError> {
     gitim_core::types::validate_labels(&labels).map_err(|e| JsError::new(&e.to_string()))
 }
 
+#[wasm_bindgen(js_name = "parseBoardMarkdown")]
+pub fn parse_board_markdown(markdown: &str) -> Result<JsValue, JsError> {
+    let board = gitim_core::types::parse_board_markdown(markdown)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "stringifyBoardMarkdown")]
+pub fn stringify_board_markdown(board: JsValue) -> Result<String, JsError> {
+    let board: gitim_core::types::BoardDocument =
+        serde_wasm_bindgen::from_value(board).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::stringify_board_markdown(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "defaultBoard")]
+pub fn default_board(handler: &str, timestamp: &str) -> Result<JsValue, JsError> {
+    let board = gitim_core::types::default_board(handler, timestamp)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "setBoardField")]
+pub fn set_board_field(board: JsValue, field: &str, value: &str) -> Result<JsValue, JsError> {
+    let mut board: gitim_core::types::BoardDocument =
+        serde_wasm_bindgen::from_value(board).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::set_board_field(&mut board, field, value)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "setBoardSection")]
+pub fn set_board_section(board: JsValue, section: &str, value: &str) -> Result<JsValue, JsError> {
+    let mut board: gitim_core::types::BoardDocument =
+        serde_wasm_bindgen::from_value(board).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::set_board_section(&mut board, section, value)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "appendBoardSection")]
+pub fn append_board_section(
+    board: JsValue,
+    section: &str,
+    value: &str,
+) -> Result<JsValue, JsError> {
+    let mut board: gitim_core::types::BoardDocument =
+        serde_wasm_bindgen::from_value(board).map_err(|e| JsError::new(&e.to_string()))?;
+    gitim_core::types::append_board_section(&mut board, section, value)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&board).map_err(|e| JsError::new(&e.to_string()))
+}
+
 // --- extraction ---
 
 #[wasm_bindgen(js_name = "extractMentions")]

@@ -415,11 +415,52 @@ pub struct UpdateCardResponse {
     pub assignee: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BoardMetaSummary {
+    pub version: u32,
+    pub handler: String,
+    pub updated_at: String,
+    pub status: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BoardSummary {
+    pub handler: String,
+    pub path: String,
+    pub updated_at: String,
+    pub status: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListBoardsResponse {
+    pub boards: Vec<BoardSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadBoardResponse {
+    pub handler: String,
+    pub path: String,
+    pub meta: BoardMetaSummary,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WriteBoardResponse {
+    pub handler: String,
+    pub path: String,
+    pub status: String,
+    pub commit_id: String,
+}
+
 /// One change entry in `PollResponse.changes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PollChange {
     pub channel: String,
-    /// `"channel"` / `"dm"` / `"card"`, etc.
+    /// `"channel"` / `"dm"` / `"card"` / `"board"`, etc.
     pub kind: String,
     /// Same opaque per-entry shape as ReadResponse / GetThreadResponse.
     pub entries: Vec<Value>,
@@ -938,6 +979,77 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v.get("cards").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_boards_response_wire_shape() {
+        let r = ListBoardsResponse {
+            boards: vec![BoardSummary {
+                handler: "alice".to_string(),
+                path: "showboards/alice/board.md".to_string(),
+                updated_at: "20260509T120000Z".to_string(),
+                status: "working".to_string(),
+                summary: "checking release".to_string(),
+                tags: vec!["release".to_string()],
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let boards = v.get("boards").unwrap().as_array().unwrap();
+        assert_eq!(boards.len(), 1);
+        let first = boards[0].as_object().unwrap();
+        assert_eq!(first.len(), 6);
+        assert_eq!(first.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            first.get("path").and_then(|v| v.as_str()),
+            Some("showboards/alice/board.md")
+        );
+        assert_eq!(
+            first.get("tags").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn read_board_response_wire_shape() {
+        let r = ReadBoardResponse {
+            handler: "alice".to_string(),
+            path: "showboards/alice/board.md".to_string(),
+            meta: BoardMetaSummary {
+                version: 1,
+                handler: "alice".to_string(),
+                updated_at: "20260509T120000Z".to_string(),
+                status: "working".to_string(),
+                summary: "checking release".to_string(),
+                tags: vec!["release".to_string()],
+            },
+            body: "## 当前状态\n\nworking\n".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.get("handler").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            obj.get("body").and_then(|v| v.as_str()),
+            Some("## 当前状态\n\nworking\n")
+        );
+        let meta = obj.get("meta").unwrap().as_object().unwrap();
+        assert_eq!(meta.len(), 6);
+        assert_eq!(meta.get("version").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn write_board_response_wire_shape() {
+        let r = WriteBoardResponse {
+            handler: "alice".to_string(),
+            path: "showboards/alice/board.md".to_string(),
+            status: "pushed".to_string(),
+            commit_id: "abc123".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("pushed"));
+        assert_eq!(obj.get("commit_id").and_then(|v| v.as_str()), Some("abc123"));
     }
 
     #[test]

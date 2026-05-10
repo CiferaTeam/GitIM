@@ -61,6 +61,13 @@ class MockLocalBackend {
   archiveChannel = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   unarchiveChannel = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   listArchivedChannels = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  listBoards = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  showBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  initBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  publishBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  setBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  setBoardSection = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  appendBoardSection = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
 
   constructor(config: Record<string, unknown>) {
     this.config = config;
@@ -268,6 +275,32 @@ describe("client local browser workspaces", () => {
       ok: true,
       data: { handler: "local" },
     });
+  });
+
+  it("routes local board methods through the active browser backend", async () => {
+    const { createBrowserWorkspace } = await import("./browser-workspaces");
+    const client = await import("./client");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    await client.activateBrowserWorkspace(record.slug);
+
+    await client.listBoards(record.slug);
+    await client.showBoard(record.slug, "alice");
+    await client.initBoard(record.slug);
+    await client.publishBoard(record.slug, "content");
+    await client.setBoard(record.slug, "summary", "Updated");
+    await client.setBoardSection(record.slug, "当前状态", "Busy");
+    await client.appendBoardSection(record.slug, "待确认", "- one");
+
+    expect(localBackends[0].listBoards).toHaveBeenCalledWith();
+    expect(localBackends[0].showBoard).toHaveBeenCalledWith("alice");
+    expect(localBackends[0].initBoard).toHaveBeenCalledWith();
+    expect(localBackends[0].publishBoard).toHaveBeenCalledWith("content");
+    expect(localBackends[0].setBoard).toHaveBeenCalledWith("summary", "Updated");
+    expect(localBackends[0].setBoardSection).toHaveBeenCalledWith("当前状态", "Busy");
+    expect(localBackends[0].appendBoardSection).toHaveBeenCalledWith("待确认", "- one");
   });
 
   it("surfaces cached browser activation when the workspace needs a token", async () => {

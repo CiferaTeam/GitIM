@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const dirs = vi.hoisted(() => new Set<string>());
 const files = vi.hoisted(() => new Map<string, string>());
 const gitMocks = vi.hoisted(() => ({
   addAndCommit: vi.fn(async () => "committed-head"),
@@ -16,12 +17,20 @@ const postMessageMock = vi.hoisted(() => vi.fn());
 vi.mock("./git", () => gitMocks);
 
 vi.mock("./storage", () => ({
+  exists: vi.fn(async (path: string) => dirs.has(path) || files.has(path)),
+  mkdir: vi.fn(async (path: string) => {
+    dirs.add(path);
+  }),
   readFile: vi.fn(async (path: string) => {
     const value = files.get(path);
     if (value === undefined) throw new Error(`missing file: ${path}`);
     return value;
   }),
   writeFile: vi.fn(async (path: string, content: string) => {
+    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+    if (!dirs.has(parent)) {
+      throw new Error(`missing parent dir: ${parent}`);
+    }
     files.set(path, content);
   }),
 }));
@@ -46,6 +55,20 @@ const localThread =
 const remoteThread =
   baseThread +
   "[L000002][P000001][@alice][20260317T120050Z] remote\n";
+const localBoard = [
+  "---",
+  "version: 1",
+  "handler: lewis",
+  "updated_at: 20260317T120100Z",
+  "status: working",
+  "summary: local board",
+  "tags: []",
+  "---",
+  "## 当前状态",
+  "",
+  "local board",
+  "",
+].join("\n");
 
 function initSyncState() {
   initState({
@@ -63,6 +86,11 @@ function initSyncState() {
 
 describe("daemon-web sync", () => {
   beforeEach(() => {
+    dirs.clear();
+    dirs.add("/repo");
+    dirs.add("/repo/channels");
+    dirs.add("/repo/showboards");
+    dirs.add("/repo/showboards/lewis");
     files.clear();
     postMessageMock.mockClear();
     Object.assign(globalThis, { postMessage: postMessageMock });
@@ -147,5 +175,60 @@ describe("daemon-web sync", () => {
     expect(gitMocks.addAndCommit).not.toHaveBeenCalled();
     expect(files.get("/repo/channels/general.thread")).toBe(localThread);
     expect(getState().syncStatus).toBe("error");
+  });
+
+  it("rebases local board commits after remote changes", async () => {
+    files.set("/repo/showboards/lewis/board.md", localBoard);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce(["showboards/lewis/board.md"]);
+
+    await runSync({ forceNewCycle: true });
+
+    expect(files.get("/repo/showboards/lewis/board.md")).toBe(localBoard);
+    expect(gitMocks.resetToRemote).toHaveBeenCalledWith(
+      "/repo",
+      "refs/remotes/origin/main",
+    );
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      ["showboards/lewis/board.md"],
+      "board: sync after rebase",
+      "lewis",
+    );
+    expect(getState().headCommit).toBe("merged-head");
+    expect(getState().syncStatus).toBe("idle");
+  });
+
+  it("recreates board directories after reset for newly-created local boards", async () => {
+    files.set("/repo/showboards/lewis/board.md", localBoard);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce(["showboards/lewis/board.md"]);
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      files.delete("/repo/showboards/lewis/board.md");
+      dirs.delete("/repo/showboards/lewis");
+    });
+
+    await runSync({ forceNewCycle: true });
+
+    expect(dirs.has("/repo/showboards/lewis")).toBe(true);
+    expect(files.get("/repo/showboards/lewis/board.md")).toBe(localBoard);
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      ["showboards/lewis/board.md"],
+      "board: sync after rebase",
+      "lewis",
+    );
+    expect(getState().headCommit).toBe("merged-head");
+    expect(getState().syncStatus).toBe("idle");
   });
 });

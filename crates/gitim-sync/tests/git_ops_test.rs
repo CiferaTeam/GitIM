@@ -287,6 +287,43 @@ fn test_diff_range_empty_when_no_changes() {
 }
 
 #[test]
+fn test_changed_files_range_detects_deletion_only_change() {
+    let (_bare_dir, clone_dir, repo) = setup_repo_pair();
+
+    let showboards = clone_dir.path().join("showboards/alice");
+    std::fs::create_dir_all(&showboards).unwrap();
+    let board_file = showboards.join("board.md");
+    std::fs::write(
+        &board_file,
+        "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: idle\nsummary: ''\ntags: []\n---\n## 当前状态\n\n## 待确认\n",
+    )
+    .unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add board"]);
+
+    let before = repo.rev_parse("HEAD").unwrap();
+    let content = std::fs::read_to_string(&board_file).unwrap();
+    let modified = content.replace("## 待确认\n", "");
+    assert_ne!(modified, content);
+    std::fs::write(&board_file, modified).unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "delete board line"]);
+    let after = repo.rev_parse("HEAD").unwrap();
+
+    let diff = repo.diff_range(&before, &after).unwrap();
+    assert!(
+        diff.is_empty(),
+        "added-line diff should miss deletion-only board edits"
+    );
+
+    let changed = repo.changed_files_range(&before, &after).unwrap();
+    assert_eq!(
+        changed,
+        vec![std::path::PathBuf::from("showboards/alice/board.md")]
+    );
+}
+
+#[test]
 fn test_rev_parse_returns_commit_hash() {
     let (_bare_dir, _clone_dir, repo) = setup_repo_pair();
 

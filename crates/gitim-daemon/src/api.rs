@@ -61,6 +61,9 @@ pub enum Event {
         author: String,
     },
 
+    #[serde(rename = "board_updated")]
+    BoardUpdated { handler: String },
+
     #[serde(rename = "channel_unarchived")]
     ChannelUnarchived {
         channel: String,
@@ -338,6 +341,43 @@ pub enum Request {
     },
     #[serde(rename = "depart_user")]
     DepartUser { handler: String },
+    #[serde(rename = "board_show")]
+    BoardShow { handler: String },
+    #[serde(rename = "board_list")]
+    BoardList,
+    #[serde(rename = "board_init")]
+    BoardInit {
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "board_publish")]
+    BoardPublish {
+        #[serde(default)]
+        content: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "board_set")]
+    BoardSet {
+        field: String,
+        value: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "board_section_set")]
+    BoardSectionSet {
+        section: String,
+        value: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "board_section_append")]
+    BoardSectionAppend {
+        section: String,
+        value: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
 }
 
 fn default_limit() -> usize {
@@ -723,6 +763,32 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_board_publish_request_roundtrip() {
+        let json = r#"{"method":"board_publish","content":"---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: x\ntags: []\n---\nbody\n","author":"alice"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::BoardPublish { content, author } => {
+                assert!(content.unwrap().contains("handler: alice"));
+                assert_eq!(author, Some("alice".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_board_updated_event_roundtrip() {
+        let ev = Event::BoardUpdated {
+            handler: "alice".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains("\"event\":\"board_updated\""),
+            "json was: {json}"
+        );
+        assert!(json.contains("\"handler\":\"alice\""));
     }
 }
 

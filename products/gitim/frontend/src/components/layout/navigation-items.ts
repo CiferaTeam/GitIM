@@ -1,4 +1,10 @@
-import { Bot, LayoutGrid, MessageSquare, type LucideIcon } from "lucide-react";
+import {
+  Bot,
+  ClipboardList,
+  LayoutGrid,
+  MessageSquare,
+  type LucideIcon,
+} from "lucide-react";
 import type { ConnectionMode } from "@/hooks/use-connection-store";
 
 export type NavigationSurface = "desktop" | "mobile";
@@ -15,6 +21,7 @@ const navItems: NavigationItem[] = [
   { to: "/management", label: "Agents", icon: Bot, requiresRuntime: true, mobileHidden: true },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/cards", label: "Cards", icon: LayoutGrid },
+  { to: "/boards", label: "Boards", icon: ClipboardList },
 ];
 
 export function getVisibleNavigationItems(

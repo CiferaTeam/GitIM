@@ -21,7 +21,13 @@ import { formatMessage, formatEvent } from "./formatter";
 import { runSync } from "./sync";
 import { isAuthFailure } from "./auth-errors";
 import initWasm, {
+  appendBoardSection,
+  defaultBoard,
+  parseBoardMarkdown,
   parseCardMeta,
+  setBoardField,
+  setBoardSection,
+  stringifyBoardMarkdown,
   stringifyCardMeta,
   validateCardId,
   validateCardLabels,
@@ -45,6 +51,20 @@ type ApiResponse = {
 };
 
 type RawCardMeta = Omit<Card, "card_id">;
+
+interface BoardMeta {
+  version: number;
+  handler: string;
+  updated_at: string;
+  status: string;
+  summary: string;
+  tags: string[];
+}
+
+interface BoardDocument {
+  meta: BoardMeta;
+  body: string;
+}
 
 export interface CreateCardOptions {
   labels?: string[];
@@ -101,26 +121,41 @@ function errorMessage(e: unknown): string {
   return String((e as Error).message ?? e);
 }
 
-async function syncAfterCommit(): Promise<{
+async function syncAfterCommit(options?: { trackCommitId?: boolean }): Promise<{
   status: "pushed" | "commit_only";
+  commit_id?: string;
   error?: string;
   error_code?: string;
   needs_token?: boolean;
 }> {
+  const beforeHead = options?.trackCommitId ? getState().headCommit : undefined;
   try {
     await runSync({ forceNewCycle: true });
-    return { status: "pushed" };
+    const syncedHead = getState().headCommit;
+    return {
+      status: "pushed",
+      commit_id:
+        beforeHead !== undefined && syncedHead !== beforeHead
+          ? syncedHead
+          : undefined,
+    };
   } catch (e) {
+    const syncedHead = getState().headCommit;
+    const commitId =
+      beforeHead !== undefined && syncedHead !== beforeHead
+        ? syncedHead
+        : undefined;
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
       return {
         status: "commit_only",
+        commit_id: commitId,
         error: errorMessage(e),
         error_code: "reconnect_required",
         needs_token: true,
       };
     }
-    return { status: "commit_only", error: errorMessage(e) };
+    return { status: "commit_only", commit_id: commitId, error: errorMessage(e) };
   }
 }
 
@@ -310,14 +345,25 @@ export async function poll(since?: string): Promise<ApiResponse> {
         const entries = await readChannelEntries(name);
         changes.push({ channel: name, kind: "new_messages", entries });
       }
+      changes.push(...(await listBoardPollChanges()));
       return ok({ commit_id: currentHead, changes });
     }
 
     // Build changes from diff
     const changes = [];
     let metaChanged = false;
+    const emittedBoards = new Set<string>();
 
     for (const fp of changedFiles) {
+      const boardHandler = boardHandlerFromPath(fp);
+      if (boardHandler) {
+        if (!emittedBoards.has(boardHandler)) {
+          emittedBoards.add(boardHandler);
+          changes.push({ channel: boardHandler, kind: "board", entries: [] });
+        }
+        continue;
+      }
+
       const cardChange = cardChangeFromPath(fp);
       if (cardChange) {
         const scope = `card:${cardChange.channel}/${cardChange.cardId}`;
@@ -875,6 +921,126 @@ export async function listArchivedDms(): Promise<ApiResponse> {
   }
 }
 
+// --- Board handlers ---
+
+export async function listBoards(): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const root = `${s.repoDir}/showboards`;
+    if (!(await exists(root))) return ok({ boards: [] });
+
+    const boards = [];
+    for (const handler of await readdir(root)) {
+      if (validateHandler(handler)) continue;
+      const path = boardPath(handler);
+      const absPath = `${s.repoDir}/${path}`;
+      if (!(await exists(absPath))) continue;
+
+      try {
+        const board = parseBoardMarkdown(await readFile(absPath)) as BoardDocument;
+        validateBoardForHandler(board, handler);
+        boards.push({
+          handler,
+          path,
+          updated_at: board.meta.updated_at,
+          status: board.meta.status,
+          summary: board.meta.summary,
+          tags: board.meta.tags,
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    boards.sort((a, b) => a.handler.localeCompare(b.handler));
+    return ok({ boards });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function showBoard(handler: string): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const s = getState();
+    const path = boardPath(handler);
+    const absPath = `${s.repoDir}/${path}`;
+    if (!(await exists(absPath))) return err(`board not found for @${handler}`);
+
+    const board = parseBoardMarkdown(await readFile(absPath)) as BoardDocument;
+    validateBoardForHandler(board, handler);
+    return ok({
+      handler,
+      path,
+      meta: boardMetaSummary(board.meta),
+      body: board.body,
+    });
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function initBoard(): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
+    const handler = s.me.handler;
+    const path = boardPath(handler);
+    if (await exists(`${s.repoDir}/${path}`)) {
+      return err(`board already exists for @${handler}`);
+    }
+    const board = defaultBoard(handler, utcTimestamp()) as BoardDocument;
+    return await commitBoardDocument(handler, board, "board: init");
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function publishBoard(content?: string): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
+    const handler = s.me.handler;
+    const path = boardPath(handler);
+    const board = content == null
+      ? await readCurrentBoard(handler, path, false)
+      : parseBoardMarkdown(content) as BoardDocument;
+
+    validateBoardForHandler(board, handler);
+    board.meta.updated_at = utcTimestamp();
+    return await commitBoardDocument(handler, board, "board: update");
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+export async function setBoard(field: string, value: string): Promise<ApiResponse> {
+  return mutateBoard((board) =>
+    setBoardField(board, field, value) as BoardDocument,
+  );
+}
+
+export async function setBoardSectionValue(
+  section: string,
+  value: string,
+): Promise<ApiResponse> {
+  return mutateBoard((board) =>
+    setBoardSection(board, section, value) as BoardDocument,
+  );
+}
+
+export async function appendBoardSectionValue(
+  section: string,
+  value: string,
+): Promise<ApiResponse> {
+  return mutateBoard((board) =>
+    appendBoardSection(board, section, value) as BoardDocument,
+  );
+}
+
 // --- Card handlers ---
 
 export async function listCards(
@@ -1204,6 +1370,96 @@ export async function listArchivedCards(
 
 // --- Internal helpers ---
 
+async function mutateBoard(
+  mutate: (board: BoardDocument) => BoardDocument,
+): Promise<ApiResponse> {
+  try {
+    const s = getState();
+    if (!s.token) return reconnectRequired();
+    await ensureWasmReady();
+    const handler = s.me.handler;
+    const path = boardPath(handler);
+    const board = await readCurrentBoard(handler, path, false);
+    const next = mutate(board);
+    next.meta.updated_at = utcTimestamp();
+    validateBoardForHandler(next, handler);
+    return await commitBoardDocument(handler, next, "board: update");
+  } catch (e) {
+    return err(String((e as Error).message ?? e));
+  }
+}
+
+async function readCurrentBoard(
+  handler: string,
+  path: string,
+  touchUpdatedAt: boolean,
+): Promise<BoardDocument> {
+  const s = getState();
+  const absPath = `${s.repoDir}/${path}`;
+  if (!(await exists(absPath))) throw new Error(`board not found for @${handler}`);
+  const board = parseBoardMarkdown(await readFile(absPath)) as BoardDocument;
+  validateBoardForHandler(board, handler);
+  if (touchUpdatedAt) board.meta.updated_at = utcTimestamp();
+  return board;
+}
+
+async function commitBoardDocument(
+  handler: string,
+  board: BoardDocument,
+  messagePrefix: string,
+): Promise<ApiResponse> {
+  const s = getState();
+  validateBoardForHandler(board, handler);
+  const path = boardPath(handler);
+  const absPath = `${s.repoDir}/${path}`;
+  await mkdirp(parentPath(absPath));
+  await writeFile(absPath, stringifyBoardMarkdown(board) as string);
+
+  const commitId = await gitOps.addAndCommitOnly(
+    s.repoDir,
+    path,
+    `${messagePrefix} @${handler}`,
+    handler,
+  );
+  const sync = await syncAfterCommit({ trackCommitId: true });
+  const data: Record<string, unknown> = {
+    handler,
+    path,
+    status: "committed",
+    commit_id: sync.commit_id ?? commitId,
+    sync_status: sync.status,
+  };
+  if (sync.error) data.sync_error = sync.error;
+  if (sync.error_code) data.error_code = sync.error_code;
+  if (sync.needs_token) data.needs_token = true;
+  return ok(data);
+}
+
+function boardPath(handler: string): string {
+  const error = validateHandler(handler);
+  if (error) throw new Error(error);
+  return `showboards/${handler}/board.md`;
+}
+
+function validateBoardForHandler(board: BoardDocument, handler: string): void {
+  const error = validateHandler(handler);
+  if (error) throw new Error(error);
+  if (board.meta.handler !== handler) {
+    throw new Error(`handler mismatch: expected ${handler}, got ${board.meta.handler}`);
+  }
+}
+
+function boardMetaSummary(meta: BoardMeta): BoardMeta {
+  return {
+    version: meta.version,
+    handler: meta.handler,
+    updated_at: meta.updated_at,
+    status: meta.status,
+    summary: meta.summary,
+    tags: meta.tags,
+  };
+}
+
 async function readChannelEntries(
   channel: string,
 ): Promise<ThreadEntry[]> {
@@ -1446,6 +1702,32 @@ function cardChangeFromPath(
     cardId: match[2],
     file: match[3] === "card.meta.yaml" ? "meta" : "thread",
   };
+}
+
+function boardHandlerFromPath(path: string): string | null {
+  const match = path.match(/^showboards\/([^/]+)\/board\.md$/);
+  if (!match) return null;
+  return validateHandler(match[1]) ? null : match[1];
+}
+
+async function listBoardPollChanges(): Promise<Array<{
+  channel: string;
+  kind: "board";
+  entries: [];
+}>> {
+  const s = getState();
+  const root = `${s.repoDir}/showboards`;
+  if (!(await exists(root))) return [];
+
+  const changes: Array<{ channel: string; kind: "board"; entries: [] }> = [];
+  const emitted = new Set<string>();
+  for (const handler of await readdir(root)) {
+    if (validateHandler(handler) || emitted.has(handler)) continue;
+    if (!(await exists(`${root}/${handler}/board.md`))) continue;
+    emitted.add(handler);
+    changes.push({ channel: handler, kind: "board", entries: [] });
+  }
+  return changes;
 }
 
 async function refreshChannelsCache(): Promise<void> {

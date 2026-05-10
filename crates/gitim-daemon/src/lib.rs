@@ -1,4 +1,5 @@
 pub mod api;
+pub mod board_handlers;
 pub mod card_handlers;
 pub mod error;
 pub mod handlers;

@@ -126,6 +126,7 @@ export type PollChangeKind =
   | "channel"
   | "channel_meta"
   | "dm"
+  | "board"
   | "card_meta"
   | "card_thread";
 
@@ -155,6 +156,42 @@ export interface CardFilter {
   labels?: string[];
   status?: CardStatus | null;
   assignee?: string | null;
+}
+
+export interface BoardMetaSummary {
+  version: number;
+  handler: string;
+  updated_at: string;
+  status: string;
+  summary: string;
+  tags: string[];
+}
+
+export interface BoardSummary {
+  handler: string;
+  path: string;
+  updated_at: string;
+  status: string;
+  summary: string;
+  tags: string[];
+}
+
+export interface BoardReadResponse {
+  handler: string;
+  path: string;
+  meta: BoardMetaSummary;
+  body: string;
+}
+
+export interface BoardWriteResponse {
+  handler: string;
+  path: string;
+  status: "committed";
+  commit_id: string;
+  sync_status?: "pushed" | "commit_only";
+  sync_error?: string;
+  error_code?: string;
+  needs_token?: boolean;
 }
 
 /** Format timestamp "20260317T120000Z" → "12:00" */
