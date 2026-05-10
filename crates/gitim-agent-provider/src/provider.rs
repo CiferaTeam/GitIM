@@ -11,6 +11,30 @@ pub trait Provider: Send + Sync {
     /// `session.result` for the final outcome.
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError>;
 
+    /// Whether this provider populates `ExecResult.usage` with token counts.
+    ///
+    /// Providers backed by SDKs that don't surface usage data (e.g., Gemini
+    /// CLI, openclaw) return `false` so the runtime can skip token-bucket
+    /// accumulation and only count turns.
+    fn reports_usage(&self) -> bool {
+        true
+    }
+
+    /// Whether `ExecResult.usage` reports cumulative token counts for the
+    /// resumed session, or per-turn deltas.
+    ///
+    /// - `false` (default): each turn's `usage` reflects only that turn.
+    ///   The runtime adds it directly to the daily bucket.
+    /// - `true`: each turn's `usage` is the running session total. The
+    ///   runtime computes the delta against `AgentState.last_session_usage`
+    ///   before accumulating, and resets the baseline whenever the session
+    ///   id changes.
+    ///
+    /// This matters only when `reports_usage()` is `true`.
+    fn usage_is_cumulative(&self) -> bool {
+        false
+    }
+
     fn prompt_identity(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_identity(ctx)
     }

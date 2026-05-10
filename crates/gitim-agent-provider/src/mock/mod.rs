@@ -15,6 +15,8 @@ pub struct MockProvider {
     config: ProviderConfig,
     default_response: String,
     usage: Option<ProviderUsage>,
+    reports_usage: bool,
+    usage_is_cumulative: bool,
 }
 
 impl MockProvider {
@@ -23,6 +25,8 @@ impl MockProvider {
             config: _config,
             default_response: "mock-response: acknowledged".to_string(),
             usage: None,
+            reports_usage: true,
+            usage_is_cumulative: false,
         }
     }
 
@@ -31,11 +35,23 @@ impl MockProvider {
             config: ProviderConfig::default(),
             default_response: response,
             usage: None,
+            reports_usage: true,
+            usage_is_cumulative: false,
         }
     }
 
     pub fn with_usage(mut self, usage: ProviderUsage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_reports_usage(mut self, reports: bool) -> Self {
+        self.reports_usage = reports;
+        self
+    }
+
+    pub fn with_usage_is_cumulative(mut self, cumulative: bool) -> Self {
+        self.usage_is_cumulative = cumulative;
         self
     }
 
@@ -49,6 +65,14 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
+    fn reports_usage(&self) -> bool {
+        self.reports_usage
+    }
+
+    fn usage_is_cumulative(&self) -> bool {
+        self.usage_is_cumulative
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let channel = Self::parse_channel(prompt).unwrap_or_else(|| "general".to_string());
         let response = self.default_response.clone();
