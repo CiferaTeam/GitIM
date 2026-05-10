@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::me_json::MeJson;
+use gitim_core::responses::{
+    CronDetail, CronRunEntry, CronSummary, HistoryCronResponse, ListCronsResponse,
+    ToggleCronResponse,
+};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -498,6 +503,108 @@ impl GitimClient {
         self.depart_user(&handler).await
     }
 
+    // -- Cron triggers --
+    //
+    // The cron methods break with the rest of the client surface — they
+    // return typed payloads instead of `ApiResponse`. Callers (CLI cron
+    // subcommands, runtime `/crons` HTTP layer) want `Vec<CronSummary>`
+    // not raw JSON, and the daemon's `error_code` taxonomy
+    // (`name_conflict`, `not_found`, `invalid_schedule`, ...) needs to
+    // travel up so the CLI can render Chinese messages per code. A typed
+    // surface keeps that mapping at the right level.
+
+    /// Create a new cron trigger. `target` accepts `@self`, `@bob`, or a
+    /// bare handler `bob` — the daemon strips the leading `@` if present
+    /// and resolves `@self` against the connection's me.json author.
+    pub async fn create_cron(
+        &self,
+        name: &str,
+        schedule: &str,
+        timezone: Option<&str>,
+        target: &str,
+        prompt: &str,
+    ) -> Result<(), ClientError> {
+        let resp = self
+            .request(
+                "create_cron",
+                json!({
+                    "name": name,
+                    "schedule": schedule,
+                    "timezone": timezone,
+                    "target": target,
+                    "prompt": prompt,
+                }),
+            )
+            .await?;
+        decode_unit(resp)
+    }
+
+    pub async fn list_crons(&self) -> Result<Vec<CronSummary>, ClientError> {
+        let resp = self.request("list_crons", json!({})).await?;
+        let payload: ListCronsResponse = decode_typed(resp)?;
+        Ok(payload.crons)
+    }
+
+    pub async fn show_cron(&self, name: &str) -> Result<CronDetail, ClientError> {
+        let resp = self.request("show_cron", json!({ "name": name })).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn history_cron(
+        &self,
+        name: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<CronRunEntry>, ClientError> {
+        let resp = self
+            .request(
+                "history_cron",
+                json!({
+                    "name": name,
+                    "limit": limit,
+                }),
+            )
+            .await?;
+        let payload: HistoryCronResponse = decode_typed(resp)?;
+        Ok(payload.runs)
+    }
+
+    pub async fn enable_cron(&self, name: &str) -> Result<ToggleCronResponse, ClientError> {
+        let resp = self.request("enable_cron", json!({ "name": name })).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn disable_cron(&self, name: &str) -> Result<ToggleCronResponse, ClientError> {
+        let resp = self.request("disable_cron", json!({ "name": name })).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn delete_cron(&self, name: &str) -> Result<(), ClientError> {
+        let resp = self.request("delete_cron", json!({ "name": name })).await?;
+        decode_unit(resp)
+    }
+
+    /// Convenience wrapper: re-runs `show_cron` and pulls the computed
+    /// `next_fire`. The daemon stores `next_fire` as ISO 8601 UTC; this
+    /// parses it into a `DateTime<Utc>` for callers that need to
+    /// compare to `Utc::now()`. Returns `None` when the daemon couldn't
+    /// compute one (disabled spec or unparseable schedule).
+    pub async fn next_fire_for(
+        &self,
+        name: &str,
+    ) -> Result<Option<DateTime<Utc>>, ClientError> {
+        let detail = self.show_cron(name).await?;
+        match detail.next_fire {
+            None => Ok(None),
+            Some(s) => DateTime::parse_from_rfc3339(&s)
+                .map(|dt| Some(dt.with_timezone(&Utc)))
+                .map_err(|e| {
+                    ClientError::ProtocolError(format!(
+                        "daemon returned unparseable next_fire {s:?}: {e}"
+                    ))
+                }),
+        }
+    }
+
     /// Resolve the caller's own handler from local `me.json`. Pulled out so
     /// `depart_self` can be unit-tested against a temp `me.json` without
     /// hitting the daemon socket.
@@ -581,6 +688,32 @@ impl GitimClient {
         )
         .await
     }
+}
+
+/// Decode a daemon response into a typed payload `T`. Used by the cron
+/// methods (and any future typed surface) to fold the `ok` / `error` /
+/// `error_code` envelope into a `ClientError::Api { message, code }` so
+/// callers can match on the typed code without unwrapping ApiResponse.
+fn decode_typed<T: serde::de::DeserializeOwned>(resp: ApiResponse) -> Result<T, ClientError> {
+    if !resp.ok {
+        return Err(ClientError::Api {
+            message: resp.error.unwrap_or_else(|| "unknown daemon error".to_string()),
+            code: resp.error_code,
+        });
+    }
+    resp.parse_data::<T>()
+}
+
+/// Variant of `decode_typed` for handlers that return only an ack (no
+/// payload). Same error semantics on the failure path.
+fn decode_unit(resp: ApiResponse) -> Result<(), ClientError> {
+    if !resp.ok {
+        return Err(ClientError::Api {
+            message: resp.error.unwrap_or_else(|| "unknown daemon error".to_string()),
+            code: resp.error_code,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -709,5 +842,291 @@ mod tests {
             unarchive_user,
             json!({"method": "unarchive_user", "handler": "bob"}),
         );
+    }
+
+    // -- Cron methods --
+    //
+    // The cron methods take a typed surface (Vec<CronSummary> etc.) so the
+    // round-trip happens in two halves:
+    //   1. build_request → wire JSON the daemon will dispatch on;
+    //   2. decode_typed / decode_unit → consume the daemon's response
+    //      envelope, mapping ok=false to ClientError::Api { code }.
+    // Together these cover the same surface area a real-socket roundtrip
+    // would, without depending on a running daemon.
+
+    #[test]
+    fn cron_create_request_shape() {
+        use crate::types::build_request;
+        let req = build_request(
+            "create_cron",
+            json!({
+                "name": "weekly-report",
+                "schedule": "0 9 * * 1",
+                "timezone": "America/Los_Angeles",
+                "target": "@self",
+                "prompt": "summarize last week",
+            }),
+        );
+        assert_eq!(
+            req,
+            json!({
+                "method": "create_cron",
+                "name": "weekly-report",
+                "schedule": "0 9 * * 1",
+                "timezone": "America/Los_Angeles",
+                "target": "@self",
+                "prompt": "summarize last week",
+            }),
+        );
+    }
+
+    #[test]
+    fn cron_create_request_shape_no_timezone() {
+        use crate::types::build_request;
+        // timezone: None serializes to JSON null — daemon's
+        // `#[serde(default)] timezone: Option<String>` accepts both
+        // missing key and null and treats both as "default to UTC".
+        let req = build_request(
+            "create_cron",
+            json!({
+                "name": "daily",
+                "schedule": "@daily",
+                "timezone": null,
+                "target": "alice",
+                "prompt": "hi",
+            }),
+        );
+        assert_eq!(
+            req.get("timezone"),
+            Some(&Value::Null),
+        );
+    }
+
+    #[test]
+    fn cron_list_request_shape() {
+        use crate::types::build_request;
+        let req = build_request("list_crons", json!({}));
+        assert_eq!(req, json!({"method": "list_crons"}));
+    }
+
+    #[test]
+    fn cron_show_request_shape() {
+        use crate::types::build_request;
+        let req = build_request("show_cron", json!({"name": "weekly-report"}));
+        assert_eq!(
+            req,
+            json!({"method": "show_cron", "name": "weekly-report"}),
+        );
+    }
+
+    #[test]
+    fn cron_history_request_shape_with_limit() {
+        use crate::types::build_request;
+        let req = build_request("history_cron", json!({"name": "daily", "limit": 10}));
+        assert_eq!(
+            req,
+            json!({"method": "history_cron", "name": "daily", "limit": 10}),
+        );
+    }
+
+    #[test]
+    fn cron_history_request_shape_without_limit() {
+        use crate::types::build_request;
+        let req = build_request("history_cron", json!({"name": "daily", "limit": null}));
+        assert_eq!(req.get("limit"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn cron_enable_disable_delete_request_shapes() {
+        use crate::types::build_request;
+        let enable = build_request("enable_cron", json!({"name": "weekly"}));
+        assert_eq!(
+            enable,
+            json!({"method": "enable_cron", "name": "weekly"}),
+        );
+
+        let disable = build_request("disable_cron", json!({"name": "weekly"}));
+        assert_eq!(
+            disable,
+            json!({"method": "disable_cron", "name": "weekly"}),
+        );
+
+        let delete = build_request("delete_cron", json!({"name": "old-job"}));
+        assert_eq!(
+            delete,
+            json!({"method": "delete_cron", "name": "old-job"}),
+        );
+    }
+
+    /// decode_unit happy-path: ok=true is mapped to Ok(()).
+    #[test]
+    fn decode_unit_ok_returns_unit() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({"name": "weekly"})),
+            error: None,
+            error_code: None,
+        };
+        let r = decode_unit(resp);
+        assert!(r.is_ok());
+    }
+
+    /// decode_unit error-path: error_code surfaces in ClientError::Api.code
+    /// so callers can render code-specific messages.
+    #[test]
+    fn decode_unit_error_carries_code() {
+        let resp = ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("cron 'weekly' already exists".to_string()),
+            error_code: Some("name_conflict".to_string()),
+        };
+        let err = decode_unit(resp).unwrap_err();
+        match err {
+            ClientError::Api { message, code } => {
+                assert_eq!(code.as_deref(), Some("name_conflict"));
+                assert!(message.contains("already exists"));
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    /// decode_typed extracts a typed payload on success.
+    #[test]
+    fn decode_typed_ok_extracts_payload() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({
+                "crons": [
+                    {
+                        "name": "weekly-report",
+                        "schedule": "0 9 * * 1",
+                        "target": "alice",
+                        "enabled": true,
+                        "created_by": "alice",
+                        "created_at": "2026-05-09T00:00:00Z",
+                        "next_fire": "2026-05-11T16:00:00Z"
+                    }
+                ]
+            })),
+            error: None,
+            error_code: None,
+        };
+        let payload: ListCronsResponse = decode_typed(resp).unwrap();
+        assert_eq!(payload.crons.len(), 1);
+        assert_eq!(payload.crons[0].name, "weekly-report");
+        assert_eq!(payload.crons[0].next_fire.as_deref(), Some("2026-05-11T16:00:00Z"));
+    }
+
+    /// decode_typed error-path: ok=false maps to ClientError::Api with
+    /// preserved error_code (the typed taxonomy).
+    #[test]
+    fn decode_typed_error_carries_code() {
+        let resp = ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("cron 'missing' does not exist".to_string()),
+            error_code: Some("not_found".to_string()),
+        };
+        let r: Result<CronDetail, _> = decode_typed(resp);
+        let err = r.unwrap_err();
+        match err {
+            ClientError::Api { code, .. } => {
+                assert_eq!(code.as_deref(), Some("not_found"));
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    /// decode_typed for an ok=false without error_code — legacy daemon
+    /// path. ClientError::Api.code is None, message is preserved.
+    #[test]
+    fn decode_typed_error_without_code_falls_back_to_message() {
+        let resp = ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("legacy error".to_string()),
+            error_code: None,
+        };
+        let r: Result<CronDetail, _> = decode_typed(resp);
+        match r.unwrap_err() {
+            ClientError::Api { message, code } => {
+                assert!(code.is_none());
+                assert_eq!(message, "legacy error");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    /// next_fire_for parses the ISO 8601 string the daemon emits.
+    /// The daemon's CronDetail.next_fire is wire-typed as Option<String>;
+    /// the client converts it to DateTime<Utc> for caller convenience.
+    #[test]
+    fn next_fire_parsing_from_show_response() {
+        // Same parse path next_fire_for runs after show_cron.
+        let detail: CronDetail = serde_json::from_value(json!({
+            "name": "weekly-report",
+            "spec": {},
+            "recent_runs": [],
+            "next_fire": "2026-05-11T16:00:00Z"
+        }))
+        .unwrap();
+        let s = detail.next_fire.unwrap();
+        let parsed = DateTime::parse_from_rfc3339(&s).unwrap();
+        assert_eq!(parsed.with_timezone(&Utc).to_rfc3339(), "2026-05-11T16:00:00+00:00");
+    }
+
+    /// next_fire absent is propagated as Ok(None) — disabled spec or
+    /// unparseable schedule, the daemon emits null and the client doesn't
+    /// fabricate a timestamp.
+    #[test]
+    fn next_fire_none_when_daemon_omits() {
+        let detail: CronDetail = serde_json::from_value(json!({
+            "name": "no-fire",
+            "spec": {},
+            "recent_runs": []
+        }))
+        .unwrap();
+        assert!(detail.next_fire.is_none());
+    }
+
+    /// CronRunEntry decodes from history_cron's `runs` field.
+    #[test]
+    fn cron_history_response_decodes_runs() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({
+                "name": "weekly-report",
+                "runs": [
+                    {"ts": "2026-05-11T09-00-00Z", "filename": "2026-05-11T09-00-00Z.thread"},
+                    {"ts": "2026-05-04T09-00-00Z", "filename": "2026-05-04T09-00-00Z.thread"}
+                ]
+            })),
+            error: None,
+            error_code: None,
+        };
+        let payload: HistoryCronResponse = decode_typed(resp).unwrap();
+        assert_eq!(payload.runs.len(), 2);
+        assert_eq!(payload.runs[0].ts, "2026-05-11T09-00-00Z");
+    }
+
+    /// ToggleCronResponse decoding — used by enable_cron / disable_cron.
+    /// Idempotent path returns changed=false.
+    #[test]
+    fn toggle_cron_response_decodes_changed_flag() {
+        let resp = ApiResponse {
+            ok: true,
+            data: Some(json!({
+                "name": "weekly-report",
+                "enabled": false,
+                "changed": false
+            })),
+            error: None,
+            error_code: None,
+        };
+        let payload: ToggleCronResponse = decode_typed(resp).unwrap();
+        assert!(!payload.changed);
+        assert!(!payload.enabled);
+        assert_eq!(payload.name, "weekly-report");
     }
 }

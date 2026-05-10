@@ -10,6 +10,13 @@ pub enum ClientError {
     ProtocolError(String),
     #[error("daemon not running")]
     DaemonNotRunning,
+    /// Daemon responded with `ok: false`. `code` mirrors the typed
+    /// `error_code` tag (e.g. `"name_conflict"`, `"not_found"`) when the
+    /// daemon emits one — callers translate it into user-facing messages.
+    /// `None` for legacy handlers that only set `error` without a tag.
     #[error("api error: {message}")]
-    Api { message: String },
+    Api {
+        message: String,
+        code: Option<String>,
+    },
 }
