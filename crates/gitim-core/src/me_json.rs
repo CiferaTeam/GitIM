@@ -57,6 +57,16 @@ pub struct MeJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
 
+    /// Hermes-internal LLM provider id (e.g. `minimax-cn`, `custom:my-glm`).
+    /// Only meaningful when `provider == "hermes"`. None for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_provider: Option<String>,
+
+    /// Hermes-internal LLM model id (e.g. `MiniMax-M2.7-highspeed`).
+    /// Only meaningful when `provider == "hermes"`. None for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
+
     /// Forward-compat: any field this version doesn't know about is captured
     /// here and round-tripped on rewrite. Both daemon and runtime currently
     /// rewrite me.json; without this, future fields and user annotations
@@ -99,6 +109,12 @@ impl MeJson {
         }
         if patch.env.is_some() {
             self.env = patch.env;
+        }
+        if patch.llm_provider.is_some() {
+            self.llm_provider = patch.llm_provider;
+        }
+        if patch.llm_model.is_some() {
+            self.llm_model = patch.llm_model;
         }
         self.extra.extend(patch.extra);
         self
@@ -308,5 +324,99 @@ mod tests {
         assert_eq!(obj.len(), 2);
         assert!(obj.contains_key("handler"));
         assert!(obj.contains_key("display_name"));
+    }
+
+    // --- llm_provider / llm_model field tests ---
+
+    /// T1: Roundtrip: Both new fields survive serialize → deserialize unchanged.
+    #[test]
+    fn serde_roundtrip_includes_llm_fields() {
+        let original = MeJson {
+            handler: Some("bob".into()),
+            provider: Some("hermes".into()),
+            llm_provider: Some("minimax-cn".into()),
+            llm_model: Some("MiniMax-M2.7-highspeed".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: MeJson = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.llm_provider.as_deref(), Some("minimax-cn"));
+        assert_eq!(decoded.llm_model.as_deref(), Some("MiniMax-M2.7-highspeed"));
+    }
+
+    /// T2: When None, the keys must be absent from the serialized JSON.
+    #[test]
+    fn serde_skip_serializing_when_none() {
+        let me = MeJson {
+            handler: Some("bob".into()),
+            provider: Some("hermes".into()),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::to_value(&me).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("llm_provider"), "llm_provider must be absent when None");
+        assert!(!obj.contains_key("llm_model"), "llm_model must be absent when None");
+    }
+
+    /// T3: patch with Some llm_provider/llm_model overrides base.
+    #[test]
+    fn merged_with_overrides_llm_fields_when_some() {
+        let base = MeJson {
+            handler: Some("bob".into()),
+            llm_provider: Some("old-provider".into()),
+            llm_model: Some("old-model".into()),
+            ..Default::default()
+        };
+        let patch = MeJson {
+            llm_provider: Some("minimax-cn".into()),
+            llm_model: Some("MiniMax-M2.7-highspeed".into()),
+            ..Default::default()
+        };
+        let merged = base.merged_with(patch);
+        assert_eq!(merged.llm_provider.as_deref(), Some("minimax-cn"));
+        assert_eq!(merged.llm_model.as_deref(), Some("MiniMax-M2.7-highspeed"));
+    }
+
+    /// T4: patch with None llm_provider/llm_model preserves base values.
+    #[test]
+    fn merged_with_preserves_llm_fields_when_patch_none() {
+        let base = MeJson {
+            handler: Some("bob".into()),
+            llm_provider: Some("minimax-cn".into()),
+            llm_model: Some("MiniMax-M2.7-highspeed".into()),
+            ..Default::default()
+        };
+        let patch = MeJson {
+            handler: Some("bob".into()),
+            ..Default::default() // llm_provider and llm_model are None
+        };
+        let merged = base.merged_with(patch);
+        assert_eq!(merged.llm_provider.as_deref(), Some("minimax-cn"));
+        assert_eq!(merged.llm_model.as_deref(), Some("MiniMax-M2.7-highspeed"));
+    }
+
+    /// T5: Forward-compat: the existing extra BTreeMap round-trip behavior is
+    /// unaffected by our new fields. Exercises the existing test scenario.
+    #[test]
+    fn forward_compat_unknown_field_preserved() {
+        let raw = r#"{
+            "handler": "carol",
+            "llm_provider": "minimax-cn",
+            "future_flag": true,
+            "custom_note": "rotate key in june"
+        }"#;
+        let me: MeJson = serde_json::from_str(raw).unwrap();
+        // Known new field is recognized and NOT in extra
+        assert_eq!(me.llm_provider.as_deref(), Some("minimax-cn"));
+        assert!(!me.extra.contains_key("llm_provider"), "known field must not leak into extra");
+        // Truly unknown field lands in extra and round-trips
+        assert_eq!(
+            me.extra.get("custom_note").and_then(|v| v.as_str()),
+            Some("rotate key in june"),
+        );
+        let v: serde_json::Value = serde_json::to_value(&me).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("custom_note").and_then(|v| v.as_str()), Some("rotate key in june"));
+        assert_eq!(obj.get("llm_provider").and_then(|v| v.as_str()), Some("minimax-cn"));
     }
 }
