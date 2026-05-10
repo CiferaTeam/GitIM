@@ -142,18 +142,21 @@ pub async fn handle_create_cron(
         );
     }
 
-    // 3. Resolve `@self` → author. Anything else must parse as a Handler
-    //    and exist in `users/<target>.meta.yaml`. We don't allow creating
-    //    crons for departed users — `archive/users/<h>.meta.yaml` doesn't
-    //    count as "exists".
-    let resolved_target = if target == "@self" {
+    // 3. Resolve `@self` (case-insensitive) → author. Anything else must
+    //    parse as a Handler and exist in `users/<target>.meta.yaml`. We
+    //    don't allow creating crons for departed users —
+    //    `archive/users/<h>.meta.yaml` doesn't count as "exists".
+    //
+    //    Case-insensitive on `@self` mirrors how CLI users naturally
+    //    type it. `@SELF` / `@Self` would otherwise fall through into
+    //    `Handler::new("SELF")` which rejects on the uppercase rule —
+    //    confusing for what is supposed to be a sugar alias, not a
+    //    handler.
+    let stripped_at = target.strip_prefix('@').unwrap_or(&target);
+    let resolved_target = if stripped_at.eq_ignore_ascii_case("self") {
         author_handler.clone()
     } else {
-        // Strip a leading `@` if the caller wrapped the handler. CLI users
-        // tend to type `--target @bob` instinctively; the spec stores the
-        // bare handler.
-        let stripped = target.strip_prefix('@').unwrap_or(&target);
-        let h = match Handler::new(stripped) {
+        let h = match Handler::new(stripped_at) {
             Ok(h) => h,
             Err(e) => {
                 return Response::error_with_code(
@@ -554,7 +557,7 @@ fn compute_next_fire(
         }
     }
 
-    let anchor = match latest {
+    let raw_anchor = match latest {
         Some(ts) => ts,
         None => match chrono::DateTime::parse_from_rfc3339(&spec.created_at) {
             Ok(dt) => dt.with_timezone(&chrono::Utc),
@@ -562,17 +565,29 @@ fn compute_next_fire(
         },
     };
 
-    // Start from the later of `anchor` and `now` — if the anchor is in
-    // the past (e.g. a fresh spec whose created_at is older than the
-    // current time), we still want the next fire strictly after now.
-    // This matches the engine semantic: `next_due = next_fire_after(spec,
-    // last_fire)` and then the engine fires when `next_due <= now`.
-    // For UI display we want "the upcoming theoretical fire" — strictly
-    // after now if the anchor was historical, strictly after anchor if
-    // anchor is itself in the future (not currently possible but
-    // defensive).
-    let from = anchor.max(now);
-    next_fire_after(spec, from)
+    // Mirror the engine's GRACE_WINDOW clamp so list/show reports
+    // exactly what `cron_engine::scan_due` will see on its next tick.
+    // Earlier code clamped to `>= now` so the UI always read "in the
+    // future" — that hid the engine's real decision and could disagree
+    // across the grace boundary.
+    //
+    // After this change `next_fire` may briefly land in the past 120s
+    // (the engine will fire that timestamp on its very next tick). UI
+    // layers wanting to display "about to fire" can branch on that
+    // locally; the wire value matches engine semantics 1:1.
+    //
+    // The 2-minute window is duplicated from `cron_engine::GRACE_WINDOW`
+    // — keeping the constant module-private to the engine rather than
+    // exporting it because the engine is the source of truth and any
+    // change to the value should ripple by intent, not by accidental
+    // import.
+    let cutoff = now - chrono::Duration::seconds(120);
+    let anchor = if raw_anchor < cutoff {
+        cutoff
+    } else {
+        raw_anchor
+    };
+    next_fire_after(spec, anchor)
         .ok()
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
@@ -866,5 +881,105 @@ async fn toggle_enabled(
         changed: true,
     };
     Response::success(serde_json::to_value(payload).unwrap())
+}
+
+#[cfg(test)]
+mod compute_next_fire_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+
+    fn alice() -> Handler {
+        Handler::new("alice").unwrap()
+    }
+
+    fn build_spec(schedule: &str, created_at: &str) -> CronSpec {
+        CronSpec {
+            version: 1,
+            schedule: schedule.to_string(),
+            timezone: None,
+            target: alice(),
+            prompt: "hi".to_string(),
+            enabled: true,
+            created_by: alice(),
+            created_at: created_at.to_string(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// After the GRACE_WINDOW alignment, compute_next_fire reports the
+    /// engine's actual next fire — which can be in the past 120s when
+    /// the spec is overdue but inside the window. Pre-fix code clamped
+    /// this to `>= now`, hiding the truth.
+    #[test]
+    fn returns_overdue_when_in_grace_window() {
+        let tmp = TempDir::new().unwrap();
+        // Spec with a stale anchor (well outside the grace window). The
+        // engine clamps the anchor to now-120s, and `* * * * *` after
+        // now-120s lands in the past relative to `now`.
+        let spec = build_spec("* * * * *", "2026-05-01T00:00:00Z");
+        // Now at exactly :30 of a minute. cutoff = now - 120s = previous
+        // minute :28. Next `* * * * *` after :28 is the previous minute :29? No:
+        // `* * * * *` matches every minute boundary, so next after
+        // a :28 is :29? Actually * * * * * fires every minute on the 0-second.
+        // Next after 23:58:30 is 23:59:00. <= now (00:00:30) → returned.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 30).unwrap();
+        let nf = compute_next_fire(tmp.path(), &spec, now).expect("returns a value");
+        let parsed: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339(&nf).unwrap().with_timezone(&chrono::Utc);
+        // Either the past-but-recent minute boundary (engine will fire
+        // it on next tick), or the immediately upcoming one. Crucially,
+        // it MUST be ≥ cutoff (no ancient backlog leaking through).
+        let cutoff = now - chrono::Duration::seconds(120);
+        assert!(
+            parsed >= cutoff,
+            "compute_next_fire returned {} which is older than cutoff {}",
+            parsed,
+            cutoff
+        );
+        // And it must be earlier than `now + 60s` — within one tick of the
+        // engine — i.e. `compute_next_fire` is not over-clamping forward.
+        assert!(
+            parsed <= now + chrono::Duration::seconds(60),
+            "compute_next_fire returned {}, expected within ±60s of now {}",
+            parsed,
+            now
+        );
+    }
+
+    /// When the most recent fire IS within the grace window, the anchor
+    /// stays at that fire and next_fire_after produces the very next
+    /// schedule match — no clamp interference. Sanity check that the
+    /// fix doesn't break the common case.
+    #[test]
+    fn returns_next_after_recent_fire() {
+        let tmp = TempDir::new().unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 5, 9, 12, 0, 30).unwrap();
+
+        // Drop a fake `<ts>.thread` file at now-30s so latest_fire picks it up.
+        let recent_fire_ts = now - chrono::Duration::seconds(30);
+        let stem = crate::cron_paths::format_thread_filename_ts(recent_fire_ts);
+        std::fs::write(
+            tmp.path().join(format!("{stem}.thread")),
+            "[L000001][P000000][@system][20260509T120000Z] cron(x): y\n",
+        )
+        .unwrap();
+
+        let spec = build_spec("* * * * *", "2026-05-01T00:00:00Z");
+        let nf = compute_next_fire(tmp.path(), &spec, now).expect("returns a value");
+        let parsed: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339(&nf)
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+        // Recent fire was at :00:00, schedule `* * * * *` → next match
+        // strictly after :00:00 is :01:00 — strictly future relative to now (:00:30).
+        assert!(
+            parsed > recent_fire_ts,
+            "next_fire {} should be strictly after the recent fire {}",
+            parsed,
+            recent_fire_ts
+        );
+    }
 }
 

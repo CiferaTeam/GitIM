@@ -31,7 +31,21 @@ use crate::output::OutputMode;
 /// "the file you pointed at is too big").
 pub fn load_prompt(prompt: Option<&str>, prompt_file: Option<&Path>) -> Result<String, String> {
     match (prompt, prompt_file) {
-        (Some(p), None) => Ok(p.to_string()),
+        (Some(p), None) => {
+            // Symmetric size guard with --prompt-file. Without this, an
+            // oversized inline prompt would round-trip to the daemon
+            // before failing as `prompt_too_large` — which is correct
+            // but loses the "你给的字符串太大了" specificity the file
+            // path gets.
+            if p.len() > MAX_PROMPT_BYTES {
+                return Err(format!(
+                    "prompt 大小 {} 字节，超过上限 {} 字节",
+                    p.len(),
+                    MAX_PROMPT_BYTES
+                ));
+            }
+            Ok(p.to_string())
+        }
         (None, Some(path)) => {
             let bytes = std::fs::read(path)
                 .map_err(|e| format!("无法读取 prompt 文件 {}: {e}", path.display()))?;
@@ -344,6 +358,17 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(&vec![b'a'; MAX_PROMPT_BYTES + 1]).unwrap();
         let err = load_prompt(None, Some(f.path())).unwrap_err();
+        assert!(err.contains("超过上限"), "msg = {err}");
+    }
+
+    #[test]
+    fn load_prompt_oversized_inline() {
+        // Symmetric guard with `load_prompt_oversized_file` — an inline
+        // --prompt over the 8KiB ceiling must fail client-side instead
+        // of round-tripping through IPC to be rejected by the daemon's
+        // CronSpec::validate.
+        let big = "a".repeat(MAX_PROMPT_BYTES + 1);
+        let err = load_prompt(Some(&big), None).unwrap_err();
         assert!(err.contains("超过上限"), "msg = {err}");
     }
 

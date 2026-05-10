@@ -377,6 +377,40 @@ async fn create_self_target_resolves() {
 }
 
 #[tokio::test]
+async fn create_resolves_self_case_insensitive() {
+    // `@SELF`, `@Self`, `@self`, `SELF` (no leading @) all alias the
+    // author handler. Without the eq_ignore_ascii_case path, anything
+    // but lowercase `@self` would fall through to `Handler::new("SELF")`
+    // — which rejects on uppercase and surfaces a confusing
+    // "InvalidChar" error from a layer the user isn't trying to interact
+    // with.
+    for variant in ["@SELF", "@Self", "@self", "SELF", "Self"] {
+        let (_tmp, state) = setup_test_repo().await;
+        let resp = create_cron(
+            state.clone(),
+            "self-test",
+            "@daily",
+            variant,
+            "x",
+            None,
+            Some("alice"),
+        )
+        .await;
+        assert!(
+            resp.ok,
+            "create with target='{}' failed: {:?}",
+            variant, resp.error
+        );
+        assert_eq!(
+            resp.data.as_ref().unwrap()["target"],
+            "alice",
+            "target='{}' did not resolve to author handler",
+            variant
+        );
+    }
+}
+
+#[tokio::test]
 async fn create_target_with_at_prefix_strips() {
     let (_tmp, state) = setup_test_repo().await;
     let resp = create_cron(
