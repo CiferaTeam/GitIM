@@ -68,7 +68,12 @@ mod tests {
     fn deserialize_github_variant() {
         let raw = r#"{"type":"github","token":"ghp_xyz"}"#;
         let p: AuthPayload = serde_json::from_str(raw).unwrap();
-        assert_eq!(p, AuthPayload::GitHub { token: "ghp_xyz".into() });
+        assert_eq!(
+            p,
+            AuthPayload::GitHub {
+                token: "ghp_xyz".into()
+            }
+        );
     }
 
     #[test]

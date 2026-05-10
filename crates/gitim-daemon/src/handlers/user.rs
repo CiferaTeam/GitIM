@@ -550,12 +550,8 @@ mod tests {
         let state = setup_state(tmp.path());
         register(&state, "alice").await;
 
-        let resp = handle_update_user(
-            state.clone(),
-            "alice".to_string(),
-            "GitIM user".to_string(),
-        )
-        .await;
+        let resp =
+            handle_update_user(state.clone(), "alice".to_string(), "GitIM user".to_string()).await;
         assert!(resp.ok);
 
         // No new commit beyond `init` + the registration: same-value short-

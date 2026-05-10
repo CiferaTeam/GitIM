@@ -559,7 +559,9 @@ fn parse_token_count_usage(line: &str) -> Option<ProviderUsage> {
         return None;
     }
     let total = v.pointer("/payload/info/total_token_usage")?;
-    let input = total.get("input_tokens").and_then(serde_json::Value::as_u64);
+    let input = total
+        .get("input_tokens")
+        .and_then(serde_json::Value::as_u64);
     let cached = total
         .get("cached_input_tokens")
         .and_then(serde_json::Value::as_u64);
@@ -843,7 +845,8 @@ mod usage_parse_tests {
 
     #[test]
     fn parse_token_count_skips_non_token_count_payloads() {
-        let line = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"hi"}}"#;
+        let line =
+            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"hi"}}"#;
         assert!(parse_token_count_usage(line).is_none());
     }
 

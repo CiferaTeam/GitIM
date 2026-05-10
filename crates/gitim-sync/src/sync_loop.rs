@@ -450,9 +450,7 @@ where
                     let path_str = p.to_string_lossy();
                     let is_board =
                         path_str.starts_with("showboards/") && path_str.ends_with("/board.md");
-                    !path_str.ends_with(".thread")
-                        && !path_str.ends_with(".meta.yaml")
-                        && !is_board
+                    !path_str.ends_with(".thread") && !path_str.ends_with(".meta.yaml") && !is_board
                 });
                 if has_unresolvable {
                     let _ = repo.abort_rebase();
@@ -465,8 +463,7 @@ where
                 }
 
                 // Rebase failed — use thread-aware + meta + board conflict resolution
-                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty()
-                {
+                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty() {
                     let _ = repo.abort_rebase();
                     warn!("sync: rebase conflict with no resolvable changes, aborted");
                     return SyncOutcome::Normal;

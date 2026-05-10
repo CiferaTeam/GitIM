@@ -1,6 +1,6 @@
-use serde::Serialize;
 use crate::types::handler::Handler;
 use crate::types::link::Link;
+use serde::Serialize;
 
 /// A parsed message from a .thread file.
 #[derive(Debug, Clone, PartialEq, Serialize)]

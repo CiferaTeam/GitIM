@@ -19,11 +19,7 @@ const MAX_PUSH_RETRIES: u32 = 3;
 /// independently. (No locked-write semantics on DM threads themselves;
 /// once moved, A.5's send-time guard rejects writes via the archived
 /// path. That guard is a separate task.)
-pub async fn handle_archive_dm(
-    state: SharedState,
-    peer: String,
-    author: String,
-) -> Response {
+pub async fn handle_archive_dm(state: SharedState, peer: String, author: String) -> Response {
     // 1. Validate handler formats. Build the canonical sorted-pair stem
     //    via dm_filename so we never concatenate handlers manually.
     let peer_h = match Handler::new(&peer) {
@@ -163,11 +159,7 @@ pub async fn handle_archive_dm(
 
 /// Restore `archive/dm/<sorted-pair>.thread` → `dm/<sorted-pair>.thread`.
 /// Symmetric reverse of `handle_archive_dm`; same rollback semantics.
-pub async fn handle_unarchive_dm(
-    state: SharedState,
-    peer: String,
-    author: String,
-) -> Response {
+pub async fn handle_unarchive_dm(state: SharedState, peer: String, author: String) -> Response {
     // 1. Validate handler formats and derive sorted-pair stem.
     let peer_h = match Handler::new(&peer) {
         Ok(h) => h,
@@ -196,9 +188,7 @@ pub async fn handle_unarchive_dm(
     }
 
     // 3. Validate archive path exists.
-    let archive_path = state
-        .repo_root
-        .join(format!("archive/dm/{}.thread", stem));
+    let archive_path = state.repo_root.join(format!("archive/dm/{}.thread", stem));
     if !archive_path.exists() {
         return Response::error(format!("DM with @{} not found in archive", peer));
     }

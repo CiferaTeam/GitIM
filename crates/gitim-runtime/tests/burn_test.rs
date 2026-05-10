@@ -50,9 +50,7 @@ fn burn_request(slug: &str, id: &str) -> Request<Body> {
         .uri(format!("/workspaces/{slug}/agents/burn"))
         .method("POST")
         .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::json!({ "id": id }).to_string(),
-        ))
+        .body(Body::from(serde_json::json!({ "id": id }).to_string()))
         .unwrap()
 }
 
@@ -377,18 +375,19 @@ async fn test_burn_daemon_depart_failed_preserves_clone() {
     // gates on (line ~73 of daemon depart.rs) — without it the handler
     // returns `ok=false` with "user @<h> not found", which is exactly the
     // shape of failure the runtime must treat as `daemon_depart_failed`.
-    std::fs::remove_file(agent_path.join("users").join(format!("{handler}.meta.yaml")))
-        .expect("remove users/<h>.meta.yaml");
+    std::fs::remove_file(
+        agent_path
+            .join("users")
+            .join(format!("{handler}.meta.yaml")),
+    )
+    .expect("remove users/<h>.meta.yaml");
 
     let (router, state) = create_router();
     let slug = "test-ws";
     inject_workspace(&state, slug, &workspace);
     insert_agent(&state, slug, handler, &agent_path, "mock");
 
-    let response = router
-        .oneshot(burn_request(slug, handler))
-        .await
-        .unwrap();
+    let response = router.oneshot(burn_request(slug, handler)).await.unwrap();
     let status = response.status();
     let body = body_to_json(response).await;
     assert_eq!(

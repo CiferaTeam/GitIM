@@ -1217,15 +1217,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let resp = handle_onboard(
-            state.clone(),
-            "git".to_string(),
-            None,
-            false,
-            true,
-            true,
-        )
-        .await;
+        let resp = handle_onboard(state.clone(), "git".to_string(), None, false, true, true).await;
         assert!(resp.ok, "guest onboard should succeed: {:?}", resp.error);
 
         let data = resp.data.unwrap();

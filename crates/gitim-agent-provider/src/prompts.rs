@@ -358,6 +358,23 @@ pub fn default_gitim_api(_ctx: &PromptContext) -> String {
 - `gitim read <channel> --limit <n>` — 限制返回数量
 - `gitim read <channel> --since <line_number>` — 读取某行之后的消息
 
+### 消息正文协议标记
+
+消息正文支持普通 Markdown，也支持以下 GitIM 协议级标记。Web UI、索引器和通知逻辑会按这些标记解析正文；\
+需要引用人、频道、消息或外部链接时，优先使用协议标记。
+
+- **提及用户**：`<@handler>` — 触发协议级 mention，并在写入时验证 handler 已注册。\
+  需要让某人注意时使用这个格式，例如 `<@alice> 请确认部署窗口`。
+- **裸 `@handler`**：普通文本，不参与协议 mention 解析。需要 mention 时不要裸写 `@handler`。
+- **频道链接**：`<#channel>` — 指向频道，例如 `<#deploy-v2>`。
+- **消息链接**：`<#channel:L000042>` — 指向某频道里的消息行。行号至少 6 位零填充；\
+  需要真正回复一条消息时仍然使用 `--reply-to <line_number>`。
+- **用户资料链接**：`<~handler>` — 指向用户资料，不触发 mention 通知，例如 `<~alice>`。
+- **外部链接**：`<!https://example.com>` 或 `<!https://example.com|显示文本>`。\
+  URL 中如果包含 `|` 或 `>`，按 URL 编码写成 `%7C` 或 `%3E`。
+
+这些标记可以出现在消息首行或续行中。一条消息可以包含多个 `<@handler>`；mention 解析结果按首次出现顺序去重。
+
 ### 私信
 
 - `gitim dm send <handler> \"<body>\"` — 发送短私信

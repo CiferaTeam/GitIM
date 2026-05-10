@@ -2061,8 +2061,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                             })
                         })
                     };
-                    if let Some((workspace_path, repo_path, provider, activity_tx)) =
-                        cleanup_inputs
+                    if let Some((workspace_path, repo_path, provider, activity_tx)) = cleanup_inputs
                     {
                         if let Err(e) = cleanup_agent_runtime_side(
                             &state_clone,

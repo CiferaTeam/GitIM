@@ -1,5 +1,5 @@
-use serde::Serialize;
 use crate::types::handler::Handler;
+use serde::Serialize;
 
 /// A link extracted from a message body.
 #[derive(Debug, Clone, PartialEq, Serialize)]

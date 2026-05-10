@@ -60,7 +60,11 @@ pub async fn handle_send(
                 if archive_dm_path.exists() {
                     // Pick whichever participant is NOT the author for the error
                     // message — matches CLI mental model ("DM with @bob is archived").
-                    let peer = if parts[0] == author { parts[1] } else { parts[0] };
+                    let peer = if parts[0] == author {
+                        parts[1]
+                    } else {
+                        parts[0]
+                    };
                     return Response::error(format!("DM with @{} is archived", peer));
                 }
             }

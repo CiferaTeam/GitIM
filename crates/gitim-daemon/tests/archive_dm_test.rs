@@ -77,11 +77,7 @@ async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
     (tmp, state)
 }
 
-async fn archive_dm(
-    state: Arc<AppState>,
-    peer: &str,
-    author: &str,
-) -> gitim_daemon::api::Response {
+async fn archive_dm(state: Arc<AppState>, peer: &str, author: &str) -> gitim_daemon::api::Response {
     let req: Request = serde_json::from_value(serde_json::json!({
         "method": "archive_dm",
         "peer": peer,
@@ -259,11 +255,7 @@ async fn test_archive_nonexistent_dm() {
     let resp = archive_dm(state.clone(), "charlie", "alice").await;
     assert!(!resp.ok);
     let err = resp.error.unwrap();
-    assert!(
-        err.contains("DM with @charlie not found"),
-        "err: {}",
-        err
-    );
+    assert!(err.contains("DM with @charlie not found"), "err: {}", err);
 
     // No git side-effects.
     let after_log = git_log_subjects(&state.repo_root);
@@ -344,11 +336,7 @@ async fn test_unarchive_dm_not_archived() {
     let resp = unarchive_dm(state.clone(), "bob", "alice").await;
     assert!(!resp.ok);
     let err = resp.error.unwrap();
-    assert!(
-        err.contains("DM with @bob is not archived"),
-        "err: {}",
-        err
-    );
+    assert!(err.contains("DM with @bob is not archived"), "err: {}", err);
 
     let after_log = git_log_subjects(&state.repo_root);
     assert_eq!(before_log, after_log);
@@ -365,11 +353,7 @@ async fn test_unarchive_dm_missing_in_archive() {
     let err = resp.error.unwrap();
     // Active path doesn't exist → falls through to archive check, which
     // also doesn't exist → "not found in archive".
-    assert!(
-        err.contains("not found in archive"),
-        "err: {}",
-        err
-    );
+    assert!(err.contains("not found in archive"), "err: {}", err);
 }
 
 // ─── 6. archive commit failure rolls back git mv ──────────────────────────────
@@ -659,8 +643,10 @@ async fn test_read_archived_dm_returns_content_with_flag() {
     // Tighter than length-only: assert each entry's body / author /
     // line_number match. Catches a regression where the fallback reads
     // a DIFFERENT file with coincidentally the same number of entries.
-    for (i, (active_entry, archived_entry)) in
-        entries_active.iter().zip(entries_archived.iter()).enumerate()
+    for (i, (active_entry, archived_entry)) in entries_active
+        .iter()
+        .zip(entries_archived.iter())
+        .enumerate()
     {
         assert_eq!(
             active_entry.get("body").and_then(|v| v.as_str()),
@@ -700,8 +686,10 @@ async fn test_read_archived_dm_returns_content_with_flag() {
     );
     // Same body-by-body equality as above — proves resolve_thread_path
     // canonicalizes to the identical archive file regardless of arg order.
-    for (i, (forward, reversed)) in
-        entries_archived.iter().zip(entries_reversed.iter()).enumerate()
+    for (i, (forward, reversed)) in entries_archived
+        .iter()
+        .zip(entries_reversed.iter())
+        .enumerate()
     {
         assert_eq!(
             forward.get("body").and_then(|v| v.as_str()),
@@ -719,10 +707,7 @@ async fn test_read_nonexistent_dm_returns_empty() {
     let (_tmp, state) = setup_test_repo().await;
 
     // alice<->charlie DM never existed, never archived.
-    assert!(!state
-        .repo_root
-        .join("dm/alice--charlie.thread")
-        .exists());
+    assert!(!state.repo_root.join("dm/alice--charlie.thread").exists());
     assert!(!state
         .repo_root
         .join("archive/dm/alice--charlie.thread")
