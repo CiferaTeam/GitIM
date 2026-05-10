@@ -110,6 +110,80 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
     s
 }
 
+/// Configure the LLM model settings for an agent's hermes profile.
+///
+/// Writes `model.provider`, `model.default`, and (when `base_url` is Some)
+/// `model.base_url` into `gitim-<handler>`'s `config.yaml` via sequential
+/// `hermes -p gitim-<handler> config set <key> <value>` shell-outs.
+///
+/// **On any failure, caller MUST `delete_profile` to avoid partial state —
+/// see add_agent flow. If, for example, `model.default` is written but the
+/// optional `model.base_url` step fails, the profile is left in a
+/// half-configured state. The caller (add_agent) is responsible for calling
+/// `delete_profile` on error.**
+pub async fn apply_model_config(
+    handler: &str,
+    llm_provider: &str,
+    llm_model: &str,
+    base_url: Option<&str>,
+) -> Result<(), HermesProfileError> {
+    apply_model_config_with(handler, llm_provider, llm_model, base_url, "hermes").await
+}
+
+/// Same as [`apply_model_config`] but with a configurable hermes binary path
+/// (used by tests to inject a fake/non-existent binary).
+pub async fn apply_model_config_with(
+    handler: &str,
+    llm_provider: &str,
+    llm_model: &str,
+    base_url: Option<&str>,
+    bin: &str,
+) -> Result<(), HermesProfileError> {
+    let profile = profile_name(handler);
+
+    // Step 1: set model.provider
+    run_config_set(bin, &profile, "model.provider", llm_provider).await?;
+
+    // Step 2: set model.default
+    run_config_set(bin, &profile, "model.default", llm_model).await?;
+
+    // Step 3 (conditional): set model.base_url
+    if let Some(url) = base_url {
+        run_config_set(bin, &profile, "model.base_url", url).await?;
+    }
+
+    Ok(())
+}
+
+async fn run_config_set(
+    bin: &str,
+    profile: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), HermesProfileError> {
+    let output = tokio::process::Command::new(bin)
+        .args(["-p", profile, "config", "set", key, value])
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HermesProfileError::CliNotFound
+            } else {
+                HermesProfileError::Other(format!("spawn {bin}: {e}"))
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Err(HermesProfileError::Other(format!(
+        "config set {key} failed: {}",
+        stderr.trim()
+    )))
+}
+
 /// Best-effort delete of the agent's hermes profile.
 ///
 /// Calls `hermes profile delete gitim-<handler> -y`. Idempotent: returns
