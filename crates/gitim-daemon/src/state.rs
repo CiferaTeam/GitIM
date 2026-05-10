@@ -475,11 +475,7 @@ impl AppState {
                 for req in requests {
                     let spec_name = req.spec_name.clone();
                     if let Err(e) = crate::cron_engine::fire(&state, req).await {
-                        tracing::warn!(
-                            "cron_engine: fire for spec '{}' failed: {}",
-                            spec_name,
-                            e
-                        );
+                        tracing::warn!("cron_engine: fire for spec '{}' failed: {}", spec_name, e);
                     }
                 }
             }

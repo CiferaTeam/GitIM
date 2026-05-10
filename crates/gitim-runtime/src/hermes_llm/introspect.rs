@@ -109,9 +109,7 @@ fn read_env_file(hermes_home: &Path) -> std::collections::HashMap<String, String
 /// Walk `BUILTIN_PROVIDERS` in alphabetical order (the static slice is already
 /// alphabetically sorted) and emit an `LlmProvider` for each entry that has at
 /// least one env var present with a non-empty value.
-fn collect_builtins(
-    env_vars: &std::collections::HashMap<String, String>,
-) -> Vec<LlmProvider> {
+fn collect_builtins(env_vars: &std::collections::HashMap<String, String>) -> Vec<LlmProvider> {
     let mut result = Vec::new();
 
     for provider in BUILTIN_PROVIDERS {
@@ -121,7 +119,11 @@ fn collect_builtins(
             .iter()
             .filter_map(|var| {
                 let val = env_vars.get(*var)?;
-                if val.is_empty() { None } else { Some(val.as_str()) }
+                if val.is_empty() {
+                    None
+                } else {
+                    Some(val.as_str())
+                }
             })
             .next();
 

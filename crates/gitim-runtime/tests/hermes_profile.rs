@@ -111,15 +111,9 @@ fn scopeguard_cleanup(handler: &str) -> Cleanup<'_> {
 /// Test 1: non-existent binary → CliNotFound (mirrors ensure_profile pattern).
 #[tokio::test]
 async fn apply_model_config_with_nonexistent_binary_returns_cli_not_found() {
-    let err = apply_model_config_with(
-        "alice",
-        "openai",
-        "gpt-4o",
-        None,
-        "/nonexistent/xyz",
-    )
-    .await
-    .expect_err("expected CliNotFound");
+    let err = apply_model_config_with("alice", "openai", "gpt-4o", None, "/nonexistent/xyz")
+        .await
+        .expect_err("expected CliNotFound");
     assert!(
         matches!(err, HermesProfileError::CliNotFound),
         "expected CliNotFound, got: {err}"
@@ -298,14 +292,9 @@ async fn apply_model_config_real_writes_config_yaml() {
         .expect("ensure_profile should succeed");
 
     // Apply model config.
-    apply_model_config(
-        &handler,
-        "minimax-cn",
-        "MiniMax-M2.7-highspeed",
-        None,
-    )
-    .await
-    .expect("apply_model_config should succeed");
+    apply_model_config(&handler, "minimax-cn", "MiniMax-M2.7-highspeed", None)
+        .await
+        .expect("apply_model_config should succeed");
 
     // Read config.yaml and verify model subtree.
     let config_path = profile_dir(&handler).unwrap().join("config.yaml");

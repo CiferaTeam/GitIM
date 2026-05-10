@@ -34,7 +34,13 @@ impl HermesHomeGuard {
         let path = tmp.path().to_path_buf();
         let original = std::env::var_os("HERMES_HOME");
         std::env::set_var("HERMES_HOME", &path);
-        (Self { original, _tmp: tmp }, path)
+        (
+            Self {
+                original,
+                _tmp: tmp,
+            },
+            path,
+        )
     }
 }
 
@@ -321,11 +327,7 @@ async fn get_models_custom_provider_returns_shape() {
         "error must be null on successful custom provider fetch; got: {body}"
     );
     let models = body["models"].as_array().expect("models must be an array");
-    assert_eq!(
-        models.len(),
-        2,
-        "expected 2 models from mock, got: {body}"
-    );
+    assert_eq!(models.len(), 2, "expected 2 models from mock, got: {body}");
     assert_eq!(models[0]["id"].as_str(), Some("custom-model-1"));
     assert_eq!(models[1]["id"].as_str(), Some("custom-model-2"));
 }
@@ -571,21 +573,38 @@ async fn agents_add_hermes_happy_path_writes_me_json() {
 
     // Seed the human clone with a commit so it has a HEAD (needed by daemon).
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.email", "test@test"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@test",
+        ])
+        .output()
+        .ok();
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.name", "test"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.name",
+            "test",
+        ])
+        .output()
+        .ok();
     fs::write(human_dir.join(".gitkeep"), "").unwrap();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "add", ".gitkeep"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "commit", "-m", "init"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "push"])
-        .output().ok();
+        .output()
+        .ok();
 
     // Inject workspace that points at the temp ws_path.
     let (router, state) = create_router();
@@ -633,8 +652,7 @@ async fn agents_add_hermes_happy_path_writes_me_json() {
 
     // Read me.json from the provisioned agent dir.
     let me_json_path = ws_path.join("herm-bot").join(".gitim").join("me.json");
-    let me_content = fs::read_to_string(&me_json_path)
-        .unwrap_or_else(|_| "{}".to_string());
+    let me_content = fs::read_to_string(&me_json_path).unwrap_or_else(|_| "{}".to_string());
     let me: serde_json::Value = serde_json::from_str(&me_content).unwrap();
     assert_eq!(
         me["llm_provider"].as_str(),
@@ -709,21 +727,38 @@ async fn agents_add_hermes_apply_model_config_failure_rollbacks() {
         .output()
         .expect("git clone");
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.email", "test@test"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@test",
+        ])
+        .output()
+        .ok();
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.name", "test"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.name",
+            "test",
+        ])
+        .output()
+        .ok();
     fs::write(human_dir.join(".gitkeep"), "").unwrap();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "add", ".gitkeep"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "commit", "-m", "init"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "push"])
-        .output().ok();
+        .output()
+        .ok();
 
     let (router, state) = create_router();
     {

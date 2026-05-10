@@ -153,16 +153,17 @@ async fn poll_surfaces_cron_fire_for_self_target() {
     let cron_change = changes
         .iter()
         .find(|c| c["kind"] == "cron_thread")
-        .unwrap_or_else(|| {
-            panic!("expected a cron_thread change, got: {:#?}", changes)
-        });
+        .unwrap_or_else(|| panic!("expected a cron_thread change, got: {:#?}", changes));
     assert_eq!(cron_change["channel"], "cron:weekly");
     let entries = cron_change["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1, "exactly one entry per fire write");
     let entry = &entries[0];
     assert_eq!(entry["author"], "system");
     assert!(
-        entry["body"].as_str().unwrap_or("").contains("cron(weekly)"),
+        entry["body"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cron(weekly)"),
         "body should contain the cron-fire signature: {:#?}",
         entry
     );
@@ -252,7 +253,9 @@ async fn poll_drops_archived_cron_threads() {
     let archive_dir = state.repo_root.join("archive/crons/old");
     std::fs::create_dir_all(&archive_dir).unwrap();
     let stem = format_thread_filename_ts(
-        chrono::Utc.with_ymd_and_hms(2025, 12, 31, 23, 59, 0).unwrap(),
+        chrono::Utc
+            .with_ymd_and_hms(2025, 12, 31, 23, 59, 0)
+            .unwrap(),
     );
     std::fs::write(
         archive_dir.join(format!("{stem}.thread")),

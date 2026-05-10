@@ -453,7 +453,11 @@ enum CronCommands {
         #[arg(long)]
         target: String,
         /// Inline prompt body. Mutually exclusive with --prompt-file.
-        #[arg(long, conflicts_with = "prompt_file", required_unless_present = "prompt_file")]
+        #[arg(
+            long,
+            conflicts_with = "prompt_file",
+            required_unless_present = "prompt_file"
+        )]
         prompt: Option<String>,
         /// Path to a UTF-8 prompt file. Mutually exclusive with --prompt.
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
@@ -819,16 +823,14 @@ async fn main() {
                 prompt_file,
                 timezone,
             } => {
-                let prompt_body = match commands::cron::load_prompt(
-                    prompt.as_deref(),
-                    prompt_file.as_deref(),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        process::exit(1);
-                    }
-                };
+                let prompt_body =
+                    match commands::cron::load_prompt(prompt.as_deref(), prompt_file.as_deref()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            process::exit(1);
+                        }
+                    };
                 commands::cron::cmd_create(
                     &client,
                     &mode,
@@ -1107,14 +1109,7 @@ mod tests {
     #[test]
     fn cron_create_rejects_missing_schedule() {
         let r = Cli::try_parse_from([
-            "gitim",
-            "cron",
-            "create",
-            "x",
-            "--target",
-            "@self",
-            "--prompt",
-            "p",
+            "gitim", "cron", "create", "x", "--target", "@self", "--prompt", "p",
         ]);
         assert!(r.is_err());
     }
@@ -1155,9 +1150,7 @@ mod tests {
 
     #[test]
     fn cron_history_parses_with_limit() {
-        let r = Cli::try_parse_from([
-            "gitim", "cron", "history", "weekly-report", "--limit", "10",
-        ]);
+        let r = Cli::try_parse_from(["gitim", "cron", "history", "weekly-report", "--limit", "10"]);
         assert!(r.is_ok());
     }
 

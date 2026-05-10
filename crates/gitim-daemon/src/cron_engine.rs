@@ -139,9 +139,7 @@ pub fn scan_due(
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(e) => {
-                warn!(
-                    "cron_engine: cannot stat entry under crons/: {e} — skipping"
-                );
+                warn!("cron_engine: cannot stat entry under crons/: {e} — skipping");
                 continue;
             }
         };
@@ -527,8 +525,11 @@ mod tests {
         let stem = format_thread_filename_ts(ts);
         let path = spec_dir.join(format!("{stem}.thread"));
         // Body shape doesn't matter for scan_due — only the filename.
-        std::fs::write(path, "[L000001][P000000][@system][20260101T000000Z] cron(x): y\n")
-            .unwrap();
+        std::fs::write(
+            path,
+            "[L000001][P000000][@system][20260101T000000Z] cron(x): y\n",
+        )
+        .unwrap();
     }
 
     // ─── scan ─────────────────────────────────────────────────────────────────
@@ -610,10 +611,7 @@ mod tests {
         )
         .unwrap();
         // Existing fire well outside the grace window — clamped away.
-        write_thread_file(
-            &dir,
-            Utc.with_ymd_and_hms(2026, 5, 2, 0, 0, 0).unwrap(),
-        );
+        write_thread_file(&dir, Utc.with_ymd_and_hms(2026, 5, 2, 0, 0, 0).unwrap());
 
         let due = scan_due(&root, &alice(), fixed_now()).unwrap();
         assert_eq!(due.len(), 1, "next fire after clamped anchor is due");

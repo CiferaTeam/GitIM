@@ -224,7 +224,11 @@ async fn fire_skips_when_spec_deleted_under_lock() {
     };
 
     let result = fire(&state, request).await;
-    assert!(result.is_ok(), "fire should return Ok on missing spec, got {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "fire should return Ok on missing spec, got {:?}",
+        result.err()
+    );
 
     // No active dir was resurrected.
     let active_dir = state.repo_root.join("crons").join(spec_name);

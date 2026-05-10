@@ -31,7 +31,11 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
     BuiltinProvider {
         id: "anthropic",
         label: "Anthropic / Claude",
-        env_vars: &["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+        env_vars: &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ],
         base_url: "https://api.anthropic.com",
         api_protocol: ApiProtocol::OpenAI,
     },
@@ -88,7 +92,11 @@ mod tests {
         let mut ids: Vec<&str> = BUILTIN_PROVIDERS.iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), BUILTIN_PROVIDERS.len(), "duplicate provider ids detected");
+        assert_eq!(
+            ids.len(),
+            BUILTIN_PROVIDERS.len(),
+            "duplicate provider ids detected"
+        );
     }
 
     #[test]

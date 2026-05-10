@@ -574,7 +574,9 @@ impl GitimClient {
     }
 
     pub async fn disable_cron(&self, name: &str) -> Result<ToggleCronResponse, ClientError> {
-        let resp = self.request("disable_cron", json!({ "name": name })).await?;
+        let resp = self
+            .request("disable_cron", json!({ "name": name }))
+            .await?;
         decode_typed(resp)
     }
 
@@ -588,10 +590,7 @@ impl GitimClient {
     /// parses it into a `DateTime<Utc>` for callers that need to
     /// compare to `Utc::now()`. Returns `None` when the daemon couldn't
     /// compute one (disabled spec or unparseable schedule).
-    pub async fn next_fire_for(
-        &self,
-        name: &str,
-    ) -> Result<Option<DateTime<Utc>>, ClientError> {
+    pub async fn next_fire_for(&self, name: &str) -> Result<Option<DateTime<Utc>>, ClientError> {
         let detail = self.show_cron(name).await?;
         match detail.next_fire {
             None => Ok(None),
@@ -691,7 +690,9 @@ impl GitimClient {
 fn decode_typed<T: serde::de::DeserializeOwned>(resp: ApiResponse) -> Result<T, ClientError> {
     if !resp.ok {
         return Err(ClientError::Api {
-            message: resp.error.unwrap_or_else(|| "unknown daemon error".to_string()),
+            message: resp
+                .error
+                .unwrap_or_else(|| "unknown daemon error".to_string()),
             code: resp.error_code,
         });
     }
@@ -703,7 +704,9 @@ fn decode_typed<T: serde::de::DeserializeOwned>(resp: ApiResponse) -> Result<T, 
 fn decode_unit(resp: ApiResponse) -> Result<(), ClientError> {
     if !resp.ok {
         return Err(ClientError::Api {
-            message: resp.error.unwrap_or_else(|| "unknown daemon error".to_string()),
+            message: resp
+                .error
+                .unwrap_or_else(|| "unknown daemon error".to_string()),
             code: resp.error_code,
         });
     }
@@ -884,10 +887,7 @@ mod tests {
                 "prompt": "hi",
             }),
         );
-        assert_eq!(
-            req.get("timezone"),
-            Some(&Value::Null),
-        );
+        assert_eq!(req.get("timezone"), Some(&Value::Null),);
     }
 
     #[test]
@@ -901,10 +901,7 @@ mod tests {
     fn cron_show_request_shape() {
         use crate::types::build_request;
         let req = build_request("show_cron", json!({"name": "weekly-report"}));
-        assert_eq!(
-            req,
-            json!({"method": "show_cron", "name": "weekly-report"}),
-        );
+        assert_eq!(req, json!({"method": "show_cron", "name": "weekly-report"}),);
     }
 
     #[test]
@@ -928,22 +925,13 @@ mod tests {
     fn cron_enable_disable_delete_request_shapes() {
         use crate::types::build_request;
         let enable = build_request("enable_cron", json!({"name": "weekly"}));
-        assert_eq!(
-            enable,
-            json!({"method": "enable_cron", "name": "weekly"}),
-        );
+        assert_eq!(enable, json!({"method": "enable_cron", "name": "weekly"}),);
 
         let disable = build_request("disable_cron", json!({"name": "weekly"}));
-        assert_eq!(
-            disable,
-            json!({"method": "disable_cron", "name": "weekly"}),
-        );
+        assert_eq!(disable, json!({"method": "disable_cron", "name": "weekly"}),);
 
         let delete = build_request("delete_cron", json!({"name": "old-job"}));
-        assert_eq!(
-            delete,
-            json!({"method": "delete_cron", "name": "old-job"}),
-        );
+        assert_eq!(delete, json!({"method": "delete_cron", "name": "old-job"}),);
     }
 
     /// decode_unit happy-path: ok=true is mapped to Ok(()).
@@ -1003,7 +991,10 @@ mod tests {
         let payload: ListCronsResponse = decode_typed(resp).unwrap();
         assert_eq!(payload.crons.len(), 1);
         assert_eq!(payload.crons[0].name, "weekly-report");
-        assert_eq!(payload.crons[0].next_fire.as_deref(), Some("2026-05-11T16:00:00Z"));
+        assert_eq!(
+            payload.crons[0].next_fire.as_deref(),
+            Some("2026-05-11T16:00:00Z")
+        );
     }
 
     /// decode_typed error-path: ok=false maps to ClientError::Api with
@@ -1061,7 +1052,10 @@ mod tests {
         .unwrap();
         let s = detail.next_fire.unwrap();
         let parsed = DateTime::parse_from_rfc3339(&s).unwrap();
-        assert_eq!(parsed.with_timezone(&Utc).to_rfc3339(), "2026-05-11T16:00:00+00:00");
+        assert_eq!(
+            parsed.with_timezone(&Utc).to_rfc3339(),
+            "2026-05-11T16:00:00+00:00"
+        );
     }
 
     /// next_fire absent is propagated as Ok(None) — disabled spec or

@@ -81,7 +81,10 @@ fn cron_usage_carries_canonical_command_and_target_alias() {
     };
     let section = provider.prompt_cron_usage(&ctx);
 
-    assert!(section.contains("gitim cron create"), "missing canonical command");
+    assert!(
+        section.contains("gitim cron create"),
+        "missing canonical command"
+    );
     assert!(section.contains("--schedule"), "missing --schedule flag");
     assert!(section.contains("--target"), "missing --target flag");
     assert!(section.contains("--prompt"), "missing --prompt flag");
@@ -89,7 +92,10 @@ fn cron_usage_carries_canonical_command_and_target_alias() {
 
     // Schedule format coverage — 5-field cron + at least one alias so
     // the agent knows both forms are accepted.
-    assert!(section.contains("5 字段"), "missing 5-field cron explanation");
+    assert!(
+        section.contains("5 字段"),
+        "missing 5-field cron explanation"
+    );
     assert!(section.contains("@daily"), "missing @daily alias example");
 
     // Wake-up shape — the agent has to recognize that a [@system]

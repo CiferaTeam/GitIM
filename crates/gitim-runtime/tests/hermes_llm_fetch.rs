@@ -50,10 +50,19 @@ async fn success_openai_compatible() {
     let provider = openai_provider("kimi-coding", &server.url());
     let result = fetch_models(&provider, tmp.path()).await;
 
-    assert_eq!(result.models.len(), 2, "expected 2 models, got {:?}", result.models);
+    assert_eq!(
+        result.models.len(),
+        2,
+        "expected 2 models, got {:?}",
+        result.models
+    );
     assert_eq!(result.models[0].id, "m1");
     assert_eq!(result.models[1].id, "m2");
-    assert!(result.error.is_none(), "expected no error, got {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "expected no error, got {:?}",
+        result.error
+    );
     assert!(result.custom_allowed);
     assert!(result.fetched_at_ms > 0);
 
@@ -344,7 +353,7 @@ async fn anthropic_protocol_short_circuits_without_network() {
         .mock("GET", "/models")
         .with_status(200)
         .with_body(r#"{"data":[]}"#)
-        .expect_at_most(0)  // enforce: must not be called
+        .expect_at_most(0) // enforce: must not be called
         .create_async()
         .await;
 

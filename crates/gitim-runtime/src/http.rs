@@ -1382,11 +1382,7 @@ async fn agents_add(
             .as_deref()
             .map(str::is_empty)
             .unwrap_or(true)
-            || req
-                .llm_model
-                .as_deref()
-                .map(str::is_empty)
-                .unwrap_or(true);
+            || req.llm_model.as_deref().map(str::is_empty).unwrap_or(true);
         if missing {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1682,13 +1678,10 @@ async fn agents_add(
                     .into_response();
                 }
                 // Use ensure_profile_with so tests can inject a fake binary.
-                let hermes_bin = std::env::var("GITIM_TEST_HERMES_BIN")
-                    .unwrap_or_else(|_| "hermes".to_string());
-                if let Err(e) = crate::hermes_profile::ensure_profile_with(
-                    &req.handler,
-                    &hermes_bin,
-                )
-                .await
+                let hermes_bin =
+                    std::env::var("GITIM_TEST_HERMES_BIN").unwrap_or_else(|_| "hermes".to_string());
+                if let Err(e) =
+                    crate::hermes_profile::ensure_profile_with(&req.handler, &hermes_bin).await
                 {
                     cleanup_agent_dir(&workspace, &req.handler);
                     return Json(ErrorBody::with_code(
@@ -1731,11 +1724,8 @@ async fn agents_add(
                 .await
                 {
                     // Best-effort profile cleanup before full agent dir removal.
-                    let _ = crate::hermes_profile::delete_profile_with(
-                        &req.handler,
-                        &hermes_bin,
-                    )
-                    .await;
+                    let _ =
+                        crate::hermes_profile::delete_profile_with(&req.handler, &hermes_bin).await;
                     cleanup_agent_dir(&workspace, &req.handler);
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1800,8 +1790,16 @@ async fn agents_add(
                 env: req.env.clone(),
                 error_message: None,
                 session_usage: None,
-                llm_provider: if req.provider == "hermes" { req.llm_provider.clone() } else { None },
-                llm_model: if req.provider == "hermes" { req.llm_model.clone() } else { None },
+                llm_provider: if req.provider == "hermes" {
+                    req.llm_provider.clone()
+                } else {
+                    None
+                },
+                llm_model: if req.provider == "hermes" {
+                    req.llm_model.clone()
+                } else {
+                    None
+                },
                 loop_handle: None,
             };
             {
@@ -4023,7 +4021,11 @@ async fn list_hermes_llm_providers() -> axum::response::Response {
         });
 
     let providers = crate::hermes_llm::list_providers(&hermes_home);
-    (StatusCode::OK, Json(serde_json::json!({ "providers": providers }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "providers": providers })),
+    )
+        .into_response()
 }
 
 /// HTTP handler for `GET /hermes/llm/providers/{id}/models`.
@@ -4048,9 +4050,9 @@ async fn list_hermes_llm_providers() -> axum::response::Response {
 async fn list_hermes_llm_models(
     axum::extract::Path(provider_id): axum::extract::Path<String>,
 ) -> axum::response::Response {
+    use crate::hermes_llm::{LlmProvider, ProviderKind, BUILTIN_PROVIDERS};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use crate::hermes_llm::{BUILTIN_PROVIDERS, LlmProvider, ProviderKind};
 
     let hermes_home = std::env::var_os("HERMES_HOME")
         .map(PathBuf::from)

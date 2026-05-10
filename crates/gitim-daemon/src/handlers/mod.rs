@@ -517,8 +517,16 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            handle_create_cron(state, name, schedule, timezone, target, prompt, resolved_author)
-                .await
+            handle_create_cron(
+                state,
+                name,
+                schedule,
+                timezone,
+                target,
+                prompt,
+                resolved_author,
+            )
+            .await
         }
         Request::ListCrons => handle_list_crons(state).await,
         Request::ShowCron { name } => handle_show_cron(state, name).await,

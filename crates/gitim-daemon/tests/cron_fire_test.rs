@@ -170,7 +170,9 @@ async fn fire_already_exists_no_op() {
     let (_tmp, state, spec) = setup_with_spec("daily", "hi", None).await;
     let ts = Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap();
 
-    let _ = fire(&state, build_request("daily", &spec, ts)).await.unwrap();
+    let _ = fire(&state, build_request("daily", &spec, ts))
+        .await
+        .unwrap();
     let after_first = count_commits(&state.repo_root);
 
     let _ = fire(&state, build_request("daily", &spec, ts))
@@ -262,9 +264,13 @@ async fn fire_multiline_prompt_uses_continuation_lines() {
     fire(&state, build_request("ml", &spec, ts)).await.unwrap();
 
     let stem = format_thread_filename_ts(ts);
-    let body =
-        std::fs::read_to_string(state.repo_root.join("crons/ml").join(format!("{stem}.thread")))
-            .unwrap();
+    let body = std::fs::read_to_string(
+        state
+            .repo_root
+            .join("crons/ml")
+            .join(format!("{stem}.thread")),
+    )
+    .unwrap();
     let parsed = gitim_core::parser::parse_thread(&body).expect("parses");
     assert_eq!(parsed.entries.len(), 1, "single message, multiple lines");
     match &parsed.entries[0] {

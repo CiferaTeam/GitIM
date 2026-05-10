@@ -121,7 +121,10 @@ fn seed_thread_file(state: &Arc<AppState>, cron_name: &str, ts: &str) {
     let path = dir.join(format!("{}.thread", ts));
     std::fs::write(
         &path,
-        format!("[L000001][P000000][@system][{}] cron({}): hi\n", ts, cron_name),
+        format!(
+            "[L000001][P000000][@system][{}] cron({}): hi\n",
+            ts, cron_name
+        ),
     )
     .unwrap();
 }
@@ -190,7 +193,11 @@ async fn list_includes_next_fire() {
     let arr = resp.data.unwrap()["crons"].as_array().unwrap().clone();
     assert_eq!(arr.len(), 1);
     let nf = arr[0]["next_fire"].as_str();
-    assert!(nf.is_some(), "next_fire should be present, got {:?}", arr[0]);
+    assert!(
+        nf.is_some(),
+        "next_fire should be present, got {:?}",
+        arr[0]
+    );
     let nf = nf.unwrap();
     // Whatever the absolute value, it must be a UTC ISO 8601 with `Z`.
     assert!(nf.ends_with('Z'), "next_fire should be UTC: {nf}");
@@ -247,7 +254,10 @@ async fn show_no_runs_yet() {
 
     let resp = show_cron(state.clone(), "fresh").await;
     assert!(resp.ok);
-    let arr = resp.data.unwrap()["recent_runs"].as_array().unwrap().clone();
+    let arr = resp.data.unwrap()["recent_runs"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert!(arr.is_empty(), "fresh cron should have no recent runs");
 }
 
@@ -273,7 +283,10 @@ async fn show_returns_recent_runs_newest_first_capped_at_5() {
 
     let resp = show_cron(state.clone(), "frequent").await;
     assert!(resp.ok);
-    let runs = resp.data.unwrap()["recent_runs"].as_array().unwrap().clone();
+    let runs = resp.data.unwrap()["recent_runs"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert_eq!(runs.len(), 5);
 
     // Newest first.
@@ -332,10 +345,7 @@ async fn history_pagination_limit() {
         .iter()
         .map(|r| r["ts"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(
-        ts,
-        vec!["2026-05-04T09-00-00Z", "2026-05-03T09-00-00Z"]
-    );
+    assert_eq!(ts, vec!["2026-05-04T09-00-00Z", "2026-05-03T09-00-00Z"]);
 }
 
 #[tokio::test]
@@ -354,7 +364,11 @@ async fn history_default_limit_50() {
     let resp = history_cron(state.clone(), "frequent", None).await;
     assert!(resp.ok);
     let runs = resp.data.unwrap()["runs"].as_array().unwrap().clone();
-    assert!(runs.len() <= 50, "default cap should be ≤ 50, got {}", runs.len());
+    assert!(
+        runs.len() <= 50,
+        "default cap should be ≤ 50, got {}",
+        runs.len()
+    );
 }
 
 #[tokio::test]

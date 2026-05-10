@@ -49,8 +49,8 @@ fn env_with_key_lists_provider() {
     write_env(&tmp, "KIMI_API_KEY=mk_xxxxxxxx\n");
 
     let providers = list_providers(tmp.path());
-    let kimi = provider_by_id(&providers, "kimi-coding")
-        .expect("kimi-coding should be in the list");
+    let kimi =
+        provider_by_id(&providers, "kimi-coding").expect("kimi-coding should be in the list");
 
     assert_eq!(kimi.base_url.as_deref(), Some("https://api.moonshot.ai/v1"));
     assert_eq!(kimi.kind, ProviderKind::ApiKey);
@@ -97,8 +97,7 @@ fn config_yaml_custom_providers_listed() {
     );
 
     let providers = list_providers(tmp.path());
-    let custom = provider_by_id(&providers, "custom:my-glm")
-        .expect("custom:my-glm should appear");
+    let custom = provider_by_id(&providers, "custom:my-glm").expect("custom:my-glm should appear");
 
     assert_eq!(custom.kind, ProviderKind::Custom);
     assert_eq!(custom.base_url.as_deref(), Some("https://x"));
@@ -168,18 +167,36 @@ fn ordering_builtin_alphabetic_then_custom() {
     let providers = list_providers(tmp.path());
 
     // Extract positions
-    let pos_deepseek = providers.iter().position(|p| p.id == "deepseek").expect("deepseek");
+    let pos_deepseek = providers
+        .iter()
+        .position(|p| p.id == "deepseek")
+        .expect("deepseek");
     let pos_zai = providers.iter().position(|p| p.id == "zai").expect("zai");
-    let pos_zzz = providers.iter().position(|p| p.id == "custom:zzz").expect("custom:zzz");
-    let pos_aaa = providers.iter().position(|p| p.id == "custom:aaa").expect("custom:aaa");
+    let pos_zzz = providers
+        .iter()
+        .position(|p| p.id == "custom:zzz")
+        .expect("custom:zzz");
+    let pos_aaa = providers
+        .iter()
+        .position(|p| p.id == "custom:aaa")
+        .expect("custom:aaa");
 
     // deepseek < zai (alphabetic builtins)
-    assert!(pos_deepseek < pos_zai, "builtins must be alphabetically ordered");
+    assert!(
+        pos_deepseek < pos_zai,
+        "builtins must be alphabetically ordered"
+    );
     // all builtins before any custom
-    assert!(pos_deepseek < pos_zzz, "builtins must precede custom providers");
+    assert!(
+        pos_deepseek < pos_zzz,
+        "builtins must precede custom providers"
+    );
     assert!(pos_zai < pos_zzz, "builtins must precede custom providers");
     // custom providers maintain yaml order (zzz before aaa in yaml, so zzz < aaa in list)
-    assert!(pos_zzz < pos_aaa, "custom providers must preserve yaml order");
+    assert!(
+        pos_zzz < pos_aaa,
+        "custom providers must preserve yaml order"
+    );
 }
 
 // ── test 9 ───────────────────────────────────────────────────────────────────
@@ -190,8 +207,8 @@ fn kimi_with_sk_kimi_prefix_resolves_coding_url() {
     write_env(&tmp, "KIMI_API_KEY=sk-kimi-abc123\n");
 
     let providers = list_providers(tmp.path());
-    let kimi = provider_by_id(&providers, "kimi-coding")
-        .expect("kimi-coding should be in the list");
+    let kimi =
+        provider_by_id(&providers, "kimi-coding").expect("kimi-coding should be in the list");
 
     assert_eq!(
         kimi.base_url.as_deref(),
@@ -208,8 +225,8 @@ fn kimi_with_other_prefix_keeps_moonshot_url() {
     write_env(&tmp, "KIMI_API_KEY=mk-abc123\n");
 
     let providers = list_providers(tmp.path());
-    let kimi = provider_by_id(&providers, "kimi-coding")
-        .expect("kimi-coding should be in the list");
+    let kimi =
+        provider_by_id(&providers, "kimi-coding").expect("kimi-coding should be in the list");
 
     assert_eq!(
         kimi.base_url.as_deref(),
@@ -226,8 +243,7 @@ fn minimax_protocol_propagates_to_list_provider() {
     write_env(&tmp, "MINIMAX_API_KEY=foo\n");
 
     let providers = list_providers(tmp.path());
-    let minimax = provider_by_id(&providers, "minimax")
-        .expect("minimax should appear");
+    let minimax = provider_by_id(&providers, "minimax").expect("minimax should appear");
 
     assert_eq!(
         minimax.api_protocol,
@@ -248,5 +264,8 @@ fn env_with_bom_prefix_still_parses_first_key() {
 
     let result = list_providers(tmp.path());
     let kimi = result.iter().find(|p| p.id == "kimi-coding");
-    assert!(kimi.is_some(), "BOM-prefixed .env should still detect KIMI_API_KEY; got {result:?}");
+    assert!(
+        kimi.is_some(),
+        "BOM-prefixed .env should still detect KIMI_API_KEY; got {result:?}"
+    );
 }

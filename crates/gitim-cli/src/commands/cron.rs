@@ -230,10 +230,7 @@ pub async fn cmd_show(client: &GitimClient, mode: &OutputMode, name: &str) {
                         }
                     }
                 }
-                println!(
-                    "Next fire: {}",
-                    detail.next_fire.as_deref().unwrap_or("-")
-                );
+                println!("Next fire: {}", detail.next_fire.as_deref().unwrap_or("-"));
                 println!("Recent runs ({}):", detail.recent_runs.len());
                 for r in &detail.recent_runs {
                     println!("  {}  {}", r.ts, r.filename);
@@ -244,12 +241,7 @@ pub async fn cmd_show(client: &GitimClient, mode: &OutputMode, name: &str) {
     }
 }
 
-pub async fn cmd_history(
-    client: &GitimClient,
-    mode: &OutputMode,
-    name: &str,
-    limit: Option<u32>,
-) {
+pub async fn cmd_history(client: &GitimClient, mode: &OutputMode, name: &str, limit: Option<u32>) {
     match client.history_cron(name, limit).await {
         Ok(runs) => match mode {
             OutputMode::Json => {

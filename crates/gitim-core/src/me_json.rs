@@ -364,8 +364,14 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&me).unwrap();
         let obj = v.as_object().unwrap();
-        assert!(!obj.contains_key("llm_provider"), "llm_provider must be absent when None");
-        assert!(!obj.contains_key("llm_model"), "llm_model must be absent when None");
+        assert!(
+            !obj.contains_key("llm_provider"),
+            "llm_provider must be absent when None"
+        );
+        assert!(
+            !obj.contains_key("llm_model"),
+            "llm_model must be absent when None"
+        );
     }
 
     /// T3: patch with Some llm_provider/llm_model overrides base.
@@ -418,7 +424,10 @@ mod tests {
         let me: MeJson = serde_json::from_str(raw).unwrap();
         // Known new field is recognized and NOT in extra
         assert_eq!(me.llm_provider.as_deref(), Some("minimax-cn"));
-        assert!(!me.extra.contains_key("llm_provider"), "known field must not leak into extra");
+        assert!(
+            !me.extra.contains_key("llm_provider"),
+            "known field must not leak into extra"
+        );
         // Truly unknown field lands in extra and round-trips
         assert_eq!(
             me.extra.get("custom_note").and_then(|v| v.as_str()),
@@ -426,7 +435,13 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::to_value(&me).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("custom_note").and_then(|v| v.as_str()), Some("rotate key in june"));
-        assert_eq!(obj.get("llm_provider").and_then(|v| v.as_str()), Some("minimax-cn"));
+        assert_eq!(
+            obj.get("custom_note").and_then(|v| v.as_str()),
+            Some("rotate key in june")
+        );
+        assert_eq!(
+            obj.get("llm_provider").and_then(|v| v.as_str()),
+            Some("minimax-cn")
+        );
     }
 }

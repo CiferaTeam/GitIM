@@ -120,10 +120,7 @@ pub async fn handle_create_cron(
     let author_handler = match Handler::new(&author) {
         Ok(h) => h,
         Err(e) => {
-            return Response::error_with_code(
-                format!("invalid author: {}", e),
-                "invalid_author",
-            )
+            return Response::error_with_code(format!("invalid author: {}", e), "invalid_author")
         }
     };
 
@@ -403,10 +400,7 @@ pub async fn handle_show_cron(state: SharedState, name: String) -> Response {
     let cron_dir = state.repo_root.join("crons").join(&name);
     let spec_path = cron_dir.join("spec.yaml");
     if !spec_path.exists() {
-        return Response::error_with_code(
-            format!("cron '{}' does not exist", name),
-            "not_found",
-        );
+        return Response::error_with_code(format!("cron '{}' does not exist", name), "not_found");
     }
     let spec = match read_spec(&spec_path) {
         Ok(s) => s,
@@ -447,11 +441,7 @@ pub async fn handle_show_cron(state: SharedState, name: String) -> Response {
 
 /// List `<ts>.thread` files for a cron, newest first, capped by `limit`
 /// (default 50, max 1000). 404 on missing cron directory.
-pub async fn handle_history_cron(
-    state: SharedState,
-    name: String,
-    limit: Option<u32>,
-) -> Response {
+pub async fn handle_history_cron(state: SharedState, name: String, limit: Option<u32>) -> Response {
     use gitim_core::responses::HistoryCronResponse;
 
     if let Err(resp) = validate_cron_name(&name) {
@@ -460,19 +450,13 @@ pub async fn handle_history_cron(
 
     let cron_dir = state.repo_root.join("crons").join(&name);
     if !cron_dir.is_dir() {
-        return Response::error_with_code(
-            format!("cron '{}' does not exist", name),
-            "not_found",
-        );
+        return Response::error_with_code(format!("cron '{}' does not exist", name), "not_found");
     }
     if !cron_dir.join("spec.yaml").exists() {
         // A bare directory without spec.yaml shouldn't happen in normal
         // operation but treat it as a not-found rather than returning
         // possibly-stale runs from an orphaned dir.
-        return Response::error_with_code(
-            format!("cron '{}' does not exist", name),
-            "not_found",
-        );
+        return Response::error_with_code(format!("cron '{}' does not exist", name), "not_found");
     }
 
     let limit_u = limit
@@ -627,10 +611,7 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
     let author_handler = match Handler::new(&author) {
         Ok(h) => h,
         Err(e) => {
-            return Response::error_with_code(
-                format!("invalid author: {}", e),
-                "invalid_author",
-            )
+            return Response::error_with_code(format!("invalid author: {}", e), "invalid_author")
         }
     };
 
@@ -649,10 +630,7 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
     if !active_spec.exists() {
         // Either missing or already in archive — caller's mental model is
         // "not there" either way. The CLI / WebUI can re-list to confirm.
-        return Response::error_with_code(
-            format!("cron '{}' does not exist", name),
-            "not_found",
-        );
+        return Response::error_with_code(format!("cron '{}' does not exist", name), "not_found");
     }
     let archive_target = state.repo_root.join("archive/crons").join(&name);
     if archive_target.exists() {
@@ -694,10 +672,7 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
         let from_rel = format!("crons/{}", name);
         let to_rel = format!("archive/crons/{}", name);
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
-            return Response::error_with_code(
-                format!("git mv failed: {}", e),
-                "git_error",
-            );
+            return Response::error_with_code(format!("git mv failed: {}", e), "git_error");
         }
 
         let commit_msg = format!("cron: delete {} by @{}", name, author_handler.as_str());
@@ -753,10 +728,7 @@ async fn toggle_enabled(
     let author_handler = match Handler::new(&author) {
         Ok(h) => h,
         Err(e) => {
-            return Response::error_with_code(
-                format!("invalid author: {}", e),
-                "invalid_author",
-            )
+            return Response::error_with_code(format!("invalid author: {}", e), "invalid_author")
         }
     };
 
@@ -770,16 +742,9 @@ async fn toggle_enabled(
         );
     }
 
-    let spec_path = state
-        .repo_root
-        .join("crons")
-        .join(&name)
-        .join("spec.yaml");
+    let spec_path = state.repo_root.join("crons").join(&name).join("spec.yaml");
     if !spec_path.exists() {
-        return Response::error_with_code(
-            format!("cron '{}' does not exist", name),
-            "not_found",
-        );
+        return Response::error_with_code(format!("cron '{}' does not exist", name), "not_found");
     }
 
     let mut spec = match read_spec(&spec_path) {
@@ -855,9 +820,11 @@ async fn toggle_enabled(
             Some((&author_name, &author_email)),
         ) {
             // Rollback: restore previous yaml so working tree mirrors HEAD.
-            if let Err(rb) = cur.to_yaml().map_err(|e| e.to_string()).and_then(|y| {
-                std::fs::write(&spec_path, y).map_err(|e| e.to_string())
-            }) {
+            if let Err(rb) = cur
+                .to_yaml()
+                .map_err(|e| e.to_string())
+                .and_then(|y| std::fs::write(&spec_path, y).map_err(|e| e.to_string()))
+            {
                 tracing::warn!("toggle_enabled: rollback restore failed: {}", rb);
             }
             return Response::error_with_code(
@@ -926,8 +893,9 @@ mod compute_next_fire_tests {
         // Next after 23:58:30 is 23:59:00. <= now (00:00:30) → returned.
         let now = chrono::Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 30).unwrap();
         let nf = compute_next_fire(tmp.path(), &spec, now).expect("returns a value");
-        let parsed: chrono::DateTime<chrono::Utc> =
-            chrono::DateTime::parse_from_rfc3339(&nf).unwrap().with_timezone(&chrono::Utc);
+        let parsed: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(&nf)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         // Either the past-but-recent minute boundary (engine will fire
         // it on next tick), or the immediately upcoming one. Crucially,
         // it MUST be ≥ cutoff (no ancient backlog leaking through).
@@ -968,10 +936,9 @@ mod compute_next_fire_tests {
 
         let spec = build_spec("* * * * *", "2026-05-01T00:00:00Z");
         let nf = compute_next_fire(tmp.path(), &spec, now).expect("returns a value");
-        let parsed: chrono::DateTime<chrono::Utc> =
-            chrono::DateTime::parse_from_rfc3339(&nf)
-                .unwrap()
-                .with_timezone(&chrono::Utc);
+        let parsed: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(&nf)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         // Recent fire was at :00:00, schedule `* * * * *` → next match
         // strictly after :00:00 is :01:00 — strictly future relative to now (:00:30).
         assert!(
@@ -982,4 +949,3 @@ mod compute_next_fire_tests {
         );
     }
 }
-

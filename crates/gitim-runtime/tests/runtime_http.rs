@@ -193,8 +193,14 @@ async fn preflight_hermes_query_param_passed_through() {
         serde_json::Value::String("hermes".into()),
         "body: {body}"
     );
-    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
-    assert!(body.get("available").is_some(), "available field missing: {body}");
+    assert!(
+        body.get("duration_ms").is_some(),
+        "duration_ms missing: {body}"
+    );
+    assert!(
+        body.get("available").is_some(),
+        "available field missing: {body}"
+    );
     // With PATH empty, hermes binary not found → not_installed.
     assert_eq!(
         body["error_kind"],
@@ -231,7 +237,10 @@ async fn preflight_other_provider_ignores_query_params() {
         serde_json::Value::String("claude".into()),
         "body: {body}"
     );
-    assert!(body.get("duration_ms").is_some(), "duration_ms missing: {body}");
+    assert!(
+        body.get("duration_ms").is_some(),
+        "duration_ms missing: {body}"
+    );
     // PATH is empty → claude not found → not_installed.
     assert_eq!(
         body["error_kind"],

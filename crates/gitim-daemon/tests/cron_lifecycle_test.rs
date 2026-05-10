@@ -115,7 +115,10 @@ fn git_log_subjects(root: &std::path::Path) -> String {
 }
 
 fn count_commits(root: &std::path::Path) -> usize {
-    git_log_subjects(root).lines().filter(|l| !l.is_empty()).count()
+    git_log_subjects(root)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count()
 }
 
 fn git_status_clean(root: &std::path::Path) -> String {
@@ -132,7 +135,10 @@ fn git_status_clean(root: &std::path::Path) -> String {
 #[tokio::test]
 async fn disable_then_enable_roundtrip() {
     let (_tmp, state) = setup_test_repo().await;
-    create_cron(state.clone(), "weekly").await.error.map(|e| panic!("{}", e));
+    create_cron(state.clone(), "weekly")
+        .await
+        .error
+        .map(|e| panic!("{}", e));
 
     // Created enabled.
     let spec = read_spec(&state, "weekly");
@@ -262,7 +268,10 @@ async fn delete_active() {
         "crons/weekly should not exist"
     );
     // Archive populated.
-    assert!(state.repo_root.join("archive/crons/weekly/spec.yaml").exists());
+    assert!(state
+        .repo_root
+        .join("archive/crons/weekly/spec.yaml")
+        .exists());
 
     // Commit + working tree clean.
     let log = git_log_subjects(&state.repo_root);
@@ -296,7 +305,15 @@ async fn delete_with_history() {
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed runs"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "seed runs",
+        ])
         .current_dir(&state.repo_root)
         .output()
         .unwrap();

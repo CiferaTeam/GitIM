@@ -179,11 +179,7 @@ async fn engine_fires_due_spec() {
     let n_threads = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with(".thread")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".thread"))
         .count();
     assert!(
         n_threads >= 1,

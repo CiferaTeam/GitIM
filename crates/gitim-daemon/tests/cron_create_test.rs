@@ -371,7 +371,8 @@ async fn create_self_target_resolves() {
     assert!(resp.ok, "create failed: {:?}", resp.error);
     assert_eq!(resp.data.as_ref().unwrap()["target"], "alice");
 
-    let body = std::fs::read_to_string(state.repo_root.join("crons/self-checkin/spec.yaml")).unwrap();
+    let body =
+        std::fs::read_to_string(state.repo_root.join("crons/self-checkin/spec.yaml")).unwrap();
     let spec: CronSpec = CronSpec::from_yaml(&body).unwrap();
     assert_eq!(spec.target.as_str(), "alice");
 }

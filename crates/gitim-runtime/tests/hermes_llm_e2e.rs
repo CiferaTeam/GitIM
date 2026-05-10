@@ -48,7 +48,9 @@ struct ProfileCleanupGuard {
 
 impl ProfileCleanupGuard {
     fn new(handler: impl Into<String>) -> Self {
-        Self { handler: handler.into() }
+        Self {
+            handler: handler.into(),
+        }
     }
 
     fn profile_dir(&self) -> Option<PathBuf> {
@@ -92,21 +94,38 @@ fn setup_local_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
     // Seed with an initial commit so bare repo has a HEAD.
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.email", "test@test.local"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@test.local",
+        ])
+        .output()
+        .ok();
     std::process::Command::new("git")
-        .args(["-C", human_dir.to_str().unwrap(), "config", "user.name", "Test"])
-        .output().ok();
+        .args([
+            "-C",
+            human_dir.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Test",
+        ])
+        .output()
+        .ok();
     fs::write(human_dir.join(".gitkeep"), "").unwrap();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "add", ".gitkeep"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "commit", "-m", "init"])
-        .output().ok();
+        .output()
+        .ok();
     std::process::Command::new("git")
         .args(["-C", human_dir.to_str().unwrap(), "push"])
-        .output().ok();
+        .output()
+        .ok();
 
     (ws_dir, ws_path, human_dir)
 }
@@ -205,7 +224,9 @@ async fn full_add_hermes_agent_with_minimax_cn() {
         Some(true),
         "response must have ok=true; got: {add_body}"
     );
-    let agent_id = add_body["id"].as_str().expect("response must have 'id' field");
+    let agent_id = add_body["id"]
+        .as_str()
+        .expect("response must have 'id' field");
     assert_eq!(agent_id, HANDLER, "id must match handler we sent");
 
     // ── 4. Assert hermes profile config.yaml has correct model fields ─────────
@@ -230,17 +251,20 @@ async fn full_add_hermes_agent_with_minimax_cn() {
 
     let yaml_str = fs::read_to_string(&config_yaml_path).expect("read config.yaml");
     // Parse via serde_json::Value as an untyped traversal — avoids a gitim-specific schema.
-    let yaml: serde_json::Value =
-        serde_yaml::from_str::<serde_json::Value>(&yaml_str)
-            .expect("config.yaml must be valid YAML");
+    let yaml: serde_json::Value = serde_yaml::from_str::<serde_json::Value>(&yaml_str)
+        .expect("config.yaml must be valid YAML");
 
     assert_eq!(
-        yaml.get("model").and_then(|m| m.get("provider")).and_then(|v| v.as_str()),
+        yaml.get("model")
+            .and_then(|m| m.get("provider"))
+            .and_then(|v| v.as_str()),
         Some(LLM_PROVIDER),
         "config.yaml model.provider must be '{LLM_PROVIDER}';\nconfig.yaml:\n{yaml_str}"
     );
     assert_eq!(
-        yaml.get("model").and_then(|m| m.get("default")).and_then(|v| v.as_str()),
+        yaml.get("model")
+            .and_then(|m| m.get("default"))
+            .and_then(|v| v.as_str()),
         Some(LLM_MODEL),
         "config.yaml model.default must be '{LLM_MODEL}';\nconfig.yaml:\n{yaml_str}"
     );
@@ -254,8 +278,7 @@ async fn full_add_hermes_agent_with_minimax_cn() {
     );
 
     let me_str = fs::read_to_string(&me_json_path).expect("read me.json");
-    let me: serde_json::Value =
-        serde_json::from_str(&me_str).expect("me.json must be valid JSON");
+    let me: serde_json::Value = serde_json::from_str(&me_str).expect("me.json must be valid JSON");
 
     assert_eq!(
         me["llm_provider"].as_str(),

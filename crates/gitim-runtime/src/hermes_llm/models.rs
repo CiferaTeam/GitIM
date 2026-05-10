@@ -91,10 +91,7 @@ pub async fn fetch_models(provider: &LlmProvider, hermes_home: &Path) -> ModelLi
     let base_url = match &provider.base_url {
         Some(u) => u.trim_end_matches('/').to_owned(),
         None => {
-            return ModelListResult::err(format!(
-                "missing base_url for provider {}",
-                provider.id
-            ));
+            return ModelListResult::err(format!("missing base_url for provider {}", provider.id));
         }
     };
 
@@ -287,7 +284,10 @@ fn resolve_api_key_from_config(provider: &LlmProvider, hermes_home: &Path) -> Op
     }
 
     let config: ConfigYaml = serde_yaml::from_str(&content).ok()?;
-    let entry = config.custom_providers.into_iter().find(|e| e.name == name)?;
+    let entry = config
+        .custom_providers
+        .into_iter()
+        .find(|e| e.name == name)?;
     let key = entry.api_key.filter(|k| !k.is_empty())?;
     Some(key)
 }

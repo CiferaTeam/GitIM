@@ -384,15 +384,14 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let spec_target: String =
-                match serde_yaml::from_str::<serde_yaml::Value>(&spec_str) {
-                    Ok(v) => v
-                        .get("target")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    Err(_) => continue,
-                };
+            let spec_target: String = match serde_yaml::from_str::<serde_yaml::Value>(&spec_str) {
+                Ok(v) => v
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Err(_) => continue,
+            };
             if spec_target.is_empty() {
                 continue;
             }
