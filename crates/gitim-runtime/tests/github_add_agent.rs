@@ -296,7 +296,10 @@ async fn add_agent_rejects_departed_handler_local_mode() {
     )
     .await;
 
-    assert_eq!(resp["ok"], false, "should reject departed handler: {resp:?}");
+    assert_eq!(
+        resp["ok"], false,
+        "should reject departed handler: {resp:?}"
+    );
     assert_eq!(resp["error_code"], "handler_reserved");
     let err_msg = resp["error"].as_str().unwrap_or_default();
     assert!(

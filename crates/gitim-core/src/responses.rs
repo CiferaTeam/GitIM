@@ -514,7 +514,10 @@ mod tests {
         assert_eq!(obj.get("line_number").and_then(|v| v.as_u64()), Some(42));
         assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("general"));
         assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("pushed"));
-        assert_eq!(obj.get("commit_id").and_then(|v| v.as_str()), Some("abc123"));
+        assert_eq!(
+            obj.get("commit_id").and_then(|v| v.as_str()),
+            Some("abc123")
+        );
     }
 
     #[test]
@@ -529,7 +532,10 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 4, "commit_only with error omits `commit_id`");
-        assert_eq!(obj.get("error").and_then(|v| v.as_str()), Some("auth failed"));
+        assert_eq!(
+            obj.get("error").and_then(|v| v.as_str()),
+            Some("auth failed")
+        );
         assert!(!obj.contains_key("commit_id"));
     }
 
@@ -544,7 +550,11 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 3, "no-remote path omits both commit_id and error");
+        assert_eq!(
+            obj.len(),
+            3,
+            "no-remote path omits both commit_id and error"
+        );
     }
 
     #[test]
@@ -1004,7 +1014,10 @@ mod tests {
             Some("showboards/alice/board.md")
         );
         assert_eq!(
-            first.get("tags").and_then(|v| v.as_array()).map(|a| a.len()),
+            first
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
             Some(1),
         );
     }
@@ -1049,7 +1062,10 @@ mod tests {
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 4);
         assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("pushed"));
-        assert_eq!(obj.get("commit_id").and_then(|v| v.as_str()), Some("abc123"));
+        assert_eq!(
+            obj.get("commit_id").and_then(|v| v.as_str()),
+            Some("abc123")
+        );
     }
 
     #[test]

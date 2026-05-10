@@ -204,17 +204,12 @@ async fn test_archive_user_round_trip() {
 
     // Commit recorded.
     let log = git_log_subjects(&state.repo_root);
-    assert!(
-        log.contains("archive: depart user @alice"),
-        "log: {}",
-        log
-    );
+    assert!(log.contains("archive: depart user @alice"), "log: {}", log);
 
     // list_users excludes alice; list_archived_users includes alice.
     let lu = list_users(state.clone()).await;
     assert!(lu.ok);
-    let lu_users: Vec<String> =
-        serde_json::from_value(lu.data.unwrap()["users"].clone()).unwrap();
+    let lu_users: Vec<String> = serde_json::from_value(lu.data.unwrap()["users"].clone()).unwrap();
     assert!(!lu_users.contains(&"alice".to_string()));
     assert!(lu_users.contains(&"bob".to_string()));
 
@@ -271,8 +266,7 @@ async fn test_archive_user_round_trip() {
 
     // After restore, list_users sees alice again.
     let lu = list_users(state.clone()).await;
-    let lu_users: Vec<String> =
-        serde_json::from_value(lu.data.unwrap()["users"].clone()).unwrap();
+    let lu_users: Vec<String> = serde_json::from_value(lu.data.unwrap()["users"].clone()).unwrap();
     assert!(lu_users.contains(&"alice".to_string()));
 
     let la = list_archived_users(state.clone()).await;
@@ -531,9 +525,7 @@ async fn test_send_by_departed_user_fails() {
     // sanity check via register_user: bob is active and his send-equivalent
     // (register a new user) should still work later. Here we just confirm
     // bob's archive guard does NOT fire (negative side of the contract).
-    let archive_bob_path = state
-        .repo_root
-        .join("archive/users/bob.meta.yaml");
+    let archive_bob_path = state.repo_root.join("archive/users/bob.meta.yaml");
     assert!(!archive_bob_path.exists(), "bob should not be archived");
 }
 
@@ -765,10 +757,7 @@ async fn test_unarchive_user_works_after_departure() {
     // Archive bob (alice authoring), so bob is the departed party.
     let resp = archive_user(state.clone(), "bob", "alice").await;
     assert!(resp.ok, "archive bob failed: {:?}", resp.error);
-    assert!(state
-        .repo_root
-        .join("archive/users/bob.meta.yaml")
-        .exists());
+    assert!(state.repo_root.join("archive/users/bob.meta.yaml").exists());
 
     // alice (active) unarchives bob — the contract: unarchive does NOT gate
     // on departed *target*, and alice is not departed herself, so this must
@@ -784,10 +773,7 @@ async fn test_unarchive_user_works_after_departure() {
         "bob should be back in active dir"
     );
     assert!(
-        !state
-            .repo_root
-            .join("archive/users/bob.meta.yaml")
-            .exists(),
+        !state.repo_root.join("archive/users/bob.meta.yaml").exists(),
         "archive entry should be gone"
     );
 }
@@ -851,8 +837,7 @@ async fn test_list_users_include_archived_returns_both() {
         "active list should not contain archived bob"
     );
 
-    let archived: Vec<String> =
-        serde_json::from_value(data["archived_users"].clone()).unwrap();
+    let archived: Vec<String> = serde_json::from_value(data["archived_users"].clone()).unwrap();
     assert_eq!(
         archived,
         vec!["bob".to_string()],

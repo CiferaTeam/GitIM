@@ -464,7 +464,9 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                 .and_then(|m| m.get("stopReason"))
                 .and_then(|r| r.as_str())
                 .map(|s| s.to_string());
-            let usage = message.and_then(|m| m.get("usage")).and_then(parse_pi_usage);
+            let usage = message
+                .and_then(|m| m.get("usage"))
+                .and_then(parse_pi_usage);
             Some(PiEvent::TurnEnd { stop_reason, usage })
         }
 

@@ -504,16 +504,10 @@ impl GitimClient {
     fn read_own_handler(&self) -> Result<String, ClientError> {
         let me_path = self.repo_root.join(".gitim/me.json");
         let contents = std::fs::read_to_string(&me_path).map_err(|e| {
-            ClientError::ProtocolError(format!(
-                "failed to read {}: {e}",
-                me_path.display()
-            ))
+            ClientError::ProtocolError(format!("failed to read {}: {e}", me_path.display()))
         })?;
         let me: MeJson = serde_json::from_str(&contents).map_err(|e| {
-            ClientError::ProtocolError(format!(
-                "failed to parse {}: {e}",
-                me_path.display()
-            ))
+            ClientError::ProtocolError(format!("failed to parse {}: {e}", me_path.display()))
         })?;
         me.handler.ok_or_else(|| {
             ClientError::ProtocolError(format!(
@@ -687,16 +681,10 @@ mod tests {
         use crate::types::build_request;
 
         let archive = build_request("archive_dm", json!({"peer": "bob"}));
-        assert_eq!(
-            archive,
-            json!({"method": "archive_dm", "peer": "bob"}),
-        );
+        assert_eq!(archive, json!({"method": "archive_dm", "peer": "bob"}),);
 
         let unarchive = build_request("unarchive_dm", json!({"peer": "bob"}));
-        assert_eq!(
-            unarchive,
-            json!({"method": "unarchive_dm", "peer": "bob"}),
-        );
+        assert_eq!(unarchive, json!({"method": "unarchive_dm", "peer": "bob"}),);
 
         let list_dms = build_request("list_archived_dms", json!({}));
         assert_eq!(list_dms, json!({"method": "list_archived_dms"}));

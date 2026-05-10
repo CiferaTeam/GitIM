@@ -40,9 +40,7 @@ fn github_email_from_user_json(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-pub fn github_identity_from_user_json(
-    body: &str,
-) -> Result<InferredIdentity, IdentityParseError> {
+pub fn github_identity_from_user_json(body: &str) -> Result<InferredIdentity, IdentityParseError> {
     let v: serde_json::Value =
         serde_json::from_str(body).map_err(|e| IdentityParseError::ParseError(e.to_string()))?;
 

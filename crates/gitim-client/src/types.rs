@@ -32,9 +32,10 @@ impl ApiResponse {
     /// first if they need a clearer message) or when the JSON shape doesn't
     /// match `T`.
     pub fn parse_data<T: DeserializeOwned>(&self) -> Result<T, ClientError> {
-        let data = self.data.as_ref().ok_or_else(|| {
-            ClientError::ProtocolError("response is missing `data`".to_string())
-        })?;
+        let data = self
+            .data
+            .as_ref()
+            .ok_or_else(|| ClientError::ProtocolError("response is missing `data`".to_string()))?;
         serde_json::from_value(data.clone())
             .map_err(|e| ClientError::ProtocolError(format!("data shape mismatch: {e}")))
     }

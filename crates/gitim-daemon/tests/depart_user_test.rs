@@ -747,8 +747,8 @@ async fn test_depart_user_concurrent_with_send() {
     );
 
     let post_dev = read_thread(&state.repo_root, "channels/dev.thread");
-    let post_parsed = gitim_core::parser::parse_thread(&post_dev)
-        .expect("post-burn dev.thread must still parse");
+    let post_parsed =
+        gitim_core::parser::parse_thread(&post_dev).expect("post-burn dev.thread must still parse");
     let post_line_numbers: Vec<u64> = post_parsed
         .entries
         .iter()
@@ -805,7 +805,8 @@ async fn test_unarchive_user_preserves_leave_events() {
     // Capture #dev.thread snapshot — it should contain alice's leave-workspace event.
     let pre_unarchive_thread = read_thread(&state.repo_root, "channels/dev.thread");
     assert!(
-        pre_unarchive_thread.contains("@alice") && pre_unarchive_thread.contains("[E:leave-workspace]"),
+        pre_unarchive_thread.contains("@alice")
+            && pre_unarchive_thread.contains("[E:leave-workspace]"),
         "pre-condition: dev.thread should have alice's leave-workspace event:\n{}",
         pre_unarchive_thread
     );
@@ -815,7 +816,10 @@ async fn test_unarchive_user_preserves_leave_events() {
         .collect();
 
     // Pre-condition: alice in archive, not active.
-    assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
+    assert!(state
+        .repo_root
+        .join("archive/users/alice.meta.yaml")
+        .exists());
     assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
 
     // Action: bob (still active) unarchives alice. Restoration always reachable
@@ -835,7 +839,10 @@ async fn test_unarchive_user_preserves_leave_events() {
         "alice should be back in users/ after unarchive"
     );
     assert!(
-        !state.repo_root.join("archive/users/alice.meta.yaml").exists(),
+        !state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists(),
         "archive entry should be gone after unarchive"
     );
 
@@ -871,16 +878,27 @@ async fn test_unarchive_user_preserves_leave_events() {
     // because the line numbers are file-positional. Send to a fresh
     // channel where she isn't blocked by the prior membership cleanup.
     let resp = create_channel(state.clone(), "ops", "alice", &["bob"]).await;
-    assert!(resp.ok, "alice creating fresh #ops post-unarchive failed: {:?}", resp.error);
+    assert!(
+        resp.ok,
+        "alice creating fresh #ops post-unarchive failed: {:?}",
+        resp.error
+    );
     let resp = send_message(state.clone(), "ops", "alice is back", "alice").await;
-    assert!(resp.ok, "alice's post-unarchive send failed: {:?}", resp.error);
+    assert!(
+        resp.ok,
+        "alice's post-unarchive send failed: {:?}",
+        resp.error
+    );
 
     // Sanity: dev.thread STILL hasn't changed despite alice's new activity
     // elsewhere. Cross-channel writes don't disturb the audit row.
     let final_dev_thread = read_thread(&state.repo_root, "channels/dev.thread");
     assert_eq!(
         pre_unarchive_lines,
-        final_dev_thread.lines().map(|s| s.to_string()).collect::<Vec<_>>(),
+        final_dev_thread
+            .lines()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "dev.thread must remain stable across alice's later activity"
     );
 }
@@ -1013,7 +1031,10 @@ async fn test_depart_terminal_state_pushes_pending_commits_to_origin() {
     // 2) Normal depart — all phases land locally and on origin.
     let resp = depart_user(state.clone(), "alice").await;
     assert!(resp.ok, "first depart failed: {:?}", resp.error);
-    assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
+    assert!(state
+        .repo_root
+        .join("archive/users/alice.meta.yaml")
+        .exists());
 
     // Pre-condition for the regression: origin has the archive/ entry now.
     let bare_default_branch = {

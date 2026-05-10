@@ -173,21 +173,14 @@ async fn test_poll_returns_self_departed_after_depart_user() {
         .depart_user("poll-agent")
         .await
         .expect("depart_user request");
-    assert!(
-        depart.ok,
-        "depart_user must succeed: {:?}",
-        depart.error
-    );
+    assert!(depart.ok, "depart_user must succeed: {:?}", depart.error);
 
     // Now poll: the daemon's self-departure gate trips, error_code is
     // "self_departed", and the poller maps it to the typed variant.
     let result = poller.poll().await;
     match result {
         Err(RuntimeError::SelfDeparted) => {}
-        other => panic!(
-            "expected RuntimeError::SelfDeparted, got: {:?}",
-            other
-        ),
+        other => panic!("expected RuntimeError::SelfDeparted, got: {:?}", other),
     }
 
     stop_daemon(&repo_root).await;

@@ -36,10 +36,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             .join("archive/users")
             .join(format!("{}.meta.yaml", handler));
         if archive_path.exists() {
-            return Response::error_with_code(
-                "agent self-departed via burn-self",
-                "self_departed",
-            );
+            return Response::error_with_code("agent self-departed via burn-self", "self_departed");
         }
     }
 

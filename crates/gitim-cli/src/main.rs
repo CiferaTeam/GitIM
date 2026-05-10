@@ -549,18 +549,12 @@ async fn main() {
         Commands::ArchivedChannels => {
             commands::channels::cmd_archived_channels(&client, &mode).await
         }
-        Commands::ArchiveDm { peer } => {
-            commands::dm::cmd_archive_dm(&client, &mode, &peer).await
-        }
+        Commands::ArchiveDm { peer } => commands::dm::cmd_archive_dm(&client, &mode, &peer).await,
         Commands::UnarchiveDm { peer } => {
             commands::dm::cmd_unarchive_dm(&client, &mode, &peer).await
         }
-        Commands::ListArchivedDms => {
-            commands::dm::cmd_list_archived_dms(&client, &mode).await
-        }
-        Commands::ListArchivedUsers => {
-            commands::dm::cmd_list_archived_users(&client, &mode).await
-        }
+        Commands::ListArchivedDms => commands::dm::cmd_list_archived_dms(&client, &mode).await,
+        Commands::ListArchivedUsers => commands::dm::cmd_list_archived_users(&client, &mode).await,
         Commands::BurnSelf => commands::burn::cmd_burn_self(&client, &mode).await,
         Commands::Users => commands::admin::cmd_users(&client, &mode).await,
         Commands::Search {

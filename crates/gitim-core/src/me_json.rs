@@ -271,7 +271,10 @@ mod tests {
 
         let v: serde_json::Value = serde_json::to_value(&me).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("daemon_version").and_then(|v| v.as_str()), Some("9.9.9"));
+        assert_eq!(
+            obj.get("daemon_version").and_then(|v| v.as_str()),
+            Some("9.9.9")
+        );
         assert_eq!(
             obj.get("note").and_then(|v| v.as_str()),
             Some("remember to rotate the key in june"),
@@ -286,14 +289,21 @@ mod tests {
             r#"{"handler":"alice","old_field":"keep","shared":"old"}"#,
         )
         .unwrap();
-        let patch = serde_json::from_str::<MeJson>(
-            r#"{"new_field":"new","shared":"new"}"#,
-        )
-        .unwrap();
+        let patch =
+            serde_json::from_str::<MeJson>(r#"{"new_field":"new","shared":"new"}"#).unwrap();
         let merged = base.merged_with(patch);
-        assert_eq!(merged.extra.get("old_field").and_then(|v| v.as_str()), Some("keep"));
-        assert_eq!(merged.extra.get("new_field").and_then(|v| v.as_str()), Some("new"));
-        assert_eq!(merged.extra.get("shared").and_then(|v| v.as_str()), Some("new"));
+        assert_eq!(
+            merged.extra.get("old_field").and_then(|v| v.as_str()),
+            Some("keep")
+        );
+        assert_eq!(
+            merged.extra.get("new_field").and_then(|v| v.as_str()),
+            Some("new")
+        );
+        assert_eq!(
+            merged.extra.get("shared").and_then(|v| v.as_str()),
+            Some("new")
+        );
     }
 
     #[test]

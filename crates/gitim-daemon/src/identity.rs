@@ -1,7 +1,7 @@
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::identity::{
-    gitea_identity_from_user_json, github_identity_from_user_json,
-    gitlab_identity_from_user_json, IdentityParseError,
+    gitea_identity_from_user_json, github_identity_from_user_json, gitlab_identity_from_user_json,
+    IdentityParseError,
 };
 use gitim_core::types::handler::HandlerError;
 use gitim_core::types::Handler;

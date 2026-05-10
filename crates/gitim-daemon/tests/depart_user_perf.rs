@@ -87,8 +87,8 @@ async fn build_synthetic_workspace() -> (TempDir, Arc<AppState>) {
     std::fs::create_dir_all(&channels_dir).unwrap();
     for i in 0..NUM_THREADS {
         let ch_name = format!("ch_{:04}", i);
-        let alice_speaks = (i as f64) < (NUM_THREADS as f64 * ALICE_PARTICIPATION) * 2.0
-            && i % 2 == 0;
+        let alice_speaks =
+            (i as f64) < (NUM_THREADS as f64 * ALICE_PARTICIPATION) * 2.0 && i % 2 == 0;
         let alice_msg_count = if alice_speaks { 1 + (i % 3) } else { 0 };
 
         let mut thread_content = String::new();
@@ -107,8 +107,11 @@ async fn build_synthetic_workspace() -> (TempDir, Arc<AppState>) {
             line += 1;
         }
 
-        std::fs::write(channels_dir.join(format!("{}.thread", ch_name)), thread_content)
-            .unwrap();
+        std::fs::write(
+            channels_dir.join(format!("{}.thread", ch_name)),
+            thread_content,
+        )
+        .unwrap();
 
         // Channel meta — alice is a member of the first NUM_MEMBER_CHANNELS
         // channels so Phase 3 has work to do.
@@ -214,27 +217,12 @@ async fn depart_user_baseline_1k_threads() {
             "[verdict] ABOVE BASELINE — measured {:?} > {}ms target.",
             elapsed, BASELINE_MS
         );
-        eprintln!(
-            "[verdict] Per A.9: non-blocking for v1 merge. Open follow-up:"
-        );
-        eprintln!(
-            "[verdict]   docs/plans/<date>-archive-perf-optimization/"
-        );
-        eprintln!(
-            "[verdict] Likely cause: Phase 1 parses every thread file to"
-        );
-        eprintln!(
-            "[verdict] check authorship; cost dominated by git subprocess"
-        );
-        eprintln!(
-            "[verdict] fork per commit (~10ms × {} commits).",
-            commits
-        );
-        eprintln!(
-            "[verdict] Candidate optimization: gitim-index author reverse-"
-        );
-        eprintln!(
-            "[verdict] lookup so Phase 1 only opens threads alice authored."
-        );
+        eprintln!("[verdict] Per A.9: non-blocking for v1 merge. Open follow-up:");
+        eprintln!("[verdict]   docs/plans/<date>-archive-perf-optimization/");
+        eprintln!("[verdict] Likely cause: Phase 1 parses every thread file to");
+        eprintln!("[verdict] check authorship; cost dominated by git subprocess");
+        eprintln!("[verdict] fork per commit (~10ms × {} commits).", commits);
+        eprintln!("[verdict] Candidate optimization: gitim-index author reverse-");
+        eprintln!("[verdict] lookup so Phase 1 only opens threads alice authored.");
     }
 }
