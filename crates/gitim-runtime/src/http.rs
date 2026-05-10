@@ -1518,6 +1518,337 @@ async fn crons_run_body(
     }
 }
 
+// -- /workspaces/{slug}/crons/timeline --
+//
+// Merged past/future/missed view across every active spec in the workspace,
+// computed on the runtime side. The daemon only owns spec metadata; the
+// timeline algorithm needs (a) the schedule + timezone + created_at from
+// `list_crons`, and (b) the actual `<ts>.thread` filenames glob'd straight
+// off disk in the human clone. No new daemon IPC was needed.
+//
+// Future-fire iteration is bounded per cron to prevent a runaway schedule
+// (e.g. `* * * * *` over a month = 43 200 entries) from DoSing the endpoint:
+// the cap is `MAX_TIMELINE_ENTRIES_PER_CRON`. When any single cron hits the
+// cap, the response carries `truncated: true` so the WebUI can surface a
+// hint without denying the rest of the data.
+
+/// Per-cron iteration ceiling for `next_fire_after` walks. Picked as a
+/// reasonable upper bound for a typical month view: even `* * * * *` over
+/// 30 days only emits 43 200 entries, so 10 000 is enough for ~7 days of
+/// minute-level granularity or a full month of hourly-or-coarser. A spec
+/// that exceeds this in the requested window is almost always a misconfig
+/// (or a deliberate DoS attempt) — partial response with a truncated flag
+/// is the safer default than unbounded iteration.
+const MAX_TIMELINE_ENTRIES_PER_CRON: usize = 10_000;
+
+#[derive(Deserialize)]
+struct TimelineQuery {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TimelineEntry {
+    /// RFC 3339 UTC with seconds + trailing `Z`, matching `next_fire` on
+    /// `CronSummary` and `CronDetail` (both call `to_rfc3339_opts` with
+    /// `SecondsFormat::Secs`).
+    ts: String,
+    /// `"past"` | `"future"` | `"missed"` — kept as string so the wire
+    /// stays language-agnostic and the frontend can switch on it.
+    kind: &'static str,
+    cron_name: String,
+    /// Populated for `kind == "past"` so the calendar UI can deep-link
+    /// directly to the run body endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_url: Option<String>,
+    /// Populated for `kind == "missed"` with a short human reason. The
+    /// WebUI shows this in tooltip / detail panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TimelineResponse {
+    entries: Vec<TimelineEntry>,
+    /// `true` when at least one cron's iteration hit
+    /// `MAX_TIMELINE_ENTRIES_PER_CRON` and the rest of its theoretical
+    /// fires were dropped. Absent (skipped on the wire) on the typical
+    /// healthy path.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    truncated: bool,
+}
+
+/// Default window when neither `from` nor `to` is given: the calendar's
+/// current month in UTC. Picked over "rolling 30d" because the WebUI is
+/// month-grid-driven; matching the natural frontend default keeps the
+/// boundary behavior intuitive.
+fn default_window_now(now: chrono::DateTime<chrono::Utc>) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    use chrono::{Datelike, NaiveDate, TimeZone};
+    let year = now.year();
+    let month = now.month();
+    // First day of current month, 00:00:00 UTC.
+    let from_date = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");
+    let from = chrono::Utc
+        .from_utc_datetime(&from_date.and_hms_opt(0, 0, 0).expect("00:00:00 always valid"));
+    // First day of NEXT month, then minus one second → end of current month.
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next_date = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid next month");
+    let next_start = chrono::Utc
+        .from_utc_datetime(&next_date.and_hms_opt(0, 0, 0).expect("00:00:00 always valid"));
+    let to = next_start - chrono::Duration::seconds(1);
+    (from, to)
+}
+
+/// Format a UTC instant as `YYYY-MM-DDTHH-MM-SSZ` — the filesystem-safe
+/// stem used for `<ts>.thread` filenames AND the URL-safe `<ts>` segment
+/// in the runs endpoints. Single source of truth so the two consumers
+/// can't drift.
+fn ts_to_filename_stem(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let canonical = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    canonical.replace(':', "-")
+}
+
+/// Inverse of `ts_to_filename_stem`. Returns `None` for shapes that don't
+/// match `YYYY-MM-DDTHH-MM-SSZ` (the validator already gates the URL
+/// path; this is for internal use against on-disk filenames).
+fn filename_stem_to_ts(stem: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if !cron_ts_is_valid(stem) {
+        return None;
+    }
+    // Restore colons so chrono's RFC 3339 parser can read it.
+    let restored: String = stem
+        .char_indices()
+        .map(|(i, c)| {
+            // Positions 13 and 16 are the time-component separators.
+            if (i == 13 || i == 16) && c == '-' {
+                ':'
+            } else {
+                c
+            }
+        })
+        .collect();
+    chrono::DateTime::parse_from_rfc3339(&restored)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Build a synthetic `CronSpec` from a `CronSummary` good enough for
+/// `next_fire_after` to operate on. Synthetic fields (`prompt`,
+/// `created_by`, `version`) get placeholder values that the cron-spec
+/// validator never sees because we skip validate() here — we trust the
+/// daemon's own validation that ran on create. Avoids round-tripping
+/// through `show_cron` once per spec just to call `next_fire_after`.
+fn synthesize_spec_for_iteration(
+    summary: &gitim_core::responses::CronSummary,
+) -> Result<gitim_core::types::cron::CronSpec, String> {
+    use gitim_core::types::cron::CronSpec;
+    use gitim_core::types::handler::Handler;
+    use std::collections::BTreeMap;
+
+    let target = Handler::new(&summary.target).map_err(|e| format!("invalid target: {e}"))?;
+    let created_by = Handler::new(&summary.created_by)
+        .map_err(|e| format!("invalid created_by: {e}"))?;
+    Ok(CronSpec {
+        version: 1,
+        schedule: summary.schedule.clone(),
+        timezone: summary.timezone.clone(),
+        target,
+        prompt: "_".to_string(),
+        enabled: summary.enabled,
+        created_by,
+        created_at: summary.created_at.clone(),
+        extra: BTreeMap::new(),
+    })
+}
+
+async fn crons_timeline(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(q): axum::extract::Query<TimelineQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use chrono::{DateTime, Utc};
+    use gitim_core::types::cron::next_fire_after;
+
+    let now = Utc::now();
+    let (default_from, default_to) = default_window_now(now);
+    let from = match q.from.as_deref() {
+        None => default_from,
+        Some(s) => match DateTime::parse_from_rfc3339(s) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(ErrorBody::with_code(
+                        format!("invalid from timestamp '{s}': {e}"),
+                        "invalid_timestamp",
+                    )),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let to = match q.to.as_deref() {
+        None => default_to,
+        Some(s) => match DateTime::parse_from_rfc3339(s) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(ErrorBody::with_code(
+                        format!("invalid to timestamp '{s}': {e}"),
+                        "invalid_timestamp",
+                    )),
+                )
+                    .into_response()
+            }
+        },
+    };
+    if from > to {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                "from must be <= to",
+                "invalid_window",
+            )),
+        )
+            .into_response();
+    }
+
+    let human_repo = match with_workspace_snapshot(&state, &slug, human_repo_path) {
+        Ok(Some(p)) => p,
+        Ok(None) => return human_not_initialized(),
+        Err(r) => return r,
+    };
+
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let summaries = match client.list_crons().await {
+        Ok(s) => s,
+        Err(e) => return cron_client_error_to_response(e),
+    };
+
+    let mut entries: Vec<TimelineEntry> = Vec::new();
+    let mut any_truncated = false;
+
+    for summary in &summaries {
+        if !summary.enabled {
+            // Disabled specs don't fire — we skip future / missed but still
+            // surface their past runs so historical context isn't lost on
+            // disable. (Matches the daemon's list_thread_runs semantics:
+            // run files persist after disable.)
+        }
+
+        // -- Past entries: glob the on-disk thread files --
+        let cron_dir = human_repo.join("crons").join(&summary.name);
+        let mut past_ts_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Ok(rd) = std::fs::read_dir(&cron_dir) {
+            for entry in rd.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                let stem = match fname.strip_suffix(".thread") {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let ts_dt = match filename_stem_to_ts(&stem) {
+                    Some(dt) => dt,
+                    None => continue,
+                };
+                if ts_dt < from || ts_dt > to {
+                    continue;
+                }
+                past_ts_set.insert(stem.clone());
+                let canonical = ts_dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                entries.push(TimelineEntry {
+                    ts: canonical,
+                    kind: "past",
+                    cron_name: summary.name.clone(),
+                    thread_url: Some(format!(
+                        "/workspaces/{}/crons/{}/runs/{}",
+                        slug, summary.name, stem
+                    )),
+                    reason: None,
+                });
+            }
+        }
+
+        // -- Future / missed: iterate next_fire_after for active specs --
+        if !summary.enabled {
+            continue;
+        }
+        let spec = match synthesize_spec_for_iteration(summary) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let created_at_dt = match DateTime::parse_from_rfc3339(&spec.created_at) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_) => continue,
+        };
+        // Strictly-after semantics: anchor = max(created_at, from) - 1s gives
+        // results >= max(created_at, from). The 1s slack matters at boundary
+        // cases where a fire lands exactly on `from`.
+        let mut anchor = created_at_dt.max(from) - chrono::Duration::seconds(1);
+        let mut iters = 0usize;
+        loop {
+            if iters >= MAX_TIMELINE_ENTRIES_PER_CRON {
+                any_truncated = true;
+                break;
+            }
+            let next = match next_fire_after(&spec, anchor) {
+                Ok(dt) => dt,
+                Err(_) => break,
+            };
+            if next > to {
+                break;
+            }
+            iters += 1;
+            anchor = next;
+
+            let stem = ts_to_filename_stem(next);
+            if past_ts_set.contains(&stem) {
+                // Theoretical fire that already happened — already emitted
+                // as `past` from the disk glob above.
+                continue;
+            }
+            let canonical = next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            if next > now {
+                entries.push(TimelineEntry {
+                    ts: canonical,
+                    kind: "future",
+                    cron_name: summary.name.clone(),
+                    thread_url: None,
+                    reason: None,
+                });
+            } else {
+                entries.push(TimelineEntry {
+                    ts: canonical,
+                    kind: "missed",
+                    cron_name: summary.name.clone(),
+                    thread_url: None,
+                    reason: Some("no thread file present".to_string()),
+                });
+            }
+        }
+    }
+
+    // Stable sort by `ts` ascending. `ts` strings are RFC 3339 UTC with
+    // fixed-width fields, so lexicographic sort == chronological.
+    entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+    Json(TimelineResponse {
+        entries,
+        truncated: any_truncated,
+    })
+    .into_response()
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -4370,12 +4701,12 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
         .route("/users/archived", get(users_list_archived))
         .route("/users/{handler}/unarchive", post(users_unarchive))
-        // Cron read endpoints — list / detail / run history / single-run body.
-        // Concrete prefix-segments must come before the dynamic
-        // `/crons/{name}` route so axum doesn't try to match e.g. `timeline`
-        // as a name segment (timeline lives in Task 4.2; reserve the path
-        // here to keep the ordering invariant explicit).
+        // Cron read endpoints — list / timeline / detail / run history /
+        // single-run body. The fixed-prefix `timeline` route MUST come
+        // before `/crons/{name}` so axum doesn't try to match the literal
+        // word as a cron name (which would 404 for any populated workspace).
         .route("/crons", get(crons_list))
+        .route("/crons/timeline", get(crons_timeline))
         .route("/crons/{name}", get(crons_show))
         .route("/crons/{name}/runs", get(crons_runs_list))
         .route("/crons/{name}/runs/{ts}", get(crons_run_body))
