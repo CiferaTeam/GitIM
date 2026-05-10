@@ -37,6 +37,10 @@ export interface Agent {
   messagesProcessed: number;
   errorMessage?: string;
   sessionUsage?: SessionUsageSnapshot;
+  /** Hermes-only: the selected LLM provider id (e.g. "deepseek", "custom:myendpoint"). */
+  llmProvider?: string;
+  /** Hermes-only: the selected LLM model id (e.g. "deepseek-chat", or a custom model string). */
+  llmModel?: string;
 }
 
 /** Hard ceiling for the introduction blurb. Must stay in sync with

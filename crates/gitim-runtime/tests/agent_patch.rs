@@ -118,6 +118,8 @@ fn seed_agent_in_workspace(
         env,
         error_message: None,
         session_usage: None,
+        llm_provider: None,
+        llm_model: None,
         loop_handle: None,
     };
 

@@ -230,7 +230,9 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 export async function addAgent(
   name: string,
   provider: ProviderId,
-  systemPrompt: string
+  systemPrompt: string,
+  _llmProvider?: string,
+  _llmModel?: string,
 ): Promise<ApiResponse> {
   await delay();
   const id = name.toLowerCase().replace(/\s+/g, "-");

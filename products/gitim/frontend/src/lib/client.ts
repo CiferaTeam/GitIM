@@ -20,6 +20,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import type { PreflightResult, ProviderId } from "./providers";
+import type { HermesLlmProvider, HermesLlmModelList } from "./hermes-llm";
 import type {
   Backend,
   BoardBackend,
@@ -1003,18 +1004,56 @@ export async function listArchivedDms(
 
 export async function preflightProvider(
   provider: ProviderId,
+  opts?: { llmProvider?: string; llmModel?: string },
 ): Promise<ApiResponse<PreflightResult>> {
   if (isLocalMode()) {
     void provider;
     return { ok: false, error: "provider preflight is unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${baseUrl()}/preflight/${provider}`);
+    const params = new URLSearchParams();
+    if (opts?.llmProvider) params.set("llm_provider", opts.llmProvider);
+    if (opts?.llmModel) params.set("llm_model", opts.llmModel);
+    const qs = params.size > 0 ? `?${params.toString()}` : "";
+    const res = await fetch(`${baseUrl()}/preflight/${provider}${qs}`);
     const data = await res.json();
     if (res.ok) {
       return { ok: true, data };
     }
     return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listHermesLlmProviders(): Promise<ApiResponse<{ providers: HermesLlmProvider[] }>> {
+  if (isLocalMode()) {
+    return { ok: true, data: { providers: [] } };
+  }
+  try {
+    const res = await fetch(`${baseUrl()}/hermes/llm/providers`);
+    const data = await res.json();
+    if (res.ok) {
+      return { ok: true, data };
+    }
+    return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listHermesLlmModels(providerId: string): Promise<ApiResponse<HermesLlmModelList>> {
+  if (isLocalMode()) {
+    return {
+      ok: true,
+      data: { models: [], custom_allowed: true, error: null, fetched_at_ms: Date.now() },
+    };
+  }
+  try {
+    const res = await fetch(`${baseUrl()}/hermes/llm/providers/${encodeURIComponent(providerId)}/models`);
+    const data = await res.json();
+    // Backend always returns 200 for this endpoint; error field carries failure info
+    return { ok: true, data };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -1048,6 +1087,8 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     lastActivity: raw.last_activity as string | undefined,
     errorMessage: (raw.error_message as string) ?? undefined,
     sessionUsage,
+    llmProvider: (raw.llm_provider as string) ?? undefined,
+    llmModel: (raw.llm_model as string) ?? undefined,
   };
 }
 
@@ -1094,6 +1135,8 @@ export async function addAgent(
   env?: Record<string, string>,
   introduction?: string,
   joinGeneral: boolean = true,
+  llmProvider?: string,
+  llmModel?: string,
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
@@ -1104,6 +1147,8 @@ export async function addAgent(
     void env;
     void introduction;
     void joinGeneral;
+    void llmProvider;
+    void llmModel;
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
@@ -1120,6 +1165,8 @@ export async function addAgent(
         introduction: introduction && introduction.length > 0 ? introduction : undefined,
         env: env && Object.keys(env).length > 0 ? env : undefined,
         join_general: joinGeneral,
+        llm_provider: llmProvider || undefined,
+        llm_model: llmModel || undefined,
       }),
     });
     const data = await res.json();
@@ -1141,6 +1188,8 @@ export async function addAgent(
       env,
       repoPath: "",
       messagesProcessed: 0,
+      llmProvider,
+      llmModel,
     };
     return { ok: true, data: { agent } };
   } catch {

@@ -696,6 +696,8 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             env: Default::default(),
             error_message: None,
             session_usage: None,
+            llm_provider: None,
+            llm_model: None,
             loop_handle: None,
         };
         agent_info.loop_handle = Some(abort_handle);

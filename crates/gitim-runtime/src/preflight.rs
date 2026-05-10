@@ -840,16 +840,41 @@ pub async fn preflight_pi() -> PreflightResult {
 
 /// Preflight for the Hermes ACP provider.
 ///
-/// Spawns `hermes acp` and performs the ACP initialize handshake. A valid
-/// response containing `authMethods` is treated as "available". This proves
-/// both CLI existence and ACP server responsiveness without sending a full
-/// prompt (avoiding token spend during preflight).
+/// Two modes depending on `llm_provider` / `llm_model`:
+///
+/// **ACP mode** (both are `None`): Spawns `hermes acp` and performs the ACP
+/// initialize handshake. A valid response containing `authMethods` is treated
+/// as "available". This proves both CLI existence and ACP server responsiveness
+/// without sending a full prompt (avoiding token spend during preflight).
+///
+/// **Chat mode** (both are `Some`): Spawns `hermes chat --provider <X> --model
+/// <Y> "Reply with: GITIM_OK"` on the default profile and looks for `GITIM_OK`
+/// in stdout. This validates that the specified (provider, model) pair can
+/// handshake using the default profile's credentials before an agent profile
+/// commits to that configuration. Only one of the two params being `Some` is
+/// treated as both `None` (chat mode requires both or neither).
 ///
 /// `hermes_home`, when set, is injected as `HERMES_HOME` into the spawned
-/// process so the handshake exercises a specific profile (e.g.
+/// process so the call exercises a specific profile (e.g.
 /// `~/.hermes/profiles/gitim-<handler>/`) rather than the default profile.
 /// `None` preserves the inherited environment.
 pub async fn preflight_hermes_with(
+    bin: &str,
+    timeout: Duration,
+    hermes_home: Option<&Path>,
+    llm_provider: Option<&str>,
+    llm_model: Option<&str>,
+) -> PreflightResult {
+    match (llm_provider, llm_model) {
+        (Some(provider), Some(model)) => {
+            preflight_hermes_chat(bin, timeout, hermes_home, provider, model).await
+        }
+        _ => preflight_hermes_acp(bin, timeout, hermes_home).await,
+    }
+}
+
+/// Inner: ACP initialize handshake (no LLM call).
+async fn preflight_hermes_acp(
     bin: &str,
     timeout: Duration,
     hermes_home: Option<&Path>,
@@ -978,10 +1003,113 @@ pub async fn preflight_hermes_with(
     }
 }
 
+/// Inner: chat-based preflight with explicit provider + model override.
+///
+/// Spawns `hermes chat --provider <provider> --model <model> "Reply with:
+/// GITIM_OK"` and verifies the response contains "GITIM_OK". Used by the
+/// `/preflight/hermes?llm_provider=X&llm_model=Y` endpoint to validate a
+/// (provider, model) pair against the default profile's credentials before
+/// committing an agent profile.
+async fn preflight_hermes_chat(
+    bin: &str,
+    timeout: Duration,
+    hermes_home: Option<&Path>,
+    llm_provider: &str,
+    llm_model: &str,
+) -> PreflightResult {
+    let started = Instant::now();
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("chat")
+        .args(["--provider", llm_provider])
+        .args(["--model", llm_model])
+        // -Q suppresses the interactive banner/spinner so stdout is just the response.
+        .arg("-Q")
+        .args(["--query", "Reply with exactly: GITIM_OK"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(home) = hermes_home {
+        cmd.env("HERMES_HOME", home);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("hermes CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn hermes chat: {e}")
+            };
+            return PreflightResult::failure(
+                "hermes",
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return PreflightResult::failure(
+                "hermes",
+                ErrorKind::Other,
+                format!("hermes IO error: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+        Err(_) => {
+            return PreflightResult::failure(
+                "hermes",
+                ErrorKind::Timeout,
+                format!("hermes preflight exceeded {}ms", timeout.as_millis()),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = truncate(stderr.trim(), STDERR_TRUNCATE);
+        let msg = if trimmed.is_empty() {
+            format!("hermes exited with status {}", output.status)
+        } else {
+            format!("hermes exited with status {}: {}", output.status, trimmed)
+        };
+        return PreflightResult::failure("hermes", ErrorKind::Other, msg, duration_ms);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = stdout.trim();
+
+    if text.contains("GITIM_OK") {
+        PreflightResult::success(
+            "hermes",
+            None,
+            Some(format!("{llm_provider}/{llm_model}")),
+            duration_ms,
+            Some(truncate(text, PREVIEW_TRUNCATE)),
+        )
+    } else {
+        PreflightResult::failure(
+            "hermes",
+            ErrorKind::Other,
+            "response did not contain GITIM_OK",
+            duration_ms,
+        )
+    }
+}
+
 /// Run preflight against the default `hermes` binary against the user's
-/// active profile (no `HERMES_HOME` override).
+/// active profile (no `HERMES_HOME` override, no LLM override).
 pub async fn preflight_hermes() -> PreflightResult {
-    preflight_hermes_with("hermes", Duration::from_secs(30), None).await
+    preflight_hermes_with("hermes", Duration::from_secs(30), None, None, None).await
 }
 
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.
