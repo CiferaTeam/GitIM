@@ -19,7 +19,7 @@ async fn setup_agent(tmp: &tempfile::TempDir) -> (std::path::PathBuf, GitimClien
         github_email: None,
     };
 
-    let handle = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle = provision_agent(&agents_dir, &config, true).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);
     (handle.repo_root, client)
 }

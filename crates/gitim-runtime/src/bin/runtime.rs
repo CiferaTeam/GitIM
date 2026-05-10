@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remote_url: remote_url.clone(),
         github_email: None,
     };
-    let handle = provision_agent(&agents_dir, &config).await?;
+    let handle = provision_agent(&agents_dir, &config, true).await?;
     eprintln!("agent ready at {}", handle.repo_root.display());
 
     eprintln!("starting agent loop (ctrl-c to stop) ...");

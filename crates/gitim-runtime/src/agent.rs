@@ -130,9 +130,15 @@ pub struct AgentHandle {
 /// Provision an agent directory: clone (if needed) → start daemon → onboard.
 ///
 /// Idempotent: if the directory already exists, skips clone and re-starts daemon.
+///
+/// `join_general` rides through to the daemon's onboard so the caller can
+/// opt the new agent out of #general auto-join. Persisted config lives in
+/// AgentConfig; this is a one-shot provisioning decision so it stays as a
+/// function arg rather than a struct field.
 pub async fn provision_agent(
     agents_dir: &Path,
     config: &AgentConfig,
+    join_general: bool,
 ) -> Result<AgentHandle, RuntimeError> {
     let repo_root = agents_dir.join(&config.handler);
 
@@ -183,7 +189,7 @@ pub async fn provision_agent(
 
     let client = GitimClient::new(&repo_root);
     let onboard_resp = client
-        .onboard("git", Some(auth), false, false, true)
+        .onboard("git", Some(auth), false, false, join_general)
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 

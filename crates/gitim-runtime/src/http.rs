@@ -1325,6 +1325,11 @@ struct AgentAddRequest {
     introduction: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Opt the new agent out of #general auto-join. `None` (field omitted) =
+    /// preserve historical default of joining. `Some(false)` skips the
+    /// auto_join_general step inside the daemon's onboard handler.
+    #[serde(default)]
+    join_general: Option<bool>,
 }
 
 async fn agents_add(
@@ -1537,7 +1542,7 @@ async fn agents_add(
         github_email: workspace_github_email,
     };
 
-    match provision_agent(&agents_dir, &config).await {
+    match provision_agent(&agents_dir, &config, req.join_general.unwrap_or(true)).await {
         Ok(handle) => {
             // Recheck after async provision to prevent duplicate loops from concurrent requests
             {
@@ -4370,6 +4375,29 @@ mod tests {
         });
         let req: AgentAddRequest = serde_json::from_value(body).unwrap();
         assert!(req.introduction.is_none());
+    }
+
+    #[test]
+    fn agent_add_request_join_general_omitted_is_none() {
+        let body = serde_json::json!({
+            "handler": "alice",
+            "display_name": "Alice",
+            "provider": "claude"
+        });
+        let req: AgentAddRequest = serde_json::from_value(body).unwrap();
+        assert!(req.join_general.is_none());
+    }
+
+    #[test]
+    fn agent_add_request_join_general_explicit_false_deserializes() {
+        let body = serde_json::json!({
+            "handler": "alice",
+            "display_name": "Alice",
+            "provider": "claude",
+            "join_general": false
+        });
+        let req: AgentAddRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.join_general, Some(false));
     }
 
     #[test]

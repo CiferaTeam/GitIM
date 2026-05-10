@@ -20,7 +20,7 @@ async fn test_provision_fresh() {
         github_email: None,
     };
 
-    let handle = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle = provision_agent(&agents_dir, &config, true).await.unwrap();
 
     assert_eq!(handle.handler, "test-agent");
     assert!(handle.repo_root.exists());
@@ -48,10 +48,10 @@ async fn test_provision_idempotent() {
         github_email: None,
     };
 
-    let handle1 = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle1 = provision_agent(&agents_dir, &config, true).await.unwrap();
     stop_daemon(&handle1.repo_root).await;
 
-    let handle2 = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle2 = provision_agent(&agents_dir, &config, true).await.unwrap();
     assert_eq!(handle1.repo_root, handle2.repo_root);
 
     let client = GitimClient::new(&handle2.repo_root);
@@ -75,10 +75,59 @@ async fn test_provision_invalid_remote() {
         github_email: None,
     };
 
-    let result = provision_agent(&agents_dir, &config).await;
+    let result = provision_agent(&agents_dir, &config, true).await;
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
         RuntimeError::GitCloneFailed(_)
     ));
+}
+
+/// Reverse coverage at the runtime layer for the `join_general` toggle.
+/// Provision bot-a normally so general exists with bot-a in members, then
+/// provision bot-b with `join_general=false` and assert bot-b is NOT a
+/// member of `channels/general.meta.yaml` in bot-b's clone.
+#[tokio::test]
+async fn test_provision_skip_general_when_join_general_false() {
+    ensure_daemon_in_path();
+    let tmp = short_tempdir();
+    let remote = setup_bare_remote(&tmp);
+    let agents_dir = tmp.path().join("agents");
+    std::fs::create_dir(&agents_dir).unwrap();
+
+    let config_a = AgentConfig {
+        handler: "bot-a".into(),
+        display_name: "Bot A".into(),
+        remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
+    };
+    let handle_a = provision_agent(&agents_dir, &config_a, true).await.unwrap();
+
+    let config_b = AgentConfig {
+        handler: "bot-b".into(),
+        display_name: "Bot B".into(),
+        remote_url: remote.to_str().unwrap().into(),
+        github_email: None,
+    };
+    let handle_b = provision_agent(&agents_dir, &config_b, false)
+        .await
+        .unwrap();
+
+    let meta_path = handle_b.repo_root.join("channels/general.meta.yaml");
+    let meta_content = std::fs::read_to_string(&meta_path)
+        .expect("bot-b should have general.meta.yaml from bot-a's earlier push");
+    let meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&meta_content).unwrap();
+
+    assert!(
+        meta.members.contains(&"bot-a".to_string()),
+        "bot-a should be a member (join_general=true)"
+    );
+    assert!(
+        !meta.members.contains(&"bot-b".to_string()),
+        "bot-b must NOT be a member when join_general=false, got: {:?}",
+        meta.members
+    );
+
+    stop_daemon(&handle_a.repo_root).await;
+    stop_daemon(&handle_b.repo_root).await;
 }

@@ -19,7 +19,7 @@ async fn test_state_save_and_load() {
         remote_url: remote.to_str().unwrap().into(),
         github_email: None,
     };
-    let handle = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle = provision_agent(&agents_dir, &config, true).await.unwrap();
 
     // Initialize poller, get a cursor
     let mut poller = Poller::new(GitimClient::new(&handle.repo_root));
@@ -56,7 +56,7 @@ async fn test_cursor_restore_skips_old_messages() {
         remote_url: remote.to_str().unwrap().into(),
         github_email: None,
     };
-    let handle = provision_agent(&agents_dir, &config).await.unwrap();
+    let handle = provision_agent(&agents_dir, &config, true).await.unwrap();
     let client = GitimClient::new(&handle.repo_root);
 
     // Phase 1: initialize poller, send a message, poll to detect it

@@ -108,7 +108,7 @@ async fn provision_test_agent(workspace: &Path, handler: &str, remote: &Path) ->
         remote_url: remote.to_str().unwrap().into(),
         github_email: None,
     };
-    let handle = provision_agent(workspace, &config).await.unwrap();
+    let handle = provision_agent(workspace, &config, true).await.unwrap();
     handle.repo_root
 }
 
