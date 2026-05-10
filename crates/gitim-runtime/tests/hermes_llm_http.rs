@@ -1,4 +1,5 @@
-//! Integration tests for `GET /hermes/llm/providers`.
+//! Integration tests for `GET /hermes/llm/providers` and
+//! `GET /hermes/llm/providers/{id}/models`.
 //!
 //! Uses `tower::ServiceExt::oneshot` — in-process, no TCP listener, no port
 //! races. `HERMES_HOME` is set/unset per-test; `#[serial(hermes_home_env)]`
@@ -7,6 +8,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use mockito::Server;
 use serial_test::serial;
 use std::fs;
 use tower::ServiceExt;
@@ -181,5 +183,203 @@ async fn get_providers_status_200() {
     assert!(
         body.get("providers").is_some(),
         "response must always have a 'providers' key; got: {body}"
+    );
+}
+
+// ── test 5 ────────────────────────────────────────────────────────────────────
+
+/// GET /hermes/llm/providers/{id}/models with a completely unknown provider id
+/// returns 400 (not 200).
+#[tokio::test]
+#[serial(hermes_home_env)]
+async fn get_models_unknown_provider_400() {
+    let (_guard, _path) = HermesHomeGuard::install_empty();
+
+    let (router, _state) = create_router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/hermes/llm/providers/totally-fake/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown provider id must return 400"
+    );
+    let body = body_to_json(response).await;
+    assert!(
+        body.get("error").is_some(),
+        "400 response must have 'error' key; got: {body}"
+    );
+}
+
+// ── test 6 ────────────────────────────────────────────────────────────────────
+
+/// GET /hermes/llm/providers/{builtin-id}/models with no API key configured
+/// returns 200 + error field (missing api key error).
+///
+/// Status is 200 — the provider is *known* (builtin), so 400 is wrong.
+/// The error comes from `fetch_models` finding no key in `.env`.
+#[tokio::test]
+#[serial(hermes_home_env)]
+async fn get_models_builtin_returns_shape() {
+    let (_guard, _path) = HermesHomeGuard::install_empty();
+    // _path is empty — no .env, so kimi-coding has no API key.
+
+    let (router, _state) = create_router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/hermes/llm/providers/kimi-coding/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "known builtin provider must return 200 even without api key"
+    );
+    let body = body_to_json(response).await;
+    // error field must be present and non-null (missing api key)
+    let error = body.get("error").expect("response must have 'error' key");
+    assert!(
+        !error.is_null(),
+        "error must be non-null when api key is missing; got: {body}"
+    );
+    let err_str = error.as_str().expect("error must be a string");
+    assert!(
+        err_str.contains("missing api key"),
+        "error must mention 'missing api key'; got: {err_str}"
+    );
+    // models must be present (empty array)
+    assert!(
+        body.get("models").is_some(),
+        "response must have 'models' key; got: {body}"
+    );
+    assert!(
+        body.get("custom_allowed").is_some(),
+        "response must have 'custom_allowed' key; got: {body}"
+    );
+}
+
+// ── test 7 ────────────────────────────────────────────────────────────────────
+
+/// GET /hermes/llm/providers/custom:{name}/models with a custom provider
+/// that has a base_url pointing at a mock server returns 200 + populated
+/// models list + null error.
+#[tokio::test]
+#[serial(hermes_home_env)]
+async fn get_models_custom_provider_returns_shape() {
+    let (_guard, path) = HermesHomeGuard::install_empty();
+
+    // Spin up a mock HTTP server that returns an OpenAI-compatible model list.
+    let mut mock_server = Server::new_async().await;
+    let _mock = mock_server
+        .mock("GET", "/models")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"data":[{"id":"custom-model-1"},{"id":"custom-model-2"}]}"#)
+        .create_async()
+        .await;
+
+    // Write config.yaml with a custom_providers entry pointing at the mock.
+    let yaml = format!(
+        "custom_providers:\n  - name: myfoo\n    base_url: {url}\n    api_key: test-key-xyz\n",
+        url = mock_server.url()
+    );
+    fs::write(path.join("config.yaml"), &yaml).expect("write config.yaml");
+
+    let (router, _state) = create_router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/hermes/llm/providers/custom:myfoo/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "custom provider must return 200 on success"
+    );
+    let body = body_to_json(response).await;
+    let error = &body["error"];
+    assert!(
+        error.is_null(),
+        "error must be null on successful custom provider fetch; got: {body}"
+    );
+    let models = body["models"].as_array().expect("models must be an array");
+    assert_eq!(
+        models.len(),
+        2,
+        "expected 2 models from mock, got: {body}"
+    );
+    assert_eq!(models[0]["id"].as_str(), Some("custom-model-1"));
+    assert_eq!(models[1]["id"].as_str(), Some("custom-model-2"));
+}
+
+// ── test 8 ────────────────────────────────────────────────────────────────────
+
+/// GET /hermes/llm/providers/{id}/models returns HTTP 200 even when the
+/// upstream server returns a 500.  The HTTP status is always 200; the upstream
+/// error is surfaced in the `error` field.
+#[tokio::test]
+#[serial(hermes_home_env)]
+async fn get_models_status_always_200_even_on_upstream_failure() {
+    let (_guard, path) = HermesHomeGuard::install_empty();
+
+    // Upstream mock returns 500.
+    let mut mock_server = Server::new_async().await;
+    let _mock = mock_server
+        .mock("GET", "/models")
+        .with_status(500)
+        .with_body("Internal Server Error")
+        .create_async()
+        .await;
+
+    // Use a custom provider so we can point its base_url at the mock.
+    let yaml = format!(
+        "custom_providers:\n  - name: failprovider\n    base_url: {url}\n    api_key: test-key\n",
+        url = mock_server.url()
+    );
+    fs::write(path.join("config.yaml"), &yaml).expect("write config.yaml");
+
+    let (router, _state) = create_router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/hermes/llm/providers/custom:failprovider/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "status must always be 200 even when upstream returns 500"
+    );
+    let body = body_to_json(response).await;
+    let error = body.get("error").expect("response must have 'error' key");
+    assert!(
+        !error.is_null(),
+        "error must be non-null when upstream fails; got: {body}"
+    );
+    let err_str = error.as_str().expect("error must be a string");
+    assert!(
+        err_str.contains("upstream HTTP 500") || err_str.contains("500"),
+        "error must mention upstream failure; got: {err_str}"
     );
 }

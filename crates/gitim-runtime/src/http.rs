@@ -3174,6 +3174,75 @@ async fn list_hermes_llm_providers() -> axum::response::Response {
     (StatusCode::OK, Json(serde_json::json!({ "providers": providers }))).into_response()
 }
 
+/// HTTP handler for `GET /hermes/llm/providers/{id}/models`.
+///
+/// Resolution order for `provider_id`:
+///
+/// 1. Call `hermes_llm::list_providers` (reads `.env` + `config.yaml`).  If
+///    the id is found there, use the fully-resolved `LlmProvider` (correct
+///    kimi-coding URL, custom entries, etc.) and call `fetch_models`.
+/// 2. If not found but the id matches a `BUILTIN_PROVIDERS` entry, construct a
+///    minimal `LlmProvider` from the static registry and call `fetch_models` —
+///    which will return `error: "missing api key …"` (the provider is known but
+///    not configured).  HTTP status is still 200.
+/// 3. If the id starts with `"custom:"` but isn't in `list_providers`, return
+///    400 — the user asked for a named custom provider that doesn't exist in
+///    their `config.yaml`.
+/// 4. Otherwise (completely unknown id) → 400.
+///
+/// All upstream failures (missing key, network error, HTTP 5xx, etc.) produce
+/// HTTP 200 with the error embedded in the `error` field.  HTTP 400 is
+/// reserved exclusively for unrecognisable provider ids.
+async fn list_hermes_llm_models(
+    axum::extract::Path(provider_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use crate::hermes_llm::{BUILTIN_PROVIDERS, LlmProvider, ProviderKind};
+
+    let hermes_home = std::env::var_os("HERMES_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(".hermes")
+        });
+
+    // Step 1: try the live-configured provider list first (correct URLs, custom
+    // entries read from config.yaml).
+    let live_providers = crate::hermes_llm::list_providers(&hermes_home);
+    if let Some(provider) = live_providers.iter().find(|p| p.id == provider_id) {
+        let result = crate::hermes_llm::fetch_models(provider, &hermes_home).await;
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+
+    // Step 2: id matches a builtin but user hasn't configured a key yet.
+    if let Some(bp) = BUILTIN_PROVIDERS.iter().find(|p| p.id == provider_id) {
+        let provider = LlmProvider {
+            id: bp.id.to_owned(),
+            label: bp.label.to_owned(),
+            kind: ProviderKind::ApiKey,
+            base_url: Some(bp.base_url.to_owned()),
+            api_protocol: bp.api_protocol,
+        };
+        let result = crate::hermes_llm::fetch_models(&provider, &hermes_home).await;
+        return (StatusCode::OK, Json(result)).into_response();
+    }
+
+    // Step 3 & 4: unknown or unreachable custom provider → 400.
+    let msg = if provider_id.starts_with("custom:") {
+        let name = &provider_id["custom:".len()..];
+        format!("custom provider '{name}' not found in config.yaml")
+    } else {
+        format!("unknown provider id '{provider_id}'")
+    };
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 /// Assemble the axum router with a fresh `RuntimeState`. The canonical exe
 /// path is resolved from `RuntimeState::default()` — fine for tests, but
 /// production must call `create_router_with_exe` so the pre-replacement
@@ -3245,6 +3314,10 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .nest("/workspaces/{slug}", ws_router)
         .route("/preflight/{provider}", get(preflight_handler))
         .route("/hermes/llm/providers", get(list_hermes_llm_providers))
+        .route(
+            "/hermes/llm/providers/{id}/models",
+            get(list_hermes_llm_models),
+        )
         .route(
             "/runtime/update-and-restart",
             post(crate::update::update_and_restart),
