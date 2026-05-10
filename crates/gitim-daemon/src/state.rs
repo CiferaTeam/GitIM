@@ -44,6 +44,12 @@ pub struct AppState {
     pub push_notify: Arc<Notify>,
     pub has_remote: bool,
     pub sync_started: AtomicBool,
+    /// Latched by `spawn_cron_engine` so the engine task is started at most
+    /// once per daemon lifetime. Mirrors `sync_started` — both are CAS-gated
+    /// because the spawn point is reached from both `main` (restart with
+    /// existing identity) and `handle_onboard` (first-time identity setup),
+    /// and a second spawn would double the fire-rate.
+    pub cron_engine_started: AtomicBool,
     pub is_admin: AtomicBool,
     pub is_guest: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
@@ -104,6 +110,7 @@ impl AppState {
             push_notify: Arc::new(Notify::new()),
             has_remote,
             sync_started: AtomicBool::new(false),
+            cron_engine_started: AtomicBool::new(false),
             is_admin: AtomicBool::new(false),
             is_guest: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
@@ -377,6 +384,106 @@ impl AppState {
         });
 
         tracing::info!("sync loop started");
+    }
+
+    /// Spawn the cron engine task for this state. Mirrors `spawn_sync_loop`:
+    /// CAS-gated, called from both `main` (restart with existing identity)
+    /// and `handle_onboard` (first-time setup) so identity-deferred startup
+    /// works the same way for both subsystems.
+    ///
+    /// The task itself runs a 60-second tokio interval. Each tick:
+    ///   1. `scan_due(crons_dir, &self_handler, now)` — pure compute over
+    ///      the on-disk specs. Errors are logged + tick continues.
+    ///   2. For each `FireRequest`: `cron_engine::fire(&state, req).await`.
+    ///      Per-fire errors are logged via `tracing::warn!`; one bad spec
+    ///      must NOT stall the rest of the tick.
+    ///
+    /// `self_handler` is read once at task start and cached — handler is
+    /// immutable for the lifetime of a daemon (changing identity requires
+    /// restart, see CLAUDE.md "Handler 冲突防护"). Caching avoids a per-tick
+    /// `.read().await` on the `current_user` RwLock and keeps the loop body
+    /// fully sync apart from `fire`'s `.await`.
+    ///
+    /// ### First-tick startup throttle
+    ///
+    /// First tick waits one full interval before scanning. Why: many
+    /// workspaces have specs whose `last_fire` is older than `now`, so a
+    /// fresh-startup scan would emit a burst of "due" fires for everything
+    /// that should have happened while the daemon was offline. Even though
+    /// idempotency protects against duplication on the same machine, the
+    /// burst spams the contribution graph and overflows agent context. One
+    /// missed cycle on startup is acceptable per design.md "no catch-up".
+    ///
+    /// ### Shutdown
+    ///
+    /// No explicit cancellation token. The task dies with the tokio
+    /// runtime when `main` exits via `std::process::exit`. Same model
+    /// `spawn_sync_loop` uses — graceful shutdown of long-running tasks
+    /// isn't part of the daemon's contract.
+    pub fn spawn_cron_engine(state: SharedState) {
+        if state
+            .cron_engine_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::warn!("spawn_cron_engine called but engine already running — ignoring");
+            return;
+        }
+
+        tokio::spawn(async move {
+            // Read identity once at task start. If it's None (shouldn't
+            // happen in production — caller gates on identity, same as
+            // sync_loop), bail out cleanly so the daemon doesn't get a
+            // dead engine that fires nothing forever.
+            let self_handler_str = match state.current_user.read().await.clone() {
+                Some(h) => h,
+                None => {
+                    tracing::warn!("cron_engine: no current_user — engine task exiting");
+                    return;
+                }
+            };
+            let self_handler = match gitim_core::types::Handler::new(&self_handler_str) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        "cron_engine: current_user '{}' is not a valid handler: {} — engine task exiting",
+                        self_handler_str,
+                        e
+                    );
+                    return;
+                }
+            };
+
+            let crons_dir = state.repo_root.join("crons");
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // First tick fires immediately by default — burn it so the
+            // startup throttle is honored. The next tick comes 60s later.
+            interval.tick().await;
+
+            tracing::info!("cron engine started for @{}", self_handler.as_str());
+
+            loop {
+                interval.tick().await;
+                let now = chrono::Utc::now();
+                let requests = match crate::cron_engine::scan_due(&crons_dir, &self_handler, now) {
+                    Ok(reqs) => reqs,
+                    Err(e) => {
+                        tracing::warn!("cron_engine: scan_due failed: {} — skipping tick", e);
+                        continue;
+                    }
+                };
+                for req in requests {
+                    let spec_name = req.spec_name.clone();
+                    if let Err(e) = crate::cron_engine::fire(&state, req).await {
+                        tracing::warn!(
+                            "cron_engine: fire for spec '{}' failed: {}",
+                            spec_name,
+                            e
+                        );
+                    }
+                }
+            }
+        });
     }
 }
 

@@ -140,6 +140,9 @@ pub async fn handle_onboard(
 
     // --- Start sync loop ---
     AppState::spawn_sync_loop(state.clone());
+    // Cron engine runs in parallel to sync_loop; both are CAS-gated so
+    // a re-onboard (uncommon but supported) won't double-spawn.
+    AppState::spawn_cron_engine(state.clone());
 
     // Initialize search index (if not already initialized)
     if state.index.read().unwrap().is_none() {

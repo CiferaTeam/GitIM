@@ -133,6 +133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On first startup (no me.json), the sync loop is deferred until after onboard.
     if app_state.current_user.read().await.is_some() || is_guest_from_me {
         state::AppState::spawn_sync_loop(app_state.clone());
+        // Cron engine runs in parallel to sync_loop; same identity gate
+        // because the engine's ownership filter compares spec.target to
+        // the daemon's running handler. Guest mode skips the engine —
+        // there's no resolved target to compare against.
+        if !is_guest_from_me {
+            state::AppState::spawn_cron_engine(app_state.clone());
+        }
     } else {
         info!("no identity configured — sync loop deferred until onboard");
     }
