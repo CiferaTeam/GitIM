@@ -169,6 +169,17 @@ impl AgentLoop {
         self.workspace_root = Some(root);
     }
 
+    /// Test-only seam to swap the underlying provider after construction.
+    /// Production paths run through `with_provider` / `with_config` which
+    /// resolve the provider through the public `create()` factory; this
+    /// entry point exists so the e2e suite can inject a mock that declares
+    /// `usage_is_cumulative()` (or other trait flags) without round-
+    /// tripping through env vars.
+    #[doc(hidden)]
+    pub fn replace_provider_for_test(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
+    }
+
     /// Attach a broadcast sender and tag emitted events with a workspace slug.
     pub fn set_activity_tx_with_workspace(
         &mut self,
@@ -310,28 +321,33 @@ impl AgentLoop {
         let usage_summary = self.accumulate_usage_log(delta.as_ref());
 
         // Step C — Patch the in-memory AgentInfo so polling clients
-        // (GET /agents/:id) see fresh data without re-reading disk on every
-        // request. session_usage is unconditional; usage_summary is only
-        // patched when we actually computed one (i.e. workspace_root was
-        // wired in).
-        if let Some(snap) = &new_snapshot {
-            if let Some(rs) = &self.runtime_state {
-                if let Ok(mut s) = rs.lock() {
-                    if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
-                        if let Some(info) = ctx.agents.get_mut(&self.handler) {
+        // (GET /agents/:id) see fresh data without re-reading disk. Both
+        // mirrors update unconditionally (independent of snapshot
+        // availability) so a turn from a provider without `reports_usage`
+        // still bumps the in-memory turn counter via usage_summary.
+        if let Some(rs) = &self.runtime_state {
+            if let Ok(mut s) = rs.lock() {
+                if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
+                    if let Some(info) = ctx.agents.get_mut(&self.handler) {
+                        if let Some(snap) = &new_snapshot {
                             info.session_usage = Some(snap.clone());
-                            if let Some(summary) = &usage_summary {
-                                info.usage_summary = Some(summary.clone());
-                            }
+                        }
+                        if let Some(summary) = &usage_summary {
+                            info.usage_summary = Some(summary.clone());
                         }
                     }
                 }
             }
+        }
 
-            // Step D — Broadcast the "usage" SSE event. Payload keeps the
-            // existing SessionUsageSnapshot fields inline (so older WebUI
-            // clients that destructure them keep working) and adds
-            // `usage_summary` as a sibling for new clients.
+        // Step D — Broadcast the "usage" SSE event when we have a snapshot.
+        // Payload keeps the existing SessionUsageSnapshot fields inline (so
+        // older WebUI clients that destructure them keep working) and adds
+        // `usage_summary` as a sibling for new clients. The SSE channel is
+        // snap-driven historically; we don't fabricate one when the
+        // provider has nothing to say about session occupancy — clients
+        // will see the new totals on the next GET /agents poll instead.
+        if let Some(snap) = &new_snapshot {
             let payload = UsageEventPayload {
                 snap,
                 usage_summary: usage_summary.as_ref(),
