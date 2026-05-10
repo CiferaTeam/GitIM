@@ -236,7 +236,11 @@ fn resolve_api_key_from_env(provider: &LlmProvider, hermes_home: &Path) -> Optio
     }
 
     let env_path = hermes_home.join(".env");
-    let content = std::fs::read_to_string(&env_path).ok()?;
+    let raw = std::fs::read_to_string(&env_path).ok()?;
+    // Strip UTF-8 BOM (U+FEFF) that some Windows tools prepend. Rust's trim()
+    // only covers ASCII whitespace, so without this the first key becomes
+    // "\u{FEFF}KEY" and silently fails provider detection.
+    let content = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
 
     // Parse the .env file into key=value pairs.
     let map: std::collections::HashMap<&str, &str> = content

@@ -242,13 +242,21 @@ async fn missing_api_key_returns_actionable_error() {
 ///
 /// This is the security invariant: keys are used in the Authorization header
 /// but must never be serialized into the `error` string.
+///
+/// Two halves:
+/// (a) the header matcher proves the key was actually sent in Authorization
+/// (b) the error-string assert proves the key was not echoed into `error`
 #[tokio::test]
 async fn error_message_does_not_leak_api_key() {
     const SECRET_KEY: &str = "secret-token-xxx";
 
     let mut server = Server::new_async().await;
-    let _mock = server
+    let mock = server
         .mock("GET", "/models")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("^Bearer ".to_string()),
+        )
         .with_status(401)
         .with_body(r#"{"error":"Unauthorized"}"#)
         .create_async()
@@ -265,6 +273,62 @@ async fn error_message_does_not_leak_api_key() {
         !err.contains(SECRET_KEY),
         "API key leaked into error string! error: {err:?}"
     );
+    assert!(
+        err.contains("auth failed (HTTP 401)"),
+        "expected 'auth failed (HTTP 401)' in error, got: {err:?}"
+    );
+
+    // Proves the Authorization header was sent AND the mock was actually called.
+    mock.assert_async().await;
+}
+
+// ── test 10: Custom provider reads api_key from config.yaml ──────────────────
+
+/// A `ProviderKind::Custom` provider reads its API key from
+/// `<hermes_home>/config.yaml` rather than `.env`.
+/// The header matcher proves the key from config.yaml was actually sent.
+#[tokio::test]
+async fn success_custom_provider_reads_api_key_from_config_yaml() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/models")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Exact("Bearer custom-key-xyz".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"data":[{"id":"custom-model-1"}]}"#)
+        .create_async()
+        .await;
+
+    let tmp = make_hermes_home();
+    // Write config.yaml with one custom_providers entry.
+    let yaml = format!(
+        "custom_providers:\n  - name: myprovider\n    base_url: {url}\n    api_key: custom-key-xyz\n",
+        url = server.url(),
+    );
+    fs::write(tmp.path().join("config.yaml"), yaml).expect("write config.yaml");
+
+    let provider = LlmProvider {
+        id: "custom:myprovider".to_string(),
+        label: "myprovider (custom)".to_string(),
+        kind: ProviderKind::Custom,
+        base_url: Some(server.url()),
+        api_protocol: ApiProtocol::OpenAI,
+    };
+
+    let result = fetch_models(&provider, tmp.path()).await;
+    assert!(
+        result.error.is_none(),
+        "expected success, got error: {:?}",
+        result.error
+    );
+    assert_eq!(result.models.len(), 1);
+    assert_eq!(result.models[0].id, "custom-model-1");
+
+    // Proves the api_key from config.yaml was used in the Authorization header.
+    mock.assert_async().await;
 }
 
 // ── test 9: Anthropic protocol short-circuit ─────────────────────────────────
