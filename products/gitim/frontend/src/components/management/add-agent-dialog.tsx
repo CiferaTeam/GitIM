@@ -19,8 +19,9 @@ import {
   type ProviderId,
 } from "@/lib/providers";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
+import type { HermesLlmModel, HermesLlmProvider } from "@/lib/hermes-llm";
 import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EnvVarsEditor } from "./env-vars-editor";
 
@@ -41,9 +42,68 @@ export function AddAgentDialog() {
   // switches provider mid-flight or fires Detect multiple times in succession.
   const detectSeq = useRef(0);
 
+  // Hermes-specific LLM selection state
+  const [llmProvider, setLlmProvider] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmProviders, setLlmProviders] = useState<HermesLlmProvider[]>([]);
+  const [llmProvidersLoading, setLlmProvidersLoading] = useState(false);
+  const [llmModels, setLlmModels] = useState<HermesLlmModel[]>([]);
+  const [llmModelsLoading, setLlmModelsLoading] = useState(false);
+  const [llmModelsError, setLlmModelsError] = useState<string | null>(null);
+  const [customModelInput, setCustomModelInput] = useState("");
+
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
   const availableModels = provider ? PROVIDERS[provider].models : [];
+  // Custom model option sentinel value
+  const CUSTOM_MODEL_VALUE = "__custom__";
+  // Effective model to pass to API: custom input overrides the select value
+  const effectiveModel =
+    llmModel === CUSTOM_MODEL_VALUE ? customModelInput : llmModel;
+
+  // When GitIM provider switches to/from hermes, fetch/reset LLM providers
+  useEffect(() => {
+    if (provider === "hermes") {
+      setLlmProvidersLoading(true);
+      client.listHermesLlmProviders().then((res) => {
+        setLlmProviders(res.ok ? (res.data?.providers ?? []) : []);
+        setLlmProvidersLoading(false);
+      });
+    } else {
+      setLlmProvider("");
+      setLlmModel("");
+      setLlmProviders([]);
+      setLlmProvidersLoading(false);
+      setLlmModels([]);
+      setLlmModelsLoading(false);
+      setLlmModelsError(null);
+      setCustomModelInput("");
+    }
+  }, [provider]);
+
+  // When llmProvider changes, fetch models for that provider
+  useEffect(() => {
+    if (llmProvider) {
+      setLlmModel("");
+      setCustomModelInput("");
+      setLlmModelsLoading(true);
+      setLlmModelsError(null);
+      client.listHermesLlmModels(llmProvider).then((res) => {
+        if (res.ok && res.data) {
+          setLlmModels(res.data.models);
+          setLlmModelsError(res.data.error);
+        } else {
+          setLlmModels([]);
+          setLlmModelsError(res.error?.message ?? "fetch failed");
+        }
+        setLlmModelsLoading(false);
+      });
+    } else {
+      setLlmModels([]);
+      setLlmModelsError(null);
+      setCustomModelInput("");
+    }
+  }, [llmProvider]);
 
   function resetForm() {
     setName("");
@@ -56,6 +116,15 @@ export function AddAgentDialog() {
     setDetecting(false);
     setDetectResult(null);
     detectSeq.current += 1;
+    // Reset hermes LLM state
+    setLlmProvider("");
+    setLlmModel("");
+    setLlmProviders([]);
+    setLlmProvidersLoading(false);
+    setLlmModels([]);
+    setLlmModelsLoading(false);
+    setLlmModelsError(null);
+    setCustomModelInput("");
   }
 
   async function handleDetect() {
@@ -63,7 +132,12 @@ export function AddAgentDialog() {
     const seq = ++detectSeq.current;
     setDetecting(true);
     setDetectResult(null);
-    const res = await client.preflightProvider(provider as ProviderId);
+    const res = await client.preflightProvider(
+      provider as ProviderId,
+      provider === "hermes"
+        ? { llmProvider, llmModel: effectiveModel }
+        : undefined,
+    );
     // Bail out if the user switched provider (or fired another detect) while
     // the request was in flight — a stale response must not overwrite state.
     if (seq !== detectSeq.current) return;
@@ -105,12 +179,15 @@ export function AddAgentDialog() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const hermesLlmIncomplete =
+      provider === "hermes" && (!llmProvider || !effectiveModel);
     if (
       !name.trim() ||
       validationError ||
       submitting ||
       !provider ||
       (modelRequired && !model) ||
+      hermesLlmIncomplete ||
       !detectResult?.available
     )
       return;
@@ -134,6 +211,8 @@ export function AddAgentDialog() {
         model,
         envMap,
         introduction.trim(),
+        provider === "hermes" ? llmProvider : undefined,
+        provider === "hermes" ? effectiveModel : undefined,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -191,7 +270,11 @@ export function AddAgentDialog() {
                   variant="outline"
                   size="sm"
                   onClick={handleDetect}
-                  disabled={!provider || detecting}
+                  disabled={
+                    !provider ||
+                    detecting ||
+                    (provider === "hermes" && (!llmProvider || !effectiveModel))
+                  }
                 >
                   {detecting ? (
                     <>
@@ -273,6 +356,109 @@ export function AddAgentDialog() {
               </div>
             )}
 
+            {provider === "hermes" && (
+              <div className="space-y-3 rounded-md border border-input p-3">
+                <p className="text-sm font-medium">Hermes LLM</p>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor="hermes-llm-provider">
+                    LLM Provider
+                  </label>
+                  {llmProvidersLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      Loading providers…
+                    </div>
+                  ) : llmProviders.length === 0 ? (
+                    <>
+                      <select
+                        id="hermes-llm-provider"
+                        value=""
+                        disabled
+                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <option value="">— No providers available —</option>
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        No LLM providers configured. Add an API key to{" "}
+                        <code>~/.hermes/.env</code> or run{" "}
+                        <code>hermes setup</code>, then reopen this dialog.
+                      </p>
+                    </>
+                  ) : (
+                    <select
+                      id="hermes-llm-provider"
+                      value={llmProvider}
+                      onChange={(e) => setLlmProvider(e.target.value)}
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <option value="">— Select LLM provider —</option>
+                      {llmProviders.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {llmProvider && (
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium" htmlFor="hermes-llm-model">
+                      LLM Model
+                    </label>
+                    {llmModelsLoading ? (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="size-4 animate-spin" />
+                        Loading models…
+                      </div>
+                    ) : llmModelsError !== null || llmModel === CUSTOM_MODEL_VALUE ? (
+                      <>
+                        {llmModelsError !== null && llmModel !== CUSTOM_MODEL_VALUE && (
+                          <p className="text-xs text-destructive">{llmModelsError}</p>
+                        )}
+                        <Input
+                          id="hermes-llm-model"
+                          value={customModelInput}
+                          onChange={(e) => setCustomModelInput(e.target.value)}
+                          placeholder="e.g. gpt-4o or custom-model-id"
+                        />
+                        {llmModel === CUSTOM_MODEL_VALUE && (
+                          <button
+                            type="button"
+                            className="text-xs text-muted-foreground hover:underline"
+                            onClick={() => {
+                              setLlmModel("");
+                              setCustomModelInput("");
+                            }}
+                          >
+                            ← Back to model list
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex items-start gap-2">
+                        <select
+                          id="hermes-llm-model"
+                          value={llmModel}
+                          onChange={(e) => setLlmModel(e.target.value)}
+                          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        >
+                          <option value="">— Select model —</option>
+                          {llmModels.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.label}
+                            </option>
+                          ))}
+                          <option value={CUSTOM_MODEL_VALUE}>Custom…</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-introduction">
                 Introduction <span className="text-text-muted font-normal">(optional)</span>
@@ -329,6 +515,7 @@ export function AddAgentDialog() {
                   submitting ||
                   !provider ||
                   (modelRequired && !model) ||
+                  (provider === "hermes" && (!llmProvider || !effectiveModel)) ||
                   !detectResult?.available
                 }
               >
