@@ -6,6 +6,7 @@ import type { ArchivedUserEntry } from "@/lib/client";
 import { AddAgentDialog } from "./add-agent-dialog";
 import { AgentCard } from "./agent-card";
 import { ArchivedAgentCard } from "./archived-agent-card";
+import { WorkspaceUsageHeader } from "./workspace-usage-header";
 import { Archive, Bot, Search, SlidersHorizontal } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -138,6 +139,8 @@ export function AgentList() {
           </Button>
         </div>
       </div>
+
+      <WorkspaceUsageHeader />
 
       {/* Active agents grid */}
       {filteredAgents.length > 0 ? (
