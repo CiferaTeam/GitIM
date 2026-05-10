@@ -576,132 +576,274 @@ fn compute_next_fire(
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-/// Stub for [`Request::EnableCron`]. Real implementation lands in Task 2.4.
-pub async fn handle_enable_cron(
-    _state: SharedState,
-    _name: String,
-    _author: String,
-) -> Response {
-    not_implemented("enable_cron")
+/// Set `spec.yaml#enabled = true`. Idempotent: when the spec is already
+/// enabled, returns `changed: false` and produces no commit.
+pub async fn handle_enable_cron(state: SharedState, name: String, author: String) -> Response {
+    toggle_enabled(state, name, author, true).await
 }
 
-/// Stub for [`Request::DisableCron`]. Real implementation lands in Task 2.4.
-pub async fn handle_disable_cron(
-    _state: SharedState,
-    _name: String,
-    _author: String,
-) -> Response {
-    not_implemented("disable_cron")
+/// Set `spec.yaml#enabled = false`. Idempotent: when the spec is already
+/// disabled, returns `changed: false` and produces no commit.
+pub async fn handle_disable_cron(state: SharedState, name: String, author: String) -> Response {
+    toggle_enabled(state, name, author, false).await
 }
 
-/// Stub for [`Request::DeleteCron`]. Real implementation lands in Task 2.4.
-pub async fn handle_delete_cron(
-    _state: SharedState,
-    _name: String,
-    _author: String,
-) -> Response {
-    not_implemented("delete_cron")
-}
+/// Soft-delete a cron: `git mv crons/<name>/ archive/crons/<name>/`.
+/// History (every `<ts>.thread`) moves with it.
+///
+/// Conventions matched from `handle_archive_channel`:
+/// - top-level `archive/<dir>/<name>/` (not `<dir>/.archive/<name>/`)
+/// - `git mv` rather than `mv + rm`, so blame and rename detection work
+/// - rollback the mv on commit failure so the working tree mirrors HEAD
+///
+/// Differs in that the cron archive moves a *directory*, not two files.
+/// `git mv <src-dir> <dest-dir>` requires `<dest-dir>`'s parent to exist
+/// but `<dest-dir>` itself must not — we guarantee that with
+/// `create_dir_all(archive/crons)` and a stat on `archive/crons/<name>/`
+/// before issuing the mv.
+pub async fn handle_delete_cron(state: SharedState, name: String, author: String) -> Response {
+    use gitim_core::responses::DeleteCronResponse;
 
-/// Tagged error helper. The `error_code: "not_implemented"` lets the client
-/// short-circuit on unfinished daemon endpoints without parsing the human
-/// message.
-fn not_implemented(method: &str) -> Response {
-    Response::error_with_code(
-        format!("{method}: not implemented yet (cron Wave 2 in progress)"),
-        "not_implemented",
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    //! Task 2.1 scope tests: roundtrip every cron `Request` variant
-    //! through `handle_request`'s dispatch and confirm we land on the
-    //! cron stub, not some other handler.
-
-    use crate::api::{Request, Response};
-    use crate::handlers::handle_request;
-    use crate::state::AppState;
-    use gitim_core::types::Config;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use tokio::sync::broadcast;
-
-    fn make_config() -> Config {
-        serde_yaml::from_str("version: 1").unwrap()
+    if let Err(resp) = validate_cron_name(&name) {
+        return resp;
     }
 
-    /// Minimal AppState with no users registered. Sufficient for stub
-    /// dispatch tests — the stubs short-circuit before touching state.
-    async fn make_state() -> (TempDir, Arc<AppState>) {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        // git init so any future handler that reaches GitStorage doesn't
-        // panic on missing repo. Stubs don't need it but a future test
-        // that promotes into 2.2/2.3/2.4 will reuse this fixture.
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        let (tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(
-            root,
-            make_config(),
-            tx,
-            Some("alice".to_string()),
-        ));
-        (tmp, state)
-    }
+    let author_handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("invalid author: {}", e),
+                "invalid_author",
+            )
+        }
+    };
 
-    fn assert_not_implemented(resp: &Response, method: &str) {
-        assert!(!resp.ok, "{method}: expected error, got success");
-        assert_eq!(
-            resp.error_code.as_deref(),
-            Some("not_implemented"),
-            "{method}: expected error_code=not_implemented, got {:?}",
-            resp.error_code
+    let cron_dir = state.repo_root.join("crons").join(&name);
+    let active_spec = cron_dir.join("spec.yaml");
+    if !active_spec.exists() {
+        // Either missing or already in archive — caller's mental model is
+        // "not there" either way. The CLI / WebUI can re-list to confirm.
+        return Response::error_with_code(
+            format!("cron '{}' does not exist", name),
+            "not_found",
         );
-        let msg = resp.error.as_deref().unwrap_or("");
-        assert!(
-            msg.contains(method),
-            "{method}: error message should mention method name, got {msg}",
+    }
+    let archive_target = state.repo_root.join("archive/crons").join(&name);
+    if archive_target.exists() {
+        // Orphaned: active path exists AND archive path exists.
+        // Refuse rather than silently overwrite the archive — the user
+        // can resolve manually (look at git log + decide which to keep).
+        return Response::error_with_code(
+            format!(
+                "cron '{}' already has an archive entry; delete aborted",
+                name
+            ),
+            "archive_conflict",
         );
     }
 
-    #[tokio::test]
-    async fn enable_cron_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "enable_cron",
-            "name": "weekly",
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "enable_cron");
+    // Ensure archive/crons/ parent exists so `git mv` doesn't fail with
+    // "No such file or directory". `git mv crons/foo archive/crons/foo`
+    // renames the directory iff archive/crons/ exists and
+    // archive/crons/foo does not.
+    let archive_parent = state.repo_root.join("archive/crons");
+    if let Err(e) = std::fs::create_dir_all(&archive_parent) {
+        return Response::error_with_code(
+            format!("failed to create archive/crons dir: {}", e),
+            "fs_error",
+        );
     }
 
-    #[tokio::test]
-    async fn disable_cron_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "disable_cron",
-            "name": "weekly",
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "disable_cron");
+    {
+        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
+        // Re-stat under lock — a concurrent delete could have raced us.
+        if !active_spec.exists() {
+            return Response::error_with_code(
+                format!("cron '{}' does not exist", name),
+                "not_found",
+            );
+        }
+
+        let from_rel = format!("crons/{}", name);
+        let to_rel = format!("archive/crons/{}", name);
+        if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
+            return Response::error_with_code(
+                format!("git mv failed: {}", e),
+                "git_error",
+            );
+        }
+
+        let commit_msg = format!("cron: delete {} by @{}", name, author_handler.as_str());
+        let (author_name, author_email) = state.author_for(author_handler.as_str());
+        // For dir-rename, `git add <dest-dir>` is sufficient — git mv
+        // already staged the rename, and a path-list `add` covers any
+        // post-mv content. Pass the destination dir; git resolves it
+        // recursively against the index.
+        if let Err(e) = state.git_storage.add_and_commit_as(
+            &[&to_rel],
+            &commit_msg,
+            Some((&author_name, &author_email)),
+        ) {
+            // Rollback: reverse the rename.
+            if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
+                tracing::warn!("delete_cron: rollback git mv also failed: {}", rb);
+            }
+            return Response::error_with_code(
+                format!("delete_cron commit failed: {}", e),
+                "commit_failed",
+            );
+        }
+        // commit_guard drops at end of scope.
     }
 
-    #[tokio::test]
-    async fn delete_cron_dispatches_to_stub() {
-        let (_tmp, state) = make_state().await;
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "method": "delete_cron",
-            "name": "weekly",
-        }))
-        .unwrap();
-        let resp = handle_request(req, state).await;
-        assert_not_implemented(&resp, "delete_cron");
-    }
+    info!("cron '{}' deleted by @{}", name, author_handler.as_str());
+
+    let payload = DeleteCronResponse {
+        name,
+        deleted_by: author_handler.as_str().to_string(),
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
 }
+
+/// Shared body for enable + disable. Reads spec, compares state, and
+/// either commits a flipped spec or short-circuits as a no-op.
+///
+/// `not_found` is returned for archived crons too — once a spec has
+/// been moved to `archive/crons/<name>/`, enable/disable refuse rather
+/// than silently writing into the archive (which would also break
+/// "archive is frozen audit data" — see the channel-archive precedent).
+async fn toggle_enabled(
+    state: SharedState,
+    name: String,
+    author: String,
+    target: bool,
+) -> Response {
+    use gitim_core::responses::ToggleCronResponse;
+
+    if let Err(resp) = validate_cron_name(&name) {
+        return resp;
+    }
+    let author_handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("invalid author: {}", e),
+                "invalid_author",
+            )
+        }
+    };
+
+    let spec_path = state
+        .repo_root
+        .join("crons")
+        .join(&name)
+        .join("spec.yaml");
+    if !spec_path.exists() {
+        return Response::error_with_code(
+            format!("cron '{}' does not exist", name),
+            "not_found",
+        );
+    }
+
+    let mut spec = match read_spec(&spec_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("failed to read cron '{}': {}", name, e),
+                "spec_unreadable",
+            )
+        }
+    };
+
+    if spec.enabled == target {
+        // Idempotent no-op. No write, no commit. Surface `changed: false`
+        // so the caller can distinguish this from a real toggle.
+        let payload = ToggleCronResponse {
+            name,
+            enabled: target,
+            changed: false,
+        };
+        return Response::success(serde_json::to_value(payload).unwrap());
+    }
+
+    spec.enabled = target;
+    let new_yaml = match spec.to_yaml() {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::error_with_code(
+                format!("failed to serialize cron spec: {}", e),
+                "serialize_failed",
+            )
+        }
+    };
+
+    {
+        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
+        // Re-read under lock and bail out if another writer already
+        // toggled to the requested state. Guards against an interleaved
+        // enable/disable racing us.
+        let cur = match read_spec(&spec_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Response::error_with_code(
+                    format!("failed to re-read cron under lock: {}", e),
+                    "spec_unreadable",
+                )
+            }
+        };
+        if cur.enabled == target {
+            let payload = ToggleCronResponse {
+                name,
+                enabled: target,
+                changed: false,
+            };
+            return Response::success(serde_json::to_value(payload).unwrap());
+        }
+
+        if let Err(e) = std::fs::write(&spec_path, &new_yaml) {
+            return Response::error_with_code(
+                format!("failed to write spec.yaml: {}", e),
+                "fs_error",
+            );
+        }
+
+        let action = if target { "enable" } else { "disable" };
+        let commit_msg = format!("cron: {} {} by @{}", action, name, author_handler.as_str());
+        let spec_rel = format!("crons/{}/spec.yaml", name);
+        let (author_name, author_email) = state.author_for(author_handler.as_str());
+        if let Err(e) = state.git_storage.add_and_commit_as(
+            &[&spec_rel],
+            &commit_msg,
+            Some((&author_name, &author_email)),
+        ) {
+            // Rollback: restore previous yaml so working tree mirrors HEAD.
+            if let Err(rb) = cur.to_yaml().map_err(|e| e.to_string()).and_then(|y| {
+                std::fs::write(&spec_path, y).map_err(|e| e.to_string())
+            }) {
+                tracing::warn!("toggle_enabled: rollback restore failed: {}", rb);
+            }
+            return Response::error_with_code(
+                format!("toggle commit failed: {}", e),
+                "commit_failed",
+            );
+        }
+        // commit_guard drops here.
+    }
+
+    info!(
+        "cron '{}' {} by @{}",
+        name,
+        if target { "enabled" } else { "disabled" },
+        author_handler.as_str()
+    );
+
+    let payload = ToggleCronResponse {
+        name,
+        enabled: target,
+        changed: true,
+    };
+    Response::success(serde_json::to_value(payload).unwrap())
+}
+
