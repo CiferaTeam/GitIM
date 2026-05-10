@@ -32,7 +32,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use gitim_core::types::cron::next_fire_after;
 use gitim_core::types::{CronSpec, Handler};
 use thiserror::Error;
@@ -40,6 +40,22 @@ use tracing::{info, warn};
 
 use crate::cron_paths::{format_thread_filename_ts, parse_thread_filename_ts};
 use crate::state::AppState;
+
+/// Maximum age (relative to `now`) of a fire that this engine will still
+/// emit. Anchors older than `now - GRACE_WINDOW` are clamped forward, so a
+/// daemon that comes back online after a long gap doesn't replay every
+/// backlogged occurrence one tick at a time.
+///
+/// Sized as 2 tick intervals (the engine ticks every 60s) so a fire whose
+/// theoretical ts genuinely lands at the boundary of a tick can still be
+/// emitted on the immediately-following scan even with mild clock drift.
+/// Anything older counts as "missed = miss" per design.md
+/// "Catch-up 策略：不补跑": catching up burns context on stale schedules.
+///
+/// Constant lives at module scope so `scan_due` and any future windowing
+/// helper agree on the same number; the `120s` is documented in design.md
+/// as well — both should move together if we ever revisit it.
+const GRACE_WINDOW: Duration = Duration::seconds(120);
 
 /// One pending fire computed by `scan_due`. The engine re-derives the
 /// destination path from `spec_name` + `theoretical_ts` when it actually
@@ -202,7 +218,7 @@ fn scan_one(
     // the last_fire fact. If no fires yet, fall back to `created_at` —
     // never to `now` (would let "create + immediate fire" sneak in).
     let last_fire = latest_fire_in_dir(spec_dir);
-    let anchor = match last_fire {
+    let raw_anchor = match last_fire {
         Some(ts) => ts,
         None => match DateTime::parse_from_rfc3339(&spec.created_at) {
             Ok(dt) => dt.with_timezone(&Utc),
@@ -216,6 +232,24 @@ fn scan_one(
                 return None;
             }
         },
+    };
+
+    // Clamp the anchor forward to `now - GRACE_WINDOW`. Without this,
+    // a daemon that's been offline for hours would walk `next_fire_after`
+    // through every overdue occurrence, firing one per tick — a daily
+    // cron created May 1 with daemon offline until May 9 would otherwise
+    // burn 8 fires of agent context over ~8 minutes. Per design.md
+    // "Catch-up 策略：不补跑", we silently drop anything older than 2
+    // ticks. The agent missed it; missed = miss.
+    //
+    // For fresh / regularly-firing crons the clamp is a no-op (anchor is
+    // already within the window). It only kicks in after the daemon was
+    // genuinely down longer than 2 minutes.
+    let cutoff = now - GRACE_WINDOW;
+    let anchor = if raw_anchor < cutoff {
+        cutoff
+    } else {
+        raw_anchor
     };
 
     let next_due = match next_fire_after(&spec, anchor) {
@@ -440,10 +474,15 @@ mod tests {
     }
 
     fn fixed_now() -> DateTime<Utc> {
-        // 2026-05-09 (Saturday) 15:00 UTC — picked so a "@daily" anchored
-        // at midnight already matches and "0 9 * * 1" anchored Sunday is
-        // tomorrow.
-        Utc.with_ymd_and_hms(2026, 5, 9, 15, 0, 0).unwrap()
+        // 2026-05-09 (Saturday) 00:00:30 UTC — 30s past midnight. Picked
+        // deliberately so `@daily` evaluated against the clamped anchor
+        // (`now - 120s` = 2026-05-08 23:58:30) returns 2026-05-09 00:00:00,
+        // which is `<= now` and therefore due. Earlier choices of `now`
+        // (15:00 UTC) worked before the GRACE_WINDOW clamp because the
+        // anchor was free to walk from `created_at` forward — once the
+        // clamp lands, midnight-aligned schedules need a `now` that's
+        // close to midnight for the test fire to actually be due.
+        Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 30).unwrap()
     }
 
     fn write_spec(crons_root: &Path, name: &str, body: &str) -> PathBuf {
@@ -513,10 +552,10 @@ mod tests {
     fn scan_due_returned() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
-        // Created at 2026-05-01, schedule @daily — by now (2026-05-09)
-        // many fires would have been due. Engine fires only the next
-        // theoretical fire after the anchor (= created_at since no
-        // thread files yet).
+        // Created at 2026-05-01, schedule @daily. After the GRACE_WINDOW
+        // clamp the anchor is now-120s = 2026-05-08T23:58:30. Next
+        // `@daily` fire after that is midnight 2026-05-09 — which is
+        // `<= fixed_now()` (00:00:30) so it's due.
         write_spec(
             &root,
             "daily",
@@ -525,15 +564,20 @@ mod tests {
         let due = scan_due(&root, &alice(), fixed_now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].spec_name, "daily");
-        // First @daily fire after 2026-05-01T00:00:00 is 2026-05-02T00:00:00.
+        // After clamp, anchor is now-120s (within today), so the next
+        // fire is today's midnight, not 2026-05-02 (the pre-clamp value).
         assert_eq!(
             due[0].theoretical_ts,
-            Utc.with_ymd_and_hms(2026, 5, 2, 0, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 0).unwrap()
         );
     }
 
     #[test]
     fn scan_already_fired_skipped() {
+        // Idempotency: a thread file exists for an old fire. The clamp
+        // pushes the anchor forward to now-120s (since the thread's ts
+        // is older than that), so the next-due fire is today's midnight
+        // — which is `<= now` and therefore returned.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
         let dir = root.join("daily");
@@ -543,27 +587,30 @@ mod tests {
             spec_yaml("alice", "@daily", "2026-05-01T00:00:00Z", true),
         )
         .unwrap();
-        // Pretend the most recent fire is at the very next-due timestamp
-        // we'd otherwise pick.
+        // Existing fire well outside the grace window — clamped away.
         write_thread_file(
             &dir,
             Utc.with_ymd_and_hms(2026, 5, 2, 0, 0, 0).unwrap(),
         );
 
         let due = scan_due(&root, &alice(), fixed_now()).unwrap();
-        assert_eq!(due.len(), 1, "next fire after the fired one is also due");
+        assert_eq!(due.len(), 1, "next fire after clamped anchor is due");
         assert_eq!(
             due[0].theoretical_ts,
-            Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap(),
-            "should advance past the fired timestamp"
+            Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 0).unwrap(),
+            "after clamp, next fire is today's midnight, not 5/3"
         );
     }
 
     #[test]
     fn scan_already_fired_at_next_due_skipped_idempotent() {
-        // Nailed-down idempotency: simulate a re-scan where the latest
-        // existing fire IS the next-due timestamp. Engine should advance
-        // past it (next-after) and not re-emit the same FireRequest.
+        // Nailed-down idempotency: simulate a re-scan with two existing
+        // fires. After the clamp, the anchor is `now - 120s` regardless
+        // of how recently the last fire happened, so the next-after is
+        // today's midnight (not 5/4 as the pre-clamp version expected).
+        // The point of this test under the clamp is that an existing
+        // fire at exactly today's midnight would short-circuit the
+        // emission — `dest_already_exists` catches the duplicate.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
         let dir = root.join("daily");
@@ -573,38 +620,41 @@ mod tests {
             spec_yaml("alice", "@daily", "2026-05-01T00:00:00Z", true),
         )
         .unwrap();
-        // Two existing fires; the next theoretical (5/3) would already
-        // exist if we somehow raced.
-        write_thread_file(&dir, Utc.with_ymd_and_hms(2026, 5, 2, 0, 0, 0).unwrap());
-        write_thread_file(&dir, Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap());
+        // Pre-existing fire AT today's midnight — engine should detect
+        // dest_already_exists and emit nothing.
+        write_thread_file(&dir, Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 0).unwrap());
         let due = scan_due(&root, &alice(), fixed_now()).unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(
-            due[0].theoretical_ts,
-            Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap(),
-            "should pick the fire after the latest existing one"
+        assert!(
+            due.is_empty(),
+            "fire already on disk for today's midnight — must not re-emit"
         );
     }
 
     #[test]
     fn scan_bootstrap_no_thread_files() {
-        // Fresh spec with `created_at` after fixed_now's threshold —
-        // no fire yet. Then move created_at back so a fire is due.
+        // Bootstrap path: no `<ts>.thread` files exist yet, so the anchor
+        // falls back to `spec.created_at`. With the GRACE_WINDOW clamp,
+        // a fresh spec whose `created_at` lands inside the grace window
+        // still uses `created_at` as the anchor (clamp is a no-op when
+        // raw_anchor >= cutoff). Use a `@daily` schedule so the next-due
+        // fire is today's midnight — within the grace window relative
+        // to fixed_now.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
+        // created_at = 2026-05-08T23:59:00Z, just inside the 120s window
+        // before fixed_now (2026-05-09T00:00:30Z). Anchor stays at
+        // created_at, next `@daily` fire = midnight 5/9.
         write_spec(
             &root,
             "fresh",
-            &spec_yaml("alice", "0 9 * * *", "2026-05-08T08:00:00Z", true),
+            &spec_yaml("alice", "@daily", "2026-05-08T23:59:00Z", true),
         );
-        // Anchor = created_at (2026-05-08 08:00). Next fire = 2026-05-08 09:00.
-        // fixed_now is 2026-05-09 15:00, so 09:00 on 5/8 is well past due.
         let due = scan_due(&root, &alice(), fixed_now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(
             due[0].theoretical_ts,
-            Utc.with_ymd_and_hms(2026, 5, 8, 9, 0, 0).unwrap(),
-            "bootstrap anchor uses created_at, not now"
+            Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 0).unwrap(),
+            "bootstrap anchor stays at created_at when within grace window"
         );
     }
 
@@ -612,11 +662,13 @@ mod tests {
     fn scan_bootstrap_no_immediate_fire() {
         // Edge case the design calls out: "create then immediately fire"
         // must NOT happen unless the schedule legitimately matches. Here
-        // created_at is *after* the most recent schedule match, so the
-        // next fire is genuinely in the future.
+        // created_at is *after* fixed_now, so the next fire is genuinely
+        // in the future. The clamp can never push the anchor backward, so
+        // a future-dated created_at stays untouched.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
-        // 0 9 * * * with anchor at 10:00 UTC — next fire is tomorrow's 09:00.
+        // 0 9 * * * with anchor at 2026-05-09T10:00 UTC (after now). Next
+        // fire is tomorrow's 09:00 — still in the future relative to now.
         write_spec(
             &root,
             "fresh",
@@ -633,9 +685,15 @@ mod tests {
     fn scan_dst_forward_no_double_fire() {
         // 2026-03-08: US DST forward day. Schedule "30 2 * * *" in
         // America/Los_Angeles is in the gap; croner snaps to 03:00 PDT
-        // (= UTC 10:00). A scan run later that day must produce exactly
-        // one fire — not one for the missed PST 02:30 + one for the
-        // snapped 03:00.
+        // (= UTC 10:00). A scan run shortly after the snapped fire must
+        // produce exactly one fire — not one for the missed PST 02:30
+        // + one for the snapped 03:00.
+        //
+        // Note: the GRACE_WINDOW clamp pushes any pre-now-120s anchor
+        // forward. Pick `now` shortly after the expected snapped fire
+        // (10:01 UTC) so the clamped anchor (now-120s = 09:59 UTC) is
+        // still before the snapped fire (10:00 UTC) and the engine
+        // returns it as due.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
         let dir = root.join("dst");
@@ -647,8 +705,9 @@ mod tests {
             ),
         )
         .unwrap();
-        // Now is later that same day — UTC 18:00 (= LA 11:00 PDT).
-        let now = Utc.with_ymd_and_hms(2026, 3, 8, 18, 0, 0).unwrap();
+        // Now = UTC 10:01 (= LA 03:01 PDT), one minute after the
+        // snapped fire timestamp.
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 10, 1, 0).unwrap();
         let due = scan_due(&root, &alice(), now).unwrap();
         assert_eq!(
             due.len(),
@@ -716,7 +775,10 @@ mod tests {
     #[test]
     fn scan_skips_when_other_handler_owns() {
         // Mixed workspace: alice's crons + bob's crons; alice clone only
-        // sees its own.
+        // sees its own. The clamp pushes both stale anchors forward to
+        // now-120s, then `@daily` next-fire = today's midnight (within
+        // grace window of fixed_now), so each handler sees exactly its
+        // own due fire.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("crons");
         write_spec(
@@ -736,6 +798,74 @@ mod tests {
         let due_bob = scan_due(&root, &bob(), fixed_now()).unwrap();
         assert_eq!(due_bob.len(), 1);
         assert_eq!(due_bob[0].spec_name, "for-bob");
+    }
+
+    // ─── GRACE_WINDOW clamp ─────────────────────────────────────────────────
+
+    /// Daemon offline for ~10 minutes; spec is `* * * * *` (every minute).
+    /// Without the clamp, scan_due would walk through all 10 backlogged
+    /// fires one tick at a time. With the clamp, the anchor jumps to
+    /// now-120s and only the most-recent-within-grace fire is eligible —
+    /// at most one FireRequest, never the full backlog.
+    #[test]
+    fn scan_skips_ancient_backlog() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("crons");
+        // created_at 10 minutes before fixed_now. Way outside grace.
+        let created_at = (fixed_now() - chrono::Duration::seconds(600))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        write_spec(
+            &root,
+            "every-min",
+            &spec_yaml("alice", "* * * * *", &created_at, true),
+        );
+        let due = scan_due(&root, &alice(), fixed_now()).unwrap();
+        assert!(
+            due.len() <= 1,
+            "ancient backlog must not replay; got {} fires",
+            due.len()
+        );
+        // Whatever fires, it must be within the grace window.
+        if let Some(req) = due.first() {
+            let cutoff = fixed_now() - chrono::Duration::seconds(120);
+            assert!(
+                req.theoretical_ts >= cutoff,
+                "emitted fire {} is older than grace cutoff {}",
+                req.theoretical_ts,
+                cutoff
+            );
+        }
+    }
+
+    /// A spec whose `created_at` is INSIDE the grace window must still
+    /// fire normally — the clamp is a no-op when the raw anchor is
+    /// already ≥ cutoff.
+    #[test]
+    fn scan_fires_within_grace_window() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("crons");
+        // created_at = now - 100s, well inside the 120s grace. Schedule
+        // `* * * * *` so the next fire is the next whole minute (which
+        // is fixed_now() itself: 2026-05-09 00:00:30 → next minute
+        // is 00:01:00, NOT due yet). Use a schedule whose next-fire
+        // after now-100s lands at now-30s instead.
+        let created_at = (fixed_now() - chrono::Duration::seconds(100))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        write_spec(
+            &root,
+            "minute",
+            &spec_yaml("alice", "* * * * *", &created_at, true),
+        );
+        let due = scan_due(&root, &alice(), fixed_now()).unwrap();
+        // raw_anchor = 2026-05-08T23:58:50, cutoff = 2026-05-08T23:58:30.
+        // raw_anchor > cutoff, so anchor stays at 23:58:50.
+        // Next * * * * * after 23:58:50 = 23:59:00 (still <= now 00:00:30) → due.
+        assert_eq!(due.len(), 1, "fresh spec inside grace window must fire");
+        assert_eq!(
+            due[0].theoretical_ts,
+            Utc.with_ymd_and_hms(2026, 5, 8, 23, 59, 0).unwrap(),
+            "fire should be the first schedule match after raw anchor"
+        );
     }
 
     // ─── format_cron_body — formatter contract with parser ───────────────────
