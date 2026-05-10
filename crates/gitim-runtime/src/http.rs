@@ -1835,10 +1835,26 @@ async fn crons_timeline(
             Ok(dt) => dt.with_timezone(&Utc),
             Err(_) => continue,
         };
-        // Strictly-after semantics: anchor = max(created_at, from) - 1s gives
-        // results >= max(created_at, from). The 1s slack matters at boundary
-        // cases where a fire lands exactly on `from`.
-        let mut anchor = created_at_dt.max(from) - chrono::Duration::seconds(1);
+        // Anchor selection mirrors the engine's strictly-after-created_at
+        // contract:
+        //   - When the requested `from` is *after* `created_at`, we walk
+        //     `from - 1s` so a fire that lands exactly on `from` still
+        //     surfaces (boundary recovery — `next_fire_after` returns
+        //     strictly later than its argument, so we shift one second
+        //     left to keep an on-`from` instant in scope).
+        //   - When `from <= created_at`, we MUST anchor at `created_at`
+        //     itself, NOT `created_at - 1s`. The engine never fires *at*
+        //     `created_at` (Bootstrap invariant: `last_fire = created_at`,
+        //     and `next_fire_after(spec, created_at)` returns the next
+        //     scheduled instant strictly later). Subtracting a second
+        //     here would let the timeline emit a `future`/`missed` entry
+        //     at `created_at` that the engine can never produce — the
+        //     calendar would lie about the cron's first run.
+        let mut anchor = if from > created_at_dt {
+            from - chrono::Duration::seconds(1)
+        } else {
+            created_at_dt
+        };
         let mut iters = 0usize;
         loop {
             if iters >= MAX_TIMELINE_ENTRIES_PER_CRON {

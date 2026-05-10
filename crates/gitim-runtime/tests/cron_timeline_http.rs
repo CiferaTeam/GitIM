@@ -562,6 +562,198 @@ async fn timeline_workspace_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// ─── Boundary correctness around `created_at` ────────────────────────────────
+//
+// The engine fires strictly *after* `last_fire`, where the bootstrap value
+// of `last_fire` is `created_at`. The timeline endpoint must mirror that:
+// when the requested window covers (or starts before) `created_at`, no
+// theoretical fire may land *at* `created_at`. Otherwise the calendar
+// over-promises an instant the engine will never produce.
+
+#[tokio::test]
+async fn timeline_does_not_emit_fire_at_created_at_when_window_covers_creation() {
+    // Spec created exactly on a scheduled instant: `0 0 * * *` with
+    // `created_at = 2025-01-01T00:00:00Z`. The first real fire is the
+    // NEXT day at 00:00:00Z, not the creation moment itself. Use a
+    // pre-now-anchored absolute date so the `missed` arm produces
+    // deterministic output (all theoretical fires ≤ `now` → "missed"
+    // unless caught as "past" by an on-disk file).
+    let env = setup();
+    let from = "2025-01-01T00:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let to = "2025-01-05T00:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let created_at = "2025-01-01T00:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    set_list_crons(
+        &env.table,
+        json!([{
+            "name": "midnight-daily",
+            "schedule": "0 0 * * *",
+            "target": "alice",
+            "enabled": true,
+            "created_by": "alice",
+            "created_at": rfc3339_secs(created_at),
+        }]),
+    )
+    .await;
+
+    let from_q = rfc3339_secs(from);
+    let to_q = rfc3339_secs(to);
+    let uri = format!(
+        "/workspaces/test-ws/crons/timeline?from={}&to={}",
+        from_q, to_q
+    );
+    let (status, body) = send(env.router, "GET", &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
+
+    // The bug: an entry at `2025-01-01T00:00:00Z` would be emitted
+    // because `next_fire_after(spec, created_at - 1s)` returns
+    // `created_at` itself. After the fix, the first emitted ts must be
+    // `2025-01-02T00:00:00Z`.
+    let timestamps: Vec<&str> = entries
+        .iter()
+        .map(|e| e.get("ts").and_then(|v| v.as_str()).unwrap_or(""))
+        .collect();
+    assert!(
+        !timestamps.contains(&"2025-01-01T00:00:00Z"),
+        "engine never fires at created_at; timeline must not emit one. got: {:?}",
+        timestamps
+    );
+    // Sanity: at least one fire exists in the window (Jan 2 / 3 / 4 / 5).
+    assert!(
+        !timestamps.is_empty(),
+        "expected daily fires in 4-day window"
+    );
+    // First entry must be the day AFTER created_at.
+    assert_eq!(
+        timestamps.first().copied(),
+        Some("2025-01-02T00:00:00Z"),
+        "first fire must be one schedule period after created_at"
+    );
+}
+
+#[tokio::test]
+async fn timeline_does_emit_fire_at_window_start_when_after_created_at() {
+    // The complementary case: created_at well before the window, and
+    // `from` lands exactly on a scheduled instant. The 1-second slack
+    // applies (because `from > created_at_dt`), so the on-`from`
+    // theoretical fire surfaces rather than being lost to strict-after
+    // semantics.
+    let env = setup();
+    let created_at = "2025-01-01T00:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let from = "2025-02-10T09:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let to = "2025-02-15T00:00:00Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    set_list_crons(
+        &env.table,
+        json!([{
+            "name": "morning",
+            "schedule": "0 9 * * *",
+            "target": "alice",
+            "enabled": true,
+            "created_by": "alice",
+            "created_at": rfc3339_secs(created_at),
+        }]),
+    )
+    .await;
+
+    let from_q = rfc3339_secs(from);
+    let to_q = rfc3339_secs(to);
+    let uri = format!(
+        "/workspaces/test-ws/crons/timeline?from={}&to={}",
+        from_q, to_q
+    );
+    let (status, body) = send(env.router, "GET", &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
+    let timestamps: Vec<&str> = entries
+        .iter()
+        .map(|e| e.get("ts").and_then(|v| v.as_str()).unwrap_or(""))
+        .collect();
+    assert!(
+        timestamps.contains(&"2025-02-10T09:00:00Z"),
+        "boundary fire on `from` must be present; got: {:?}",
+        timestamps
+    );
+}
+
+#[tokio::test]
+async fn timeline_cap_one_cron_other_unaffected() {
+    // Cross-cron isolation: when cron A's iteration trips the
+    // per-cron cap, cron B's expected entries must still appear in the
+    // response. The code structurally iterates per-cron — this test
+    // locks that invariant against future refactors that might share a
+    // global counter.
+    let env = setup();
+    let now = Utc::now();
+    let from = now;
+    let to = now + Duration::days(30);
+    let created_at = now - Duration::days(30);
+    set_list_crons(
+        &env.table,
+        json!([
+            {
+                "name": "minute-burst",
+                "schedule": "* * * * *",
+                "target": "alice",
+                "enabled": true,
+                "created_by": "alice",
+                "created_at": rfc3339_secs(created_at),
+            },
+            {
+                "name": "morning-daily",
+                "schedule": "0 9 * * *",
+                "target": "bob",
+                "enabled": true,
+                "created_by": "bob",
+                "created_at": rfc3339_secs(created_at),
+            }
+        ]),
+    )
+    .await;
+
+    let from_q = rfc3339_secs(from);
+    let to_q = rfc3339_secs(to);
+    let uri = format!(
+        "/workspaces/test-ws/crons/timeline?from={}&to={}",
+        from_q, to_q
+    );
+    let (status, body) = send(env.router, "GET", &uri).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A trips the cap → truncated must be true.
+    assert_eq!(
+        body.get("truncated").and_then(|v| v.as_bool()),
+        Some(true),
+        "minute-burst is far over the cap; truncated must surface"
+    );
+
+    // B's entries (~30 daily fires) must still be present despite A
+    // exhausting iteration. Count by cron_name to filter cleanly.
+    let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
+    let b_count = entries
+        .iter()
+        .filter(|e| {
+            e.get("cron_name").and_then(|v| v.as_str()) == Some("morning-daily")
+        })
+        .count();
+    assert!(
+        b_count >= 25,
+        "morning-daily should produce ~30 entries over 30 days; got {} (cap on cron A bled into B?)",
+        b_count
+    );
+}
+
 struct KindCounts {
     past: usize,
     future: usize,
