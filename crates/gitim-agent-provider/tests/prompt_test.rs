@@ -181,6 +181,24 @@ fn gitim_api_exposes_board_commands() {
 }
 
 #[test]
+fn gitim_api_exposes_message_body_markers() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("### 消息正文协议标记"));
+    assert!(api.contains("<@handler>"));
+    assert!(api.contains("裸写 `@handler`"));
+    assert!(api.contains("<#channel>"));
+    assert!(api.contains("<#channel:L000042>"));
+    assert!(api.contains("<~handler>"));
+    assert!(api.contains("<!https://example.com|显示文本>"));
+}
+
+#[test]
 fn reset_protocol_handles_lost_gitim_output_contract() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
