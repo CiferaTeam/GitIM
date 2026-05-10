@@ -205,6 +205,55 @@ describe("BoardsView", () => {
     expect(listBoardsMock).toHaveBeenCalledTimes(2);
   });
 
+  it("refresh button reloads the selected board detail", async () => {
+    listBoardsMock
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { boards: [boardSummary("alice", "Old summary")] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { boards: [boardSummary("alice", "New summary")] },
+      });
+    showBoardMock
+      .mockResolvedValueOnce({
+        ok: true,
+        data: boardRead("alice", "Old detail"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: boardRead("alice", "New detail"),
+      });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<BoardsView />);
+      await flushPromises();
+    });
+
+    expect(container.textContent).toContain("Old detail");
+
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh boards"]',
+    );
+    expect(button).not.toBeNull();
+
+    await act(async () => {
+      button?.click();
+      await flushPromises();
+    });
+
+    expect(listBoardsMock).toHaveBeenCalledTimes(2);
+    expect(showBoardMock).toHaveBeenCalledTimes(2);
+    expect(showBoardMock).toHaveBeenNthCalledWith(1, "phone", "alice");
+    expect(showBoardMock).toHaveBeenNthCalledWith(2, "phone", "alice");
+    expect(container.textContent).toContain("New detail");
+    expect(container.textContent).not.toContain("Old detail");
+  });
+
   it("ignores a stale list response after the workspace changes", async () => {
     const stalePhoneList = deferred<ApiResponse<{ boards: BoardSummary[] }>>();
     listBoardsMock

@@ -39,12 +39,15 @@ export function BoardsView() {
     };
   }, []);
 
-  const refreshBoards = useCallback(async () => {
+  const refreshBoards = useCallback(async (options?: { reloadSelectedDetail?: boolean }) => {
     const requestSlug = activeSlug;
     if (!requestSlug) return;
     if (activeSlugRef.current !== requestSlug) return;
     const requestId = listRequestIdRef.current + 1;
     listRequestIdRef.current = requestId;
+    const previousSelected = options?.reloadSelectedDetail
+      ? useBoardStore.getState().selectedHandler
+      : null;
     setListState("loading");
     setError(null);
     const res = await client.listBoards(requestSlug);
@@ -61,7 +64,30 @@ export function BoardsView() {
     }
     setBoards(res.data.boards);
     setListState("idle");
-  }, [activeSlug, setBoards]);
+    if (
+      !previousSelected ||
+      !res.data.boards.some((board) => board.handler === previousSelected)
+    ) {
+      return;
+    }
+
+    setDetailState("loading");
+    const detailRes = await client.showBoard(requestSlug, previousSelected);
+    if (
+      listRequestIdRef.current !== requestId ||
+      activeSlugRef.current !== requestSlug ||
+      useBoardStore.getState().selectedHandler !== previousSelected
+    ) {
+      return;
+    }
+    if (!detailRes.ok || !detailRes.data) {
+      setDetailState("error");
+      setError(detailRes.error ?? "Failed to load board");
+      return;
+    }
+    setSelectedBoard(detailRes.data);
+    setDetailState("idle");
+  }, [activeSlug, setBoards, setSelectedBoard]);
 
   useEffect(() => {
     let cancelled = false;
@@ -123,7 +149,7 @@ export function BoardsView() {
           size="icon-sm"
           aria-label="Refresh boards"
           title="Refresh boards"
-          onClick={() => void refreshBoards()}
+          onClick={() => void refreshBoards({ reloadSelectedDetail: true })}
         >
           <RefreshCcw className={cn("size-4", listState === "loading" && "animate-spin")} />
         </Button>

@@ -861,6 +861,23 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("reports the post-sync commit id for browser board writes", async () => {
+    runSyncMock.mockImplementationOnce(async () => {
+      setState({ headCommit: "rebased-head" });
+    });
+
+    const res = await initBoard();
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      status: "committed",
+      commit_id: "rebased-head",
+      sync_status: "pushed",
+    }));
+  });
+
   it("refuses to initialize over an existing browser board", async () => {
     dirs.set("/repo/showboards", ["lewis"]);
     dirs.set("/repo/showboards/lewis", ["board.md"]);

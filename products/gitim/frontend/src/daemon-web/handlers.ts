@@ -121,26 +121,41 @@ function errorMessage(e: unknown): string {
   return String((e as Error).message ?? e);
 }
 
-async function syncAfterCommit(): Promise<{
+async function syncAfterCommit(options?: { trackCommitId?: boolean }): Promise<{
   status: "pushed" | "commit_only";
+  commit_id?: string;
   error?: string;
   error_code?: string;
   needs_token?: boolean;
 }> {
+  const beforeHead = options?.trackCommitId ? getState().headCommit : undefined;
   try {
     await runSync({ forceNewCycle: true });
-    return { status: "pushed" };
+    const syncedHead = getState().headCommit;
+    return {
+      status: "pushed",
+      commit_id:
+        beforeHead !== undefined && syncedHead !== beforeHead
+          ? syncedHead
+          : undefined,
+    };
   } catch (e) {
+    const syncedHead = getState().headCommit;
+    const commitId =
+      beforeHead !== undefined && syncedHead !== beforeHead
+        ? syncedHead
+        : undefined;
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
       return {
         status: "commit_only",
+        commit_id: commitId,
         error: errorMessage(e),
         error_code: "reconnect_required",
         needs_token: true,
       };
     }
-    return { status: "commit_only", error: errorMessage(e) };
+    return { status: "commit_only", commit_id: commitId, error: errorMessage(e) };
   }
 }
 
@@ -1267,12 +1282,12 @@ async function commitBoardDocument(
     `${messagePrefix} @${handler}`,
     handler,
   );
-  const sync = await syncAfterCommit();
+  const sync = await syncAfterCommit({ trackCommitId: true });
   const data: Record<string, unknown> = {
     handler,
     path,
     status: "committed",
-    commit_id: commitId,
+    commit_id: sync.commit_id ?? commitId,
     sync_status: sync.status,
   };
   if (sync.error) data.sync_error = sync.error;
