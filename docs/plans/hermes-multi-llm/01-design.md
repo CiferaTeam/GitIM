@@ -131,14 +131,27 @@ base_url: <from entry> }`.
 
 ### `BUILTIN_PROVIDERS` (v1, mirrored from `hermes_cli/auth.py:PROVIDER_REGISTRY`)
 
-| id | label | env_vars (any matches) | base_url |
-|---|---|---|---|
-| `anthropic` | Anthropic / Claude | `ANTHROPIC_API_KEY`, `ANTHROPIC_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` | `https://api.anthropic.com` |
-| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
-| `kimi-coding` | Kimi / Moonshot | `KIMI_API_KEY` | `https://api.moonshot.ai/v1` |
-| `minimax` | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/anthropic` |
-| `minimax-cn` | MiniMax CN | `MINIMAX_CN_API_KEY` | `https://api.minimaxi.com/anthropic` |
-| `zai` | Z.AI / GLM | `GLM_API_KEY`, `ZAI_API_KEY`, `Z_AI_API_KEY` | `https://api.z.ai/api/paas/v4` |
+| id | label | env_vars (any matches) | base_url | api_protocol |
+|---|---|---|---|---|
+| `anthropic` | Anthropic / Claude | `ANTHROPIC_API_KEY`, `ANTHROPIC_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` | `https://api.anthropic.com` | OpenAI |
+| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` | OpenAI |
+| `kimi-coding` | Kimi / Moonshot | `KIMI_API_KEY` | **dynamic** — see below | OpenAI |
+| `minimax` | MiniMax | `MINIMAX_API_KEY` | `https://api.minimax.io/anthropic` | Anthropic |
+| `minimax-cn` | MiniMax CN | `MINIMAX_CN_API_KEY` | `https://api.minimaxi.com/anthropic` | Anthropic |
+| `zai` | Z.AI / GLM | `GLM_API_KEY`, `ZAI_API_KEY`, `Z_AI_API_KEY` | `https://api.z.ai/api/paas/v4` | OpenAI |
+
+**`api_protocol`** distinguishes OpenAI-compatible (`/models` works) from
+Anthropic Messages-compatible (no `/models` endpoint). Verified by Phase 0
+probe — `minimax` / `minimax-cn` `/anthropic`-suffixed base_urls return 404
+on `GET <base_url>/models`. The `fetch_models` function short-circuits
+Anthropic-protocol entries to "no list available — use Custom..." without
+hitting the network.
+
+**`kimi-coding` dynamic base_url** mirrors `hermes_cli/auth.py:_resolve_kimi_base_url()`:
+if the user's `KIMI_API_KEY` starts with `sk-kimi-`, base_url is
+`https://api.kimi.com/coding/v1`; otherwise `https://api.moonshot.ai/v1`.
+`introspect.rs` reads the key prefix at request time and surfaces the
+resolved URL on the returned `LlmProvider`.
 
 Values mirrored from `hermes_cli/auth.py` at the targeted hermes version.
 The Phase 0 baseline task verifies them against the locally installed hermes
@@ -189,13 +202,16 @@ re-evaluate Q3.
 
 ```
 1. Path param `id`:
-   ├─ in BUILTIN_PROVIDERS → static base_url
+   ├─ in BUILTIN_PROVIDERS → static base_url (or kimi-coding's dynamic resolution)
    ├─ "custom:<name>" → ~/.hermes/config.yaml.custom_providers[<name>].base_url
    └─ otherwise → 400
-2. Auth header: read corresponding API key from .env (builtin) or
+2. If builtin and api_protocol == Anthropic: short-circuit. Return 200 with
+   models: [], error: "<provider> uses Anthropic protocol; /models not
+   supported. Use Custom...". No network call.
+3. Auth header: read corresponding API key from .env (builtin) or
    custom_providers[<name>].api_key (custom). Send `Authorization: Bearer <key>`.
-3. GET <base_url>/models, 5s timeout via reqwest.
-4. Parse OpenAI-compatible: response.data[].id → models[].id (label = id).
+4. GET <base_url>/models, 5s timeout via reqwest.
+5. Parse OpenAI-compatible: response.data[].id → models[].id (label = id).
 ```
 
 ### Failure → 200 with `error` field
@@ -295,7 +311,8 @@ unattended CI does not spend on real LLM calls.
 | API key leaks through error string or log | Security | Tests assert error strings exclude key literal; structured fields, no raw-key logging |
 | Step 4 fails leaving partial profile | Next add hits `AlreadyExists` with bad config | Rollback sequence (L6) deletes profile on any failure |
 | Hermes binary too old for `config set model.provider` | Phase 0 misses it | Plan's preflight extension reports hermes version; not a hard gate v1 |
-| `<base_url>/models` path varies by provider (Anthropic uses `/v1/models`, MiniMax's anthropic-compat endpoint may not expose `/models` at all) | Live fetch returns 404 → falls back to Custom input | Phase 0 baseline probes each builtin's actual `/models` path; if Anthropic needs `/v1/models`, registry stores `models_path: Option<&str>` per provider with default `"/models"`. Failure case still degrades cleanly to error + Custom |
+| Anthropic-protocol providers (`minimax` / `minimax-cn`) have no `/models` endpoint | Anthropic-protocol always falls back to Custom input | `BuiltinProvider.api_protocol` distinguishes; `fetch_models` short-circuits Anthropic-protocol providers to empty + actionable error before any network call (verified Phase 0) |
+| `kimi-coding` base_url depends on key prefix (`sk-kimi-*` → coding endpoint, else → moonshot) | Static URL would be wrong for half the user population | Mirror `hermes_cli/auth.py:_resolve_kimi_base_url()` at registry-resolution time; introspect.rs reads .env key prefix and emits the resolved URL on the LlmProvider it returns |
 
 ## Out-of-scope dependencies on other work
 
