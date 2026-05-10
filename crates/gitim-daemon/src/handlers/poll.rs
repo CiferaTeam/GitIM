@@ -333,6 +333,105 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                 entries: Vec::new(),
             });
             continue;
+        } else if path_str.starts_with("crons/")
+            && path_str.ends_with(".thread")
+            && !path_str.starts_with("archive/")
+        {
+            // Cron fire: `crons/<name>/<theoretical_ts>.thread`. Each fire
+            // is a synthetic [@system] thread file written by `cron_engine::fire`
+            // when a spec's schedule comes due. The runtime poller drives
+            // agent_loop wake-ups; without a poll branch here, every
+            // cron fire would be silently dropped — runtime never sees it,
+            // target agent never wakes, the entire feature is dead.
+            //
+            // Ownership filter: in a multi-clone workspace, every clone
+            // sees every other clone's cron fires syncing in via git.
+            // Only the clone whose own me.json handler matches `spec.target`
+            // should surface the change to its agent_loop. Other clones
+            // would otherwise wake their (wrong) agents on someone else's
+            // schedule. We read `crons/<name>/spec.yaml` from HEAD (current
+            // state, not the historical revision in the diff) because the
+            // ownership decision is "is this fire for me right now?", not
+            // "was it for me when the spec was the way it was at fire time".
+            //
+            // archive/ exclusion: `path_str.starts_with("archive/")` is
+            // false here because `path_str.starts_with("crons/")` is true
+            // and the prefixes don't overlap — but spelling it out as a
+            // belt-and-suspenders so a future refactor that shifts the
+            // strip_prefix order won't accidentally start surfacing
+            // archived crons.
+            let rest = match path_str.strip_prefix("crons/") {
+                Some(r) => r,
+                None => continue,
+            };
+            // `crons/<name>/<ts>.thread` — the cron name is the directory
+            // segment immediately under `crons/`. Anything without a slash
+            // (e.g. a stray top-level file) is not a cron fire.
+            let cron_name = match rest.split_once('/') {
+                Some((n, _)) => n,
+                None => continue,
+            };
+            // Read spec.yaml at HEAD via fs (same semantic as state-side
+            // reads in cron handlers); the file is committed before the
+            // fire so it must exist when the diff carries the fire path.
+            // If the spec is gone (delete-then-fire race archived it
+            // between fire and our poll), drop the change silently —
+            // ownership can't be evaluated and an undecidable change is
+            // worse than a missed wake-up.
+            let spec_path = state
+                .repo_root
+                .join("crons")
+                .join(cron_name)
+                .join("spec.yaml");
+            let spec_str = match std::fs::read_to_string(&spec_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let spec_target: String =
+                match serde_yaml::from_str::<serde_yaml::Value>(&spec_str) {
+                    Ok(v) => v
+                        .get("target")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    Err(_) => continue,
+                };
+            if spec_target.is_empty() {
+                continue;
+            }
+            // Self check uses `current_user_snapshot` (read once at the top
+            // of this fn, same source the channel/dm filters use). admin /
+            // guest flags bypass the visibility filter elsewhere but cron
+            // ownership is structural — admins shouldn't get woken by
+            // every workspace cron. Apply unconditionally.
+            let self_match = current_user_snapshot
+                .as_deref()
+                .map(|me| me == spec_target.as_str())
+                .unwrap_or(false);
+            if !self_match {
+                continue;
+            }
+            let parsed = match parse_thread(added_content) {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("poll: failed to parse cron thread {}: {}", path_str, e);
+                    continue;
+                }
+            };
+            if parsed.entries.is_empty() {
+                continue;
+            }
+            let entries: Vec<serde_json::Value> = parsed
+                .entries
+                .iter()
+                .map(|entry| entry_to_json(entry))
+                .collect();
+            changes.push(gitim_core::responses::PollChange {
+                channel: format!("cron:{}", cron_name),
+                kind: "cron_thread".to_string(),
+                entries,
+            });
+            continue;
         } else if let Some(name) = path_str.strip_prefix("archive/users/") {
             // A user meta showing up in `archive/users/<handler>.meta.yaml`
             // means the handler departed. Workspace-wide event — anyone

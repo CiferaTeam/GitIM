@@ -16,6 +16,7 @@
 //! The CAS / startup / shutdown invariants don't need a 60s wait and
 //! stay in the default-run set.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
@@ -23,7 +24,10 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 use gitim_core::types::{Config, CronSpec, Handler};
+use gitim_daemon::api::Request;
+use gitim_daemon::cron_engine::{fire, FireRequest};
 use gitim_daemon::cron_paths::format_thread_filename_ts;
+use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
 fn make_config() -> Config {
@@ -303,4 +307,107 @@ async fn engine_stops_on_runtime_shutdown() {
 async fn engine_filename_contract() {
     let stem = format_thread_filename_ts(Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap());
     assert_eq!(stem, "2026-05-11T09-00-00Z");
+}
+
+// ─── fire → poll delivery (the missing e2e link) ────────────────────────────
+
+/// End-to-end: directly drive `fire()`, then call `handle_poll`, and
+/// assert the runtime would see a `cron_thread`-kind ChannelChange.
+///
+/// This is the test the original `engine_fires_due_spec` should have
+/// extended — it wasn't enough that fire wrote a file; the runtime poller
+/// consumes ChannelChanges, not raw fs state, so without this assertion
+/// the fire could silently never reach the agent_loop.
+///
+/// Default-run (not `#[ignore]`) because we drive `fire` directly and
+/// skip the 60s engine throttle.
+#[tokio::test]
+async fn fire_then_poll_delivers_cron_thread_change() {
+    let (_tmp, root) = setup_repo("alice");
+    let state = make_state(root.clone(), "alice");
+
+    // Pre-write the spec.yaml + commit so HEAD has it before the fire.
+    // This mirrors what handle_create_cron does, minus the IPC plumbing.
+    let spec = CronSpec {
+        version: 1,
+        schedule: "@daily".to_string(),
+        timezone: None,
+        target: Handler::new("alice").unwrap(),
+        prompt: "weekly summary".to_string(),
+        enabled: true,
+        created_by: Handler::new("alice").unwrap(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        extra: BTreeMap::new(),
+    };
+    let spec_dir = root.join("crons/weekly");
+    std::fs::create_dir_all(&spec_dir).unwrap();
+    std::fs::write(spec_dir.join("spec.yaml"), spec.to_yaml().unwrap()).unwrap();
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+    run_git(&["add", "crons"]);
+    run_git(&["commit", "-m", "create weekly cron"]);
+
+    // Cursor: HEAD before the fire write.
+    let cursor = handle_request(Request::Poll { since: None }, state.clone())
+        .await
+        .data
+        .unwrap()["commit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Directly fire — bypasses the engine's 60s throttle but exercises
+    // the same write+commit path the real loop does.
+    let fire_ts = Utc.with_ymd_and_hms(2026, 1, 2, 9, 0, 0).unwrap();
+    fire(
+        &state,
+        FireRequest {
+            spec_name: "weekly".to_string(),
+            spec: spec.clone(),
+            theoretical_ts: fire_ts,
+        },
+    )
+    .await
+    .expect("fire should succeed");
+
+    // Poll across the fire — the runtime would do this on its next tick.
+    let poll_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(poll_resp.ok, "poll failed: {:?}", poll_resp.error);
+
+    let changes = poll_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    let cron_change = changes
+        .iter()
+        .find(|c| c["kind"] == "cron_thread")
+        .unwrap_or_else(|| {
+            panic!(
+                "fire wrote a file but poll surfaced nothing — runtime would never wake. changes={:#?}",
+                changes
+            )
+        });
+    assert_eq!(cron_change["channel"], "cron:weekly");
+    let entries = cron_change["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["author"], "system");
+    assert!(entries[0]["body"]
+        .as_str()
+        .unwrap_or("")
+        .contains("cron(weekly)"));
 }

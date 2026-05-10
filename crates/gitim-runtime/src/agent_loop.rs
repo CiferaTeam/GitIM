@@ -759,6 +759,19 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
                         channel.strip_prefix("card:").unwrap_or(channel)
                     )
                 }
+                // Cron fires arrive as `kind: "cron_thread"` keyed by
+                // `cron:<name>`. The wake-up trigger is structural (the
+                // engine wrote a synthetic `[@system]` message) — not a
+                // mention — so the [MENTION] tag never applies here even
+                // if the prompt body happens to contain the agent's
+                // handler. We still pass the body through unchanged so
+                // the agent sees its full prompt template.
+                "cron_thread" => {
+                    format!(
+                        "[CRON {}]",
+                        channel.strip_prefix("cron:").unwrap_or(channel)
+                    )
+                }
                 _ => format!("[#{channel}]"),
             };
 
@@ -1162,6 +1175,39 @@ mod tests {
             info.session_usage.is_none(),
             "clear must drop the in-memory snapshot so HUD stops showing stale percent"
         );
+    }
+
+    #[test]
+    fn format_changes_renders_cron_thread_with_cron_scope() {
+        // P1 regression guard: the runtime side must render `kind:
+        // "cron_thread"` ChannelChanges with a `[CRON <name>]` scope tag,
+        // matching the daemon's poll branch that emits
+        // `channel: "cron:<name>"` + `kind: "cron_thread"`. Without this,
+        // a cron fire would either fall through the default `_ =>` arm
+        // (rendering as `[#cron:<name>]` — confusing) or the agent's
+        // prompt template wouldn't recognize the scope.
+        let change = ChannelChange {
+            channel: "cron:weekly".to_string(),
+            kind: "cron_thread".to_string(),
+            entries: vec![serde_json::json!({
+                "author": "system",
+                "body": "cron(weekly): scan logs",
+                "timestamp": "20260102T090000Z",
+                "line_number": 1u64,
+                "point_to": 0u64,
+            })],
+        };
+        let out = format_changes_as_prompt(&[change], "alice").expect("renders");
+        assert!(
+            out.contains("[CRON weekly]"),
+            "expected [CRON weekly] scope in prompt; got:\n{}",
+            out
+        );
+        // Author tag goes through unchanged — body still attributed to system.
+        assert!(out.contains("@system"), "got:\n{}", out);
+        // No mention tag — cron is structural, not a mention, even if the
+        // body happened to contain @<self>.
+        assert!(!out.contains("[MENTION]"), "got:\n{}", out);
     }
 
     #[test]
