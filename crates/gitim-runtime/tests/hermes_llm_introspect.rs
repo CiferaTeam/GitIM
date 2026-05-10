@@ -235,3 +235,18 @@ fn minimax_protocol_propagates_to_list_provider() {
         "minimax api_protocol must be Anthropic"
     );
 }
+
+// ── test 12 ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn env_with_bom_prefix_still_parses_first_key() {
+    // .env files copied from BOM-prepending tools (some Windows editors)
+    // must parse the first key correctly. UTF-8 BOM is U+FEFF.
+    let tmp = TempDir::new().unwrap();
+    let env_path = tmp.path().join(".env");
+    std::fs::write(&env_path, "\u{FEFF}KIMI_API_KEY=mk-test\n").unwrap();
+
+    let result = list_providers(tmp.path());
+    let kimi = result.iter().find(|p| p.id == "kimi-coding");
+    assert!(kimi.is_some(), "BOM-prefixed .env should still detect KIMI_API_KEY; got {result:?}");
+}

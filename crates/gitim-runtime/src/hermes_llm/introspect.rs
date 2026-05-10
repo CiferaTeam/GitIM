@@ -80,10 +80,14 @@ pub(crate) fn resolve_builtin_base_url(provider: &BuiltinProvider, env_value: &s
 /// Returns an empty map when the file is missing or unreadable.
 fn read_env_file(hermes_home: &Path) -> std::collections::HashMap<String, String> {
     let path = hermes_home.join(".env");
-    let content = match std::fs::read_to_string(&path) {
+    let raw = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return std::collections::HashMap::new(),
     };
+    // Strip UTF-8 BOM (U+FEFF) that some Windows tools prepend. Rust's trim()
+    // only covers ASCII whitespace, so without this the first key becomes
+    // "\u{FEFF}KEY" and silently fails provider detection.
+    let content = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
 
     let mut map = std::collections::HashMap::new();
     for line in content.lines() {
