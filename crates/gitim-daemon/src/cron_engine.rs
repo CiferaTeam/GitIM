@@ -36,9 +36,10 @@ use chrono::{DateTime, Utc};
 use gitim_core::types::cron::next_fire_after;
 use gitim_core::types::{CronSpec, Handler};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cron_paths::{format_thread_filename_ts, parse_thread_filename_ts};
+use crate::state::AppState;
 
 /// One pending fire computed by `scan_due`. The engine re-derives the
 /// destination path from `spec_name` + `theoretical_ts` when it actually
@@ -272,6 +273,155 @@ fn latest_fire_in_dir(spec_dir: &Path) -> Option<DateTime<Utc>> {
 fn dest_already_exists(spec_dir: &Path, theoretical_ts: DateTime<Utc>) -> bool {
     let stem = format_thread_filename_ts(theoretical_ts);
     spec_dir.join(format!("{stem}.thread")).exists()
+}
+
+/// Side-effecting fire: writes one `<ts>.thread` file + commits via
+/// `state.git_storage`. Called by the engine loop after `scan_due`.
+///
+/// Holds `state.commit_lock` for the entire write+commit window so a
+/// concurrent `handle_send` (or sync_loop's rebase) can't slip a write
+/// between our `fs::write` and `add_and_commit_as`. This is the same
+/// pattern `handle_send` uses; cron fires are just another writer of
+/// thread content that has to coordinate with everyone else.
+///
+/// ### Idempotent behaviour
+///
+/// If the destination file already exists (because another scan already
+/// fired this theoretical ts, or the engine restarted mid-tick), this
+/// returns `Ok(())` without writing or committing. The caller treats the
+/// fire as completed — the file is the proof.
+///
+/// ### Crash semantics
+///
+/// - Crash before write: lost fire (no file, no commit). Surfaces as a
+///   "missed" entry in the calendar UI computation; not retried (per
+///   design.md "no catch-up").
+/// - Crash between write and commit: working tree dirty. Sync loop will
+///   pick up the file on its next cycle. Worst case the fire is
+///   committed without our `cron(<name>): ...` commit-message tag, but
+///   the file content + theoretical ts is identical so attribution from
+///   the protocol's POV is unchanged.
+/// - Crash after commit: clean. No different from a successful fire.
+///
+/// ### Author email
+///
+/// Author goes through `state.author_for(<emit_handle>)` so the commit
+/// is attributed to the daemon's git owner email when configured (and
+/// thus shows up on the GitHub contribution graph for that account).
+/// `<emit_handle>` is the daemon's running `current_user` if set, else
+/// the literal `system` — falling back lets out-of-the-box tests run
+/// without onboarding plumbing. The in-message `[@system]` token is
+/// preserved as the *content* author either way: it's the protocol's
+/// signal for "synthesised by daemon", distinct from "who scheduled it".
+pub async fn fire(state: &AppState, request: FireRequest) -> Result<(), CronEngineError> {
+    let FireRequest {
+        spec_name,
+        spec,
+        theoretical_ts,
+    } = request;
+
+    let stem = format_thread_filename_ts(theoretical_ts);
+    let filename = format!("{stem}.thread");
+    let spec_dir = state.repo_root.join("crons").join(&spec_name);
+    let dest_path = spec_dir.join(&filename);
+    let rel_path = format!("crons/{spec_name}/{filename}");
+
+    // Build the message body OUTSIDE the lock — formatting is pure and
+    // shouldn't extend the critical section.
+    let body = format_cron_body(&spec_name, &spec.prompt, theoretical_ts);
+
+    // Snapshot the daemon's running identity for the commit author. The
+    // engine fires on behalf of self_handler (= spec.target post-ownership
+    // filter), which is the same handler the rest of this clone's commits
+    // attribute to.
+    let commit_author_handle = state
+        .current_user
+        .read()
+        .await
+        .clone()
+        .unwrap_or_else(|| "system".to_string());
+    let (author_name, author_email) = state.author_for(&commit_author_handle);
+
+    {
+        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
+        // Race-safe idempotency check: another scan loop on this same
+        // daemon could have raced us between scan_due and now. We skip
+        // rather than overwrite — file existence is the canonical proof
+        // of fire.
+        if dest_path.exists() {
+            return Ok(());
+        }
+
+        // Ensure the cron dir exists. Should already, but a freshly
+        // restarted daemon hitting an empty workspace is no excuse to
+        // crash.
+        if let Err(e) = std::fs::create_dir_all(&spec_dir) {
+            return Err(CronEngineError::ThreadWrite {
+                path: dest_path.clone(),
+                source: e,
+            });
+        }
+
+        if let Err(e) = std::fs::write(&dest_path, &body) {
+            return Err(CronEngineError::ThreadWrite {
+                path: dest_path.clone(),
+                source: e,
+            });
+        }
+
+        let commit_msg = format!("cron: fire {spec_name} at {stem}");
+        if let Err(e) = state.git_storage.add_and_commit_as(
+            &[&rel_path],
+            &commit_msg,
+            Some((&author_name, &author_email)),
+        ) {
+            // Roll back the on-disk write so the working tree mirrors HEAD.
+            // Best-effort — if rollback fails too, sync_loop's next cycle
+            // will pick up the dirty file.
+            let _ = std::fs::remove_file(&dest_path);
+            return Err(CronEngineError::GitCommit(e.to_string()));
+        }
+        // commit_guard drops here.
+    }
+
+    info!(
+        "cron_engine: fired {} at {} (target=@{})",
+        spec_name,
+        stem,
+        spec.target.as_str()
+    );
+
+    Ok(())
+}
+
+/// Build the first-line body for a cron fire thread, using the same
+/// `format_message` plumbing as `handle_send`. This guarantees the
+/// resulting file parses cleanly with `gitim_core::parser::parse_thread`.
+///
+/// The author handle on the line itself is `system` — the protocol-level
+/// "who voiced this" signal that distinguishes cron fires from human
+/// messages and from agent replies. Multi-line prompts get the
+/// continuation-line treatment formatter already does (lines after the
+/// first inherit no `[L...]` prefix).
+pub(crate) fn format_cron_body(
+    spec_name: &str,
+    prompt: &str,
+    theoretical_ts: DateTime<Utc>,
+) -> String {
+    // `Handler::system()` is the only path that constructs the reserved
+    // `system` handle — `Handler::new("system")` rejects it. Both daemon
+    // emit (here) and parser read-back (`parser::parse_thread`'s carve-out)
+    // route through that single factory so the "no user-input forges
+    // @system" invariant holds.
+    let system = Handler::system();
+    // The in-message timestamp uses the compact format `YYYYMMDDTHHMMSSZ`
+    // expected by `gitim_core::parser::parse_thread` — distinct from the
+    // filename stem which uses `YYYY-MM-DDTHH-MM-SSZ`. Both encode the
+    // same instant.
+    let ts_compact = theoretical_ts.format("%Y%m%dT%H%M%SZ").to_string();
+    let body_text = format!("cron({spec_name}): {prompt}");
+    gitim_core::formatter::format_message(1, 0, &system, &ts_compact, &body_text)
 }
 
 #[cfg(test)]
@@ -586,6 +736,58 @@ mod tests {
         let due_bob = scan_due(&root, &bob(), fixed_now()).unwrap();
         assert_eq!(due_bob.len(), 1);
         assert_eq!(due_bob[0].spec_name, "for-bob");
+    }
+
+    // ─── format_cron_body — formatter contract with parser ───────────────────
+
+    #[test]
+    fn format_cron_body_parses_back() {
+        // Sanity: the body we write must be parseable by the very parser
+        // that reads back thread files. Otherwise the cron fire would
+        // poison the thread cache + every reader.
+        let body = format_cron_body(
+            "weekly-report",
+            "scan #general for highlights",
+            Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap(),
+        );
+        let parsed = gitim_core::parser::parse_thread(&body).expect("parses");
+        assert_eq!(parsed.entries.len(), 1);
+        match &parsed.entries[0] {
+            gitim_core::types::ThreadEntry::Message(m) => {
+                assert_eq!(m.line_number, 1);
+                assert_eq!(m.point_to, 0);
+                assert_eq!(m.author.as_str(), "system");
+                assert!(
+                    m.body.starts_with("cron(weekly-report):"),
+                    "body: {}",
+                    m.body
+                );
+            }
+            other => panic!("expected message entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_cron_body_handles_multiline_prompt() {
+        // Multi-line prompt: subsequent lines must come through as
+        // continuation lines (no `[L...]` prefix). Verified by the
+        // parser collapsing them into a single `body` field.
+        let prompt = "first line\nsecond line\nthird line";
+        let body = format_cron_body(
+            "multi",
+            prompt,
+            Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap(),
+        );
+        let parsed = gitim_core::parser::parse_thread(&body).expect("parses");
+        assert_eq!(parsed.entries.len(), 1);
+        match &parsed.entries[0] {
+            gitim_core::types::ThreadEntry::Message(m) => {
+                assert!(m.body.contains("first line"));
+                assert!(m.body.contains("second line"));
+                assert!(m.body.contains("third line"));
+            }
+            other => panic!("expected message, got {other:?}"),
+        }
     }
 
     // ─── FireRequest equality + Debug ────────────────────────────────────────
