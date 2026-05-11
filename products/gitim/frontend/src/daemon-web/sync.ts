@@ -12,6 +12,20 @@ interface RunSyncOptions {
   forceNewCycle?: boolean;
 }
 
+export type SyncResultStatus =
+  | "idle"
+  | "pushed"
+  | "fast_forwarded"
+  | "rebased"
+  | "reconnect_required";
+
+export interface SyncResult {
+  beforeHead: string;
+  afterHead: string;
+  changed: boolean;
+  status: SyncResultStatus;
+}
+
 function isNonFastForward(e: unknown): boolean {
   const msg = String(
     (e as { message?: string })?.message ?? e ?? "",
@@ -47,13 +61,53 @@ async function mkdirp(
   }
 }
 
-let syncInFlight: Promise<void> | null = null;
+function syncResult(
+  beforeHead: string,
+  afterHead: string,
+  status: SyncResultStatus,
+): SyncResult {
+  return {
+    beforeHead,
+    afterHead,
+    changed: beforeHead !== afterHead,
+    status,
+  };
+}
 
-async function runSyncOnce(): Promise<void> {
+function postRepoChanged(
+  commitId: string,
+  reason: "fast_forward" | "rebase",
+): void {
+  postMessage({
+    type: "repo_changed",
+    commit_id: commitId,
+    reason,
+  });
+}
+
+function postReconnectRequired(commitId: string, error?: string): void {
+  postMessage({
+    type: "reconnect_required",
+    commit_id: commitId,
+    needs_token: true,
+    error,
+    error_code: "reconnect_required",
+  });
+}
+
+function errorMessage(e: unknown): string {
+  return String((e as { message?: string })?.message ?? e);
+}
+
+let syncInFlight: Promise<SyncResult> | null = null;
+
+async function runSyncOnce(): Promise<SyncResult> {
   const s = getState();
+  const beforeHead = s.headCommit;
   if (!s.token) {
     setState({ syncStatus: "reconnect_required" });
-    return;
+    postReconnectRequired(beforeHead);
+    return syncResult(beforeHead, beforeHead, "reconnect_required");
   }
   setState({ syncStatus: "syncing" });
 
@@ -67,7 +121,7 @@ async function runSyncOnce(): Promise<void> {
       try {
         await gitOps.push(s.repoDir, s.corsProxy, onAuth, s.defaultBranch);
         setState({ headCommit: localHead, syncStatus: "idle" });
-        return;
+        return syncResult(beforeHead, localHead, "pushed");
       } catch (e: unknown) {
         if (!isNonFastForward(e)) throw e;
         // Push rejected — need fetch+merge below
@@ -79,8 +133,8 @@ async function runSyncOnce(): Promise<void> {
     const remoteHead = await gitOps.resolveRemoteHead(s.repoDir);
 
     if (remoteHead === localHead) {
-      setState({ syncStatus: "idle" });
-      return;
+      setState({ headCommit: localHead, syncStatus: "idle" });
+      return syncResult(beforeHead, localHead, "idle");
     }
 
     // 3. No local unpushed commits — fast-forward to remote
@@ -90,8 +144,8 @@ async function runSyncOnce(): Promise<void> {
         `refs/remotes/origin/${s.defaultBranch}`,
       );
       setState({ headCommit: remoteHead, syncStatus: "idle" });
-      postMessage({ type: "sync_reset" });
-      return;
+      postRepoChanged(remoteHead, "fast_forward");
+      return syncResult(beforeHead, remoteHead, "fast_forwarded");
     }
 
     // 4. Conflict: local changes AND new remote commits.
@@ -193,19 +247,23 @@ async function runSyncOnce(): Promise<void> {
 
     const newHead = await gitOps.resolveHead(s.repoDir);
     setState({ headCommit: newHead, syncStatus: "idle" });
-    postMessage({ type: "sync_reset" });
+    postRepoChanged(newHead, "rebase");
+    return syncResult(beforeHead, newHead, "rebased");
   } catch (e) {
+    const message = errorMessage(e);
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
+      postReconnectRequired(getState().headCommit, message);
     } else {
       setState({ syncStatus: "error" });
+      postMessage({ type: "sync_error", error: message });
     }
     console.error("[daemon-web] sync error:", e);
     throw e;
   }
 }
 
-async function runSync(options: RunSyncOptions = {}): Promise<void> {
+async function runSync(options: RunSyncOptions = {}): Promise<SyncResult> {
   if (syncInFlight && !options.forceNewCycle) return syncInFlight;
 
   const previous = syncInFlight;
@@ -217,7 +275,7 @@ async function runSync(options: RunSyncOptions = {}): Promise<void> {
         /* A fresh cycle below reports its own result. */
       }
     }
-    await runSyncOnce();
+    return await runSyncOnce();
   })();
 
   syncInFlight = next;

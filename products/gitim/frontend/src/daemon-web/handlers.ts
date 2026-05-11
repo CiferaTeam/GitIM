@@ -309,23 +309,9 @@ export async function poll(since?: string): Promise<ApiResponse> {
       needs_token: true,
     });
   }
-  const onAuth = tokenAuth(s.token);
 
   try {
-    // Fetch from remote
-    await gitOps.fetchOrigin(s.repoDir, s.corsProxy, onAuth);
-    const remoteHead = await gitOps.resolveRemoteHead(s.repoDir);
-    const localHead = await gitOps.resolveHead(s.repoDir);
-
-    // If remote has new commits, fast-forward (sync handles conflicts separately)
-    if (remoteHead !== localHead && localHead === s.headCommit) {
-      await gitOps.resetToRemote(
-        s.repoDir,
-        `refs/remotes/origin/${s.defaultBranch}`,
-      );
-      setState({ headCommit: remoteHead });
-    }
-
+    await runSync();
     const currentHead = await gitOps.resolveHead(s.repoDir);
 
     if (!since || since === currentHead) {
@@ -337,16 +323,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
     try {
       changedFiles = await gitOps.diffTrees(s.repoDir, since, currentHead);
     } catch {
-      // Stale cursor — return all channels as changed
-      changedFiles = [];
-      await refreshChannelsCache();
-      const changes = [];
-      for (const [name] of s.channels) {
-        const entries = await readChannelEntries(name);
-        changes.push({ channel: name, kind: "new_messages", entries });
-      }
-      changes.push(...(await listBoardPollChanges()));
-      return ok({ commit_id: currentHead, changes });
+      return ok({ commit_id: currentHead, changes: [], reset: true });
     }
 
     // Build changes from diff
@@ -1708,26 +1685,6 @@ function boardHandlerFromPath(path: string): string | null {
   const match = path.match(/^showboards\/([^/]+)\/board\.md$/);
   if (!match) return null;
   return validateHandler(match[1]) ? null : match[1];
-}
-
-async function listBoardPollChanges(): Promise<Array<{
-  channel: string;
-  kind: "board";
-  entries: [];
-}>> {
-  const s = getState();
-  const root = `${s.repoDir}/showboards`;
-  if (!(await exists(root))) return [];
-
-  const changes: Array<{ channel: string; kind: "board"; entries: [] }> = [];
-  const emitted = new Set<string>();
-  for (const handler of await readdir(root)) {
-    if (validateHandler(handler) || emitted.has(handler)) continue;
-    if (!(await exists(`${root}/${handler}/board.md`))) continue;
-    emitted.add(handler);
-    changes.push({ channel: handler, kind: "board", entries: [] });
-  }
-  return changes;
 }
 
 async function refreshChannelsCache(): Promise<void> {

@@ -13,7 +13,7 @@ import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { useAgentStore } from "./hooks/use-agent-store";
 import { useBoardStore } from "./hooks/use-board-store";
-import { useCardStore, parseCardScope } from "./hooks/use-card-store";
+import { useCardStore, parseCardScope, cardPathKey } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useIsMobile } from "./hooks/use-media-query";
@@ -52,6 +52,34 @@ function apiToDisplay(channel: string): string {
     return channel.slice(3).replace(",", "--");
   }
   return channel;
+}
+
+/** "alice--lewis" -> "dm:alice,lewis"; passthrough for channels */
+function toApiChannel(displayName: string): string {
+  if (displayName.includes("--")) {
+    return `dm:${displayName.split("--").join(",")}`;
+  }
+  return displayName;
+}
+
+function decodePathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+function parseCardRoute(pathname: string): {
+  channel: string;
+  cardId: string;
+} | null {
+  const match = /^\/cards\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  return {
+    channel: decodePathSegment(match[1]),
+    cardId: decodePathSegment(match[2]),
+  };
 }
 
 function isUnknownWorkspaceResponse(res: { ok: boolean; error?: string | null }) {
@@ -117,7 +145,10 @@ export default function App() {
   const setUsers = useChatStore((s) => s.setUsers);
   const setConnected = useChatStore((s) => s.setConnected);
   const addMessages = useChatStore((s) => s.addMessages);
+  const setMessages = useChatStore((s) => s.setMessages);
+  const selectChannel = useChatStore((s) => s.selectChannel);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
+  const setArchivedDms = useChatStore((s) => s.setArchivedDms);
   const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
   const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
@@ -125,6 +156,10 @@ export default function App() {
   const setSelectedBoard = useBoardStore((s) => s.setSelectedBoard);
   const resetBoardsForSwitch = useBoardStore((s) => s.resetForWorkspaceSwitch);
   const setCards = useCardStore((s) => s.setCards);
+  const setArchivedCards = useCardStore((s) => s.setArchivedCards);
+  const setCardMessages = useCardStore((s) => s.setCardMessages);
+  const upsertCard = useCardStore((s) => s.upsertCard);
+  const upsertArchivedCard = useCardStore((s) => s.upsertArchivedCard);
   const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
   const resetCardsForSwitch = useCardStore((s) => s.resetForWorkspaceSwitch);
@@ -135,6 +170,7 @@ export default function App() {
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
   const setConnectionError = useConnectionStore((s) => s.setError);
   const isMobile = useIsMobile();
+  const location = useLocation();
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -157,6 +193,7 @@ export default function App() {
   const currentChannelRef = useRef<string | null>(null);
   const channelsRef = useRef<Channel[]>([]);
   const activeSlugRef = useRef<string | null>(null);
+  const locationPathRef = useRef(location.pathname);
 
   // Transport failures: fetch throws because the runtime port is gone.
   const consecutiveTransportFailuresRef = useRef(0);
@@ -178,6 +215,10 @@ export default function App() {
   useEffect(() => {
     activeSlugRef.current = activeSlug;
   }, [activeSlug]);
+
+  useEffect(() => {
+    locationPathRef.current = location.pathname;
+  }, [location.pathname]);
 
   // Fetch workspaces once the runtime is reachable.
   useEffect(() => {
@@ -221,6 +262,220 @@ export default function App() {
     }
   }, [setConnected, setConnectionStatus]);
 
+  const reloadActiveWorkspaceState = useCallback(
+    async (
+      slug: string,
+      workspaceKey: string,
+      options: {
+        preserveSelection: boolean;
+        isCancelled?: () => boolean;
+      },
+    ): Promise<boolean> => {
+      const isCurrentTarget = () =>
+        options.isCancelled?.() !== true &&
+        slug === activeSlugRef.current &&
+        workspaceKey === workspaceRef.current;
+      const previousChannel = useChatStore.getState().currentChannel;
+
+      const [
+        meRes,
+        channelsRes,
+        usersRes,
+        agentsRes,
+        cardsRes,
+        boardsRes,
+        archivedChannelsRes,
+        archivedDmsRes,
+        archivedCardsRes,
+      ] = await Promise.all([
+        client.me(slug),
+        client.channels(slug),
+        client.users(slug),
+        mode === "remote"
+          ? client.listAgents(slug)
+          : Promise.resolve({ ok: true, data: { agents: [] } }),
+        client.listCards(slug),
+        client.listBoards(slug),
+        client.listArchivedChannels(slug),
+        client.listArchivedDms(slug),
+        client.listArchivedCards(slug),
+      ]);
+
+      if (!isCurrentTarget()) return false;
+      if (
+        [
+          meRes,
+          channelsRes,
+          usersRes,
+          agentsRes,
+          cardsRes,
+          boardsRes,
+          archivedChannelsRes,
+          archivedDmsRes,
+          archivedCardsRes,
+        ].some(isUnknownWorkspaceResponse)
+      ) {
+        await refreshAfterActiveUnavailable(slug);
+        return false;
+      }
+
+      const nextChannels =
+        channelsRes.ok && channelsRes.data
+          ? (channelsRes.data.channels as Channel[])
+          : useChatStore.getState().channels;
+      const nextBoards =
+        boardsRes.ok && boardsRes.data
+          ? (boardsRes.data.boards as BoardSummary[])
+          : useBoardStore.getState().boards;
+      const state = useChatStore.getState();
+      const currentHandler =
+        meRes.ok && meRes.data
+          ? (meRes.data.handler as string)
+          : state.currentUser;
+      const archivedChannels =
+        archivedChannelsRes.ok && archivedChannelsRes.data
+          ? (archivedChannelsRes.data.channels as Channel[])
+          : state.archivedChannels;
+      const archivedDms =
+        archivedDmsRes.ok && archivedDmsRes.data
+          ? archivedDmsRes.data.dms.map((dm) => {
+              const members = dm.dm_pair_stem.includes("--")
+                ? dm.dm_pair_stem.split("--")
+                : [currentHandler, dm.peer].filter(Boolean).sort();
+              return {
+                name: dm.dm_pair_stem,
+                kind: "dm" as const,
+                unreadCount: 0,
+                hasMention: false,
+                members,
+              };
+            })
+          : state.archivedDms;
+      const selectableChannels = [
+        ...nextChannels,
+        ...archivedChannels,
+        ...archivedDms,
+      ];
+      const boardState = useBoardStore.getState();
+      const selectedBoardHandler =
+        boardState.selectedHandler &&
+        nextBoards.some((board) => board.handler === boardState.selectedHandler)
+          ? boardState.selectedHandler
+          : nextBoards[0]?.handler ?? null;
+      const cardRoute = parseCardRoute(locationPathRef.current);
+
+      let nextChannel: string | null = null;
+      if (
+        options.preserveSelection &&
+        previousChannel &&
+        selectableChannels.some((c) => c.name === previousChannel)
+      ) {
+        nextChannel = previousChannel;
+      }
+      nextChannel ??=
+        nextChannels.find((c) => c.name === "general")?.name ??
+        nextChannels[0]?.name ??
+        null;
+
+      let messagesForChannel: Message[] | null = null;
+      const [readRes, selectedBoardRes, cardDetailRes] = await Promise.all([
+        nextChannel
+          ? client.read(slug, toApiChannel(nextChannel), 50)
+          : Promise.resolve(null),
+        selectedBoardHandler
+          ? client.showBoard(slug, selectedBoardHandler)
+          : Promise.resolve(null),
+        cardRoute
+          ? client.readCard(slug, cardRoute.channel, cardRoute.cardId, {
+              limit: 100,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      if (!isCurrentTarget()) return false;
+      if (readRes?.ok && readRes.data) {
+        messagesForChannel = readRes.data.entries as Message[];
+      }
+
+      if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
+      if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
+      if (archivedChannelsRes.ok && archivedChannelsRes.data)
+        setArchivedChannels(archivedChannels);
+      if (archivedDmsRes.ok && archivedDmsRes.data) setArchivedDms(archivedDms);
+      if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
+      if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
+      if (cardsRes.ok && cardsRes.data) {
+        const cards = cardsRes.data.cards as Card[];
+        if (options.preserveSelection) {
+          mergeCards(cards);
+        } else {
+          setCards(cards);
+        }
+      }
+      if (archivedCardsRes.ok && archivedCardsRes.data)
+        setArchivedCards(archivedCardsRes.data.cards as Card[]);
+      if (boardsRes.ok && boardsRes.data) setBoards(nextBoards);
+      if (selectedBoardRes?.ok && selectedBoardRes.data) {
+        setSelectedBoard(selectedBoardRes.data);
+      }
+      if (cardRoute && cardDetailRes?.ok && cardDetailRes.data) {
+        if (cardDetailRes.data.archived) {
+          upsertArchivedCard(cardDetailRes.data.meta as Card);
+        } else {
+          upsertCard(cardDetailRes.data.meta as Card);
+        }
+        setCardMessages(
+          cardPathKey(cardRoute.channel, cardRoute.cardId),
+          cardDetailRes.data.entries as Message[],
+        );
+      }
+
+      if (nextChannel && nextChannel !== previousChannel) {
+        selectChannel(nextChannel);
+      }
+      if (messagesForChannel) {
+        setMessages(messagesForChannel);
+      } else if (!nextChannel) {
+        setMessages([]);
+      }
+
+      return (
+        meRes.ok &&
+        channelsRes.ok &&
+        usersRes.ok &&
+        agentsRes.ok &&
+        cardsRes.ok &&
+        boardsRes.ok &&
+        archivedChannelsRes.ok &&
+        archivedDmsRes.ok &&
+        archivedCardsRes.ok &&
+        (readRes === null || readRes.ok) &&
+        (selectedBoardRes === null || selectedBoardRes.ok) &&
+        (cardDetailRes === null || cardDetailRes.ok)
+      );
+    },
+    [
+      mode,
+      refreshAfterActiveUnavailable,
+      setCurrentUser,
+      setChannels,
+      setArchivedChannels,
+      setArchivedDms,
+      setUsers,
+      setAgents,
+      setCards,
+      mergeCards,
+      setArchivedCards,
+      setCardMessages,
+      upsertCard,
+      upsertArchivedCard,
+      setBoards,
+      setSelectedBoard,
+      selectChannel,
+      setMessages,
+    ],
+  );
+
   const runPoll = useCallback(async (signal?: AbortSignal) => {
     const slug = activeSlugRef.current;
     const requestWorkspaceKey = workspaceRef.current;
@@ -246,11 +501,12 @@ export default function App() {
         return;
       }
 
-      sinceRef.current = pollRes.data.commit_id as string;
-      saveCursor(requestWorkspaceKey, sinceRef.current);
-      setHeadCommit(sinceRef.current);
+      const nextCommitId = pollRes.data.commit_id;
 
       if (mode === "local" && pollRes.data.needs_token === true) {
+        sinceRef.current = nextCommitId;
+        saveCursor(requestWorkspaceKey, sinceRef.current);
+        setHeadCommit(sinceRef.current);
         setConnected(false);
         setConnectionStatus("disconnected");
         setConnectionError("Reconnect token to sync this browser workspace.");
@@ -258,6 +514,26 @@ export default function App() {
         return;
       }
 
+      if (pollRes.data.reset === true) {
+        clearCursor(requestWorkspaceKey);
+        sinceRef.current = undefined;
+        const reloaded = await reloadActiveWorkspaceState(
+          slug,
+          requestWorkspaceKey,
+          { preserveSelection: true },
+        );
+        if (reloaded) {
+          sinceRef.current = nextCommitId;
+          saveCursor(requestWorkspaceKey, sinceRef.current);
+          setHeadCommit(sinceRef.current);
+          markConnected();
+        }
+        return;
+      }
+
+      sinceRef.current = nextCommitId;
+      saveCursor(requestWorkspaceKey, sinceRef.current);
+      setHeadCommit(sinceRef.current);
       markConnected();
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
@@ -425,6 +701,7 @@ export default function App() {
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,
+    reloadActiveWorkspaceState,
     mode,
   ]);
 
@@ -463,12 +740,11 @@ export default function App() {
       if (mode === "local") {
         const activation = await client.activateBrowserWorkspace(slug, {
           onSyncReset: () => {
-            clearCursor(workspaceKey);
-            sinceRef.current = undefined;
-            resetChatForSwitch();
-            resetAgentsForSwitch();
-            resetCardsForSwitch();
-            resetBoardsForSwitch();
+            void reloadActiveWorkspaceState(slug, workspaceKey, {
+              preserveSelection: true,
+            }).catch(() => {
+              markTransportUnavailable();
+            });
           },
         });
         if (cancelled) return false;
@@ -482,44 +758,19 @@ export default function App() {
         activationNeedsToken = activation.data?.needs_token === true;
       }
 
-      const [meRes, channelsRes, usersRes, agentsRes, cardsRes, boardsRes] =
-        await Promise.all([
-          client.me(slug),
-          client.channels(slug),
-          client.users(slug),
-          mode === "remote"
-            ? client.listAgents(slug)
-            : Promise.resolve({ ok: true, data: { agents: [] } }),
-          client.listCards(slug),
-          client.listBoards(slug),
-        ]);
-
-      if (cancelled) return false;
-
-      if (
-        [meRes, channelsRes, usersRes, agentsRes, cardsRes].some(
-          isUnknownWorkspaceResponse,
-        )
-      ) {
-        await refreshAfterActiveUnavailable(slug);
-        return false;
-      }
-
       // Restore cursor from localStorage keyed by runtime or browser workspace identity.
       workspaceRef.current = workspaceKey;
       sinceRef.current = loadCursor(workspaceKey);
+      const bootstrapOk = await reloadActiveWorkspaceState(
+        slug,
+        workspaceKey,
+        {
+          preserveSelection: false,
+          isCancelled: () => cancelled,
+        },
+      );
 
-      if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
-      if (channelsRes.ok && channelsRes.data)
-        setChannels(channelsRes.data.channels as Channel[]);
-      if (usersRes.ok && usersRes.data)
-        setUsers(usersRes.data.users as string[]);
-      if (agentsRes.ok && agentsRes.data)
-        setAgents(agentsRes.data.agents as Agent[]);
-      if (cardsRes.ok && cardsRes.data)
-        setCards(cardsRes.data.cards as Card[]);
-      if (boardsRes.ok && boardsRes.data)
-        setBoards(boardsRes.data.boards as BoardSummary[]);
+      if (cancelled) return false;
 
       if (activationNeedsToken) {
         setConnected(false);
@@ -529,13 +780,6 @@ export default function App() {
         return false;
       }
 
-      const bootstrapOk =
-        meRes.ok &&
-        channelsRes.ok &&
-        usersRes.ok &&
-        agentsRes.ok &&
-        cardsRes.ok &&
-        boardsRes.ok;
       if (bootstrapOk) {
         markConnected();
       }
@@ -565,6 +809,8 @@ export default function App() {
         }, pollInterval);
       };
       schedulePoll();
+    }).catch(() => {
+      if (!cancelled) markTransportUnavailable();
     });
 
     return () => {
@@ -592,15 +838,15 @@ export default function App() {
     setConnectionStatus,
     setConnectionError,
     fetchWorkspaces,
-    refreshAfterActiveUnavailable,
     markConnected,
+    markTransportUnavailable,
+    reloadActiveWorkspaceState,
     runPoll,
   ]);
 
   // /docs is a standalone reference — let it render regardless of workspace
   // state so setup-screen hints ("What scopes does the PAT need?") can deep-link
   // into it without getting bounced back by the gate.
-  const location = useLocation();
   const isDocsRoute = location.pathname.startsWith("/docs");
 
   // Render-time gate: until we have a workspace selected, bypass the chat UI.

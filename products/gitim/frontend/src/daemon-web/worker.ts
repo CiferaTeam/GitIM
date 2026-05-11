@@ -23,9 +23,14 @@ export interface WorkerResponse {
 
 // Also used for unsolicited messages from sync
 export interface WorkerEvent {
-  type: "sync_reset" | "sync_error";
+  type: "sync_reset" | "repo_changed" | "sync_error" | "reconnect_required";
   workspaceId: string;
   generation: number;
+  commit_id?: string;
+  reason?: "fast_forward" | "rebase" | "push";
+  error?: string;
+  error_code?: string;
+  needs_token?: boolean;
 }
 
 let currentWorkspaceId = "";
@@ -38,7 +43,12 @@ function isUnscopedWorkerEvent(
   if (!message || typeof message !== "object") return false;
   const data = message as Record<string, unknown>;
   return (
-    (data.type === "sync_reset" || data.type === "sync_error") &&
+    (
+      data.type === "sync_reset" ||
+      data.type === "repo_changed" ||
+      data.type === "sync_error" ||
+      data.type === "reconnect_required"
+    ) &&
     (typeof data.workspaceId !== "string" ||
       typeof data.generation !== "number")
   );

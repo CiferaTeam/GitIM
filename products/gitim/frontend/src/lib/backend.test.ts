@@ -116,6 +116,62 @@ describe("LocalBackend", () => {
     ).__gitimSyncReset;
   });
 
+  it("treats repo_changed events as scoped sync reset events", () => {
+    const onSyncReset = vi.fn();
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+      onSyncReset,
+    });
+    const worker = StubWorker.instances[0];
+
+    worker.emit({
+      type: "repo_changed",
+      workspaceId: "ws_current",
+      generation: 1,
+      commit_id: "old-head",
+      reason: "fast_forward",
+    });
+    worker.emit({
+      type: "repo_changed",
+      workspaceId: "ws_current",
+      generation: 2,
+      commit_id: "new-head",
+      reason: "fast_forward",
+    });
+
+    expect(onSyncReset).toHaveBeenCalledTimes(1);
+    backend.terminate();
+  });
+
+  it("clears the session token on scoped reconnect_required events", async () => {
+    const { loadSessionToken, saveSessionToken } = await import("./browser-workspaces");
+    saveSessionToken("ws_current", "github_pat_stale");
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+
+    worker.emit({
+      type: "reconnect_required",
+      workspaceId: "ws_current",
+      generation: 1,
+      needs_token: true,
+    });
+    expect(loadSessionToken("ws_current")).toBe("github_pat_stale");
+
+    worker.emit({
+      type: "reconnect_required",
+      workspaceId: "ws_current",
+      generation: 2,
+      needs_token: true,
+    });
+
+    expect(loadSessionToken("ws_current")).toBeUndefined();
+    backend.terminate();
+  });
+
   it("rejects pending RPCs when terminated", async () => {
     const backend = new LocalBackend({
       workspaceId: "ws_current",

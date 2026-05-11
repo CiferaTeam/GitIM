@@ -242,6 +242,8 @@ export async function addAgent(
     status: "offline",
     provider,
     systemPrompt,
+    ...(_llmProvider ? { llmProvider: _llmProvider } : {}),
+    ...(_llmModel ? { llmModel: _llmModel } : {}),
     repoPath: `~/gitim-agents/${id}/`,
     messagesProcessed: 0,
   };
