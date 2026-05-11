@@ -28,6 +28,7 @@ import type {
 } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
+import { readUiState } from "./lib/ui-state";
 import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
@@ -357,13 +358,27 @@ export default function App() {
         ...archivedDms,
       ];
       const boardState = useBoardStore.getState();
+      const storedUiState = readUiState(workspaceKey);
+      // Three-tier board handler resolution:
+      // In-memory wins (keeps user's view stable across poll cycles); stored
+      // selection is the cross-refresh source of truth when in-memory is gone;
+      // first board is the last-resort fallback.
+      const storedBoardHandler =
+        storedUiState.boardHandler &&
+        nextBoards.some((board) => board.handler === storedUiState.boardHandler)
+          ? storedUiState.boardHandler
+          : null;
       const selectedBoardHandler =
         boardState.selectedHandler &&
         nextBoards.some((board) => board.handler === boardState.selectedHandler)
           ? boardState.selectedHandler
-          : nextBoards[0]?.handler ?? null;
+          : storedBoardHandler ?? nextBoards[0]?.handler ?? null;
       const cardRoute = parseCardRoute(locationPathRef.current);
 
+      // Three-tier channel resolution:
+      // In-session preserve still wins so SSE/poll-reset doesn't clobber the
+      // user's current view; stored selection is the cross-refresh source of
+      // truth on first load; general → first channel is the last-resort fallback.
       let nextChannel: string | null = null;
       if (
         options.preserveSelection &&
@@ -371,6 +386,12 @@ export default function App() {
         selectableChannels.some((c) => c.name === previousChannel)
       ) {
         nextChannel = previousChannel;
+      }
+      if (nextChannel === null) {
+        const storedChannel = storedUiState.channel;
+        if (storedChannel && selectableChannels.some((c) => c.name === storedChannel)) {
+          nextChannel = storedChannel;
+        }
       }
       nextChannel ??=
         nextChannels.find((c) => c.name === "general")?.name ??
