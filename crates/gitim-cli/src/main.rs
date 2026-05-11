@@ -50,10 +50,16 @@ enum Commands {
     Read {
         /// Channel name
         channel: String,
-        /// Maximum number of messages to return
+        /// Maximum number of messages to return.
+        /// Alone: the last N messages in the channel.
+        /// With --since: the first N messages after the cursor.
         #[arg(short, long)]
         limit: Option<u64>,
-        /// Only return messages after this line number
+        /// Return messages with line_number > N (a cursor, not a count).
+        /// Alone: every message after the cursor. With --limit: the first
+        /// LIMIT messages after the cursor — use this to page back through
+        /// history (since = oldest_seen - limit - 1) or to pull incrementally
+        /// from a known cursor.
         #[arg(short, long)]
         since: Option<u64>,
     },
@@ -254,10 +260,13 @@ enum DmCommands {
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
-        /// Maximum number of messages to return
+        /// Maximum number of messages to return.
+        /// Alone: the last N messages. With --since: the first N after the cursor.
         #[arg(short, long)]
         limit: Option<u64>,
-        /// Only return messages after this line number
+        /// Return messages with line_number > N (a cursor, not a count).
+        /// With --limit: the first LIMIT messages after the cursor — use to
+        /// page back (since = oldest_seen - limit - 1) or pull incrementally.
         #[arg(short, long)]
         since: Option<u64>,
     },
@@ -307,10 +316,13 @@ enum CardCommands {
         channel: String,
         /// Card ID
         card_id: String,
-        /// Maximum number of entries
+        /// Maximum number of entries.
+        /// Alone: the last N entries. With --since: the first N after the cursor.
         #[arg(short, long)]
         limit: Option<u64>,
-        /// Only return entries after this line number
+        /// Return entries with line_number > N (a cursor, not a count).
+        /// With --limit: the first LIMIT entries after the cursor — use to
+        /// page back (since = oldest_seen - limit - 1) or pull incrementally.
         #[arg(short, long)]
         since: Option<u64>,
     },
