@@ -29,6 +29,10 @@ impl OpenclawProvider {
 
 #[async_trait]
 impl Provider for OpenclawProvider {
+    fn reports_usage(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config

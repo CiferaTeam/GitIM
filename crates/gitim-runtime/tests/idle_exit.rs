@@ -51,6 +51,7 @@ fn has_active_agents_with_running() {
                 session_usage: None,
                 llm_provider: None,
                 llm_model: None,
+                usage_summary: None,
                 loop_handle: None,
             },
         );

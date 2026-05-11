@@ -1,8 +1,21 @@
 use std::path::{Path, PathBuf};
 
+use gitim_agent_provider::ProviderUsage;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
+
+/// Last seen `ProviderUsage` for a cumulative provider, paired with the
+/// session id it belongs to. The runtime computes per-turn deltas by
+/// subtracting this baseline from the next turn's ProviderUsage.
+///
+/// Cleared on `[[RESET]]` and whenever the session id changes, so the
+/// baseline never bleeds across sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastSessionUsage {
+    pub session_id: String,
+    pub usage: ProviderUsage,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +51,13 @@ pub struct AgentState {
     pub estimated_tokens: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_notice_pending: bool,
+
+    /// Baseline used to convert cumulative provider usage to per-turn deltas
+    /// in the token-statistics layer. Lives next to `session_token` because
+    /// it shares the session lifecycle, not because it serves the session
+    /// machinery itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_usage: Option<LastSessionUsage>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -74,6 +94,7 @@ impl AgentState {
         self.session_usage = None;
         self.estimated_tokens = 0;
         self.usage_notice_pending = false;
+        self.last_session_usage = None;
     }
 }
 
@@ -102,6 +123,7 @@ mod tests {
             }),
             estimated_tokens: 125_400,
             usage_notice_pending: false,
+            last_session_usage: None,
         };
 
         original.save(dir.path()).expect("save");
@@ -130,6 +152,59 @@ mod tests {
         assert!(json.contains("\"used_percent\":47.5"));
         assert!(json.contains("\"source\":\"provider_reported\""));
         assert!(!json.contains("input_tokens")); // skipped when None
+    }
+
+    #[test]
+    fn last_session_usage_roundtrips() {
+        let dir = TempDir::new().expect("tempdir");
+        let gitim_dir = dir.path().join(".gitim");
+        std::fs::create_dir_all(&gitim_dir).expect("mkdir");
+
+        let original = AgentState {
+            cursor: None,
+            session_token: Some("sess-cum".into()),
+            session_usage: None,
+            estimated_tokens: 0,
+            usage_notice_pending: false,
+            last_session_usage: Some(LastSessionUsage {
+                session_id: "sess-cum".into(),
+                usage: ProviderUsage {
+                    input_tokens: Some(40_000),
+                    output_tokens: Some(2_000),
+                    used_percent: Some(0.42),
+                    cache_read_tokens: Some(150_000),
+                    cache_creation_tokens: Some(900),
+                },
+            }),
+        };
+
+        original.save(dir.path()).expect("save");
+        let loaded = AgentState::load(dir.path()).expect("load");
+        let baseline = loaded.last_session_usage.expect("baseline present");
+        assert_eq!(baseline.session_id, "sess-cum");
+        assert_eq!(baseline.usage.input_tokens, Some(40_000));
+        assert_eq!(baseline.usage.cache_read_tokens, Some(150_000));
+    }
+
+    #[test]
+    fn clear_session_drops_last_session_usage() {
+        let mut state = AgentState {
+            cursor: None,
+            session_token: Some("sess-cum".into()),
+            session_usage: None,
+            estimated_tokens: 0,
+            usage_notice_pending: false,
+            last_session_usage: Some(LastSessionUsage {
+                session_id: "sess-cum".into(),
+                usage: ProviderUsage {
+                    input_tokens: Some(1_000),
+                    ..Default::default()
+                },
+            }),
+        };
+        state.clear_session();
+        assert!(state.last_session_usage.is_none());
+        assert!(state.session_token.is_none());
     }
 
     #[test]

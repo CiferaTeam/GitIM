@@ -255,6 +255,13 @@ pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
 /// (it's what the ACP spec mandates), then camelCase as a fallback.
 /// Returns `None` when none of the four counts are present, so an empty
 /// `usage: {}` doesn't fabricate a 0% snapshot.
+/// Test-only re-export so `tests/hermes_usage_semantics_test.rs` can pin the
+/// shape of the id=3 prompt-response usage parser. Production code paths still
+/// reach `parse_acp_usage` through the private module boundary.
+pub fn parse_acp_usage_for_test(v: &Value) -> Option<ProviderUsage> {
+    parse_acp_usage(v)
+}
+
 fn parse_acp_usage(v: &Value) -> Option<ProviderUsage> {
     let obj = v.as_object()?;
     let pick = |snake: &str, camel: &str| -> Option<u64> {
@@ -591,8 +598,11 @@ async fn drive_session(
                                             ParsedNotification::ToolResult { call_id, output: tool_output } => {
                                                 try_send_event(&event_tx, Event::ToolResult { call_id, output: tool_output });
                                             }
-                                            ParsedNotification::Usage(u) => {
-                                                latest_usage = Some(u);
+                                            ParsedNotification::Usage(_) => {
+                                                // Drop: mid-stream usage_update is display-only;
+                                                // ExecResult.usage must come from the id=3 prompt
+                                                // response (per-turn delta) for the runtime token
+                                                // accumulator to stay deterministic.
                                             }
                                         }
                                     }

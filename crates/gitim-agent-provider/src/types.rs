@@ -136,15 +136,20 @@ pub enum ExecStatus {
 /// `input_tokens + cache_read_tokens + cache_creation_tokens`. `input_tokens`
 /// alone excludes cached content and will underreport by orders of magnitude
 /// once caching kicks in — compute consumers must sum the three.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<f64>,
     /// Tokens served from the prompt cache (Claude `cache_read_input_tokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
     /// Tokens written into the prompt cache this turn
     /// (Claude `cache_creation_input_tokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<u64>,
 }
 

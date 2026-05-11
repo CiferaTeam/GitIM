@@ -1073,6 +1073,8 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
       }
     : undefined;
 
+  const usageSummary = mapBackendUsageSummary(raw.usage_summary);
+
   return {
     id: (raw.id ?? raw.handler) as string,
     name: (raw.display_name ?? raw.handler) as string,
@@ -1089,6 +1091,57 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     sessionUsage,
     llmProvider: (raw.llm_provider as string) ?? undefined,
     llmModel: (raw.llm_model as string) ?? undefined,
+    usageSummary,
+  };
+}
+
+/** Convert the runtime's snake_case `usage_summary` payload into the
+ *  camelCase shape the React side expects. Defensive against missing or
+ *  malformed nested objects so an older runtime cannot crash the UI. */
+export function mapBackendUsageSummary(raw: unknown): Agent["usageSummary"] {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  const totals = mapBucket(obj.totals);
+  const today = mapBucket(obj.today);
+  const byDay = Array.isArray(obj.by_day)
+    ? obj.by_day
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") return null;
+          const e = entry as Record<string, unknown>;
+          return {
+            date: (e.date as string) ?? "",
+            bucket: mapBucket(e.bucket),
+          };
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null)
+    : [];
+  return {
+    providerReportsUsage: (obj.provider_reports_usage as boolean) ?? true,
+    firstSeen: (obj.first_seen as string) ?? "",
+    lastUpdated: (obj.last_updated as string) ?? "",
+    totals,
+    today,
+    byDay,
+  };
+}
+
+function mapBucket(raw: unknown): {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  turns: number;
+} {
+  if (!raw || typeof raw !== "object") {
+    return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0 };
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    input: (b.input as number) ?? 0,
+    output: (b.output as number) ?? 0,
+    cacheRead: (b.cache_read as number) ?? 0,
+    cacheCreation: (b.cache_creation as number) ?? 0,
+    turns: (b.turns as number) ?? 0,
   };
 }
 

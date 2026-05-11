@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { AgentActivityEvent } from "../lib/types";
+import { mapBackendUsageSummary } from "../lib/client";
+import type { Agent, AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
 import { useWorkspaceStore } from "./use-workspace-store";
@@ -77,7 +78,7 @@ export function useAgentActivitySSE(slug: string | null) {
         if (event.event_type === "usage") {
           try {
             const snap = JSON.parse(event.detail);
-            useAgentStore.getState().updateAgent(event.agent_id, {
+            const updates: Partial<Agent> = {
               sessionUsage: {
                 sessionId: snap.session_id ?? "",
                 inputTokens: snap.input_tokens,
@@ -87,7 +88,12 @@ export function useAgentActivitySSE(slug: string | null) {
                 source: snap.source ?? "provider_reported",
                 updatedAt: snap.updated_at ?? "",
               },
-            });
+            };
+            const summary = mapBackendUsageSummary(snap.usage_summary);
+            if (summary) {
+              updates.usageSummary = summary;
+            }
+            useAgentStore.getState().updateAgent(event.agent_id, updates);
           } catch {
             // malformed usage payload — ignore
           }

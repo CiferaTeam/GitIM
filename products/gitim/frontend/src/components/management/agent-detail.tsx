@@ -12,6 +12,7 @@ import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-status";
 import { ProviderBadge } from "./provider-badge";
 import { BurnAgentDialog } from "./burn-agent-dialog";
+import { AgentUsageCard } from "./agent-usage-card";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
@@ -438,6 +439,11 @@ export function AgentDetail() {
             <EnvVarsEditor value={draftEnv} onChange={setDraftEnv} />
           )}
         </Field>
+      </div>
+
+      {/* Token Usage */}
+      <div className="mb-8">
+        <AgentUsageCard agent={agent} />
       </div>
 
       {/* Activity Log */}

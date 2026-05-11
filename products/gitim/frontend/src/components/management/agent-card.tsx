@@ -12,6 +12,7 @@ import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
+import { AgentUsageTag } from "./agent-usage-tag";
 import { BurnAgentDialog } from "./burn-agent-dialog";
 import { Play, Pause, Settings, Flame } from "lucide-react";
 import { relativeTime, statusBadge } from "./agent-status";
@@ -120,6 +121,9 @@ export function AgentCard({ agent }: AgentCardProps) {
 
             <span className="text-muted-foreground">Messages processed</span>
             <span>{agent.messagesProcessed}</span>
+
+            <span className="text-muted-foreground">Token usage</span>
+            <AgentUsageTag agent={agent} />
           </div>
         </CardContent>
 

@@ -84,6 +84,11 @@ struct HealthResponse {
     version: &'static str,
     workspaces_count: usize,
     runtime_id: String,
+    /// Best-effort observability for the token statistics layer. Increments
+    /// every time the agent loop fails to persist a usage log. v1 has no
+    /// alerting on this; the field exists so a flaky filesystem shows up
+    /// without scraping logs.
+    usage_save_failures: u64,
 }
 
 // -----------------------------------------------------------------------------
@@ -255,6 +260,11 @@ pub struct AgentInfo {
     /// Hermes-only: the selected LLM model id (e.g. "deepseek-chat").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_model: Option<String>,
+    /// Cumulative + 30-day breakdown of token usage. Loaded at recovery
+    /// from `<workspace>/.gitim-runtime/usage/<handler>.json` and patched in
+    /// place by the agent loop after each turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_summary: Option<crate::usage_log::UsageSummary>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -300,6 +310,11 @@ pub struct RuntimeState {
     /// string when constructed via `Default::default()` for tests that
     /// don't go through the boot path. See docs/plans/runtime-id/00-design.md.
     pub runtime_id: String,
+    /// Counter incremented every time `AgentUsageLog::save` returns an
+    /// error from the agent loop. Surfaced on `/runtime/health` so a
+    /// repeatedly-failing FS shows up without scraping logs. Best-effort
+    /// observability — no alerting / threshold logic in v1.
+    pub usage_save_failures: std::sync::atomic::AtomicU64,
 }
 
 impl RuntimeState {
@@ -346,6 +361,7 @@ impl Default for RuntimeState {
             update_last_error: None,
             listen_port: DEFAULT_PORT,
             runtime_id: String::new(),
+            usage_save_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -380,6 +396,9 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
         version: env!("CARGO_PKG_VERSION"),
         workspaces_count: s.workspaces.len(),
         runtime_id: s.runtime_id.clone(),
+        usage_save_failures: s
+            .usage_save_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -2427,6 +2446,7 @@ async fn agents_add(
                 } else {
                     None
                 },
+                usage_summary: None,
                 loop_handle: None,
             };
             {
@@ -2479,6 +2499,29 @@ fn read_user_introduction(repo_root: &Path, handler: &str) -> Option<String> {
     Some(meta.introduction)
 }
 
+/// Recovery-time loader for `<workspace>/.gitim-runtime/usage/<handler>.json`.
+///
+/// Returns `None` when the file is missing — that's the lazy-init posture for
+/// agents created before token statistics shipped. We only synthesize a
+/// `UsageSummary` when the file actually exists, so a fresh install renders
+/// as "no data yet" rather than as a fully-zeroed sparkline.
+///
+/// Provider/model are stamped into the file when the agent loop first writes
+/// it; recovery doesn't need them, so we pass empty strings — load_or_default
+/// will only enter the load branch when the file is present and parseable.
+fn load_usage_summary_for_recovery(
+    workspace: &Path,
+    handler: &str,
+) -> Option<crate::usage_log::UsageSummary> {
+    let path = crate::usage_log::AgentUsageLog::path(workspace, handler);
+    if !path.exists() {
+        return None;
+    }
+    let log = crate::usage_log::AgentUsageLog::load_or_default(workspace, handler, "", "", true);
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    Some(log.summary(&today))
+}
+
 fn cleanup_agent_dir(workspace: &Path, handler: &str) {
     let agent_dir = workspace.join(handler);
     let pid_file = agent_dir.join(".gitim/run/gitim.pid");
@@ -2528,12 +2571,13 @@ struct AgentRemoveRequest {
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
-    let (repo_root, handler, provider, model, system_prompt, env, activity_tx) = {
+    let (repo_root, handler, provider, model, system_prompt, env, activity_tx, workspace_root) = {
         let s = state.lock().unwrap();
         let ctx = s
             .workspaces
             .get(slug)
             .ok_or_else(|| format!("unknown workspace: {slug}"))?;
+        let workspace_root = ctx.path.clone();
         match ctx.agents.get(agent_id) {
             None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
@@ -2547,6 +2591,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 info.system_prompt.clone(),
                 info.env.clone(),
                 ctx.activity_tx.clone(),
+                workspace_root,
             ),
         }
     };
@@ -2563,6 +2608,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
 
     agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
     agent_loop.set_runtime_state(state.clone());
+    agent_loop.set_workspace_root(workspace_root);
 
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
@@ -3215,6 +3261,15 @@ async fn agents_remove(
     if req.hard_delete {
         if let Err(e) = hard_delete_agent_dir(&workspace_path, &req.id, &repo_path) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::new(e))).into_response();
+        }
+        // Best-effort: same posture as hermes profile cleanup below.
+        // Statistics file failure must not block the user-visible delete.
+        if let Err(e) = crate::usage_log::AgentUsageLog::delete(&workspace_path, &req.id) {
+            tracing::warn!(
+                agent = %req.id,
+                error = %e,
+                "failed to delete usage log during hard_delete"
+            );
         }
         // Best-effort hermes profile cleanup: failures only warn so a
         // missing/broken hermes CLI never blocks the user-facing delete.
@@ -3878,6 +3933,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                                 .and_then(|s| s.session_usage),
                             llm_provider: llm_provider_val.clone(),
                             llm_model: llm_model_val.clone(),
+                            usage_summary: load_usage_summary_for_recovery(workspace, &handler),
                             loop_handle: None,
                         },
                     );
@@ -3936,6 +3992,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                                 .and_then(|s| s.session_usage),
                             llm_provider: llm_provider_val,
                             llm_model: llm_model_val,
+                            usage_summary: load_usage_summary_for_recovery(workspace, &handler),
                             loop_handle: None,
                         },
                     );

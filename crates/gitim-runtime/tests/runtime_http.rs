@@ -309,6 +309,7 @@ fn insert_agent(
             session_usage: None,
             llm_provider: None,
             llm_model: None,
+            usage_summary: None,
             loop_handle: None,
         },
     );

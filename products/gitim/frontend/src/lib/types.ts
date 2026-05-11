@@ -18,6 +18,39 @@ export interface SessionUsageSnapshot {
   updatedAt: string;
 }
 
+/** Five-counter token bucket scoped to one UTC day or to the agent's
+ *  lifetime (when used as `totals`). Mirrors `usage_log::UsageBucket`. */
+export interface UsageBucket {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  turns: number;
+}
+
+/** One calendar day's bucket as emitted by the runtime's
+ *  `last_30_days` zero-filled view. */
+export interface UsageDayEntry {
+  date: string; // YYYY-MM-DD UTC
+  bucket: UsageBucket;
+}
+
+/** Cumulative + 30-day breakdown of an agent's token usage.
+ *
+ *  Mirrors `usage_log::UsageSummary` from the runtime. The runtime serializes
+ *  with snake_case keys; the http client converts to camelCase before
+ *  putting the value on the agent. `byDay` is always 30 entries (zero-filled
+ *  for days the agent had no turns). */
+export interface UsageSummary {
+  providerReportsUsage: boolean;
+  firstSeen: string; // ISO8601 UTC
+  lastUpdated: string; // ISO8601 UTC
+  totals: UsageBucket;
+  /** Convenience field: today's bucket from the agent's own POV (UTC). */
+  today: UsageBucket;
+  byDay: UsageDayEntry[];
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -41,6 +74,11 @@ export interface Agent {
   llmProvider?: string;
   /** Hermes-only: the selected LLM model id (e.g. "deepseek-chat", or a custom model string). */
   llmModel?: string;
+  /** Cumulative + 30-day breakdown. Patched in place by the runtime over
+   *  the SSE `usage` event after every turn, plus initially populated from
+   *  GET /agents on first load. Absent when the agent has never produced a
+   *  usage entry (lazy init from the runtime side). */
+  usageSummary?: UsageSummary;
 }
 
 /** Hard ceiling for the introduction blurb. Must stay in sync with

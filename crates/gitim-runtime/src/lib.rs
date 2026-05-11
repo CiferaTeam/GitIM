@@ -20,6 +20,7 @@ pub mod state;
 pub mod token_propagation;
 pub mod tool_path;
 pub mod update;
+pub mod usage_log;
 pub mod user_config;
 pub mod workspace;
 
