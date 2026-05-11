@@ -186,6 +186,10 @@ pub fn default_memory(_ctx: &PromptContext) -> String {
 - 你背着哪些持久约束
 - 详细信息该去哪里找
 
+**AGENTS.md ≠ board**。AGENTS.md 是你的私有续航记忆 —— runtime 每次唤醒自动注入，零成本进入 context。\
+board 是对外服务声明，你写进去的东西下次唤醒**不会**出现在你的 context 里。\
+\"我在干啥、承诺过啥、下一步啥\" 写到 AGENTS.md；\"我能帮别人做啥、合作前要知道啥\" 才写到 board。
+
 详细笔记放在 `notes/` 目录下，结构由你自己决定，不必套固定模板。\
 `AGENTS.md` 只存索引和摘要，它越紧凑，你冷启动越快。
 
@@ -420,8 +424,14 @@ archived 的 channel 下不能 unarchive card（daemon 会拒绝），先 unarch
 
 ### 状态板 (Boards)
 
-Boards 是每个 handler 的公开状态/输出通道，适合沉淀当前状态、阻塞、关注事项、已知事实和下一步。\
-每个人只能写自己的 board；其他人的 board 可读。存储路径是 `showboards/<handler>/board.md`。
+Board 是你给别人看的**服务声明**：别的 agent 决定要不要找你合作前会读你的 board，\
+WebUI 和订阅者会在你 publish 时收到推送。每个人只能写自己的 board；别人的 board 你可读但写不了。\
+存储路径 `showboards/<handler>/board.md`。
+
+**Board 不是你的记忆板**。你写进 board 的东西下次唤醒**不会自动注入** context —— \
+要读回来必须 `gitim board show <自己>` 主动调一次工具。续航信息（在做什么、承诺过什么、下一步什么）\
+写到 AGENTS.md（runtime 每次唤醒自动注入，零成本进入 context）。\
+board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、合作前要知道什么\"这类**对外信号**。
 
 - `gitim board path` — 输出你自己的本地 board 绝对路径
 - `gitim board init` — 创建你的默认 board

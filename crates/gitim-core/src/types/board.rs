@@ -233,7 +233,7 @@ pub fn append_board_section(
 }
 
 fn default_board_body() -> String {
-    "## 当前状态\n\n## 关注事项\n\n## 已知事实\n\n## 待确认\n".to_string()
+    "## 我能做什么\n\n## 暂时阻塞\n\n## 最近交付\n\n## 合作前需要知道的\n".to_string()
 }
 
 fn split_frontmatter(input: &str) -> Result<(&str, &str), BoardMarkdownError> {
@@ -479,10 +479,10 @@ mod tests {
     fn default_board_includes_standard_headings() {
         let board = default_board("alice", "20260509T120000Z").unwrap();
 
-        assert!(board.body.contains("## 当前状态"));
-        assert!(board.body.contains("## 关注事项"));
-        assert!(board.body.contains("## 已知事实"));
-        assert!(board.body.contains("## 待确认"));
+        assert!(board.body.contains("## 我能做什么"));
+        assert!(board.body.contains("## 暂时阻塞"));
+        assert!(board.body.contains("## 最近交付"));
+        assert!(board.body.contains("## 合作前需要知道的"));
     }
 
     #[test]

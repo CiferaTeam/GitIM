@@ -85,7 +85,7 @@ async fn board_init_creates_current_handler_board() {
     let path = state.repo_root.join("showboards/alice/board.md");
     let content = std::fs::read_to_string(path).unwrap();
     assert!(content.contains("handler: alice"));
-    assert!(content.contains("## 当前状态"));
+    assert!(content.contains("## 我能做什么"));
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn board_init_refuses_to_overwrite_existing_board() {
 
     let path = state.repo_root.join("showboards/alice/board.md");
     let original = std::fs::read_to_string(&path).unwrap();
-    let edited = original.replace("## 当前状态", "## 当前状态\n\nKeep this board");
+    let edited = original.replace("## 我能做什么", "## 我能做什么\n\nKeep this board");
     std::fs::write(&path, &edited).unwrap();
 
     let second = handle_request(
@@ -153,7 +153,7 @@ async fn board_section_set_commits_only_board_file() {
 
     let resp = handle_request(
         Request::BoardSectionSet {
-            section: "当前状态".to_string(),
+            section: "我能做什么".to_string(),
             value: "正在验证 board 协议。".to_string(),
             author: Some("alice".to_string()),
         },
@@ -293,7 +293,7 @@ async fn board_deletion_only_publish_is_visible_in_poll_catchup() {
     let previous_head = git(&state.repo_root, &["rev-parse", "HEAD"]);
     let board_path = state.repo_root.join("showboards/alice/board.md");
     let content = std::fs::read_to_string(&board_path).unwrap();
-    let modified = content.replace("## 待确认\n", "");
+    let modified = content.replace("## 合作前需要知道的\n", "");
     assert_ne!(modified, content);
 
     let resp = handle_request(
