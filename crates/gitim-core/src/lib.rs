@@ -1,6 +1,7 @@
 #![deny(warnings)]
 
 pub mod auth_payload;
+pub mod config_patch;
 pub mod dm;
 pub mod formatter;
 pub mod identity;

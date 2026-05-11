@@ -12,6 +12,7 @@ use serde_json::json;
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::config_patch::ensure_config_indexer_enabled as _ensure_config_indexer_enabled;
 
 /// Git server type for onboarding
 #[derive(Clone, Debug)]
@@ -386,37 +387,10 @@ fn ensure_config_debug_http(repo_dir: &Path, enabled: bool) {
 }
 
 fn ensure_config_indexer_enabled(repo_dir: &Path, enabled: bool) {
-    let config_path = repo_dir.join(".gitim/config.yaml");
-    let value = enabled.to_string();
-
-    if config_path.exists() {
-        let mut content = fs::read_to_string(&config_path).unwrap_or_default();
-        let re = Regex::new(r"(?m)(indexer:\s*\n\s*enabled:)\s*(true|false)").unwrap();
-        if re.is_match(&content) {
-            content = re
-                .replace(&content, format!("$1 {value}"))
-                .to_string();
-        } else if content.contains("indexer:") {
-            content = content.replacen("indexer:", &format!("indexer:\n  enabled: {value}"), 1);
-        } else {
-            content.push_str(&format!("\nindexer:\n  enabled: {value}\n"));
-        }
-        fs::write(&config_path, content).unwrap_or_else(|e| {
-            eprintln!("Error: cannot write config: {e}");
-            process::exit(1);
-        });
-    } else {
-        let gitim_dir = repo_dir.join(".gitim");
-        fs::create_dir_all(&gitim_dir).unwrap_or_else(|e| {
-            eprintln!("Error: cannot create .gitim directory: {e}");
-            process::exit(1);
-        });
-        let content = format!("version: 1\nindexer:\n  enabled: {value}\n");
-        fs::write(&config_path, content).unwrap_or_else(|e| {
-            eprintln!("Error: cannot write config: {e}");
-            process::exit(1);
-        });
-    }
+    _ensure_config_indexer_enabled(repo_dir, enabled).unwrap_or_else(|e| {
+        eprintln!("Error: cannot write indexer config: {e}");
+        process::exit(1);
+    });
 }
 
 pub async fn cmd_onboard(args: OnboardArgs) {
