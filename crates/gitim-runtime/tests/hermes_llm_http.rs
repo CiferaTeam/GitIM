@@ -55,10 +55,10 @@ impl Drop for HermesHomeGuard {
 
 // ── test 1 ────────────────────────────────────────────────────────────────────
 
-/// Empty HERMES_HOME → providers list is empty; status is always 200.
+/// Empty HERMES_HOME → builtin providers are still listed; status is always 200.
 #[tokio::test]
 #[serial(hermes_home_env)]
-async fn get_providers_empty_when_no_hermes_home() {
+async fn get_providers_lists_builtins_when_no_hermes_home() {
     let (_guard, _path) = HermesHomeGuard::install_empty();
     // _path is an empty tempdir — no .env, no config.yaml
 
@@ -76,10 +76,28 @@ async fn get_providers_empty_when_no_hermes_home() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_to_json(response).await;
     let providers = body["providers"].as_array().expect("providers is an array");
+    let ids: Vec<&str> = providers.iter().filter_map(|p| p["id"].as_str()).collect();
     assert!(
-        providers.is_empty(),
-        "expected empty providers list for empty hermes home, got: {body}"
+        ids.contains(&"anthropic"),
+        "expected anthropic builtin in {body}"
     );
+    assert!(
+        ids.contains(&"deepseek"),
+        "expected deepseek builtin in {body}"
+    );
+    assert!(
+        ids.contains(&"kimi-coding"),
+        "expected kimi-coding builtin in {body}"
+    );
+    assert!(
+        ids.contains(&"minimax"),
+        "expected minimax builtin in {body}"
+    );
+    assert!(
+        ids.contains(&"minimax-cn"),
+        "expected minimax-cn builtin in {body}"
+    );
+    assert!(ids.contains(&"zai"), "expected zai builtin in {body}");
 }
 
 // ── test 2 ────────────────────────────────────────────────────────────────────
@@ -410,15 +428,14 @@ fn inject_test_workspace(state: &gitim_runtime::http::SharedRuntimeState) {
 
 // ── test 9 ────────────────────────────────────────────────────────────────────
 
-/// POST /agents/add with provider=hermes and no llm_provider → 400 with
-/// "missing llm_provider/llm_model for hermes" in the error field.
-///
-/// Validation runs before workspace provisioning so this needs only an
-/// injected workspace, not a real git repo.
+/// POST /agents/add with provider=hermes and no llm_provider/llm_model uses
+/// the cloned profile's default model configuration path instead of being
+/// rejected as a malformed explicit override.
 #[tokio::test]
 #[serial(hermes_home_env)]
-async fn agents_add_hermes_missing_llm_provider_400() {
-    let (_guard, _path) = HermesHomeGuard::install_empty();
+async fn agents_add_hermes_without_llm_fields_uses_default_profile_path() {
+    let (_guard, path) = HermesHomeGuard::install_empty();
+    fs::write(path.join(".env"), "ANTHROPIC_API_KEY=test\n").expect("write .env");
 
     let (router, state) = create_router();
     inject_test_workspace(&state);
@@ -428,22 +445,18 @@ async fn agents_add_hermes_missing_llm_provider_400() {
             "handler": "test-bot",
             "display_name": "Test Bot",
             "provider": "hermes",
-            // llm_provider and llm_model intentionally absent
+            // llm_provider and llm_model intentionally absent: use default.
         })))
         .await
         .unwrap();
 
-    assert_eq!(
+    assert_ne!(
         response.status(),
         StatusCode::BAD_REQUEST,
-        "missing llm_provider for hermes must return 400"
+        "missing llm fields should select the default profile path, not fail validation"
     );
     let body = body_to_json(response).await;
-    let err = body["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("missing llm_provider") || err.contains("llm_provider"),
-        "error must mention llm_provider; got: {err}"
-    );
+    assert_ne!(body["error_code"].as_str(), Some("missing_llm_provider"));
 }
 
 // ── test 10 ───────────────────────────────────────────────────────────────────
@@ -639,11 +652,10 @@ async fn agents_add_hermes_happy_path_writes_me_json() {
     let status = response.status();
     let body = body_to_json(response).await;
 
-    // If provisioning fails (e.g. gitim-daemon not in PATH), we get 500 from
-    // provision_agent. In that case skip the me.json check — we've already
-    // verified the validation path in tests 9-11, and the me.json write is
-    // verified by the handler code that runs only on provision success.
-    if status == StatusCode::INTERNAL_SERVER_ERROR {
+    // If provisioning fails (e.g. gitim-daemon not in PATH), this route
+    // currently returns an ErrorBody with HTTP 200. In that case skip the
+    // me.json check; it only exists after provision_agent succeeds.
+    if body["ok"].as_bool() != Some(true) || status == StatusCode::INTERNAL_SERVER_ERROR {
         // Acceptable in CI without a full daemon binary.
         return;
     }

@@ -18,8 +18,15 @@ import {
   type PreflightResult,
   type ProviderId,
 } from "@/lib/providers";
+import {
+  HERMES_DEFAULT_LLM_PROVIDER,
+  getHermesLlmOverride,
+  isHermesDefaultLlmProvider,
+  isHermesLlmSelectionIncomplete,
+  type HermesLlmModel,
+  type HermesLlmProvider,
+} from "@/lib/hermes-llm";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
-import type { HermesLlmModel, HermesLlmProvider } from "@/lib/hermes-llm";
 import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -62,10 +69,13 @@ export function AddAgentDialog() {
   // Effective model to pass to API: custom input overrides the select value
   const effectiveModel =
     llmModel === CUSTOM_MODEL_VALUE ? customModelInput : llmModel;
+  const hermesLlmOverride = getHermesLlmOverride(llmProvider, effectiveModel);
+  const hermesLlmUsesDefault = isHermesDefaultLlmProvider(llmProvider);
 
   // When GitIM provider switches to/from hermes, fetch/reset LLM providers
   useEffect(() => {
     if (provider === "hermes") {
+      setLlmProvider(HERMES_DEFAULT_LLM_PROVIDER);
       setLlmProvidersLoading(true);
       client.listHermesLlmProviders().then((res) => {
         setLlmProviders(res.ok ? (res.data?.providers ?? []) : []);
@@ -85,8 +95,10 @@ export function AddAgentDialog() {
 
   // When llmProvider changes, fetch models for that provider
   useEffect(() => {
-    if (!llmProvider) {
+    if (!llmProvider || isHermesDefaultLlmProvider(llmProvider)) {
+      modelFetchSeq.current += 1;
       setLlmModels([]);
+      setLlmModelsLoading(false);
       setLlmModelsError(null);
       setCustomModelInput("");
       return;
@@ -139,9 +151,7 @@ export function AddAgentDialog() {
     setDetectResult(null);
     const res = await client.preflightProvider(
       provider as ProviderId,
-      provider === "hermes"
-        ? { llmProvider, llmModel: effectiveModel }
-        : undefined,
+      provider === "hermes" ? hermesLlmOverride : undefined,
     );
     // Bail out if the user switched provider (or fired another detect) while
     // the request was in flight — a stale response must not overwrite state.
@@ -184,8 +194,11 @@ export function AddAgentDialog() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const hermesLlmIncomplete =
-      provider === "hermes" && (!llmProvider || !effectiveModel);
+    const hermesLlmIncomplete = isHermesLlmSelectionIncomplete(
+      provider,
+      llmProvider,
+      effectiveModel,
+    );
     if (
       !name.trim() ||
       validationError ||
@@ -217,8 +230,8 @@ export function AddAgentDialog() {
         envMap,
         introduction.trim(),
         joinGeneral,
-        provider === "hermes" ? llmProvider : undefined,
-        provider === "hermes" ? effectiveModel : undefined,
+        provider === "hermes" ? hermesLlmOverride?.llmProvider : undefined,
+        provider === "hermes" ? hermesLlmOverride?.llmModel : undefined,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -279,7 +292,11 @@ export function AddAgentDialog() {
                   disabled={
                     !provider ||
                     detecting ||
-                    (provider === "hermes" && (!llmProvider || !effectiveModel))
+                    isHermesLlmSelectionIncomplete(
+                      provider,
+                      llmProvider,
+                      effectiveModel,
+                    )
                   }
                 >
                   {detecting ? (
@@ -336,8 +353,17 @@ export function AddAgentDialog() {
               <div className="space-y-1.5">
                 <label className="text-sm font-medium">Model</label>
                 <p className="text-xs text-muted-foreground">
-                  {providerInfo.label} uses the default model from{" "}
-                  <code>opencode auth login</code>. No selection needed.
+                  {provider === "hermes" ? (
+                    <>
+                      Hermes uses the default model from <code>hermes setup</code>{" "}
+                      unless an override is selected below.
+                    </>
+                  ) : (
+                    <>
+                      {providerInfo.label} uses its configured default model. No
+                      selection needed.
+                    </>
+                  )}
                 </p>
               </div>
             ) : (
@@ -370,45 +396,36 @@ export function AddAgentDialog() {
                   <label className="text-sm font-medium" htmlFor="hermes-llm-provider">
                     LLM Provider
                   </label>
-                  {llmProvidersLoading ? (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin" />
-                      Loading providers…
-                    </div>
-                  ) : llmProviders.length === 0 ? (
-                    <>
-                      <select
-                        id="hermes-llm-provider"
-                        value=""
-                        disabled
-                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <option value="">— No providers available —</option>
-                      </select>
-                      <p className="text-xs text-muted-foreground">
-                        No LLM providers configured. Add an API key to{" "}
-                        <code>~/.hermes/.env</code> or run{" "}
-                        <code>hermes setup</code>, then reopen this dialog.
-                      </p>
-                    </>
-                  ) : (
+                  <div className="space-y-1.5">
                     <select
                       id="hermes-llm-provider"
                       value={llmProvider}
                       onChange={(e) => setLlmProvider(e.target.value)}
                       className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                      <option value="">— Select LLM provider —</option>
+                      <option value={HERMES_DEFAULT_LLM_PROVIDER}>
+                        Default profile
+                      </option>
                       {llmProviders.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.label}
                         </option>
                       ))}
                     </select>
-                  )}
+                    {llmProvidersLoading && (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="size-3 animate-spin" />
+                        Loading providers…
+                      </div>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Default profile uses the model configured by{" "}
+                      <code>hermes setup</code>.
+                    </p>
+                  </div>
                 </div>
 
-                {llmProvider && (
+                {llmProvider && !hermesLlmUsesDefault && (
                   <div className="space-y-1.5">
                     <label className="text-sm font-medium" htmlFor="hermes-llm-model">
                       LLM Model
@@ -542,7 +559,11 @@ export function AddAgentDialog() {
                   submitting ||
                   !provider ||
                   (modelRequired && !model) ||
-                  (provider === "hermes" && (!llmProvider || !effectiveModel)) ||
+                  isHermesLlmSelectionIncomplete(
+                    provider,
+                    llmProvider,
+                    effectiveModel,
+                  ) ||
                   !detectResult?.available
                 }
               >

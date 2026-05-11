@@ -67,6 +67,8 @@ export interface HermesLlmModelList {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+export const HERMES_DEFAULT_LLM_PROVIDER = "__default__";
+
 /**
  * Returns true when the provider id represents a user-added custom endpoint
  * (i.e. defined in hermes config.yaml rather than the builtin registry).
@@ -75,4 +77,29 @@ export interface HermesLlmModelList {
  */
 export function isCustomProvider(id: string): boolean {
   return id.startsWith("custom:");
+}
+
+export function isHermesDefaultLlmProvider(id: string): boolean {
+  return id === HERMES_DEFAULT_LLM_PROVIDER;
+}
+
+export function getHermesLlmOverride(
+  llmProvider: string,
+  llmModel: string,
+): { llmProvider: string; llmModel: string } | undefined {
+  if (!llmProvider || isHermesDefaultLlmProvider(llmProvider)) {
+    return undefined;
+  }
+  return { llmProvider, llmModel };
+}
+
+export function isHermesLlmSelectionIncomplete(
+  provider: string,
+  llmProvider: string,
+  llmModel: string,
+): boolean {
+  if (provider !== "hermes" || isHermesDefaultLlmProvider(llmProvider)) {
+    return false;
+  }
+  return !llmProvider || !llmModel;
 }

@@ -1993,12 +1993,13 @@ struct AgentAddRequest {
     #[serde(default)]
     join_general: Option<bool>,
     /// Hermes-only: the LLM provider id to configure in the agent's hermes
-    /// profile (e.g. "anthropic", "kimi-coding", "custom:foo"). Required when
-    /// `provider == "hermes"`. Validated against BUILTIN_PROVIDERS + config.yaml.
+    /// profile (e.g. "anthropic", "kimi-coding", "custom:foo"). When omitted
+    /// together with `llm_model`, the cloned profile keeps its default model.
+    /// Explicit values are validated against BUILTIN_PROVIDERS + config.yaml.
     #[serde(default)]
     llm_provider: Option<String>,
     /// Hermes-only: the model to set as `model.default` in the hermes profile
-    /// (e.g. "claude-opus-4-5"). Required when `provider == "hermes"`.
+    /// (e.g. "claude-opus-4-5"). Required with an explicit `llm_provider`.
     #[serde(default)]
     llm_model: Option<String>,
 }
@@ -2032,60 +2033,65 @@ async fn agents_add(
     // without touching git or the daemon. Must mirror the whitelist logic in the
     // hermes branch below (apply_model_config + rollback).
     if req.provider == "hermes" {
-        // Step 1: both fields must be present and non-empty.
-        let missing = req
+        let llm_provider = req
             .llm_provider
             .as_deref()
-            .map(str::is_empty)
-            .unwrap_or(true)
-            || req.llm_model.as_deref().map(str::is_empty).unwrap_or(true);
-        if missing {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::with_code(
-                    "missing llm_provider/llm_model for hermes",
-                    "missing_llm_provider",
-                )),
-            )
-                .into_response();
-        }
+            .and_then(|value| (!value.is_empty()).then_some(value));
+        let llm_model = req
+            .llm_model
+            .as_deref()
+            .and_then(|value| (!value.is_empty()).then_some(value));
 
-        // Step 2: whitelist check — builtin or valid custom:<name>.
-        let llm_provider_str = req.llm_provider.as_deref().unwrap();
-        if crate::hermes_llm::BUILTIN_PROVIDERS
-            .iter()
-            .any(|p| p.id == llm_provider_str)
-        {
-            // Builtin provider — OK.
-        } else if let Some(custom_name) = llm_provider_str.strip_prefix("custom:") {
-            // Custom provider — must exist in the user's config.yaml.
-            let hermes_home = std::env::var_os("HERMES_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("/"))
-                        .join(".hermes")
-                });
-            let providers = crate::hermes_llm::list_providers(&hermes_home);
-            if !providers.iter().any(|p| p.id == llm_provider_str) {
+        match (llm_provider, llm_model) {
+            (None, None) => {}
+            (Some(llm_provider_str), Some(_)) => {
+                let is_builtin = crate::hermes_llm::BUILTIN_PROVIDERS
+                    .iter()
+                    .any(|p| p.id == llm_provider_str);
+
+                if !is_builtin && llm_provider_str.starts_with("custom:") {
+                    let custom_name = &llm_provider_str["custom:".len()..];
+                    let hermes_home = std::env::var_os("HERMES_HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            dirs::home_dir()
+                                .unwrap_or_else(|| PathBuf::from("/"))
+                                .join(".hermes")
+                        });
+                    let providers = crate::hermes_llm::list_providers(&hermes_home);
+                    if !providers.iter().any(|p| p.id == llm_provider_str) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorBody::with_code(
+                                format!(
+                                    "custom provider {custom_name} not found in hermes config.yaml"
+                                ),
+                                "custom_provider_not_found",
+                            )),
+                        )
+                            .into_response();
+                    }
+                } else if !is_builtin {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorBody::with_code(
+                            format!("unknown llm_provider: {llm_provider_str}"),
+                            "unknown_llm_provider",
+                        )),
+                    )
+                        .into_response();
+                }
+            }
+            _ => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(ErrorBody::with_code(
-                        format!("custom provider {custom_name} not found in hermes config.yaml"),
-                        "custom_provider_not_found",
+                        "missing llm_provider/llm_model for hermes",
+                        "missing_llm_provider",
                     )),
                 )
                     .into_response();
             }
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::with_code(
-                    format!("unknown llm_provider: {llm_provider_str}"),
-                    "unknown_llm_provider",
-                )),
-            )
-                .into_response();
         }
     }
 
@@ -2308,8 +2314,16 @@ async fn agents_add(
                         env: env_patch,
                         // Hermes-only: persist llm_provider/llm_model chosen at
                         // add-agent time so the agent loop can introspect them.
-                        llm_provider: req.llm_provider.clone(),
-                        llm_model: req.llm_model.clone(),
+                        llm_provider: req
+                            .llm_provider
+                            .as_ref()
+                            .filter(|value| !value.is_empty())
+                            .cloned(),
+                        llm_model: req
+                            .llm_model
+                            .as_ref()
+                            .filter(|value| !value.is_empty())
+                            .cloned(),
                         ..Default::default()
                     };
                     let merged = existing.merged_with(patch);
@@ -2348,49 +2362,59 @@ async fn agents_add(
                 }
 
                 // ── Hermes LLM provider validation + model config write ────────
-                // llm_provider/llm_model were validated early (before workspace
-                // lookup), so by here they are guaranteed to be non-empty and on
-                // the whitelist. Resolve base_url for custom providers; builtin
-                // providers pass None so hermes uses its registry default.
-                let llm_provider_str = req.llm_provider.as_deref().unwrap();
-                let llm_model_str = req.llm_model.as_deref().unwrap();
-                let base_url: Option<String> = if llm_provider_str.starts_with("custom:") {
-                    let hermes_home = std::env::var_os("HERMES_HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            dirs::home_dir()
-                                .unwrap_or_else(|| PathBuf::from("/"))
-                                .join(".hermes")
-                        });
-                    crate::hermes_llm::list_providers(&hermes_home)
-                        .into_iter()
-                        .find(|p| p.id == llm_provider_str)
-                        .and_then(|p| p.base_url)
-                } else {
-                    None // builtin → hermes uses registry default
-                };
+                // Explicit llm_provider/llm_model values were validated early
+                // (before workspace lookup). Resolve base_url for custom
+                // providers; builtin providers pass None so hermes uses its
+                // registry default.
+                let llm_provider = req
+                    .llm_provider
+                    .as_deref()
+                    .and_then(|value| (!value.is_empty()).then_some(value));
+                let llm_model = req
+                    .llm_model
+                    .as_deref()
+                    .and_then(|value| (!value.is_empty()).then_some(value));
 
-                if let Err(e) = crate::hermes_profile::apply_model_config_with(
-                    &req.handler,
-                    llm_provider_str,
-                    llm_model_str,
-                    base_url.as_deref(),
-                    &hermes_bin,
-                )
-                .await
-                {
-                    // Best-effort profile cleanup before full agent dir removal.
-                    let _ =
-                        crate::hermes_profile::delete_profile_with(&req.handler, &hermes_bin).await;
-                    cleanup_agent_dir(&workspace, &req.handler);
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorBody::with_code(
-                            format!("apply_model_config failed: {e}"),
-                            "apply_model_config_failed",
-                        )),
+                if let (Some(llm_provider_str), Some(llm_model_str)) = (llm_provider, llm_model) {
+                    let base_url: Option<String> = if llm_provider_str.starts_with("custom:") {
+                        let hermes_home = std::env::var_os("HERMES_HOME")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| {
+                                dirs::home_dir()
+                                    .unwrap_or_else(|| PathBuf::from("/"))
+                                    .join(".hermes")
+                            });
+                        crate::hermes_llm::list_providers(&hermes_home)
+                            .into_iter()
+                            .find(|p| p.id == llm_provider_str)
+                            .and_then(|p| p.base_url)
+                    } else {
+                        None
+                    };
+
+                    if let Err(e) = crate::hermes_profile::apply_model_config_with(
+                        &req.handler,
+                        llm_provider_str,
+                        llm_model_str,
+                        base_url.as_deref(),
+                        &hermes_bin,
                     )
-                        .into_response();
+                    .await
+                    {
+                        // Best-effort profile cleanup before full agent dir removal.
+                        let _ =
+                            crate::hermes_profile::delete_profile_with(&req.handler, &hermes_bin)
+                                .await;
+                        cleanup_agent_dir(&workspace, &req.handler);
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorBody::with_code(
+                                format!("apply_model_config failed: {e}"),
+                                "apply_model_config_failed",
+                            )),
+                        )
+                            .into_response();
+                    }
                 }
             }
 
@@ -2447,12 +2471,18 @@ async fn agents_add(
                 error_message: None,
                 session_usage: None,
                 llm_provider: if req.provider == "hermes" {
-                    req.llm_provider.clone()
+                    req.llm_provider
+                        .as_ref()
+                        .filter(|value| !value.is_empty())
+                        .cloned()
                 } else {
                     None
                 },
                 llm_model: if req.provider == "hermes" {
-                    req.llm_model.clone()
+                    req.llm_model
+                        .as_ref()
+                        .filter(|value| !value.is_empty())
+                        .cloned()
                 } else {
                     None
                 },
@@ -4699,9 +4729,9 @@ async fn workspaces_create(
 /// HTTP handler for `GET /hermes/llm/providers`.
 ///
 /// Resolves the hermes home directory from `HERMES_HOME` (or `~/.hermes`),
-/// delegates to `hermes_llm::list_providers`, and returns the result as
-/// `{"providers": [...]}`. Always 200 — introspection failures return an
-/// empty list rather than a 5xx so the WebUI degrades gracefully.
+/// delegates to `hermes_llm::list_selectable_providers`, and returns the
+/// result as `{"providers": [...]}`. Always 200 so the WebUI degrades
+/// gracefully.
 async fn list_hermes_llm_providers() -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -4714,7 +4744,7 @@ async fn list_hermes_llm_providers() -> axum::response::Response {
                 .join(".hermes")
         });
 
-    let providers = crate::hermes_llm::list_providers(&hermes_home);
+    let providers = crate::hermes_llm::list_selectable_providers(&hermes_home);
     (
         StatusCode::OK,
         Json(serde_json::json!({ "providers": providers })),

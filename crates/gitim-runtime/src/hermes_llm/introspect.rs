@@ -56,6 +56,37 @@ pub fn list_providers(hermes_home: &Path) -> Vec<LlmProvider> {
     providers
 }
 
+/// Return the provider catalog users can select from.
+///
+/// Built-in providers always appear. Entries with configured API keys carry
+/// their resolved base URL, and custom providers are appended from
+/// `config.yaml`.
+pub fn list_selectable_providers(hermes_home: &Path) -> Vec<LlmProvider> {
+    let configured_builtins = collect_builtins(&read_env_file(hermes_home));
+    let mut configured_by_id: std::collections::HashMap<String, LlmProvider> = configured_builtins
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect();
+
+    let mut providers = Vec::new();
+    for provider in BUILTIN_PROVIDERS {
+        if let Some(configured) = configured_by_id.remove(provider.id) {
+            providers.push(configured);
+        } else {
+            providers.push(LlmProvider {
+                id: provider.id.to_owned(),
+                label: provider.label.to_owned(),
+                kind: ProviderKind::ApiKey,
+                base_url: Some(provider.base_url.to_owned()),
+                api_protocol: provider.api_protocol,
+            });
+        }
+    }
+
+    providers.extend(collect_custom(hermes_home));
+    providers
+}
+
 /// Resolve the effective base URL for a built-in provider given the env value
 /// that matched one of its `env_vars`.
 ///

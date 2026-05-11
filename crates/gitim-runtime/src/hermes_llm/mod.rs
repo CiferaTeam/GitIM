@@ -8,6 +8,6 @@ mod introspect;
 mod models;
 mod registry;
 
-pub use introspect::{list_providers, LlmProvider, ProviderKind};
+pub use introspect::{list_providers, list_selectable_providers, LlmProvider, ProviderKind};
 pub use models::{fetch_models, ModelEntry, ModelListResult};
 pub use registry::{ApiProtocol, BuiltinProvider, BUILTIN_PROVIDERS};
