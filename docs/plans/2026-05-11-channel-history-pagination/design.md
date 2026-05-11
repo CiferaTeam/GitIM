@@ -67,7 +67,7 @@ if let Some(lim) = limit {
   - 返回 0 条 → 标记 `hasMoreHistory = false`
   - 返回非零 → prepend,保持滚动锚点
 
-- `components/chat/message-list.tsx`:加 `onScroll` 监听,scrollTop ≤ 50px 阈值触发 `loadOlder`,防抖避免并发请求;prepend 后用 `scrollTop = newScrollHeight - prevScrollHeight` 维持视觉位置不变。
+- `components/chat/message-list.tsx`:加 `onScroll` 监听,scrollTop ≤ 50px 阈值触发 `loadOlder`,防抖避免并发请求;prepend 后用 `scrollTop = scrollTop + (newScrollHeight - prevScrollHeight)` 维持视觉位置不变。区分 append(新消息从底来)和 prepend(旧消息从顶来)以避免现有"消息变多就滚底"逻辑把用户拉回底部。
 
 - Page size:**50**(与初次加载一致)。
 
