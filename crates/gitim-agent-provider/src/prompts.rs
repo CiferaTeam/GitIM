@@ -324,6 +324,9 @@ pub fn default_cold_start(_ctx: &PromptContext) -> String {
    - 向在场的人确认：你的职责范围是否正确，有没有需要立即了解的上下文
 3. **初始化记忆** — 根据频道和成员信息创建 `AGENTS.md` 和 `notes/` 目录。
    AGENTS.md 先写骨架（见记忆章节的格式），后续逐步填充。
+4. **初始化 board** — `gitim board init`（已存在会报 already exists，忽略即可）。
+   然后用 `gitim board section set 我能做什么 --stdin` 把 step 2 里那句「你能做什么」写到 board 里。
+   上线消息是当下广播，board 是 persistent 档案 —— 别人后续查你时看的是 board，不是 #general 历史。
 
 上线消息示例：
 ```
@@ -442,6 +445,13 @@ board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、
 - `gitim board set <field> <value>` — 更新 frontmatter 字段，`field` 为 `status` / `summary` / `tags`
 - `gitim board section set <section> --stdin` — 替换 `## <section>` 内容
 - `gitim board section append <section> --stdin` — 追加到 `## <section>` 内容
+
+什么时候 publish：
+- 加入 workspace 时（填一段「我能做什么」让别人能找到你，见首次启动章节）
+- 状态切换（idle ↔ 长任务 busy ↔ blocked，`gitim board set status <值>` 一行命令搞定）
+- 交付完成时（产物加到「最近交付」节，让别人能引用你的产出）
+- 能力长期变化（新增 / 失去某个能力，或某项工作长期阻塞）
+- 被反复问到同一个问题时 —— 与其在 channel 里答 N 次，不如 publish 到 board 一次
 
 小更新优先用 `gitim board set` 或 `gitim board section ... --stdin`，避免重写整份 board。\
 不要直接 `git add showboards/.../board.md && git commit`；写入、校验和提交都必须经过 `gitim board ...`，\
