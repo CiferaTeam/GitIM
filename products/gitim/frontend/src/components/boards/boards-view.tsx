@@ -3,9 +3,12 @@ import { RefreshCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useBoardStore } from "@/hooks/use-board-store";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { BoardReadResponse, BoardSummary } from "@/lib/types";
+import { writeUiState } from "@/lib/ui-state";
+import { workspaceIdentity } from "@/lib/workspace-key";
 import { cn } from "@/lib/utils";
 
 type LoadState = "idle" | "loading" | "error";
@@ -16,7 +19,15 @@ interface MarkdownBlock {
 }
 
 export function BoardsView() {
+  const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const activeWorkspace = activeSlug
+    ? workspaces.find((workspace) => workspace.slug === activeSlug)
+    : undefined;
+  const workspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
+    : null;
   const boards = useBoardStore((s) => s.boards);
   const selectedHandler = useBoardStore((s) => s.selectedHandler);
   const selectedBoard = useBoardStore((s) => s.selectedBoard);
@@ -170,7 +181,10 @@ export function BoardsView() {
           <BoardList
             boards={boards}
             selectedHandler={selectedHandler}
-            onSelect={setSelectedHandler}
+            onSelect={(handler) => {
+              setSelectedHandler(handler);
+              if (workspaceKey) writeUiState(workspaceKey, { boardHandler: handler });
+            }}
           />
           <BoardDetail
             board={selectedBoard}
