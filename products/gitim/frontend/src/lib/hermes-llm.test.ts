@@ -7,6 +7,8 @@ import {
 
 describe("Hermes LLM selection", () => {
   it("treats the default profile as a complete Hermes selection", () => {
+    expect(isHermesLlmSelectionIncomplete("hermes", "", "")).toBe(false);
+    expect(getHermesLlmOverride("", "")).toBeUndefined();
     expect(
       isHermesLlmSelectionIncomplete(
         "hermes",

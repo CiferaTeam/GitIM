@@ -70,7 +70,8 @@ export function AddAgentDialog() {
   const effectiveModel =
     llmModel === CUSTOM_MODEL_VALUE ? customModelInput : llmModel;
   const hermesLlmOverride = getHermesLlmOverride(llmProvider, effectiveModel);
-  const hermesLlmUsesDefault = isHermesDefaultLlmProvider(llmProvider);
+  const selectedLlmProvider = llmProvider || HERMES_DEFAULT_LLM_PROVIDER;
+  const hermesLlmUsesDefault = isHermesDefaultLlmProvider(selectedLlmProvider);
 
   // When GitIM provider switches to/from hermes, fetch/reset LLM providers
   useEffect(() => {
@@ -399,7 +400,7 @@ export function AddAgentDialog() {
                   <div className="space-y-1.5">
                     <select
                       id="hermes-llm-provider"
-                      value={llmProvider}
+                      value={selectedLlmProvider}
                       onChange={(e) => setLlmProvider(e.target.value)}
                       className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >

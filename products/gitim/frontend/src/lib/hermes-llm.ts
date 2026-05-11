@@ -80,7 +80,7 @@ export function isCustomProvider(id: string): boolean {
 }
 
 export function isHermesDefaultLlmProvider(id: string): boolean {
-  return id === HERMES_DEFAULT_LLM_PROVIDER;
+  return !id || id === HERMES_DEFAULT_LLM_PROVIDER;
 }
 
 export function getHermesLlmOverride(
