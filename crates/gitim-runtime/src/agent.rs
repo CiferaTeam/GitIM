@@ -5,6 +5,7 @@ use tracing::info;
 
 use gitim_client::{ensure_daemon_with_log, GitimClient};
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::config_patch::ensure_config_indexer_enabled;
 use gitim_sync::url_redact::redacted_url;
 
 use crate::daemon_log::daemon_log_path;
@@ -105,6 +106,10 @@ pub async fn provision_human(
         .status()
         .await
         .map_err(|e| RuntimeError::OnboardFailed(format!("status check failed: {e}")))?;
+
+    ensure_config_indexer_enabled(&human_dir, true)
+        .map_err(|e| RuntimeError::OnboardFailed(format!("indexer config: {e}")))?;
+    info!("indexer enabled in human config");
 
     Ok(human_dir)
 }
