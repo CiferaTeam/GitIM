@@ -20,10 +20,7 @@ import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
 import { UserCard } from "./user-card";
-
-/** Page size for both initial channel load and history paging. Single
- *  source of truth: changing this here changes every read call. */
-export const MESSAGES_PAGE_SIZE = 50;
+import { MESSAGES_PAGE_SIZE } from "./pagination";
 
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
