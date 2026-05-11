@@ -681,6 +681,89 @@ describe("CronDayPanel", () => {
     expect(dots.length).toBe(3);
   });
 
+  it("flat list shows @target handler inline on each entry row", () => {
+    const entries: CronTimelineEntry[] = [
+      {
+        ts: "2026-05-11T09:00:00Z",
+        kind: "past",
+        cron_name: "shared-cron",
+        target: "alice",
+      },
+      {
+        ts: "2026-05-11T10:00:00Z",
+        kind: "past",
+        cron_name: "shared-cron",
+        target: "bob",
+      },
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-11"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    // Both handlers appear, prefixed with "@".
+    expect(container.textContent).toContain("@alice");
+    expect(container.textContent).toContain("@bob");
+    // Each EntryRow contains its own @target string.
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-testid="entry-row"]'),
+    );
+    expect(rows.find((r) => r.textContent?.includes("@alice"))).toBeTruthy();
+    expect(rows.find((r) => r.textContent?.includes("@bob"))).toBeTruthy();
+  });
+
+  it("grouped mode shows @target handler inside each expanded entry row", () => {
+    // 13 entries → grouped mode. Mix two handlers in the same hour so
+    // an expanded group reveals both.
+    const entries: CronTimelineEntry[] = [
+      ...Array.from({ length: 7 }, (_, i) => ({
+        ts: `2026-05-18T09:${String(i * 2).padStart(2, "0")}:00Z`,
+        kind: "future" as const,
+        cron_name: "shared",
+        target: i % 2 === 0 ? "alice" : "bob",
+      })),
+      ...Array.from({ length: 6 }, (_, i) => ({
+        ts: `2026-05-18T10:${String(i * 2).padStart(2, "0")}:00Z`,
+        kind: "future" as const,
+        cron_name: "shared",
+        target: "carol",
+      })),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const headers = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="hour-group-header"]'),
+    );
+    const hour09 = headers.find((h) => h.textContent?.includes("09:00Z"))!;
+    act(() => {
+      hour09.click();
+    });
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-testid="entry-row"]'),
+    );
+    expect(rows.find((r) => r.textContent?.includes("@alice"))).toBeTruthy();
+    expect(rows.find((r) => r.textContent?.includes("@bob"))).toBeTruthy();
+    // Carol's entries are in hour 10 (still collapsed), so no @carol yet.
+    expect(rows.find((r) => r.textContent?.includes("@carol"))).toBeUndefined();
+  });
+
   it("hour-group with only one kind shows a single dot", () => {
     // 13 past-only entries split across two hours (single kind in each).
     const entries: CronTimelineEntry[] = [

@@ -214,6 +214,13 @@ function EntryRow({
       <span className="shrink-0 font-mono text-[11px] tabular-nums text-text-secondary">
         {formatEntryTime(entry.ts)}
       </span>
+      {/* Per-handler hue would need a new palette + colorblind audit, so
+          we stay on the existing muted-foreground token. `@target` reads
+          as a handler in chat conventions throughout the rest of GitIM,
+          so the prefix is doing the legwork of "this is who runs it". */}
+      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+        @{entry.target}
+      </span>
       <span className="min-w-0 flex-1 truncate font-mono text-xs">
         {entry.cron_name}
       </span>
