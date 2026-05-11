@@ -391,8 +391,8 @@ fn ensure_config_indexer_enabled(repo_dir: &Path, enabled: bool) {
 
     if config_path.exists() {
         let mut content = fs::read_to_string(&config_path).unwrap_or_default();
-        if content.contains("enabled:") && content.contains("indexer:") {
-            let re = Regex::new(r"(?m)(indexer:\s*\n\s*enabled:)\s*(true|false)").unwrap();
+        let re = Regex::new(r"(?m)(indexer:\s*\n\s*enabled:)\s*(true|false)").unwrap();
+        if re.is_match(&content) {
             content = re
                 .replace(&content, format!("$1 {value}"))
                 .to_string();
