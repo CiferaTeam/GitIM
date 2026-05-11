@@ -56,7 +56,7 @@ export interface Backend {
   me(): Promise<ApiResponse>;
   poll(since?: string): Promise<ApiResponse>;
   channels(): Promise<ApiResponse>;
-  read(channel: string, limit?: number): Promise<ApiResponse>;
+  read(channel: string, limit?: number, since?: number): Promise<ApiResponse>;
   send(
     channel: string,
     body: string,
@@ -182,11 +182,15 @@ export class HttpBackend implements Backend {
     return await res.json();
   }
 
-  async read(channel: string, limit?: number): Promise<ApiResponse> {
+  async read(
+    channel: string,
+    limit?: number,
+    since?: number,
+  ): Promise<ApiResponse> {
     const res = await fetch(`${this.baseUrl()}/im/read`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel, limit }),
+      body: JSON.stringify({ channel, limit, since }),
     });
     return await res.json();
   }
@@ -380,8 +384,12 @@ export class LocalBackend implements Backend {
   channels(): Promise<ApiResponse> {
     return this.call("channels");
   }
-  read(channel: string, limit?: number): Promise<ApiResponse> {
-    return this.call("read", channel, limit);
+  read(
+    channel: string,
+    limit?: number,
+    since?: number,
+  ): Promise<ApiResponse> {
+    return this.call("read", channel, limit, since);
   }
   send(
     channel: string,

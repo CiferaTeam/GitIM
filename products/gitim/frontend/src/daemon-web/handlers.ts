@@ -431,11 +431,30 @@ export async function channels(): Promise<ApiResponse> {
 export async function read(
   channel: string,
   limit?: number,
+  since?: number,
 ): Promise<ApiResponse> {
   try {
     const { entries, archived } = await readChannelEntriesWithArchive(channel);
-    const limited = limit ? entries.slice(-limit) : entries;
-    return ok({ channel, entries: limited, archived });
+    let filtered = entries;
+    if (since !== undefined) {
+      filtered = filtered.filter((e) => (e.line_number as number) > since);
+    }
+    // Three calling modes (mirrors crates/gitim-daemon/src/handlers/read.rs):
+    //   limit only     → tail-cut, last N entries (channel open default)
+    //   since only     → all entries after since (no truncation)
+    //   since + limit  → head-cut, first N entries after since
+    //
+    // Tail-cut uses Math.max instead of slice(-limit) because JS treats
+    // -0 the same as 0, so slice(-0) would return everything for limit=0.
+    if (limit !== undefined) {
+      if (since !== undefined) {
+        filtered = filtered.slice(0, limit);
+      } else {
+        const start = Math.max(0, filtered.length - limit);
+        filtered = filtered.slice(start);
+      }
+    }
+    return ok({ channel, entries: filtered, archived });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
