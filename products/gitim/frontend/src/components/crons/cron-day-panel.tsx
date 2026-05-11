@@ -45,6 +45,26 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
     setView({ kind: "list" });
   }, [dayKey, slug]);
 
+  // Escape closes the panel. We guard on `dayKey` so the listener is a no-op
+  // when no panel is showing (component still rendered as the empty
+  // placeholder). When inside a detail subview (`run` / `spec`), Escape
+  // first pops back to the list — falling all the way to `onClose` on a
+  // single keystroke would skip the day overview the user opened the
+  // panel for.
+  useEffect(() => {
+    if (!dayKey) return;
+    function handleKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (view.kind !== "list") {
+        setView({ kind: "list" });
+      } else {
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [dayKey, view.kind, onClose]);
+
   if (!dayKey) {
     return (
       <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">

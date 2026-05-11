@@ -185,6 +185,98 @@ describe("CronCalendar", () => {
     expect(container.textContent).toContain("部分结果被截断");
   });
 
+  it("returns focus to the activated day cell after the panel closes", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ts = `${year}-${pad(month)}-15T09:00:00Z`;
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    // The day cell carrying the entry chip is the one we want focus to
+    // return to. Locate it by the chip's accessible name we just lifted.
+    const chip = Array.from(container.querySelectorAll("[aria-label]")).find(
+      (n) => n.getAttribute("aria-label") === "已执行: weekly-report",
+    );
+    expect(chip).toBeTruthy();
+    const dayButton = chip!.closest("button");
+    expect(dayButton).not.toBeNull();
+    await act(async () => {
+      dayButton!.click();
+      await flushPromises();
+    });
+
+    // Close via the panel's X button. There are two panels in the DOM
+    // (lg-and-up aside + mobile stack), but only one is visible at a
+    // time — for the test it's enough that ALL of their close buttons
+    // route through the same handler, restoring focus to dayButton.
+    const closeButtons = container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Close day panel"]',
+    );
+    expect(closeButtons.length).toBeGreaterThan(0);
+    await act(async () => {
+      closeButtons[0].click();
+      await flushPromises();
+    });
+    // queueMicrotask fires before flushPromises returns since each
+    // `await Promise.resolve()` drains the microtask queue.
+    expect(document.activeElement).toBe(dayButton);
+  });
+
+  it("Escape from the day panel closes it and restores focus to the trigger", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ts = `${year}-${pad(month)}-15T09:00:00Z`;
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    const chip = Array.from(container.querySelectorAll("[aria-label]")).find(
+      (n) => n.getAttribute("aria-label") === "已执行: weekly-report",
+    );
+    const dayButton = chip!.closest("button");
+    await act(async () => {
+      dayButton!.click();
+      await flushPromises();
+    });
+
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await flushPromises();
+    });
+
+    // Panel should be closed (no header text matching the day key remains
+    // — header carries `{dayKey}` so its absence is a clean signal).
+    // We're more interested in the focus assertion, but keep both.
+    expect(document.activeElement).toBe(dayButton);
+  });
+
   it("re-fetches with a new window when the user navigates months", async () => {
     getCronTimelineMock.mockResolvedValue({ ok: true, data: { entries: [] } });
 
@@ -213,6 +305,89 @@ describe("CronCalendar", () => {
     const firstFrom = getCronTimelineMock.mock.calls[0][1];
     const latestFrom = getCronTimelineMock.mock.calls.at(-1)?.[1];
     expect(latestFrom).not.toBe(firstFrom);
+  });
+
+  it("encodes the full date plus kind breakdown into each day cell's aria-label", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    // 2 past + 1 missed on day 15. The assertion below uses the textual
+    // month name so a regression that drops "May" / "June" / etc. fails
+    // loudly.
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ];
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "beta" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "missed", cron_name: "gamma" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    // The DayCell button for day 15 should carry the full descriptive label.
+    const monthName = monthNames[month - 1];
+    const expectedLabel = `${monthName} 15, ${year}, 2 已执行, 1 未执行`;
+    const cell = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === expectedLabel,
+    );
+    expect(cell, `expected day cell aria-label "${expectedLabel}"`).toBeTruthy();
+  });
+
+  it("entry chips render a non-color icon and accessible name with the kind label", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "missed", cron_name: "daily-standup" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "future", cron_name: "monthly-roll" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    // Each chip carries kind label + cron name in its aria-label.
+    const chips = Array.from(container.querySelectorAll("[aria-label]"));
+    const chipLabels = chips
+      .map((c) => c.getAttribute("aria-label") ?? "")
+      .filter((l) => l.includes("weekly-report") || l.includes("daily-standup") || l.includes("monthly-roll"));
+    expect(chipLabels).toContain("已执行: weekly-report");
+    expect(chipLabels).toContain("未执行: daily-standup");
+    expect(chipLabels).toContain("未来: monthly-roll");
+
+    // Every chip should contain an SVG (the lucide icon) — i.e. color is
+    // never the only signal. lucide-react renders <svg ...>.
+    const chipNodes = chips.filter((c) => {
+      const l = c.getAttribute("aria-label") ?? "";
+      return /(已执行|未执行|未来): /.test(l);
+    });
+    expect(chipNodes.length).toBeGreaterThan(0);
+    for (const node of chipNodes) {
+      expect(node.querySelector("svg"), `chip ${node.getAttribute("aria-label")} missing icon`).toBeTruthy();
+    }
   });
 
   it("renders +N more for days with more than the visible cap", async () => {

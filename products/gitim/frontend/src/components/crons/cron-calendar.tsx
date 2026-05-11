@@ -1,5 +1,12 @@
-import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Loader2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCronTimeline } from "@/hooks/use-cron-timeline";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
@@ -28,26 +35,68 @@ const MAX_VISIBLE_ENTRIES_PER_DAY = 3;
 // change propagates. The "kind" semantics here are wire-driven (runtime
 // timeline endpoint). Past = success (it ran), future = primary blue
 // (scheduled), missed = error (didn't run when it should have).
+//
+// Each kind also carries an `Icon` component. The icon is the WCAG 1.4.1
+// non-color affordance: colour-blind users and screen readers can no
+// longer be the only signal carriers. Sighted-but-color-blind users see
+// a check / clock / alert glyph alongside the dot; screen readers consume
+// the kind label via the chip's `aria-label`.
 const KIND_STYLES: Record<
   CronTimelineKind,
-  { dot: string; chip: string; label: string }
+  {
+    dot: string;
+    chip: string;
+    label: string;
+    Icon: typeof Check;
+  }
 > = {
   past: {
     dot: "bg-success",
-    chip: "bg-success/15 text-success border-success/25",
+    chip: "bg-success/15 text-success border-success/30",
     label: "已执行",
+    Icon: Check,
   },
   future: {
     dot: "bg-primary",
-    chip: "bg-primary/15 text-primary border-primary/25",
+    chip: "bg-primary/15 text-primary border-primary/30",
     label: "未来",
+    Icon: Clock,
   },
   missed: {
     dot: "bg-error",
-    chip: "bg-error/15 text-error border-error/25",
+    chip: "bg-error/15 text-error border-error/30",
     label: "未执行",
+    Icon: AlertCircle,
   },
 };
+
+// English month names for aria-label — kept inline rather than reusing
+// `toLocaleString` so server/SSR-style consistency is guaranteed regardless
+// of the jsdom locale. Chinese readers get the kind labels in Chinese, the
+// date in numeric form below — this is the same compromise the rest of the
+// crons page makes.
+const MONTH_NAMES_EN = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** Build a screen-reader-friendly label for a day cell. Includes the full
+ *  date plus a count breakdown by kind so a user navigating with a screen
+ *  reader hears "May 15, 2026, 2 已执行, 1 未执行" instead of a bare "15". */
+function dayCellAriaLabel(date: Date, entries: CronTimelineEntry[]): string {
+  const monthName = MONTH_NAMES_EN[date.getUTCMonth()] ?? "";
+  const dayNum = date.getUTCDate();
+  const year = date.getUTCFullYear();
+  const datePart = `${monthName} ${dayNum}, ${year}`;
+  if (entries.length === 0) return `${datePart}, 无任务`;
+  const counts: Record<CronTimelineKind, number> = { past: 0, future: 0, missed: 0 };
+  for (const e of entries) counts[e.kind] += 1;
+  const parts: string[] = [];
+  for (const k of ["past", "future", "missed"] as const) {
+    if (counts[k] > 0) parts.push(`${counts[k]} ${KIND_STYLES[k].label}`);
+  }
+  return `${datePart}, ${parts.join(", ")}`;
+}
 
 export function CronCalendar() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -77,6 +126,32 @@ export function CronCalendar() {
     if (!selectedDayKey) return null;
     return grouped.get(selectedDayKey) ?? null;
   }, [grouped, selectedDayKey]);
+
+  // Track the most recently activated DayCell so we can restore focus to it
+  // when the panel closes (Escape or X button). Without this, after Escape
+  // the focus lands on <body> — accessibility regression where a sighted
+  // keyboard user loses their place in the grid.
+  const lastTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const handleClose = useCallback(() => {
+    setSelectedDayKey(null);
+    // queueMicrotask: the close usually unmounts the panel synchronously,
+    // and focusing immediately works in practice. We still queue so an
+    // edge case where the panel is the active document.activeElement
+    // doesn't fight us — the focus call lands after React commits.
+    queueMicrotask(() => {
+      lastTriggerRef.current?.focus();
+    });
+  }, []);
+  const handleDayClick = useCallback(
+    (cellKey: string, hasEntries: boolean, button: HTMLButtonElement | null) => {
+      lastTriggerRef.current = button;
+      // Empty-day behavior is owned by fix 3e in the polish commit; here
+      // we preserve the existing "empty day collapses panel" semantic
+      // and only the focus-restoration side effect is new.
+      setSelectedDayKey(hasEntries ? cellKey : null);
+    },
+    [],
+  );
 
   const today = todayKey();
 
@@ -146,7 +221,12 @@ export function CronCalendar() {
       )}
 
       <div className="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[1fr_22rem]">
-        <div className="flex min-h-0 flex-col overflow-hidden">
+        {/* `relative` anchors the absolutely-positioned loading spinner below
+            so it lands at the top-right of the calendar column, not the app
+            shell. Previously the spinner used `absolute inset-0` with no
+            relative ancestor in this subtree and walked all the way up to
+            the document. */}
+        <div className="relative flex min-h-0 flex-col overflow-hidden">
           <div className="grid shrink-0 grid-cols-7 border-b border-border bg-surface/30 text-[11px] font-medium text-muted-foreground">
             {WEEKDAY_LABELS.map((label, idx) => (
               <div
@@ -169,15 +249,13 @@ export function CronCalendar() {
                 return (
                   <DayCell
                     key={cell.key}
-                    dateLabel={cell.date.getUTCDate()}
+                    date={cell.date}
                     inMonth={cell.inMonth}
                     isToday={isToday}
                     isSelected={isSelected}
                     entries={dayEntries}
-                    onClick={() =>
-                      dayEntries.length > 0
-                        ? setSelectedDayKey(cell.key)
-                        : setSelectedDayKey(null)
+                    onActivate={(button) =>
+                      handleDayClick(cell.key, dayEntries.length > 0, button)
                     }
                   />
                 );
@@ -199,7 +277,7 @@ export function CronCalendar() {
             slug={activeSlug}
             dayKey={selectedDayKey}
             entries={selectedEntries}
-            onClose={() => setSelectedDayKey(null)}
+            onClose={handleClose}
           />
         </aside>
 
@@ -212,7 +290,7 @@ export function CronCalendar() {
               slug={activeSlug}
               dayKey={selectedDayKey}
               entries={selectedEntries}
-              onClose={() => setSelectedDayKey(null)}
+              onClose={handleClose}
             />
           </div>
         )}
@@ -222,35 +300,40 @@ export function CronCalendar() {
 }
 
 interface DayCellProps {
-  dateLabel: number;
+  date: Date;
   inMonth: boolean;
   isToday: boolean;
   isSelected: boolean;
   entries: CronTimelineEntry[];
-  onClick: () => void;
+  /** Receives the activated button so the parent can park a ref for
+   *  focus restoration on panel close. */
+  onActivate: (button: HTMLButtonElement | null) => void;
 }
 
 function DayCell({
-  dateLabel,
+  date,
   inMonth,
   isToday,
   isSelected,
   entries,
-  onClick,
+  onActivate,
 }: DayCellProps) {
   const visible = entries.slice(0, MAX_VISIBLE_ENTRIES_PER_DAY);
   const overflow = entries.length - visible.length;
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const ariaLabel = dayCellAriaLabel(date, entries);
   return (
     <button
+      ref={buttonRef}
       type="button"
-      onClick={onClick}
+      onClick={() => onActivate(buttonRef.current)}
       className={cn(
         "flex min-h-[88px] flex-col items-stretch gap-1 bg-background px-1.5 py-1 text-left transition-colors",
         "hover:bg-surface/40 focus:outline-none focus:ring-1 focus:ring-primary/60",
         !inMonth && "bg-background/40 text-muted-foreground/60",
         isSelected && "bg-primary/10 ring-1 ring-primary/40",
       )}
-      aria-label={`${dateLabel}, ${entries.length} entries`}
+      aria-label={ariaLabel}
     >
       <span
         className={cn(
@@ -261,7 +344,7 @@ function DayCell({
           !inMonth && "text-muted-foreground/50",
         )}
       >
-        {dateLabel}
+        {date.getUTCDate()}
       </span>
       <div className="flex flex-col gap-0.5">
         {visible.map((entry, idx) => (
@@ -279,14 +362,23 @@ function DayCell({
 
 function CalendarEntryChip({ entry }: { entry: CronTimelineEntry }) {
   const style = KIND_STYLES[entry.kind];
+  const Icon = style.Icon;
   return (
     <span
       title={`${style.label} · ${entry.cron_name} · ${entry.ts}`}
+      // `aria-label` puts the kind into the accessible name even when the
+      // visible content is just the cron name. Without it, blind users
+      // can't tell past from future from missed.
+      aria-label={`${style.label}: ${entry.cron_name}`}
       className={cn(
         "flex min-w-0 items-center gap-1 truncate rounded border px-1 py-0.5 font-mono text-[10px]",
         style.chip,
       )}
     >
+      {/* The icon is the visible non-color signal: WCAG 1.4.1 says color
+          can't be the only conveyor of information. The colored dot is
+          retained for sighted users who scan by hue. */}
+      <Icon className="size-3 shrink-0" aria-hidden />
       <span className={cn("size-1.5 shrink-0 rounded-full", style.dot)} aria-hidden />
       <span className="truncate">{entry.cron_name}</span>
     </span>
