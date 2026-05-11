@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IndexerConfig {
+    #[serde(default)]
     pub enabled: bool,
 }
 
