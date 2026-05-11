@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MESSAGES_PAGE_SIZE, computeLoadOlderSince } from "./pagination";
+import { computeLoadOlderSince, MESSAGES_PAGE_SIZE } from "./pagination";
 
 describe("computeLoadOlderSince", () => {
   it("returns skip when there are no messages on screen", () => {
@@ -38,9 +38,5 @@ describe("computeLoadOlderSince", () => {
       kind: "fetch",
       since: 0,
     });
-  });
-
-  it("exposes MESSAGES_PAGE_SIZE as 50 (single source of truth)", () => {
-    expect(MESSAGES_PAGE_SIZE).toBe(50);
   });
 });

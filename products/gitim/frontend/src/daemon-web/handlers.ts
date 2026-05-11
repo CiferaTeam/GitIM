@@ -428,6 +428,42 @@ export async function channels(): Promise<ApiResponse> {
   return ok({ channels: channelList });
 }
 
+/** Apply the canonical three-mode read slice semantics that the daemon
+ *  enforces in `crates/gitim-daemon/src/handlers/read.rs` and
+ *  `crates/gitim-daemon/src/thread_io.rs`:
+ *
+ *    limit only       → tail-cut, last N entries (channel open default)
+ *    since only       → all entries after since (no truncation)
+ *    since + limit    → head-cut, first N entries after since
+ *
+ *  Tail-cut uses `Math.max(0, len - limit)` instead of `slice(-limit)`
+ *  because JS treats `-0` the same as `0`, so `slice(-0)` would return
+ *  everything when `limit === 0`.
+ *
+ *  Both the channel read path and the card-discussion read path go through
+ *  this helper so the browser-side daemon and the real Rust daemon can't
+ *  drift apart silently.
+ */
+function applyReadSliceSemantics<T extends { line_number: number | string }>(
+  entries: T[],
+  limit: number | undefined,
+  since: number | undefined,
+): T[] {
+  let filtered = entries;
+  if (since !== undefined) {
+    filtered = filtered.filter((e) => (e.line_number as number) > since);
+  }
+  if (limit !== undefined) {
+    if (since !== undefined) {
+      filtered = filtered.slice(0, limit);
+    } else {
+      const start = Math.max(0, filtered.length - limit);
+      filtered = filtered.slice(start);
+    }
+  }
+  return filtered;
+}
+
 export async function read(
   channel: string,
   limit?: number,
@@ -435,26 +471,8 @@ export async function read(
 ): Promise<ApiResponse> {
   try {
     const { entries, archived } = await readChannelEntriesWithArchive(channel);
-    let filtered = entries;
-    if (since !== undefined) {
-      filtered = filtered.filter((e) => (e.line_number as number) > since);
-    }
-    // Three calling modes (mirrors crates/gitim-daemon/src/handlers/read.rs):
-    //   limit only     → tail-cut, last N entries (channel open default)
-    //   since only     → all entries after since (no truncation)
-    //   since + limit  → head-cut, first N entries after since
-    //
-    // Tail-cut uses Math.max instead of slice(-limit) because JS treats
-    // -0 the same as 0, so slice(-0) would return everything for limit=0.
-    if (limit !== undefined) {
-      if (since !== undefined) {
-        filtered = filtered.slice(0, limit);
-      } else {
-        const start = Math.max(0, filtered.length - limit);
-        filtered = filtered.slice(start);
-      }
-    }
-    return ok({ channel, entries: filtered, archived });
+    const sliced = applyReadSliceSemantics(entries, limit, since);
+    return ok({ channel, entries: sliced, archived });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
@@ -1496,10 +1514,7 @@ async function readCardEntries(
   if (!(await exists(threadPath))) return [];
   const content = await readFile(threadPath);
   const file = parseThread(content);
-  let entries = file.entries;
-  if (since != null) entries = entries.filter((e) => e.line_number > since);
-  if (limit != null) entries = entries.slice(-limit);
-  return entries;
+  return applyReadSliceSemantics(file.entries, limit, since);
 }
 
 async function locateActiveCard(

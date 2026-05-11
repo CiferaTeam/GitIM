@@ -357,7 +357,16 @@ export function ChatLayout() {
   // In-flight guard for history paging. Plain ref (not store state) — the
   // scroll handler may fire many times during a fast scroll, and we drop
   // calls while a fetch is already pending. Doesn't need re-render triggers.
+  //
+  // Reset on channel / workspace switch so a fetch that's still in flight
+  // for the previous context doesn't silently swallow the user's first
+  // scroll-to-top in the new context. The previous-context response is also
+  // dropped by the stale-check inside handleLoadOlder; this effect just
+  // ensures the new context's scroll handler can fire immediately.
   const loadingOlderRef = useRef(false);
+  useEffect(() => {
+    loadingOlderRef.current = false;
+  }, [currentChannel, workspaceKey]);
 
   const handleLoadOlder = useCallback(async () => {
     if (loadingOlderRef.current) return;
