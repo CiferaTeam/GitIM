@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # ---------- Parse bump type ----------
@@ -110,4 +110,4 @@ echo "    Cargo.toml version: ${NEXT}"
 echo "    Tag: ${NEXT_TAG}"
 echo "    Release notes: ${NOTES_FILE}"
 echo ""
-echo "    Next step: ./release.sh"
+echo "    Next step: ./scripts/release.sh"

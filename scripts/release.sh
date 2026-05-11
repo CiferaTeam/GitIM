@@ -23,7 +23,7 @@ if command -v sccache >/dev/null 2>&1; then
   echo "==> sccache enabled (host targets only)"
 fi
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_REPO="CiferaTeam/GitIM"
 
 # ---------- Argument parsing ----------
@@ -45,8 +45,8 @@ $DRY_RUN && echo "==> DRY RUN (will not publish)"
 if [ -n "$ONLY_TARGET" ] && ! $DRY_RUN; then
   echo "Error: --target <slug> is debug-only (requires --dry-run)."
   echo "  Single-target upload would truncate SHA256SUMS and break other platforms."
-  echo "  For a real release run all 4 targets:     ./release.sh"
-  echo "  For single-target debugging add --dry-run: ./release.sh --target $ONLY_TARGET --dry-run"
+  echo "  For a real release run all 4 targets:     ./scripts/release.sh"
+  echo "  For single-target debugging add --dry-run: ./scripts/release.sh --target $ONLY_TARGET --dry-run"
   exit 1
 fi
 
@@ -57,7 +57,7 @@ echo "==> Version: $VERSION"
 
 # ---------- Verify tag exists ----------
 if ! git rev-parse "$TAG" &>/dev/null; then
-  echo "Error: tag $TAG not found. Run ./bump.sh first."
+  echo "Error: tag $TAG not found. Run ./scripts/bump.sh first."
   exit 1
 fi
 

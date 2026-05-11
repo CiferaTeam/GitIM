@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="$HOME/.gitim/bin"
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 BINARIES="gitim gitim-daemon gitim-runtime"

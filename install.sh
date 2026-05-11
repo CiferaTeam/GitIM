@@ -20,7 +20,7 @@ if ! echo "$SUPPORTED_PLATFORMS" | grep -qw "$PLATFORM"; then
   echo "Supported: $SUPPORTED_PLATFORMS"
   echo ""
   echo "You can build from source instead:"
-  echo "  git clone <repo> && ./install-from-source.sh"
+  echo "  git clone <repo> && ./scripts/install-from-source.sh"
   exit 1
 fi
 

@@ -29,7 +29,7 @@ pub async fn cmd_update(version: Option<&str>, yes: bool) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");
-            eprintln!("You can build from source instead: ./install-from-source.sh");
+            eprintln!("You can build from source instead: ./scripts/install-from-source.sh");
             std::process::exit(1);
         }
     };

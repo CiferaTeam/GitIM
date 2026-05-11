@@ -38,7 +38,7 @@ The three Rust binaries — `gitim` (CLI), `gitim-daemon` (Git / state service),
 ```sh
 git clone https://github.com/CiferaTeam/GitIM
 cd GitIM
-./install-from-source.sh
+./scripts/install-from-source.sh
 ```
 
 The gitim web app — only if you'd rather self-host the frontend instead of using `gitim.io`:
