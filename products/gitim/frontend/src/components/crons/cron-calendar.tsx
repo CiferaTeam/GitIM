@@ -9,6 +9,7 @@ import {
   WEEKDAY_LABELS,
   buildMonthGrid,
   currentMonth,
+  distinctCronCount,
   formatMonthLabel,
   groupEntriesByDay,
   monthRangeIso,
@@ -40,8 +41,11 @@ const MONTH_NAMES_EN = [
 ];
 
 /** Build a screen-reader-friendly label for a day cell. Includes the full
- *  date plus a count breakdown by kind so a user navigating with a screen
- *  reader hears "May 15, 2026, 2 已执行, 1 未执行" instead of a bare "15". */
+ *  date, a count breakdown by kind, and (when more than one distinct cron
+ *  exists on the day) a "N 个 cron" suffix so a user can hear "a day's
+ *  48 fires come from 3 different crons" without opening the panel. The
+ *  cron-count suffix is omitted for single-cron days where it would just
+ *  read as "1 个 cron" — pure noise. */
 function dayCellAriaLabel(date: Date, entries: CronTimelineEntry[]): string {
   const monthName = MONTH_NAMES_EN[date.getUTCMonth()] ?? "";
   const dayNum = date.getUTCDate();
@@ -54,6 +58,8 @@ function dayCellAriaLabel(date: Date, entries: CronTimelineEntry[]): string {
   for (const k of ["past", "future", "missed"] as const) {
     if (counts[k] > 0) parts.push(`${counts[k]} ${KIND_STYLES[k].label}`);
   }
+  const cronCount = distinctCronCount(entries);
+  if (cronCount > 1) parts.push(`${cronCount} 个 cron`);
   return `${datePart}, ${parts.join(", ")}`;
 }
 
@@ -312,7 +318,13 @@ function DayCell({
           <CalendarEntryChip key={`${entry.cron_name}-${entry.ts}-${idx}`} entry={entry} />
         ))}
         {overflow > 0 && (
-          <span className="px-1 py-0.5 text-[10px] text-muted-foreground">
+          <span
+            // Native `title` attribute is desktop-only (no mobile hover),
+            // but on mobile the day cell is a button → tap opens the day
+            // panel which surfaces the same info inline. No info is lost.
+            title={`${entries.length} 个任务（${distinctCronCount(entries)} 个 cron）`}
+            className="px-1 py-0.5 text-[10px] text-muted-foreground"
+          >
             +{overflow} more
           </span>
         )}
