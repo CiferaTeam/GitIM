@@ -2,25 +2,21 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use gitim_core::types::config::{Config, IndexerConfig};
+use gitim_core::types::Config;
 use gitim_daemon::api::{Event, Request};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
 fn make_config_indexer_disabled() -> Config {
-    Config {
-        indexer: IndexerConfig { enabled: false },
-        ..Config::default()
-    }
+    serde_yaml::from_str("version: 1\nindexer:\n  enabled: false\n").unwrap()
 }
 
 fn make_config_indexer_enabled() -> Config {
-    Config {
-        indexer: IndexerConfig { enabled: true },
-        ..Config::default()
-    }
+    serde_yaml::from_str("version: 1\nindexer:\n  enabled: true\n").unwrap()
 }
 
+/// Initialise a git repo at `root`, staging all existing files before the
+/// initial commit so the tree object exists in production-shaped form.
 fn init_git_repo(root: &std::path::Path) {
     let run = |args: &[&str]| {
         let out = std::process::Command::new("git")
@@ -40,14 +36,13 @@ fn init_git_repo(root: &std::path::Path) {
         );
     };
     run(&["init"]);
-    run(&["commit", "--allow-empty", "-m", "init"]);
+    run(&["add", "users/alice.meta.yaml"]);
+    run(&["commit", "-m", "init"]);
 }
 
 async fn setup_repo(config: Config) -> (TempDir, Arc<AppState>) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
-
-    init_git_repo(&root);
 
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
@@ -56,6 +51,9 @@ async fn setup_repo(config: Config) -> (TempDir, Arc<AppState>) {
         "display_name: Alice\nrole: dev\nintroduction: hi\n",
     )
     .unwrap();
+
+    // init repo after files are in place so the initial commit has a real tree
+    init_git_repo(&root);
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
     let state = Arc::new(AppState::new(
