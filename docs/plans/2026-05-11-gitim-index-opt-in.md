@@ -2,6 +2,8 @@
 
 **Related history**: [2026-03-23-sqlite-index.md](2026-03-23-sqlite-index.md)（原 crate 引入设计）
 
+**Status**: implemented in commits 561f62e..bd03058 (Tasks 1-5 with intra-task fixes)
+
 ---
 
 ## Where we are
