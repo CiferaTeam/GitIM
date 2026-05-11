@@ -12,7 +12,7 @@ use serde_json::json;
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
 use gitim_core::auth_payload::AuthPayload;
-use gitim_core::config_patch::ensure_config_indexer_enabled as _ensure_config_indexer_enabled;
+use gitim_core::config_patch::ensure_config_indexer_enabled;
 
 /// Git server type for onboarding
 #[derive(Clone, Debug)]
@@ -386,13 +386,6 @@ fn ensure_config_debug_http(repo_dir: &Path, enabled: bool) {
     }
 }
 
-fn ensure_config_indexer_enabled(repo_dir: &Path, enabled: bool) {
-    _ensure_config_indexer_enabled(repo_dir, enabled).unwrap_or_else(|e| {
-        eprintln!("Error: cannot write indexer config: {e}");
-        process::exit(1);
-    });
-}
-
 pub async fn cmd_onboard(args: OnboardArgs) {
     let git_server = GitServer::from_str(&args.git_server).unwrap_or_else(|| {
         eprintln!("Error: unknown git server type: {}", args.git_server);
@@ -497,7 +490,10 @@ pub async fn cmd_onboard(args: OnboardArgs) {
         ensure_config_debug_http(&repo_dir, true);
     }
 
-    ensure_config_indexer_enabled(&repo_dir, true);
+    ensure_config_indexer_enabled(&repo_dir, true).unwrap_or_else(|e| {
+        eprintln!("Error: cannot write indexer config: {e}");
+        process::exit(1);
+    });
 
     if let Err(e) = ensure_daemon(&repo_dir) {
         eprintln!("Error: failed to start daemon: {e}");
@@ -549,57 +545,5 @@ pub async fn cmd_onboard(args: OnboardArgs) {
             eprintln!("Onboard 失败：{e}");
             process::exit(1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn onboard_writes_indexer_enabled_true_no_config() {
-        let tmp = TempDir::new().unwrap();
-        ensure_config_indexer_enabled(tmp.path(), true);
-        let content = fs::read_to_string(tmp.path().join(".gitim/config.yaml")).unwrap();
-        let config: gitim_core::types::config::Config = serde_yaml::from_str(&content).unwrap();
-        assert!(config.indexer.enabled);
-    }
-
-    #[test]
-    fn onboard_writes_indexer_enabled_true_existing_config_without_indexer() {
-        let tmp = TempDir::new().unwrap();
-        let gitim_dir = tmp.path().join(".gitim");
-        fs::create_dir_all(&gitim_dir).unwrap();
-        let config_path = gitim_dir.join("config.yaml");
-        fs::write(&config_path, "version: 1\ndaemon:\n  debug_http: false\n").unwrap();
-        ensure_config_indexer_enabled(tmp.path(), true);
-        let content = fs::read_to_string(&config_path).unwrap();
-        let config: gitim_core::types::config::Config = serde_yaml::from_str(&content).unwrap();
-        assert!(config.indexer.enabled);
-        // daemon section preserved
-        assert!(!config.daemon.debug_http);
-    }
-
-    #[test]
-    fn onboard_writes_indexer_enabled_true_existing_config_with_indexer_false() {
-        let tmp = TempDir::new().unwrap();
-        let gitim_dir = tmp.path().join(".gitim");
-        fs::create_dir_all(&gitim_dir).unwrap();
-        let config_path = gitim_dir.join("config.yaml");
-        fs::write(&config_path, "version: 1\nindexer:\n  enabled: false\n").unwrap();
-        ensure_config_indexer_enabled(tmp.path(), true);
-        let content = fs::read_to_string(&config_path).unwrap();
-        let config: gitim_core::types::config::Config = serde_yaml::from_str(&content).unwrap();
-        assert!(config.indexer.enabled);
-    }
-
-    #[test]
-    fn ensure_config_indexer_enabled_false_writes_false() {
-        let tmp = TempDir::new().unwrap();
-        ensure_config_indexer_enabled(tmp.path(), false);
-        let content = fs::read_to_string(tmp.path().join(".gitim/config.yaml")).unwrap();
-        let config: gitim_core::types::config::Config = serde_yaml::from_str(&content).unwrap();
-        assert!(!config.indexer.enabled);
     }
 }
