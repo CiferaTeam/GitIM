@@ -8,6 +8,7 @@ import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
+import { writeUiState } from "../../lib/ui-state";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { Button } from "../ui/button";
 import { ChannelCardDrawer } from "../cards/channel-card-drawer";
@@ -136,6 +137,7 @@ export function ChatLayout() {
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
       selectChannel(name);
+      if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: name });
       clearUnread(name);
       setMessages([]);
       setThreadRoot(null);
@@ -328,6 +330,7 @@ export function ChatLayout() {
     const requestSlug = activeSlug;
     const requestWorkspaceKey = workspaceKey;
     selectChannel(entry.channel);
+    if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: entry.channel });
     clearUnread(entry.channel);
     setMessages([]);
     setThreadRoot(null);
