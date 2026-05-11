@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { CronTimelineEntry, CronTimelineKind } from "@/lib/types";
+import type { CronTimelineEntry } from "@/lib/types";
 import { formatEntryTime } from "./calendar-utils";
 import { CronRunViewer } from "./cron-run-viewer";
 import { CronSpecDetail } from "./cron-spec-detail";
+import { kindStyle } from "./kind-styles";
 
 interface CronDayPanelProps {
   slug: string | null;
@@ -23,17 +24,9 @@ type View =
   | { kind: "run"; cronName: string; ts: string }
   | { kind: "spec"; cronName: string; ts: string; entryKind: "future" | "missed" };
 
-const KIND_LABEL: Record<CronTimelineKind, string> = {
-  past: "已执行",
-  future: "未来",
-  missed: "未执行",
-};
-
-const KIND_BADGE: Record<CronTimelineKind, string> = {
-  past: "bg-success/15 text-success border-success/30",
-  future: "bg-primary/15 text-primary border-primary/30",
-  missed: "bg-error/15 text-error border-error/30",
-};
+// Kind label + badge styling are imported from `./kind-styles.ts` so the
+// day list, the calendar chips, and any future kind-styled surface stay
+// in lock-step on opacities and Chinese labels.
 
 export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelProps) {
   const [view, setView] = useState<View>({ kind: "list" });
@@ -153,14 +146,19 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
                   <span className="min-w-0 flex-1 truncate font-mono text-xs">
                     {entry.cron_name}
                   </span>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded border px-1.5 py-0.5 text-[10px]",
-                      KIND_BADGE[entry.kind],
-                    )}
-                  >
-                    {KIND_LABEL[entry.kind]}
-                  </span>
+                  {(() => {
+                    const style = kindStyle(entry.kind);
+                    return (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded border px-1.5 py-0.5 text-[10px]",
+                          style.chip,
+                        )}
+                      >
+                        {style.label}
+                      </span>
+                    );
+                  })()}
                 </button>
               </li>
             );

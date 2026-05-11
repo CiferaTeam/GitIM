@@ -167,6 +167,7 @@ describe("CronDayPanel", () => {
       "phone",
       "weekly-report",
       "2026-05-11T09-00-00Z",
+      expect.any(AbortSignal),
     );
     expect(container.textContent).toContain("cron(weekly-report)");
     expect(container.textContent).toContain("@system");
@@ -212,7 +213,11 @@ describe("CronDayPanel", () => {
       await flushPromises();
     });
 
-    expect(showCronMock).toHaveBeenCalledWith("phone", "weekly-report");
+    expect(showCronMock).toHaveBeenCalledWith(
+      "phone",
+      "weekly-report",
+      expect.any(AbortSignal),
+    );
     expect(container.textContent).toContain("summarize the week");
     expect(container.textContent).toContain("0 9 * * 1");
     expect(container.textContent).toContain("预计 fire 时刻");
@@ -259,10 +264,100 @@ describe("CronDayPanel", () => {
       await flushPromises();
     });
 
-    expect(showCronMock).toHaveBeenCalledWith("phone", "daily-standup");
+    expect(showCronMock).toHaveBeenCalledWith(
+      "phone",
+      "daily-standup",
+      expect.any(AbortSignal),
+    );
     expect(container.textContent).toContain("missed at 2026-05-12T09:30:00Z");
     expect(container.textContent).toContain("runtime 当时未运行");
     expect(container.textContent).toContain("standup ping");
+  });
+
+  it("rapidly switching between past entries aborts the in-flight fetch", async () => {
+    // First click resolves slow; second click triggers abort on the first.
+    // We assert the first invocation's AbortSignal ends up aborted.
+    let firstSignal: AbortSignal | null = null;
+    const SECOND_ENTRY: CronTimelineEntry = {
+      ts: "2026-05-11T10:00:00Z",
+      kind: "past",
+      cron_name: "later-job",
+    };
+    getCronRunBodyMock.mockImplementation(
+      (_slug: string, _name: string, _ts: string, signal?: AbortSignal) => {
+        if (firstSignal === null) firstSignal = signal ?? null;
+        return new Promise(() => {
+          // never resolves — we want the abort path to do the work
+        });
+      },
+    );
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-11"
+          entries={[PAST_ENTRY, SECOND_ENTRY]}
+          onClose={() => {}}
+        />,
+      );
+    });
+
+    // Click first entry.
+    const first = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.includes("weekly-report"),
+    );
+    await act(async () => {
+      first?.click();
+      await flushPromises();
+    });
+    expect(firstSignal).not.toBeNull();
+    expect(firstSignal!.aborted).toBe(false);
+
+    // Back to list, then click the second.
+    const backBtn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Back to day"]',
+    );
+    await act(async () => {
+      backBtn?.click();
+      await flushPromises();
+    });
+
+    // Back-to-list unmounts CronRunViewer → effect cleanup aborts the
+    // pending fetch. That's the behavior we're locking in.
+    expect(firstSignal!.aborted).toBe(true);
+  });
+
+  it("renders a sane fallback when the runtime emits an unknown kind", () => {
+    // Future-proofing against a `kind: "failed"` (or similar) arriving
+    // from a newer runtime than the WebUI. The badge should render the
+    // missed style (the `kindStyle` default) instead of crashing on a
+    // `KIND_STYLES[undefined].chip` access.
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-11"
+          entries={[
+            {
+              // Force-cast — we're simulating wire data that exceeds the
+              // declared union.
+              ts: "2026-05-11T09:00:00Z",
+              kind: "failed" as unknown as CronTimelineEntry["kind"],
+              cron_name: "weekly-report",
+            },
+          ]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    // Falls back to "未执行" (missed style). No crash, the badge renders.
+    expect(container.textContent).toContain("未执行");
+    expect(container.textContent).toContain("weekly-report");
   });
 
   it("back button returns from detail view to the list", async () => {

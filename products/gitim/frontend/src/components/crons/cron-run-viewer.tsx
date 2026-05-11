@@ -4,6 +4,12 @@ import { Button } from "@/components/ui/button";
 import { MessageBody } from "@/components/chat/message-body";
 import * as client from "@/lib/client";
 import { parseThread, type ThreadEntry } from "@/daemon-web/parser";
+// `entry.timestamp` from `parseThread` is the LEGACY compact format
+// (`YYYYMMDDTHHMMSSZ`) that gitim writes on the message line, NOT the
+// RFC 3339 `entry.ts` that the calendar timeline uses elsewhere on this
+// page. `formatTimestamp` handles the legacy form. Two timestamp formats
+// coexist in the cron UI on purpose: thread bodies inherit gitim's line
+// format, calendar metadata uses RFC 3339 for portability.
 import { formatTimestamp } from "@/lib/types";
 
 interface CronRunViewerProps {
@@ -27,13 +33,18 @@ export function CronRunViewer({ slug, cronName, ts, onBack }: CronRunViewerProps
 
   useEffect(() => {
     if (!slug) return;
-    let cancelled = false;
+    // AbortController so rapidly switching between cron runs cancels the
+    // previous in-flight fetch (matches the `useCronTimeline` pattern).
+    // Otherwise tapping through five runs on mobile burns bandwidth on
+    // four bodies the user no longer cares about, and the resolutions
+    // race the latest one to set state.
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     setBody(null);
     (async () => {
-      const res = await client.getCronRunBody(slug, cronName, ts);
-      if (cancelled) return;
+      const res = await client.getCronRunBody(slug, cronName, ts, controller.signal);
+      if (controller.signal.aborted) return;
       if (!res.ok || !res.data) {
         setError(res.error ?? "Failed to load run body");
         setLoading(false);
@@ -42,12 +53,16 @@ export function CronRunViewer({ slug, cronName, ts, onBack }: CronRunViewerProps
       setBody(res.data.body);
       setLoading(false);
     })().catch((err: unknown) => {
-      if (cancelled) return;
+      if (controller.signal.aborted) return;
+      // Aborts surface as DOMException("AbortError") on real fetch and as
+      // plain Error("AbortError") in some jsdom paths — drop both.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [slug, cronName, ts]);
 

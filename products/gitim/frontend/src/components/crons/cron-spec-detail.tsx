@@ -39,13 +39,15 @@ export function CronSpecDetail({
 
   useEffect(() => {
     if (!slug) return;
-    let cancelled = false;
+    // AbortController per the `useCronTimeline` pattern — see
+    // `cron-run-viewer.tsx` for the rationale.
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     setDetail(null);
     (async () => {
-      const res = await client.showCron(slug, cronName);
-      if (cancelled) return;
+      const res = await client.showCron(slug, cronName, controller.signal);
+      if (controller.signal.aborted) return;
       if (!res.ok || !res.data) {
         setError(res.error ?? "Failed to load cron spec");
         setLoading(false);
@@ -54,12 +56,14 @@ export function CronSpecDetail({
       setDetail(res.data);
       setLoading(false);
     })().catch((err: unknown) => {
-      if (cancelled) return;
+      if (controller.signal.aborted) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [slug, cronName]);
 

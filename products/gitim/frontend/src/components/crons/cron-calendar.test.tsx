@@ -390,6 +390,48 @@ describe("CronCalendar", () => {
     }
   });
 
+  it("clicking an empty day opens the panel showing the empty state", async () => {
+    // Mobile-first behavior — without this, tapping an empty day on a
+    // touch device does nothing, hiding the affordance entirely. The
+    // panel's "当天没有计划任务" empty state is the user-visible result.
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    // Put one entry on day 15 so the calendar doesn't collapse to the
+    // big "这个时间窗内没有计划任务" empty placeholder (which is rendered
+    // by a different code path that has no per-cell buttons).
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    // Pick a day cell that has no entries — search by its aria-label
+    // pattern. Many empty cells exist; grab the first.
+    const emptyCell = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button[aria-label]"),
+    ).find((b) => (b.getAttribute("aria-label") ?? "").includes("无任务"));
+    expect(emptyCell, "expected at least one empty-day cell").toBeTruthy();
+    await act(async () => {
+      emptyCell!.click();
+      await flushPromises();
+    });
+
+    // The panel renders the empty-day state.
+    expect(container.textContent).toContain("当天没有计划任务");
+  });
+
   it("renders +N more for days with more than the visible cap", async () => {
     const today = new Date();
     const year = today.getUTCFullYear();

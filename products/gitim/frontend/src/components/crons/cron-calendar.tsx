@@ -1,12 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import {
-  AlertCircle,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Clock,
-  Loader2,
-} from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCronTimeline } from "@/hooks/use-cron-timeline";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
@@ -24,6 +17,7 @@ import {
   type CalendarMonth,
 } from "./calendar-utils";
 import { CronDayPanel } from "./cron-day-panel";
+import { KIND_STYLES, kindStyle } from "./kind-styles";
 
 // Visible entries per day before collapsing into "+N more". 3 keeps a single
 // row of small chips visible inside a comfortably-sized cell at desktop
@@ -31,44 +25,9 @@ import { CronDayPanel } from "./cron-day-panel";
 // has to ignore to scan the calendar.
 const MAX_VISIBLE_ENTRIES_PER_DAY = 3;
 
-// Colour mapping — pulled from index.css design tokens so a future palette
-// change propagates. The "kind" semantics here are wire-driven (runtime
-// timeline endpoint). Past = success (it ran), future = primary blue
-// (scheduled), missed = error (didn't run when it should have).
-//
-// Each kind also carries an `Icon` component. The icon is the WCAG 1.4.1
-// non-color affordance: colour-blind users and screen readers can no
-// longer be the only signal carriers. Sighted-but-color-blind users see
-// a check / clock / alert glyph alongside the dot; screen readers consume
-// the kind label via the chip's `aria-label`.
-const KIND_STYLES: Record<
-  CronTimelineKind,
-  {
-    dot: string;
-    chip: string;
-    label: string;
-    Icon: typeof Check;
-  }
-> = {
-  past: {
-    dot: "bg-success",
-    chip: "bg-success/15 text-success border-success/30",
-    label: "已执行",
-    Icon: Check,
-  },
-  future: {
-    dot: "bg-primary",
-    chip: "bg-primary/15 text-primary border-primary/30",
-    label: "未来",
-    Icon: Clock,
-  },
-  missed: {
-    dot: "bg-error",
-    chip: "bg-error/15 text-error border-error/30",
-    label: "未执行",
-    Icon: AlertCircle,
-  },
-};
+// Visual style mapping lives in `./kind-styles.ts` so the day panel
+// (and any future surface) renders the same kind → label/color/icon
+// mapping. See the comment there for the canonical opacity convention.
 
 // English month names for aria-label — kept inline rather than reusing
 // `toLocaleString` so server/SSR-style consistency is guaranteed regardless
@@ -143,12 +102,14 @@ export function CronCalendar() {
     });
   }, []);
   const handleDayClick = useCallback(
-    (cellKey: string, hasEntries: boolean, button: HTMLButtonElement | null) => {
+    (cellKey: string, _hasEntries: boolean, button: HTMLButtonElement | null) => {
       lastTriggerRef.current = button;
-      // Empty-day behavior is owned by fix 3e in the polish commit; here
-      // we preserve the existing "empty day collapses panel" semantic
-      // and only the focus-restoration side effect is new.
-      setSelectedDayKey(hasEntries ? cellKey : null);
+      // Open the panel on every cell click, even days with no entries.
+      // Previously empty days were inert clicks — on mobile (no hover
+      // tooltip available) this meant tapping an empty day did nothing,
+      // hiding the "no scheduled tasks on this day" affordance. The
+      // panel renders its own "当天没有计划任务" empty state.
+      setSelectedDayKey(cellKey);
     },
     [],
   );
@@ -361,7 +322,9 @@ function DayCell({
 }
 
 function CalendarEntryChip({ entry }: { entry: CronTimelineEntry }) {
-  const style = KIND_STYLES[entry.kind];
+  // `kindStyle` returns the `missed` style for unknown kinds — a future
+  // `kind: "failed"` arriving from the runtime won't crash the calendar.
+  const style = kindStyle(entry.kind);
   const Icon = style.Icon;
   return (
     <span
