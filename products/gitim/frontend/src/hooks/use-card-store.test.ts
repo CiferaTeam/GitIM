@@ -13,6 +13,19 @@ function msg(line: number, body: string, extra: Partial<Message> = {}): Message 
   };
 }
 
+describe("useCardStore showArchived", () => {
+  beforeEach(() => {
+    useCardStore.getState().resetForWorkspaceSwitch();
+  });
+
+  it("setShowArchived sets showArchived", () => {
+    useCardStore.getState().setShowArchived(true);
+    expect(useCardStore.getState().showArchived).toBe(true);
+    useCardStore.getState().setShowArchived(false);
+    expect(useCardStore.getState().showArchived).toBe(false);
+  });
+});
+
 describe("useCardStore pending messages", () => {
   beforeEach(() => {
     useCardStore.getState().resetForWorkspaceSwitch();

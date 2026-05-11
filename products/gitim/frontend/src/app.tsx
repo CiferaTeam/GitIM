@@ -163,6 +163,7 @@ export default function App() {
   const upsertArchivedCard = useCardStore((s) => s.upsertArchivedCard);
   const mergeCards = useCardStore((s) => s.mergeCards);
   const addCardMessages = useCardStore((s) => s.addCardMessages);
+  const setShowArchived = useCardStore((s) => s.setShowArchived);
   const resetCardsForSwitch = useCardStore((s) => s.resetForWorkspaceSwitch);
   const port = useConnectionStore((s) => s.port);
   const mode = useConnectionStore((s) => s.mode);
@@ -435,6 +436,9 @@ export default function App() {
       }
       if (archivedCardsRes.ok && archivedCardsRes.data)
         setArchivedCards(archivedCardsRes.data.cards as Card[]);
+      // Cards view preference is not in-session: always restore from storage,
+      // even when preserveSelection is true.
+      setShowArchived(storedUiState.cardsShowArchived);
       if (boardsRes.ok && boardsRes.data) setBoards(nextBoards);
       if (selectedBoardRes?.ok && selectedBoardRes.data) {
         setSelectedBoard(selectedBoardRes.data);
@@ -487,6 +491,7 @@ export default function App() {
       setCards,
       mergeCards,
       setArchivedCards,
+      setShowArchived,
       setCardMessages,
       upsertCard,
       upsertArchivedCard,

@@ -46,6 +46,7 @@ interface CardState {
   /** Add-or-replace an archived card by (channel, card_id). */
   upsertArchivedCard: (card: Card) => void;
   toggleShowArchived: () => void;
+  setShowArchived: (v: boolean) => void;
   /** Optimistic: move a card from `cards` → `archivedCards`. */
   markArchived: (channel: string, cardId: string) => void;
   /** Optimistic: move a card from `archivedCards` → `cards`. */
@@ -157,6 +158,8 @@ export const useCardStore = create<CardState>((set) => ({
 
   toggleShowArchived: () =>
     set((state) => ({ showArchived: !state.showArchived })),
+
+  setShowArchived: (v) => set({ showArchived: v }),
 
   markArchived: (channel, cardId) =>
     set((state) => {
