@@ -49,6 +49,37 @@ export const useAgentActivityStore = create<AgentActivityState>()(
   ),
 );
 
+export function applyUsageActivityEvent(event: AgentActivityEvent) {
+  if (event.detail.trim() === "") {
+    useAgentStore.getState().updateAgent(event.agent_id, {
+      sessionUsage: undefined,
+    });
+    return;
+  }
+
+  try {
+    const snap = JSON.parse(event.detail);
+    const updates: Partial<Agent> = {
+      sessionUsage: {
+        sessionId: snap.session_id ?? "",
+        inputTokens: snap.input_tokens,
+        outputTokens: snap.output_tokens,
+        maxTokens: snap.max_tokens,
+        usedPercent: snap.used_percent ?? 0,
+        source: snap.source ?? "provider_reported",
+        updatedAt: snap.updated_at ?? "",
+      },
+    };
+    const summary = mapBackendUsageSummary(snap.usage_summary);
+    if (summary) {
+      updates.usageSummary = summary;
+    }
+    useAgentStore.getState().updateAgent(event.agent_id, updates);
+  } catch {
+    // malformed usage payload — ignore
+  }
+}
+
 /**
  * Connects to the SSE endpoint for agent activity events for the given
  * workspace. Closes and re-opens when `slug` changes so events from the
@@ -76,27 +107,7 @@ export function useAgentActivitySSE(slug: string | null) {
       try {
         const event: AgentActivityEvent = JSON.parse(e.data);
         if (event.event_type === "usage") {
-          try {
-            const snap = JSON.parse(event.detail);
-            const updates: Partial<Agent> = {
-              sessionUsage: {
-                sessionId: snap.session_id ?? "",
-                inputTokens: snap.input_tokens,
-                outputTokens: snap.output_tokens,
-                maxTokens: snap.max_tokens,
-                usedPercent: snap.used_percent ?? 0,
-                source: snap.source ?? "provider_reported",
-                updatedAt: snap.updated_at ?? "",
-              },
-            };
-            const summary = mapBackendUsageSummary(snap.usage_summary);
-            if (summary) {
-              updates.usageSummary = summary;
-            }
-            useAgentStore.getState().updateAgent(event.agent_id, updates);
-          } catch {
-            // malformed usage payload — ignore
-          }
+          applyUsageActivityEvent(event);
           return; // do NOT push usage events to the activity log
         }
         if (event.event_type === "burned") {
