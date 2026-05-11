@@ -283,6 +283,10 @@ export interface CronTimelineEntry {
   ts: string;
   kind: CronTimelineKind;
   cron_name: string;
+  /** Handler the cron fires at — the agent that "does" this task. Always
+   *  present; the runtime never emits an entry without a target because
+   *  CronSpec validation rejects empty target on the spec itself. */
+  target: string;
   /** Present only when `kind === "past"` — runtime path to fetch the body. */
   thread_url?: string;
   /** Present only when `kind === "missed"`. */

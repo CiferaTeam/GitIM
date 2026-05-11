@@ -226,6 +226,11 @@ async fn timeline_past_only() {
     assert_eq!(futures.len(), 0, "to is in the past — no future entries");
     let p = &pasts[0];
     assert_eq!(p.get("cron_name").and_then(|v| v.as_str()), Some("hourly-job"));
+    assert_eq!(
+        p.get("target").and_then(|v| v.as_str()),
+        Some("alice"),
+        "past entry must carry the cron's target handler",
+    );
     assert!(p.get("thread_url").is_some(), "past entry must carry a thread_url");
 }
 
@@ -266,6 +271,11 @@ async fn timeline_future_only() {
         assert_eq!(
             e.get("cron_name").and_then(|v| v.as_str()),
             Some("daily-standup")
+        );
+        assert_eq!(
+            e.get("target").and_then(|v| v.as_str()),
+            Some("bob"),
+            "future entry must carry the cron's target handler",
         );
         assert!(e.get("thread_url").is_none());
     }
@@ -366,6 +376,11 @@ async fn timeline_includes_missed() {
         assert_eq!(
             e.get("reason").and_then(|v| v.as_str()),
             Some("no thread file present")
+        );
+        assert_eq!(
+            e.get("target").and_then(|v| v.as_str()),
+            Some("alice"),
+            "missed entry must carry the cron's target handler",
         );
     }
 }

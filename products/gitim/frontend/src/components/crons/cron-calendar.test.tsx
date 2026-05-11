@@ -133,18 +133,21 @@ describe("CronCalendar", () => {
             ts: pastTs,
             kind: "past",
             cron_name: "weekly-report",
+            target: "alice",
             thread_url: `/workspaces/phone/crons/weekly-report/runs/${pastTs.replace(/:/g, "-")}`,
           },
           {
             ts: missedTs,
             kind: "missed",
             cron_name: "daily-standup",
+            target: "bob",
             reason: "no thread file present",
           },
           {
             ts: futureTs,
             kind: "future",
             cron_name: "weekly-report",
+            target: "alice",
           },
         ],
         truncated: false,
@@ -194,7 +197,7 @@ describe("CronCalendar", () => {
     getCronTimelineMock.mockResolvedValue({
       ok: true,
       data: {
-        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+        entries: [{ ts, kind: "past", cron_name: "weekly-report", target: "alice" }],
       },
     });
 
@@ -244,7 +247,7 @@ describe("CronCalendar", () => {
     getCronTimelineMock.mockResolvedValue({
       ok: true,
       data: {
-        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+        entries: [{ ts, kind: "past", cron_name: "weekly-report", target: "alice" }],
       },
     });
 
@@ -323,9 +326,9 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha" },
-          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "beta" },
-          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "missed", cron_name: "gamma" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "beta", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "missed", cron_name: "gamma", target: "alice" },
         ],
       },
     });
@@ -338,8 +341,9 @@ describe("CronCalendar", () => {
     });
 
     // The DayCell button for day 15 should carry the full descriptive label.
+    // 3 distinct cron names (alpha, beta, gamma) → "3 个 cron" suffix.
     const monthName = monthNames[month - 1];
-    const expectedLabel = `${monthName} 15, ${year}, 2 已执行, 1 未执行`;
+    const expectedLabel = `${monthName} 15, ${year}, 2 已执行, 1 未执行, 3 个 cron`;
     const cell = Array.from(container.querySelectorAll("button")).find(
       (b) => b.getAttribute("aria-label") === expectedLabel,
     );
@@ -355,9 +359,9 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
-          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "missed", cron_name: "daily-standup" },
-          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "future", cron_name: "monthly-roll" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "missed", cron_name: "daily-standup", target: "bob" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "future", cron_name: "monthly-roll", target: "carol" },
         ],
       },
     });
@@ -405,7 +409,7 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report", target: "alice" },
         ],
       },
     });
@@ -445,11 +449,11 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: baseTs(8, 0), kind: "past", cron_name: "job-a" },
-          { ts: baseTs(9, 0), kind: "past", cron_name: "job-b" },
-          { ts: baseTs(10, 0), kind: "past", cron_name: "job-c" },
-          { ts: baseTs(11, 0), kind: "future", cron_name: "job-d" },
-          { ts: baseTs(12, 0), kind: "future", cron_name: "job-e" },
+          { ts: baseTs(8, 0), kind: "past", cron_name: "job-a", target: "alice" },
+          { ts: baseTs(9, 0), kind: "past", cron_name: "job-b", target: "alice" },
+          { ts: baseTs(10, 0), kind: "past", cron_name: "job-c", target: "alice" },
+          { ts: baseTs(11, 0), kind: "future", cron_name: "job-d", target: "alice" },
+          { ts: baseTs(12, 0), kind: "future", cron_name: "job-e", target: "alice" },
         ],
       },
     });
@@ -462,5 +466,115 @@ describe("CronCalendar", () => {
     });
 
     expect(container.textContent).toContain("+2 more");
+  });
+
+  it("overflow badge carries a title attribute with total + distinct cron count", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const day = `${year}-${pad(month)}-15`;
+    const baseTs = (h: number, mi: number) =>
+      `${day}T${pad(h)}:${pad(mi)}:00Z`;
+    // 5 entries on the same day, 2 distinct cron names.
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: baseTs(8, 0), kind: "past", cron_name: "job-a", target: "alice" },
+          { ts: baseTs(9, 0), kind: "past", cron_name: "job-a", target: "alice" },
+          { ts: baseTs(10, 0), kind: "past", cron_name: "job-a", target: "alice" },
+          { ts: baseTs(11, 0), kind: "future", cron_name: "job-b", target: "alice" },
+          { ts: baseTs(12, 0), kind: "future", cron_name: "job-b", target: "alice" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    const badge = Array.from(container.querySelectorAll("[title]")).find(
+      (n) => n.textContent?.includes("+2 more"),
+    );
+    expect(badge, "overflow badge with title").toBeTruthy();
+    expect(badge!.getAttribute("title")).toBe("5 个任务（2 个 cron）");
+  });
+
+  it("day cell with > 1 distinct cron appends cron count to aria-label", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ];
+    // 2 distinct crons on day 15 (1 past + 1 future) → aria-label
+    // appends "2 个 cron".
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "future", cron_name: "beta", target: "alice" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    const monthName = monthNames[month - 1];
+    const expectedLabel = `${monthName} 15, ${year}, 1 已执行, 1 未来, 2 个 cron`;
+    const cell = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === expectedLabel,
+    );
+    expect(cell, `expected day cell aria-label "${expectedLabel}"`).toBeTruthy();
+  });
+
+  it("day cell with only 1 distinct cron does NOT append cron count to aria-label", async () => {
+    const today = new Date();
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth() + 1;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ];
+    // Same cron 4 times on day 15 — single distinct cron, so the
+    // "N 个 cron" suffix is omitted.
+    getCronTimelineMock.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          { ts: `${year}-${pad(month)}-15T08:00:00Z`, kind: "past", cron_name: "only-one", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "only-one", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "only-one", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "past", cron_name: "only-one", target: "alice" },
+        ],
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(<CronCalendar />);
+      await flushPromises();
+    });
+
+    const monthName = monthNames[month - 1];
+    const expectedLabel = `${monthName} 15, ${year}, 4 已执行`;
+    const cell = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === expectedLabel,
+    );
+    expect(cell, `expected day cell aria-label "${expectedLabel}"`).toBeTruthy();
   });
 });

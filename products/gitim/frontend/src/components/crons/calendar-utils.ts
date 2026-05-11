@@ -135,3 +135,53 @@ export function formatEntryTime(ts: string): string {
   if (Number.isNaN(d.getTime())) return ts;
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}Z`;
 }
+
+/** One hour-of-day bucket inside a single day's panel. `hourKey` is the
+ *  zero-padded UTC hour (`"00"` through `"23"`); `label` is the user-
+ *  visible header text. Empty hours never appear in the returned list. */
+export interface HourGroup {
+  hourKey: string;
+  label: string;
+  entries: CronTimelineEntry[];
+}
+
+/** Bucket timeline entries by UTC hour-of-day, preserving input order
+ *  inside each bucket. Hours with no entries are absent (we don't pad a
+ *  24-row grid — empty rows are pure visual noise). Entries with an
+ *  unparseable `ts` are silently dropped, mirroring `groupEntriesByDay`.
+ *  Caller stays responsible for keeping the input scoped to a single
+ *  UTC day; this function only groups by hour-of-day, so a multi-day
+ *  input would collapse 13:00 from different days into one bucket. */
+export function groupEntriesByHour(
+  entries: readonly CronTimelineEntry[],
+): HourGroup[] {
+  const buckets = new Map<string, CronTimelineEntry[]>();
+  for (const entry of entries) {
+    const d = new Date(entry.ts);
+    if (Number.isNaN(d.getTime())) continue;
+    const hourKey = pad2(d.getUTCHours());
+    let list = buckets.get(hourKey);
+    if (!list) {
+      list = [];
+      buckets.set(hourKey, list);
+    }
+    list.push(entry);
+  }
+  const out: HourGroup[] = [];
+  for (const [hourKey, list] of buckets) {
+    out.push({ hourKey, label: `${hourKey}:00Z`, entries: list });
+  }
+  out.sort((a, b) => a.hourKey.localeCompare(b.hourKey));
+  return out;
+}
+
+/** Count of distinct `cron_name` values across the entry list. Used by
+ *  the day cell's overflow tooltip and aria-label to convey "this stack
+ *  of N entries is N repeats of M crons". */
+export function distinctCronCount(
+  entries: readonly CronTimelineEntry[],
+): number {
+  const names = new Set<string>();
+  for (const e of entries) names.add(e.cron_name);
+  return names.size;
+}
