@@ -19,6 +19,12 @@ interface CronRunViewerProps {
   onBack: () => void;
 }
 
+interface RunBodyState {
+  key: string | null;
+  body: string | null;
+  error: string | null;
+}
+
 /**
  * Renders the body of one cron fire by parsing the on-disk `.thread` file
  * with the daemon-web parser (single source of truth for the line format)
@@ -27,44 +33,53 @@ interface CronRunViewerProps {
  * vertical list is enough; we skip the chat's reply/threading affordances.
  */
 export function CronRunViewer({ slug, cronName, ts, onBack }: CronRunViewerProps) {
-  const [body, setBody] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const requestKey = slug ? `${slug}\0${cronName}\0${ts}` : null;
+  const [runState, setRunState] = useState<RunBodyState>({
+    key: null,
+    body: null,
+    error: null,
+  });
+  const isCurrentRequest = runState.key === requestKey;
+  const body = isCurrentRequest ? runState.body : null;
+  const error = isCurrentRequest ? runState.error : null;
+  const loading = requestKey !== null && !isCurrentRequest;
 
   useEffect(() => {
-    if (!slug) return;
+    if (!slug || requestKey === null) return;
     // AbortController so rapidly switching between cron runs cancels the
     // previous in-flight fetch (matches the `useCronTimeline` pattern).
     // Otherwise tapping through five runs on mobile burns bandwidth on
     // four bodies the user no longer cares about, and the resolutions
     // race the latest one to set state.
     const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setBody(null);
     (async () => {
       const res = await client.getCronRunBody(slug, cronName, ts, controller.signal);
       if (controller.signal.aborted) return;
       if (!res.ok || !res.data) {
-        setError(res.error ?? "Failed to load run body");
-        setLoading(false);
+        setRunState({
+          key: requestKey,
+          body: null,
+          error: res.error ?? "Failed to load run body",
+        });
         return;
       }
-      setBody(res.data.body);
-      setLoading(false);
+      setRunState({ key: requestKey, body: res.data.body, error: null });
     })().catch((err: unknown) => {
       if (controller.signal.aborted) return;
       // Aborts surface as DOMException("AbortError") on real fetch and as
       // plain Error("AbortError") in some jsdom paths — drop both.
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
-      setLoading(false);
+      setRunState({
+        key: requestKey,
+        body: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
     return () => {
       controller.abort();
     };
-  }, [slug, cronName, ts]);
+  }, [slug, cronName, ts, requestKey]);
 
   const entries = useMemo<ThreadEntry[]>(() => {
     if (!body) return [];

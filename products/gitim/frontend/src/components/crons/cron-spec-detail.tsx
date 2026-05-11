@@ -26,6 +26,12 @@ function asString(value: unknown, fallback = "—"): string {
   return fallback;
 }
 
+interface CronDetailState {
+  key: string | null;
+  detail: CronDetail | null;
+  error: string | null;
+}
+
 export function CronSpecDetail({
   slug,
   cronName,
@@ -33,39 +39,48 @@ export function CronSpecDetail({
   futureTs,
   onBack,
 }: CronSpecDetailProps) {
-  const [detail, setDetail] = useState<CronDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const requestKey = slug ? `${slug}\0${cronName}` : null;
+  const [detailState, setDetailState] = useState<CronDetailState>({
+    key: null,
+    detail: null,
+    error: null,
+  });
+  const isCurrentRequest = detailState.key === requestKey;
+  const detail = isCurrentRequest ? detailState.detail : null;
+  const error = isCurrentRequest ? detailState.error : null;
+  const loading = requestKey !== null && !isCurrentRequest;
 
   useEffect(() => {
-    if (!slug) return;
+    if (!slug || requestKey === null) return;
     // AbortController per the `useCronTimeline` pattern — see
     // `cron-run-viewer.tsx` for the rationale.
     const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setDetail(null);
     (async () => {
       const res = await client.showCron(slug, cronName, controller.signal);
       if (controller.signal.aborted) return;
       if (!res.ok || !res.data) {
-        setError(res.error ?? "Failed to load cron spec");
-        setLoading(false);
+        setDetailState({
+          key: requestKey,
+          detail: null,
+          error: res.error ?? "Failed to load cron spec",
+        });
         return;
       }
-      setDetail(res.data);
-      setLoading(false);
+      setDetailState({ key: requestKey, detail: res.data, error: null });
     })().catch((err: unknown) => {
       if (controller.signal.aborted) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
-      setLoading(false);
+      setDetailState({
+        key: requestKey,
+        detail: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
     return () => {
       controller.abort();
     };
-  }, [slug, cronName]);
+  }, [slug, cronName, requestKey]);
 
   const spec = detail?.spec ?? {};
   const schedule = asString(spec["schedule"]);

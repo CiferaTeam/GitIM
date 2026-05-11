@@ -50,13 +50,13 @@ Object.defineProperty(globalThis, "localStorage", {
 // isomorphic-git backend (whose internal init runs jsdom-hostile code).
 vi.mock("./backend", () => ({
   HttpBackend: class {
-    constructor(_baseUrl: () => string) {
-      // no-op
+    constructor(baseUrl: () => string) {
+      void baseUrl;
     }
   },
   LocalBackend: class {
-    constructor(_config: unknown) {
-      // no-op
+    constructor(config: unknown) {
+      void config;
     }
   },
 }));

@@ -19,6 +19,13 @@ const EMPTY_ENTRIES: CronTimelineEntry[] = Object.freeze(
   [] as CronTimelineEntry[],
 ) as CronTimelineEntry[];
 
+interface CronTimelineState {
+  key: string | null;
+  entries: CronTimelineEntry[];
+  truncated: boolean;
+  error: string | null;
+}
+
 /**
  * Fetch /crons/timeline?from=<iso>&to=<iso> for the active workspace and
  * surface the merged past/future/missed entry list plus a truncation flag.
@@ -37,23 +44,25 @@ export function useCronTimeline(
   from: string | undefined,
   to: string | undefined,
 ): UseCronTimelineResult {
-  const [entries, setEntries] = useState<CronTimelineEntry[]>(EMPTY_ENTRIES);
-  const [truncated, setTruncated] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // `refreshNonce` exists so a manual `refetch()` can re-trigger the effect
   // without changing any of the (slug, from, to) inputs.
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const requestKey = slug ? `${slug}\0${from ?? ""}\0${to ?? ""}\0${refreshNonce}` : null;
+  const [timelineState, setTimelineState] = useState<CronTimelineState>({
+    key: null,
+    entries: EMPTY_ENTRIES,
+    truncated: false,
+    error: null,
+  });
+  const isCurrentRequest = timelineState.key === requestKey;
+  const entries = isCurrentRequest ? timelineState.entries : EMPTY_ENTRIES;
+  const truncated = isCurrentRequest ? timelineState.truncated : false;
+  const error = isCurrentRequest ? timelineState.error : null;
+  const loading = requestKey !== null && !isCurrentRequest;
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (!slug) {
-      setEntries(EMPTY_ENTRIES);
-      setTruncated(false);
-      setLoading(false);
-      setError(null);
-      return;
-    }
+    if (!slug || requestKey === null) return;
 
     // Cancel any in-flight fetch from the previous (slug, from, to).
     if (abortRef.current) {
@@ -63,23 +72,25 @@ export function useCronTimeline(
     abortRef.current = controller;
 
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
     (async () => {
       const res = await client.getCronTimeline(slug, from, to, controller.signal);
       if (cancelled || controller.signal.aborted) return;
       if (!res.ok || !res.data) {
-        setEntries(EMPTY_ENTRIES);
-        setTruncated(false);
-        setError(res.error ?? "Failed to load cron timeline");
-        setLoading(false);
+        setTimelineState({
+          key: requestKey,
+          entries: EMPTY_ENTRIES,
+          truncated: false,
+          error: res.error ?? "Failed to load cron timeline",
+        });
         return;
       }
-      setEntries(res.data.entries);
-      setTruncated(res.data.truncated === true);
-      setError(null);
-      setLoading(false);
+      setTimelineState({
+        key: requestKey,
+        entries: res.data.entries,
+        truncated: res.data.truncated === true,
+        error: null,
+      });
     })().catch((err: unknown) => {
       if (cancelled || controller.signal.aborted) return;
       // Aborts manifest as DOMException on real fetch; on jsdom mocks they
@@ -87,15 +98,19 @@ export function useCronTimeline(
       // way, drop the result.
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
-      setLoading(false);
+      setTimelineState({
+        key: requestKey,
+        entries: EMPTY_ENTRIES,
+        truncated: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [slug, from, to, refreshNonce]);
+  }, [slug, from, to, requestKey]);
 
   const refetch = useCallback(() => {
     setRefreshNonce((n) => n + 1);

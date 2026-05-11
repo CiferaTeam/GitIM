@@ -24,19 +24,25 @@ type View =
   | { kind: "run"; cronName: string; ts: string }
   | { kind: "spec"; cronName: string; ts: string; entryKind: "future" | "missed" };
 
+const LIST_VIEW: View = { kind: "list" };
+
 // Kind label + badge styling are imported from `./kind-styles.ts` so the
 // day list, the calendar chips, and any future kind-styled surface stay
 // in lock-step on opacities and Chinese labels.
 
 export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelProps) {
-  const [view, setView] = useState<View>({ kind: "list" });
-
-  // Reset to list whenever the selected day or workspace changes — a
-  // detail view pinned to "yesterday's run" stops making sense once
-  // the user navigates to a different day or switches workspaces.
-  useEffect(() => {
-    setView({ kind: "list" });
-  }, [dayKey, slug]);
+  const panelKey = `${slug ?? ""}\0${dayKey ?? ""}`;
+  const [viewState, setViewState] = useState<{ key: string; view: View }>({
+    key: panelKey,
+    view: LIST_VIEW,
+  });
+  if (viewState.key !== panelKey) {
+    setViewState({ key: panelKey, view: LIST_VIEW });
+  }
+  const view = viewState.key === panelKey ? viewState.view : LIST_VIEW;
+  const setPanelView = (nextView: View) => {
+    setViewState({ key: panelKey, view: nextView });
+  };
 
   // Escape closes the panel. We guard on `dayKey` so the listener is a no-op
   // when no panel is showing (component still rendered as the empty
@@ -49,14 +55,14 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
     function handleKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       if (view.kind !== "list") {
-        setView({ kind: "list" });
+        setViewState({ key: panelKey, view: LIST_VIEW });
       } else {
         onClose();
       }
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [dayKey, view.kind, onClose]);
+  }, [dayKey, panelKey, view.kind, onClose]);
 
   if (!dayKey) {
     return (
@@ -72,7 +78,7 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
         slug={slug}
         cronName={view.cronName}
         ts={view.ts}
-        onBack={() => setView({ kind: "list" })}
+        onBack={() => setPanelView(LIST_VIEW)}
       />
     );
   }
@@ -84,7 +90,7 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
         cronName={view.cronName}
         missedTs={view.entryKind === "missed" ? view.ts : undefined}
         futureTs={view.entryKind === "future" ? view.ts : undefined}
-        onBack={() => setView({ kind: "list" })}
+        onBack={() => setPanelView(LIST_VIEW)}
       />
     );
   }
@@ -123,9 +129,9 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
             const stem = entry.ts.replace(/:/g, "-");
             const onClick = () => {
               if (entry.kind === "past") {
-                setView({ kind: "run", cronName: entry.cron_name, ts: stem });
+                setPanelView({ kind: "run", cronName: entry.cron_name, ts: stem });
               } else {
-                setView({
+                setPanelView({
                   kind: "spec",
                   cronName: entry.cron_name,
                   ts: entry.ts,

@@ -403,4 +403,65 @@ describe("CronDayPanel", () => {
     expect(listEntry).toBeDefined();
     expect(container.textContent).toContain("已执行");
   });
+
+  it("resets detail view when navigating away from a day and back", async () => {
+    getCronRunBodyMock.mockResolvedValue({
+      ok: true,
+      data: {
+        body: "[L000001][P000000][@system][20260511T090000Z] cron(weekly-report): hi\n",
+      },
+    });
+
+    const { container, root: r } = makeRoot();
+    root = r;
+    await act(async () => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-11"
+          entries={[PAST_ENTRY]}
+          onClose={() => {}}
+        />,
+      );
+    });
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.includes("weekly-report"),
+    );
+    await act(async () => {
+      openButton?.click();
+      await flushPromises();
+    });
+    expect(container.querySelector('button[aria-label="Back to day"]')).not.toBeNull();
+
+    await act(async () => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={[FUTURE_ENTRY]}
+          onClose={() => {}}
+        />,
+      );
+      await flushPromises();
+    });
+    expect(container.querySelector('button[aria-label="Back to day"]')).toBeNull();
+
+    await act(async () => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-11"
+          entries={[PAST_ENTRY]}
+          onClose={() => {}}
+        />,
+      );
+      await flushPromises();
+    });
+
+    expect(container.querySelector('button[aria-label="Back to day"]')).toBeNull();
+    expect(container.textContent).toContain("weekly-report");
+    expect(container.textContent).toContain("已执行");
+    expect(getCronRunBodyMock).toHaveBeenCalledTimes(1);
+  });
 });
