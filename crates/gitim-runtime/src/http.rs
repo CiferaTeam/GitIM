@@ -1624,6 +1624,13 @@ struct TimelineEntry {
     /// stays language-agnostic and the frontend can switch on it.
     kind: &'static str,
     cron_name: String,
+    /// Handler the cron message goes to when it fires — i.e. the agent
+    /// that "does" this task. Copied straight off the owning `CronSummary`
+    /// so the calendar can disambiguate "alice ran e2e-check at 13:00"
+    /// from "bob ran e2e-check at 13:00" without a follow-up `show_cron`
+    /// per entry. Required (never empty) because `CronSpec` validation
+    /// rejects specs without a target.
+    target: String,
     /// Populated for `kind == "past"` so the calendar UI can deep-link
     /// directly to the run body endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1833,6 +1840,7 @@ async fn crons_timeline(
                     ts: canonical,
                     kind: "past",
                     cron_name: summary.name.clone(),
+                    target: summary.target.clone(),
                     thread_url: Some(format!(
                         "/workspaces/{}/crons/{}/runs/{}",
                         slug, summary.name, stem
@@ -1930,6 +1938,7 @@ async fn crons_timeline(
                     ts: canonical,
                     kind: "future",
                     cron_name: summary.name.clone(),
+                    target: summary.target.clone(),
                     thread_url: None,
                     reason: None,
                 });
@@ -1938,6 +1947,7 @@ async fn crons_timeline(
                     ts: canonical,
                     kind: "missed",
                     cron_name: summary.name.clone(),
+                    target: summary.target.clone(),
                     thread_url: None,
                     reason: Some("no thread file present".to_string()),
                 });
