@@ -5,6 +5,7 @@ import { BoardsView } from "./components/boards/boards-view";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
+import { CronCalendar } from "./components/crons/cron-calendar";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
@@ -651,6 +652,9 @@ export default function App() {
             <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
             <Route path="/boards" element={<BoardsView />} />
             <Route path="/chat" element={<ChatPage />} />
+            {mode === "remote" && (
+              <Route path="/crons" element={<CronCalendar />} />
+            )}
             <Route path="/docs" element={<DocsPage />} />
             {mode === "local" && (
               <Route path="*" element={<Navigate to="/chat" replace />} />

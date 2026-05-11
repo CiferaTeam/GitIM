@@ -16,6 +16,11 @@ import type {
   CardStatus,
   Channel,
   CreateWorkspaceRequest,
+  CronDetail,
+  CronRunBody,
+  CronRunEntry,
+  CronSummary,
+  CronTimelineResponse,
   Message,
   WorkspaceSummary,
 } from "./types";
@@ -689,6 +694,74 @@ export async function appendBoardSection(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ section, value }),
   });
+  return await res.json();
+}
+
+// --- Cron API: runtime HTTP read endpoints (Wave 3 consumer) ---
+//
+// All five routes are GET-only in v1 — calendar is view-only. Local (browser)
+// mode has no cron engine, so these short-circuit to a friendly empty
+// response shape rather than 404 / unreachable network errors.
+
+const CRON_LOCAL_UNAVAILABLE: ApiResponse<never> = {
+  ok: false,
+  error: "Cron view requires the gitim runtime (not available in browser mode).",
+  error_code: "runtime_required",
+};
+
+export async function listCrons(
+  slug: string,
+): Promise<ApiResponse<{ crons: CronSummary[] }>> {
+  if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
+  const res = await fetch(`${wsBase(slug)}/crons`);
+  return await res.json();
+}
+
+export async function showCron(
+  slug: string,
+  name: string,
+): Promise<ApiResponse<CronDetail>> {
+  if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
+  const res = await fetch(`${wsBase(slug)}/crons/${encodeURIComponent(name)}`);
+  return await res.json();
+}
+
+export async function listCronRuns(
+  slug: string,
+  name: string,
+): Promise<ApiResponse<{ runs: CronRunEntry[] }>> {
+  if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
+  const res = await fetch(
+    `${wsBase(slug)}/crons/${encodeURIComponent(name)}/runs`,
+  );
+  return await res.json();
+}
+
+export async function getCronRunBody(
+  slug: string,
+  name: string,
+  ts: string,
+): Promise<ApiResponse<CronRunBody>> {
+  if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
+  const res = await fetch(
+    `${wsBase(slug)}/crons/${encodeURIComponent(name)}/runs/${encodeURIComponent(ts)}`,
+  );
+  return await res.json();
+}
+
+export async function getCronTimeline(
+  slug: string,
+  from?: string,
+  to?: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<CronTimelineResponse>> {
+  if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  const url = `${wsBase(slug)}/crons/timeline${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, { signal });
   return await res.json();
 }
 

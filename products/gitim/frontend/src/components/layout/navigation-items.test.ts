@@ -27,6 +27,15 @@ describe("getVisibleNavigationItems", () => {
       "Chat",
       "Cards",
       "Boards",
+      "周期任务",
     ]);
+  });
+
+  it("hides the cron tab in browser mode (no runtime engine)", () => {
+    expect(labelsFor("local", "desktop")).not.toContain("周期任务");
+  });
+
+  it("hides the cron tab on mobile even on remote", () => {
+    expect(labelsFor("remote", "mobile")).not.toContain("周期任务");
   });
 });

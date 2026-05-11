@@ -236,6 +236,60 @@ export interface BoardWriteResponse {
   needs_token?: boolean;
 }
 
+// --- Cron --- (mirrors gitim-core::responses and runtime timeline shape)
+
+export interface CronSummary {
+  name: string;
+  schedule: string;
+  /** IANA timezone string, or omitted = UTC. */
+  timezone?: string;
+  target: string;
+  enabled: boolean;
+  created_by: string;
+  /** RFC 3339 UTC. */
+  created_at: string;
+  /** RFC 3339 UTC. Absent when schedule fails to parse. */
+  next_fire?: string;
+}
+
+export interface CronRunEntry {
+  /** Filename stem `YYYY-MM-DDTHH-MM-SSZ`. */
+  ts: string;
+  filename: string;
+}
+
+export interface CronDetail {
+  name: string;
+  /** Raw spec.yaml body (server returns `serde_yaml::Value`, decoded to JSON
+   *  on the wire). Treated as an opaque record by the UI. */
+  spec: Record<string, unknown>;
+  recent_runs: CronRunEntry[];
+  next_fire?: string;
+}
+
+export type CronTimelineKind = "past" | "future" | "missed";
+
+export interface CronTimelineEntry {
+  /** RFC 3339 UTC with seconds + trailing `Z`. */
+  ts: string;
+  kind: CronTimelineKind;
+  cron_name: string;
+  /** Present only when `kind === "past"` — runtime path to fetch the body. */
+  thread_url?: string;
+  /** Present only when `kind === "missed"`. */
+  reason?: string;
+}
+
+export interface CronTimelineResponse {
+  entries: CronTimelineEntry[];
+  /** True when any single cron's iteration ceiling was hit. */
+  truncated?: boolean;
+}
+
+export interface CronRunBody {
+  body: string;
+}
+
 /** Format timestamp "20260317T120000Z" → "12:00" */
 export function formatTimestamp(ts: string): string {
   const match = ts.match(/T(\d{2})(\d{2})\d{2}Z$/);
