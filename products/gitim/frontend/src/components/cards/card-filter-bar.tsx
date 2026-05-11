@@ -11,8 +11,11 @@ import { LabelChipInput } from "@/components/ui/label-chip-input";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import { writeUiState } from "@/lib/ui-state";
+import { workspaceIdentity } from "@/lib/workspace-key";
 import { cn } from "@/lib/utils";
 
 export interface CardFilterState {
@@ -47,7 +50,15 @@ export function CardFilterBar({
   const showArchived = useCardStore((s) => s.showArchived);
   const toggleShowArchived = useCardStore((s) => s.toggleShowArchived);
   const setArchivedCards = useCardStore((s) => s.setArchivedCards);
+  const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const activeWorkspace = activeSlug
+    ? workspaces.find((w) => w.slug === activeSlug)
+    : undefined;
+  const workspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
+    : null;
 
   const channelOptions = useMemo(
     () => channels.filter((c) => c.kind === "channel").map((c) => c.name),
@@ -94,6 +105,7 @@ export function CardFilterBar({
   async function handleToggleArchived() {
     const nextShow = !showArchived;
     toggleShowArchived();
+    if (workspaceKey) writeUiState(workspaceKey, { cardsShowArchived: nextShow });
     // Refetch whenever we turn on — stale archived lists are worse than one
     // extra request, and the UX cost of stale is high (user sees wrong cards).
     if (nextShow) {
@@ -102,6 +114,7 @@ export function CardFilterBar({
         // Revert — "show archived = ON + empty list" is indistinguishable
         // from "no archived cards" and misleads the user.
         toggleShowArchived();
+        if (workspaceKey) writeUiState(workspaceKey, { cardsShowArchived: false });
       }
     }
   }

@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import * as client from "@/lib/client";
-import { activeWorkspaceStorageKey } from "@/lib/workspace-key";
+import { activeWorkspaceStorageKey, workspaceIdentity } from "@/lib/workspace-key";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { clearUiState } from "@/lib/ui-state";
 import type { CreateWorkspaceRequest, WorkspaceSummary } from "@/lib/types";
 
 function currentActiveKey(): string {
@@ -106,6 +107,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   },
 
   remove: async (slug) => {
+    // Capture workspace and mode before the await so the lookup is deterministic.
+    const workspace = get().workspaces.find((w) => w.slug === slug);
+    const mode = useConnectionStore.getState().mode;
     set({ loading: true, error: null, errorCode: null });
     const res = await client.deleteWorkspace(slug);
     if (!res.ok) {
@@ -116,6 +120,8 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       });
       return false;
     }
+    // Clear before fetchAll so loadStoredSlug doesn't pick up a stale active slug.
+    if (workspace) clearUiState(workspaceIdentity(mode, workspace));
     await get().fetchAll();
     return true;
   },

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, WorkspaceSummary } from "@/lib/types";
+import { workspaceIdentity } from "@/lib/workspace-key";
+import { writeUiState } from "@/lib/ui-state";
 
 let workspacesResponse: ApiResponse<{ workspaces: WorkspaceSummary[] }>;
 const workspacesResponses: Array<
@@ -182,6 +184,38 @@ describe("useWorkspaceStore", () => {
     ]);
     expect(useWorkspaceStore.getState().activeSlug).toBe("browser-2");
     expect(localStorage.getItem("gitim-active-workspace")).toBe("browser-2");
+  });
+
+  it("clears ui-state storage for the deleted workspace on successful remove", async () => {
+    const client = await import("@/lib/client");
+    const { useConnectionStore } = await import("./use-connection-store");
+    useConnectionStore.setState({ mode: "remote" });
+    const { useWorkspaceStore } = await import("./use-workspace-store");
+
+    const ws: WorkspaceSummary = {
+      slug: "my-ws",
+      workspace_name: "My WS",
+      path: "/tmp/my-ws",
+      provider: "local",
+      initialized: true,
+    };
+    useWorkspaceStore.setState({
+      workspaces: [ws],
+      activeSlug: "my-ws",
+      loading: false,
+      error: null,
+      errorCode: null,
+    });
+
+    const key = workspaceIdentity("remote", ws);
+    writeUiState(key, { channel: "general", boardHandler: null, cardsShowArchived: false });
+    expect(localStorage.getItem("gitim-ui-state:" + key)).not.toBeNull();
+
+    vi.mocked(client.deleteWorkspace).mockResolvedValueOnce({ ok: true });
+
+    await useWorkspaceStore.getState().remove("my-ws");
+
+    expect(localStorage.getItem("gitim-ui-state:" + key)).toBeNull();
   });
 
   it("does not refresh when an old workspace reports unavailable after switching", async () => {
