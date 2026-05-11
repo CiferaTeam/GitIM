@@ -92,7 +92,7 @@ async fn indexer_disabled_skips_index_creation() {
         "index.db must not be created when indexer is disabled"
     );
 
-    // Search request must return an error (not assert on message text — Task 3 owns that)
+    // Search request must return an error with actionable message
     let resp = handle_request(
         Request::Search {
             query: Some("anything".to_string()),
@@ -107,6 +107,25 @@ async fn indexer_disabled_skips_index_creation() {
     )
     .await;
     assert!(!resp.ok, "Search must return error when indexer is disabled");
+    let error_msg = resp.error.as_deref().unwrap_or("");
+    assert!(
+        error_msg.contains("disabled"),
+        "Search error must mention 'disabled', got: {:?}",
+        error_msg
+    );
+
+    // Reindex request must also return an error with actionable message
+    let reindex_resp = handle_request(Request::Reindex, state.clone()).await;
+    assert!(
+        !reindex_resp.ok,
+        "Reindex must return error when indexer is disabled"
+    );
+    let reindex_error_msg = reindex_resp.error.as_deref().unwrap_or("");
+    assert!(
+        reindex_error_msg.contains("disabled"),
+        "Reindex error must mention 'disabled', got: {:?}",
+        reindex_error_msg
+    );
 }
 
 #[tokio::test]

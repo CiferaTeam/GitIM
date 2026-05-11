@@ -16,7 +16,7 @@ pub async fn handle_search(
         let guard = state.index.read().unwrap();
         match &*guard {
             Some(idx) => idx.clone(),
-            None => return Response::error("search index not available"),
+            None => return Response::error("search index disabled for this clone (set indexer.enabled=true in .gitim/config.yaml and restart daemon)"),
         }
     };
 
@@ -67,7 +67,7 @@ pub async fn handle_reindex(state: SharedState) -> Response {
         let guard = state.index.read().unwrap();
         match &*guard {
             Some(idx) => idx.clone(),
-            None => return Response::error("search index not available"),
+            None => return Response::error("search index disabled for this clone (set indexer.enabled=true in .gitim/config.yaml and restart daemon)"),
         }
     };
 
