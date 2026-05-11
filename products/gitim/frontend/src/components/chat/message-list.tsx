@@ -56,12 +56,20 @@ export function MessageList({
   onLoadOlder,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Track first / last line numbers and pre-mutation scrollHeight so we can
-  // distinguish prepend (older history arrived) from append (new live message
-  // arrived) and adjust scroll position appropriately. `undefined` sentinel
-  // means "first render, nothing to compare against."
+  // Track first line number, list length, and pre-mutation scrollHeight so we
+  // can distinguish prepend (older history arrived at the head) from append
+  // (anything growing the list — new live message, pending placeholder, poll
+  // delivering newer entries) and adjust scroll position appropriately.
+  //
+  // Why head-line for prepend but length for append: pending outbound
+  // messages live at the tail with line_number = -1, so a line-number-based
+  // append detector ("last line grew") would miss them and the user's just-
+  // sent message would scroll off-screen. Length is the right append signal
+  // because pending always grows the array. Prepend, conversely, is unique
+  // in that the head shrinks — length grows too, so we must check the
+  // prepend signal first and bail out before the append branch.
   const prevFirstLineRef = useRef<number | undefined>(undefined);
-  const prevLastLineRef = useRef<number | undefined>(undefined);
+  const prevLengthRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
@@ -79,19 +87,19 @@ export function MessageList({
     if (!el) return;
 
     const newFirstLine = messages[0]?.line_number;
-    const newLastLine = messages[messages.length - 1]?.line_number;
+    const newLength = messages.length;
     const prevFirstLine = prevFirstLineRef.current;
-    const prevLastLine = prevLastLineRef.current;
+    const prevLength = prevLengthRef.current;
     const prevScrollHeight = prevScrollHeightRef.current;
     const newScrollHeight = el.scrollHeight;
 
     // Update refs for the next effect cycle BEFORE any early return so
     // subsequent decisions compare against the most recent state.
     prevFirstLineRef.current = newFirstLine;
-    prevLastLineRef.current = newLastLine;
+    prevLengthRef.current = newLength;
     prevScrollHeightRef.current = newScrollHeight;
 
-    if (pendingScrollLine !== null && messages.length > 0) {
+    if (pendingScrollLine !== null && newLength > 0) {
       requestAnimationFrame(() => {
         if (!scrollRef.current) return;
         const target = scrollRef.current.querySelector(
@@ -106,9 +114,10 @@ export function MessageList({
       return;
     }
 
-    // Prepend: older messages arrived at the head of the list. Preserve the
-    // visual anchor by adding the height delta to the current scrollTop so
-    // the message the user was looking at stays put.
+    // Prepend: older messages arrived at the head — preserve the visual
+    // anchor by adding the height delta to scrollTop so the message the
+    // user was looking at stays put. Check this BEFORE the length-based
+    // append branch because a prepend also grows the list.
     if (
       prevFirstLine !== undefined &&
       newFirstLine !== undefined &&
@@ -118,15 +127,12 @@ export function MessageList({
       return;
     }
 
-    // Append: a new message arrived at the tail. Auto-scroll to the bottom.
-    // First load (prevLastLine undefined) also auto-scrolls so the user
-    // sees the most recent messages immediately.
-    const isFirstLoad = prevLastLine === undefined && messages.length > 0;
-    const isAppend =
-      prevLastLine !== undefined &&
-      newLastLine !== undefined &&
-      newLastLine > prevLastLine;
-    if (isFirstLoad || isAppend) {
+    // Append: anything growing the list at the tail — new live message,
+    // pending placeholder (line_number = -1), poll delivering newer entries.
+    // Length-based detection catches all three; line-number-based detection
+    // would miss the pending case and the user's outbound message would
+    // scroll off-screen.
+    if (newLength > prevLength) {
       el.scrollTop = newScrollHeight;
     }
   }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);

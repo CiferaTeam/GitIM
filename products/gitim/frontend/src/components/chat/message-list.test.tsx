@@ -113,3 +113,174 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(rendered.container.querySelector("[data-message-scroll]")).not.toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scroll position adjustments on message list mutations.
+//
+// jsdom doesn't compute real layout, so scrollHeight is stubbed via
+// Object.defineProperty and we override it between renders to simulate the
+// height change a prepend or append would cause in a real browser.
+// ---------------------------------------------------------------------------
+
+function pendingMsg(): Message {
+  return {
+    line_number: -1,
+    point_to: 0,
+    author: "alice",
+    timestamp: "20260511T120000Z",
+    body: "outbound",
+    _pendingId: "pending-1",
+    _status: "sending",
+  };
+}
+
+function stubScrollHeight(el: HTMLElement, value: number) {
+  Object.defineProperty(el, "scrollHeight", {
+    value,
+    configurable: true,
+  });
+}
+
+async function rerender(
+  root: Root,
+  props: Parameters<typeof MessageList>[0],
+) {
+  await act(async () => {
+    root.render(<MessageList {...props} />);
+    await Promise.resolve();
+  });
+}
+
+describe("MessageList scroll position on message mutations", () => {
+  let root: Root | null = null;
+
+  const baseProps = {
+    scopeKey: "general" as const,
+    replyTo: null,
+    highlightLine: null,
+    pendingScrollLine: null,
+    onHighlightLineChange: () => {},
+    onPendingScrollClear: () => {},
+    onReply: () => {},
+    onShowThread: () => {},
+  };
+
+  /** Render once with a single placeholder so the scroll div exists, stub
+   *  its scrollHeight to `initialHeight`, then rerender with `messages`. The
+   *  layout effect's append branch fires on the second render and reads the
+   *  stubbed height, so prevScrollHeightRef captures `initialHeight` for any
+   *  subsequent rerender that drives the prepend / append math.
+   *  (We can't use messages=[] for the priming render because the empty
+   *  branch in MessageList renders a different DOM tree without
+   *  [data-message-scroll].) */
+  async function mountWithHeight(
+    r: Root,
+    messages: Message[],
+    initialHeight: number,
+  ): Promise<HTMLDivElement> {
+    await act(async () => {
+      r.render(
+        <MessageList {...baseProps} messages={[msg(0, "__placeholder__")]} />,
+      );
+      await Promise.resolve();
+    });
+    const scroll = document.querySelector<HTMLDivElement>(
+      "[data-message-scroll]",
+    )!;
+    stubScrollHeight(scroll, initialHeight);
+    await act(async () => {
+      r.render(<MessageList {...baseProps} messages={messages} />);
+      await Promise.resolve();
+    });
+    return scroll;
+  }
+
+  afterEach(() => {
+    if (root) {
+      root.unmount();
+      root = null;
+    }
+    document.body.innerHTML = "";
+  });
+
+  it("scrolls to the bottom on first load with messages", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(1, "a"), msg(2, "b"), msg(3, "c")],
+      600,
+    );
+
+    expect(scroll.scrollTop).toBe(600);
+  });
+
+  it("scrolls to the bottom when a pending outbound message is appended (line_number = -1)", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(10, "a"), msg(11, "b"), msg(12, "c")],
+      600,
+    );
+    // After first load: scrollTop = 600. Simulate the user pinned at bottom.
+    stubScrollHeight(scroll, 800);
+
+    await rerender(r, {
+      ...baseProps,
+      messages: [msg(10, "a"), msg(11, "b"), msg(12, "c"), pendingMsg()],
+    });
+
+    // Pending append MUST auto-scroll to the bottom, otherwise the user's
+    // outbound message vanishes off-screen until the round-trip lands.
+    expect(scroll.scrollTop).toBe(800);
+  });
+
+  it("preserves the visual anchor when older messages are prepended", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    // Mount with 5 messages, height 500. After mount the layout effect has
+    // captured prevScrollHeight=500, prevFirstLine=50, prevLength=5.
+    const scroll = await mountWithHeight(
+      r,
+      [msg(50, "a"), msg(51, "b"), msg(52, "c"), msg(53, "d"), msg(54, "e")],
+      500,
+    );
+    // Simulate the user has scrolled to the near-top trigger zone.
+    Object.defineProperty(scroll, "scrollTop", {
+      value: 20,
+      writable: true,
+      configurable: true,
+    });
+    // Older history arrives, height grows to 1000 (delta = 500).
+    stubScrollHeight(scroll, 1000);
+
+    await rerender(r, {
+      ...baseProps,
+      messages: [
+        msg(45, "old-a"),
+        msg(46, "old-b"),
+        msg(47, "old-c"),
+        msg(48, "old-d"),
+        msg(49, "old-e"),
+        msg(50, "a"),
+        msg(51, "b"),
+        msg(52, "c"),
+        msg(53, "d"),
+        msg(54, "e"),
+      ],
+    });
+
+    // Expected: scrollTop = 20 + (1000 - 500) = 520 (visual anchor held).
+    expect(scroll.scrollTop).toBe(520);
+  });
+});
