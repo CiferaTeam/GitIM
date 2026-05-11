@@ -702,28 +702,83 @@ export async function appendBoardSection(
 // All five routes are GET-only in v1 — calendar is view-only. Local (browser)
 // mode has no cron engine, so these short-circuit to a friendly empty
 // response shape rather than 404 / unreachable network errors.
-
+//
+// Wire contract: the runtime cron handlers (gitim-runtime::http.rs Phase 4
+// typed-response style) return RAW typed JSON bodies on success — e.g.
+// `{crons: [...]}` for list, `{entries: [...]}` for timeline, the
+// `CronDetail` directly for show, `{body: "..."}` for a single run. They
+// only emit the legacy `{ok, error, error_code}` envelope on failure, via
+// `ErrorBody`. That asymmetry means we can't just `return await res.json()`
+// and call it an `ApiResponse` (success bodies have no `ok` field, so
+// `res.ok` reads as `undefined` and consumers treat every successful
+// fetch as a failure — the bug Phase 6 was opened to fix).
+//
+// `cronRequest` re-wraps these raw success bodies in `{ok: true, data}` so
+// the cron callers in WebUI keep their existing `ApiResponse` ergonomics,
+// while still surfacing `error` / `error_code` on the failure path. The
+// rest of the client (channels/dms/boards) returns daemon-shaped envelopes
+// directly, so they don't need this helper.
 const CRON_LOCAL_UNAVAILABLE: ApiResponse<never> = {
   ok: false,
   error: "Cron view requires the gitim runtime (not available in browser mode).",
   error_code: "runtime_required",
 };
 
+async function cronRequest<T>(
+  url: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<T>> {
+  let res: Response;
+  try {
+    res = await fetch(url, signal ? { signal } : undefined);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (e instanceof Error && e.name === "AbortError") throw e;
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  // Parse the body once. Empty / malformed body on a 2xx is treated as an
+  // error so consumers don't render with `undefined` data and crash deeper.
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      error: res.ok
+        ? `failed to parse response body: ${e instanceof Error ? e.message : String(e)}`
+        : `HTTP ${res.status}`,
+    };
+  }
+  if (!res.ok) {
+    // ErrorBody shape from runtime: `{ok: false, error, error_code?}`.
+    const obj = (body as Record<string, unknown>) ?? {};
+    return {
+      ok: false,
+      error: typeof obj.error === "string" ? obj.error : `HTTP ${res.status}`,
+      error_code: typeof obj.error_code === "string" ? obj.error_code : undefined,
+    };
+  }
+  // 2xx — runtime returns the raw typed body. Wrap it.
+  return { ok: true, data: body as T };
+}
+
 export async function listCrons(
   slug: string,
 ): Promise<ApiResponse<{ crons: CronSummary[] }>> {
   if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
-  const res = await fetch(`${wsBase(slug)}/crons`);
-  return await res.json();
+  return cronRequest<{ crons: CronSummary[] }>(`${wsBase(slug)}/crons`);
 }
 
 export async function showCron(
   slug: string,
   name: string,
+  signal?: AbortSignal,
 ): Promise<ApiResponse<CronDetail>> {
   if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
-  const res = await fetch(`${wsBase(slug)}/crons/${encodeURIComponent(name)}`);
-  return await res.json();
+  return cronRequest<CronDetail>(
+    `${wsBase(slug)}/crons/${encodeURIComponent(name)}`,
+    signal,
+  );
 }
 
 export async function listCronRuns(
@@ -731,22 +786,22 @@ export async function listCronRuns(
   name: string,
 ): Promise<ApiResponse<{ runs: CronRunEntry[] }>> {
   if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
-  const res = await fetch(
+  return cronRequest<{ runs: CronRunEntry[] }>(
     `${wsBase(slug)}/crons/${encodeURIComponent(name)}/runs`,
   );
-  return await res.json();
 }
 
 export async function getCronRunBody(
   slug: string,
   name: string,
   ts: string,
+  signal?: AbortSignal,
 ): Promise<ApiResponse<CronRunBody>> {
   if (isLocalMode()) return CRON_LOCAL_UNAVAILABLE;
-  const res = await fetch(
+  return cronRequest<CronRunBody>(
     `${wsBase(slug)}/crons/${encodeURIComponent(name)}/runs/${encodeURIComponent(ts)}`,
+    signal,
   );
-  return await res.json();
 }
 
 export async function getCronTimeline(
@@ -761,8 +816,7 @@ export async function getCronTimeline(
   if (to) params.set("to", to);
   const qs = params.toString();
   const url = `${wsBase(slug)}/crons/timeline${qs ? `?${qs}` : ""}`;
-  const res = await fetch(url, { signal });
-  return await res.json();
+  return cronRequest<CronTimelineResponse>(url, signal);
 }
 
 /** Sanitize a display name into a valid handler (a-z, 0-9, hyphens). */
