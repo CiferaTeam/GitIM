@@ -236,6 +236,14 @@ export function MessageItem({
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
           >
+            {message.line_number > 0 && (
+              <span
+                className="text-[10px] font-mono text-text-muted/40 mr-2 select-none align-baseline tabular-nums"
+                title={`Line ${message.line_number}`}
+              >
+                L{message.line_number}
+              </span>
+            )}
             <MessageBody
               body={message.body}
               onMentionClick={onMentionClick}
