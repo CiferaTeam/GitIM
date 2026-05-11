@@ -17,22 +17,6 @@ impl Provider for TestOverrideProvider {
     }
 }
 
-/// A test provider that suppresses the cron usage section. Models a
-/// hypothetical future provider whose execution surface doesn't include
-/// shell tool access (so teaching it cron syntax would be misleading).
-struct CronlessProvider;
-
-#[async_trait]
-impl Provider for CronlessProvider {
-    async fn execute(&self, _prompt: &str, _opts: ExecOptions) -> Result<Session, ProviderError> {
-        Err(ProviderError::NotImplemented("test".to_string()))
-    }
-
-    fn prompt_cron_usage(&self, _ctx: &PromptContext) -> String {
-        String::new()
-    }
-}
-
 #[test]
 fn default_prompt_contains_all_sections() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
@@ -54,84 +38,51 @@ fn default_prompt_contains_all_sections() {
     assert!(prompt.contains("## GitIM 工具"));
     assert!(prompt.contains("## 主机操作边界"));
     assert!(prompt.contains("pkill -f gitim-daemon"));
-    // Cron usage is part of the default surface — assert presence and
-    // canonical command syntax. The substring "gitim cron create" is
-    // narrow enough that wording tweaks elsewhere in the section won't
-    // flap it, but specific enough to fail loudly if Lane B ever renames
-    // the subcommand.
-    assert!(prompt.contains("## 周期任务"));
+    // Cron lives inside the GitIM API section alongside Cards/Boards.
+    // The substring "gitim cron create" is narrow enough that wording
+    // tweaks elsewhere in the section won't flap it, but specific
+    // enough to fail loudly if the subcommand is ever renamed.
+    assert!(prompt.contains("### 周期任务 (Cron)"));
     assert!(prompt.contains("gitim cron create"));
 }
 
 #[test]
-fn cron_usage_carries_canonical_command_and_target_alias() {
-    // Standalone test on just the cron section. Catches "we forgot to
-    // update the example after CLI changed flag names" — if Lane B ever
-    // renames --schedule / --target / --prompt or drops the @self alias,
-    // this breaks before agents ever see the stale text.
-    //
-    // We reach the section through any provider's default trait method
-    // rather than calling `prompts::default_cron_usage` directly, because
-    // the `prompts` module is `pub(crate)`. The default impl delegates to
-    // the same function, so flag/alias regressions still surface here.
+fn gitim_api_exposes_cron_commands() {
+    // Cron lives inside `prompt_gitim_api` alongside cards and boards.
+    // If the CLI ever renames --schedule / --target / --prompt or drops
+    // the @self alias, this breaks before agents ever see stale text.
     let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "any-bot",
         model: None,
     };
-    let section = provider.prompt_cron_usage(&ctx);
+    let api = provider.prompt_gitim_api(&ctx);
 
     assert!(
-        section.contains("gitim cron create"),
+        api.contains("### 周期任务 (Cron)"),
+        "missing cron section header"
+    );
+    assert!(
+        api.contains("gitim cron create"),
         "missing canonical command"
     );
-    assert!(section.contains("--schedule"), "missing --schedule flag");
-    assert!(section.contains("--target"), "missing --target flag");
-    assert!(section.contains("--prompt"), "missing --prompt flag");
-    assert!(section.contains("@self"), "missing @self target alias");
+    assert!(api.contains("--schedule"), "missing --schedule flag");
+    assert!(api.contains("--target"), "missing --target flag");
+    assert!(api.contains("--prompt"), "missing --prompt flag");
+    assert!(api.contains("@self"), "missing @self target alias");
 
     // Schedule format coverage — 5-field cron + at least one alias so
     // the agent knows both forms are accepted.
-    assert!(
-        section.contains("5 字段"),
-        "missing 5-field cron explanation"
-    );
-    assert!(section.contains("@daily"), "missing @daily alias example");
+    assert!(api.contains("5 字段"), "missing 5-field cron explanation");
+    assert!(api.contains("@daily"), "missing @daily alias example");
 
     // Wake-up shape — the agent has to recognize that a [@system]
     // message with `cron(<name>):` prefix IS the trigger.
-    assert!(section.contains("[@system]"), "missing system author cue");
-    assert!(section.contains("cron("), "missing cron(<name>) prefix cue");
+    assert!(api.contains("[@system]"), "missing system author cue");
+    assert!(api.contains("cron("), "missing cron(<name>) prefix cue");
 
     // Discoverability commands the agent needs to know exist.
-    assert!(section.contains("gitim cron list"), "missing list command");
-}
-
-#[test]
-fn provider_can_override_cron_usage_to_empty() {
-    let provider = CronlessProvider;
-    let ctx = PromptContext {
-        handler: "shellless-bot",
-        model: None,
-    };
-    let prompt = provider.build_system_prompt(&ctx);
-
-    // Section header is gone — proves the override took effect end-to-end
-    // through build_system_prompt (not just at the trait method level).
-    assert!(
-        !prompt.contains("## 周期任务"),
-        "cron section header should be absent when override returns empty"
-    );
-    assert!(
-        !prompt.contains("gitim cron create"),
-        "cron command example should be absent when override returns empty"
-    );
-
-    // Other sections still default — proves we didn't accidentally take
-    // out more than the cron block.
-    assert!(prompt.contains("你是 shellless-bot"));
-    assert!(prompt.contains("## GitIM 工具"));
-    assert!(prompt.contains("## 主机操作边界"));
+    assert!(api.contains("gitim cron list"), "missing list command");
 }
 
 #[test]

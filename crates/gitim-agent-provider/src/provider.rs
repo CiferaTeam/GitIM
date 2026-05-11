@@ -59,9 +59,6 @@ pub trait Provider: Send + Sync {
     fn prompt_gitim_api(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_gitim_api(ctx)
     }
-    fn prompt_cron_usage(&self, ctx: &PromptContext) -> String {
-        crate::prompts::default_cron_usage(ctx)
-    }
     fn prompt_host_safety(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_host_safety(ctx)
     }
@@ -75,7 +72,6 @@ pub trait Provider: Send + Sync {
             self.prompt_reset_protocol(ctx),
             self.prompt_cold_start(ctx),
             self.prompt_gitim_api(ctx),
-            self.prompt_cron_usage(ctx),
             self.prompt_host_safety(ctx),
         ]
         .join("\n\n")
