@@ -3,9 +3,11 @@ import {
   buildMonthGrid,
   currentMonth,
   dayKey,
+  distinctCronCount,
   formatEntryTime,
   formatMonthLabel,
   groupEntriesByDay,
+  groupEntriesByHour,
   monthRangeIso,
   shiftMonth,
 } from "./calendar-utils";
@@ -79,5 +81,80 @@ describe("calendar-utils", () => {
   it("formatEntryTime returns HH:MMZ", () => {
     expect(formatEntryTime("2026-05-11T09:30:00Z")).toBe("09:30Z");
     expect(formatEntryTime("2026-05-11T23:00:00Z")).toBe("23:00Z");
+  });
+
+  describe("groupEntriesByHour", () => {
+    it("returns an empty array for an empty input", () => {
+      expect(groupEntriesByHour([])).toEqual([]);
+    });
+
+    it("buckets a single entry into one hour group", () => {
+      const entries: CronTimelineEntry[] = [
+        { ts: "2026-05-18T03:15:00Z", kind: "past", cron_name: "a", target: "alice" },
+      ];
+      const groups = groupEntriesByHour(entries);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].hourKey).toBe("03");
+      expect(groups[0].label).toBe("03:00Z");
+      expect(groups[0].entries).toHaveLength(1);
+    });
+
+    it("groups by UTC hour and ascends across hours", () => {
+      const entries: CronTimelineEntry[] = [
+        { ts: "2026-05-18T13:45:00Z", kind: "past", cron_name: "a", target: "alice" },
+        { ts: "2026-05-18T01:00:00Z", kind: "future", cron_name: "b", target: "bob" },
+        { ts: "2026-05-18T13:00:00Z", kind: "missed", cron_name: "c", target: "carol" },
+      ];
+      const groups = groupEntriesByHour(entries);
+      expect(groups.map((g) => g.hourKey)).toEqual(["01", "13"]);
+      // Hour 13 has two entries; insertion order is preserved within a group.
+      expect(groups[1].entries.map((e) => e.cron_name)).toEqual(["a", "c"]);
+    });
+
+    it("skips hours with zero entries (no padded 24-row grid)", () => {
+      // Entries at 03 and 17 only. No group should exist for 04..16.
+      const entries: CronTimelineEntry[] = [
+        { ts: "2026-05-18T03:00:00Z", kind: "past", cron_name: "a", target: "alice" },
+        { ts: "2026-05-18T17:00:00Z", kind: "future", cron_name: "b", target: "alice" },
+      ];
+      const groups = groupEntriesByHour(entries);
+      expect(groups).toHaveLength(2);
+      expect(groups.map((g) => g.hourKey)).toEqual(["03", "17"]);
+    });
+
+    it("treats 23:xx and 00:xx as separate hours (does not wrap across midnight)", () => {
+      const entries: CronTimelineEntry[] = [
+        { ts: "2026-05-18T23:30:00Z", kind: "past", cron_name: "late", target: "alice" },
+        { ts: "2026-05-19T00:30:00Z", kind: "past", cron_name: "early", target: "alice" },
+      ];
+      const groups = groupEntriesByHour(entries);
+      // groupEntriesByHour only buckets by hour-of-day, so callers stay
+      // responsible for one-day-at-a-time semantics; we just assert the
+      // two entries don't collapse into the same hour bucket.
+      expect(groups.map((g) => g.hourKey)).toEqual(["00", "23"]);
+    });
+  });
+
+  describe("distinctCronCount", () => {
+    it("returns 0 for an empty input", () => {
+      expect(distinctCronCount([])).toBe(0);
+    });
+
+    it("returns 1 for a single entry", () => {
+      expect(
+        distinctCronCount([
+          { ts: "2026-05-18T03:00:00Z", kind: "past", cron_name: "a", target: "alice" },
+        ]),
+      ).toBe(1);
+    });
+
+    it("deduplicates by cron_name", () => {
+      const entries: CronTimelineEntry[] = [
+        { ts: "2026-05-18T03:00:00Z", kind: "past", cron_name: "a", target: "alice" },
+        { ts: "2026-05-18T04:00:00Z", kind: "past", cron_name: "a", target: "alice" },
+        { ts: "2026-05-18T05:00:00Z", kind: "past", cron_name: "b", target: "alice" },
+      ];
+      expect(distinctCronCount(entries)).toBe(2);
+    });
   });
 });
