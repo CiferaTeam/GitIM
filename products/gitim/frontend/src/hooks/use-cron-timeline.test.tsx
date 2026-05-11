@@ -75,7 +75,7 @@ describe("useCronTimeline", () => {
       ok: true,
       data: {
         entries: [
-          { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "alpha" },
+          { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "alpha", target: "alice" },
         ],
         truncated: true,
       },

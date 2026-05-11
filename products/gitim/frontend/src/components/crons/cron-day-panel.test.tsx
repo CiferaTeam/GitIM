@@ -63,6 +63,7 @@ const PAST_ENTRY: CronTimelineEntry = {
   ts: "2026-05-11T09:00:00Z",
   kind: "past",
   cron_name: "weekly-report",
+  target: "alice",
   thread_url: "/workspaces/phone/crons/weekly-report/runs/2026-05-11T09-00-00Z",
 };
 
@@ -70,12 +71,14 @@ const FUTURE_ENTRY: CronTimelineEntry = {
   ts: "2026-05-18T09:00:00Z",
   kind: "future",
   cron_name: "weekly-report",
+  target: "alice",
 };
 
 const MISSED_ENTRY: CronTimelineEntry = {
   ts: "2026-05-12T09:30:00Z",
   kind: "missed",
   cron_name: "daily-standup",
+  target: "bob",
   reason: "no thread file present",
 };
 
@@ -282,6 +285,7 @@ describe("CronDayPanel", () => {
       ts: "2026-05-11T10:00:00Z",
       kind: "past",
       cron_name: "later-job",
+      target: "alice",
     };
     getCronRunBodyMock.mockImplementation(
       (_slug: string, _name: string, _ts: string, signal?: AbortSignal) => {
@@ -349,6 +353,7 @@ describe("CronDayPanel", () => {
               ts: "2026-05-11T09:00:00Z",
               kind: "failed" as unknown as CronTimelineEntry["kind"],
               cron_name: "weekly-report",
+              target: "alice",
             },
           ]}
           onClose={() => {}}

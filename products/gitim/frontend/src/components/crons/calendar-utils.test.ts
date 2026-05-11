@@ -55,9 +55,9 @@ describe("calendar-utils", () => {
 
   it("groupEntriesByDay buckets entries by UTC day and sorts within day", () => {
     const entries: CronTimelineEntry[] = [
-      { ts: "2026-05-11T09:30:00Z", kind: "past", cron_name: "daily" },
-      { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "daily" },
-      { ts: "2026-05-12T09:00:00Z", kind: "future", cron_name: "daily" },
+      { ts: "2026-05-11T09:30:00Z", kind: "past", cron_name: "daily", target: "alice" },
+      { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "daily", target: "alice" },
+      { ts: "2026-05-12T09:00:00Z", kind: "future", cron_name: "daily", target: "alice" },
     ];
     const grouped = groupEntriesByDay(entries);
     expect(grouped.size).toBe(2);
@@ -71,7 +71,7 @@ describe("calendar-utils", () => {
 
   it("groupEntriesByDay drops entries with unparseable ts", () => {
     const grouped = groupEntriesByDay([
-      { ts: "bogus", kind: "past", cron_name: "x" },
+      { ts: "bogus", kind: "past", cron_name: "x", target: "alice" },
     ]);
     expect(grouped.size).toBe(0);
   });

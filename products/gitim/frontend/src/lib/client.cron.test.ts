@@ -113,8 +113,8 @@ describe("cron client wire-shape contract (raw runtime typed bodies)", () => {
       const client = await setupRemote();
       const runtimeBody = {
         entries: [
-          { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "alpha" },
-          { ts: "2026-05-18T09:00:00Z", kind: "future", cron_name: "alpha" },
+          { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "alpha", target: "alice" },
+          { ts: "2026-05-18T09:00:00Z", kind: "future", cron_name: "alpha", target: "alice" },
         ],
         truncated: false,
       };

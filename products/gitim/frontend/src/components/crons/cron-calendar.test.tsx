@@ -133,18 +133,21 @@ describe("CronCalendar", () => {
             ts: pastTs,
             kind: "past",
             cron_name: "weekly-report",
+            target: "alice",
             thread_url: `/workspaces/phone/crons/weekly-report/runs/${pastTs.replace(/:/g, "-")}`,
           },
           {
             ts: missedTs,
             kind: "missed",
             cron_name: "daily-standup",
+            target: "bob",
             reason: "no thread file present",
           },
           {
             ts: futureTs,
             kind: "future",
             cron_name: "weekly-report",
+            target: "alice",
           },
         ],
         truncated: false,
@@ -194,7 +197,7 @@ describe("CronCalendar", () => {
     getCronTimelineMock.mockResolvedValue({
       ok: true,
       data: {
-        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+        entries: [{ ts, kind: "past", cron_name: "weekly-report", target: "alice" }],
       },
     });
 
@@ -244,7 +247,7 @@ describe("CronCalendar", () => {
     getCronTimelineMock.mockResolvedValue({
       ok: true,
       data: {
-        entries: [{ ts, kind: "past", cron_name: "weekly-report" }],
+        entries: [{ ts, kind: "past", cron_name: "weekly-report", target: "alice" }],
       },
     });
 
@@ -323,9 +326,9 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha" },
-          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "beta" },
-          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "missed", cron_name: "gamma" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "alpha", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "past", cron_name: "beta", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "missed", cron_name: "gamma", target: "alice" },
         ],
       },
     });
@@ -355,9 +358,9 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
-          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "missed", cron_name: "daily-standup" },
-          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "future", cron_name: "monthly-roll" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report", target: "alice" },
+          { ts: `${year}-${pad(month)}-15T10:00:00Z`, kind: "missed", cron_name: "daily-standup", target: "bob" },
+          { ts: `${year}-${pad(month)}-15T11:00:00Z`, kind: "future", cron_name: "monthly-roll", target: "carol" },
         ],
       },
     });
@@ -405,7 +408,7 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report" },
+          { ts: `${year}-${pad(month)}-15T09:00:00Z`, kind: "past", cron_name: "weekly-report", target: "alice" },
         ],
       },
     });
@@ -445,11 +448,11 @@ describe("CronCalendar", () => {
       ok: true,
       data: {
         entries: [
-          { ts: baseTs(8, 0), kind: "past", cron_name: "job-a" },
-          { ts: baseTs(9, 0), kind: "past", cron_name: "job-b" },
-          { ts: baseTs(10, 0), kind: "past", cron_name: "job-c" },
-          { ts: baseTs(11, 0), kind: "future", cron_name: "job-d" },
-          { ts: baseTs(12, 0), kind: "future", cron_name: "job-e" },
+          { ts: baseTs(8, 0), kind: "past", cron_name: "job-a", target: "alice" },
+          { ts: baseTs(9, 0), kind: "past", cron_name: "job-b", target: "alice" },
+          { ts: baseTs(10, 0), kind: "past", cron_name: "job-c", target: "alice" },
+          { ts: baseTs(11, 0), kind: "future", cron_name: "job-d", target: "alice" },
+          { ts: baseTs(12, 0), kind: "future", cron_name: "job-e", target: "alice" },
         ],
       },
     });
