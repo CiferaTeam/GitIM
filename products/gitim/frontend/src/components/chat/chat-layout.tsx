@@ -21,6 +21,10 @@ import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
 import { UserCard } from "./user-card";
 
+/** Page size for both initial channel load and history paging. Single
+ *  source of truth: changing this here changes every read call. */
+export const MESSAGES_PAGE_SIZE = 50;
+
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
   if (displayName.includes("--")) {
@@ -140,7 +144,7 @@ export function ChatLayout() {
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(requestSlug, apiChannel, 50);
+      const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
       if (
         res.ok &&
         res.data &&
@@ -175,7 +179,7 @@ export function ChatLayout() {
       setChannels(chRes.data.channels as Channel[]);
     }
     const apiChannel = toApiChannel(requestChannel);
-    const readRes = await client.read(requestSlug, apiChannel, 50);
+    const readRes = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
     if (
       readRes.ok &&
       readRes.data &&
@@ -332,7 +336,7 @@ export function ChatLayout() {
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(requestSlug, apiChannel, 50);
+    const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
     if (
       res.ok &&
       res.data &&
