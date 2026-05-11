@@ -469,4 +469,240 @@ describe("CronDayPanel", () => {
     expect(container.textContent).toContain("已执行");
     expect(getCronRunBodyMock).toHaveBeenCalledTimes(1);
   });
+
+  // -- Hour grouping (threshold = 12) --
+  //
+  // ≤12 entries: flat list (current behavior). >12: collapsed-by-default
+  // hour groups so a high-frequency cron (e.g. */30 ≡ 48/day) doesn't
+  // dump a wall of rows at the user.
+
+  function makeBulkEntries(count: number, hour: number): CronTimelineEntry[] {
+    // Spread `count` entries inside a single hour, two minutes apart, so
+    // they all bucket to the same hour group regardless of `count`.
+    return Array.from({ length: count }, (_, i) => ({
+      ts: `2026-05-18T${String(hour).padStart(2, "0")}:${String(i * 2).padStart(2, "0")}:00Z`,
+      kind: "future" as const,
+      cron_name: "bulk-job",
+      target: "alice",
+    }));
+  }
+
+  it("renders flat list when entry count is at or below the threshold (12)", () => {
+    const entries = makeBulkEntries(12, 9);
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    // No hour-group header should appear at threshold-edge.
+    expect(container.querySelector('[data-testid="hour-group"]')).toBeNull();
+    // All 12 entry buttons exist directly under the list.
+    const entryButtons = container.querySelectorAll('[data-testid="entry-row"]');
+    expect(entryButtons.length).toBe(12);
+  });
+
+  it("groups entries by hour when count exceeds the threshold", () => {
+    // 8 in hour 09, 5 in hour 10 = 13 total (> 12), spans two hour buckets.
+    const entries = [
+      ...makeBulkEntries(8, 9),
+      ...makeBulkEntries(5, 10),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const headers = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="hour-group-header"]'),
+    );
+    expect(headers).toHaveLength(2);
+    expect(headers[0].textContent).toContain("09:00Z");
+    expect(headers[0].textContent).toContain("8");
+    expect(headers[1].textContent).toContain("10:00Z");
+    expect(headers[1].textContent).toContain("5");
+    // Default state is collapsed: aria-expanded="false" on every header
+    // and no entry row visible.
+    for (const h of headers) {
+      expect(h.getAttribute("aria-expanded")).toBe("false");
+    }
+    expect(container.querySelector('[data-testid="entry-row"]')).toBeNull();
+  });
+
+  it("clicking an hour-group header expands and re-clicking collapses", () => {
+    const entries = [
+      ...makeBulkEntries(7, 9),
+      ...makeBulkEntries(7, 10),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const firstHeader = container.querySelector<HTMLButtonElement>(
+      '[data-testid="hour-group-header"]',
+    )!;
+    expect(firstHeader.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => {
+      firstHeader.click();
+    });
+    expect(firstHeader.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      container.querySelectorAll('[data-testid="entry-row"]').length,
+    ).toBe(7);
+
+    act(() => {
+      firstHeader.click();
+    });
+    expect(firstHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="entry-row"]')).toBeNull();
+  });
+
+  it("re-opens the panel with all hour groups collapsed (state reset)", () => {
+    const entries = [
+      ...makeBulkEntries(7, 9),
+      ...makeBulkEntries(7, 10),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const firstHeader = container.querySelector<HTMLButtonElement>(
+      '[data-testid="hour-group-header"]',
+    )!;
+    act(() => {
+      firstHeader.click();
+    });
+    expect(firstHeader.getAttribute("aria-expanded")).toBe("true");
+
+    // Switch to a different day, then back.
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-19"
+          entries={[]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const headerAfterReopen = container.querySelector<HTMLButtonElement>(
+      '[data-testid="hour-group-header"]',
+    )!;
+    expect(headerAfterReopen.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("hour-group header reports kind breakdown in aria-label and dot count", () => {
+    // Hour 09: 4 past + 2 future + 1 missed (all kinds present).
+    const entries: CronTimelineEntry[] = [
+      ...Array.from({ length: 4 }, (_, i) => ({
+        ts: `2026-05-18T09:${String(i).padStart(2, "0")}:00Z`,
+        kind: "past" as const,
+        cron_name: "p",
+        target: "alice",
+      })),
+      ...Array.from({ length: 2 }, (_, i) => ({
+        ts: `2026-05-18T09:${String(10 + i).padStart(2, "0")}:00Z`,
+        kind: "future" as const,
+        cron_name: "f",
+        target: "alice",
+      })),
+      {
+        ts: "2026-05-18T09:20:00Z",
+        kind: "missed",
+        cron_name: "m",
+        target: "alice",
+      },
+      // Pad with 6 future entries in hour 10 so total = 13 > threshold.
+      ...makeBulkEntries(6, 10),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const headers = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="hour-group-header"]'),
+    );
+    const hour09 = headers.find((h) => h.textContent?.includes("09:00Z"))!;
+    const label = hour09.getAttribute("aria-label") ?? "";
+    expect(label).toContain("09:00Z");
+    expect(label).toContain("4 已执行");
+    expect(label).toContain("2 未来");
+    expect(label).toContain("1 未执行");
+    // Three kind dots visible (one per non-zero kind), each marked aria-hidden.
+    const dots = hour09.querySelectorAll('[data-testid="kind-dot"]');
+    expect(dots.length).toBe(3);
+  });
+
+  it("hour-group with only one kind shows a single dot", () => {
+    // 13 past-only entries split across two hours (single kind in each).
+    const entries: CronTimelineEntry[] = [
+      ...makeBulkEntries(7, 9).map((e) => ({ ...e, kind: "past" as const })),
+      ...makeBulkEntries(6, 10).map((e) => ({ ...e, kind: "past" as const })),
+    ];
+    const { container, root: r } = makeRoot();
+    root = r;
+    act(() => {
+      r.render(
+        <CronDayPanel
+          slug="phone"
+          dayKey="2026-05-18"
+          entries={entries}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const firstHeader = container.querySelector<HTMLButtonElement>(
+      '[data-testid="hour-group-header"]',
+    )!;
+    const dots = firstHeader.querySelectorAll('[data-testid="kind-dot"]');
+    expect(dots.length).toBe(1);
+  });
 });
