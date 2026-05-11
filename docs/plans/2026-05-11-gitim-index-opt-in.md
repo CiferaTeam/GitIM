@@ -128,6 +128,10 @@ CLI `gitim search` / `gitim reindex` 在 agent clone 上失败时用户能看到
 
 Breaking 影响范围实测为零（前端不接、runtime 不暴露），但 CHANGELOG 明确提示，避免少数手动用 `gitim search` 的开发者困惑。
 
+### Ordering constraint (provision_human)
+
+Runtime `provision_human` 写 `indexer.enabled=true` **必须早于** daemon spawn —— daemon 启动时读 config，若文件不存在或字段缺省会落到 false，运行期不 reload。CLI `gitim onboard` 自然如此（config 写入早于 ensure_daemon）。Runtime 路径同样必须保持这个顺序。
+
 旧 `.gitim/index.db` 残留文件**不主动删**:
 
 - 文件本身不大、不在 git 里、用户重新 `enabled=true` 时 `initialize_index` 会自动 incremental update 复用

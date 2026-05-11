@@ -77,6 +77,13 @@ pub async fn provision_human(
 
     std::fs::create_dir_all(human_dir.join(".gitim"))?;
 
+    // Write before daemon spawn so initialize_index sees enabled=true on first startup.
+    // Daemon reads config.yaml at launch; if indexer.enabled is absent or false at that
+    // moment, state.index stays None for the entire session (no hot-reload).
+    ensure_config_indexer_enabled(&human_dir, true)
+        .map_err(|e| RuntimeError::OnboardFailed(format!("indexer config: {e}")))?;
+    info!("indexer enabled in human config");
+
     let root = human_dir.clone();
     let log_path = daemon_log_path(&human_dir);
     tokio::task::spawn_blocking(move || ensure_daemon_with_log(&root, &log_path))
@@ -106,10 +113,6 @@ pub async fn provision_human(
         .status()
         .await
         .map_err(|e| RuntimeError::OnboardFailed(format!("status check failed: {e}")))?;
-
-    ensure_config_indexer_enabled(&human_dir, true)
-        .map_err(|e| RuntimeError::OnboardFailed(format!("indexer config: {e}")))?;
-    info!("indexer enabled in human config");
 
     Ok(human_dir)
 }

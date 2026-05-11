@@ -16,4 +16,3 @@ croner = { workspace = true }
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"
-serde_yaml.workspace = true
