@@ -144,7 +144,13 @@ impl AppState {
 
     /// Open (or rebuild) the search index at `.gitim/index.db`.
     /// Compares stored commit with HEAD; does incremental update or full rebuild as needed.
+    /// Returns immediately without touching SQLite or state.index when `enabled` is false.
     pub fn initialize_index(state: &SharedState) -> Result<(), String> {
+        if !state.config.indexer.enabled {
+            tracing::info!("indexer disabled by config");
+            return Ok(());
+        }
+
         let db_path = state.repo_root.join(".gitim").join("index.db");
         let index = gitim_index::Index::open(&db_path)
             .map_err(|e| format!("failed to open index: {}", e))?;
