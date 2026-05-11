@@ -78,9 +78,18 @@ pub async fn handle_read(
         entries.retain(|e| e.line_number() > since_line);
     }
 
+    // Three calling modes (see docs/plans/2026-05-11-channel-history-pagination/):
+    //   limit only           → tail-cut, last N entries (channel open default)
+    //   since only           → all entries after since (no truncation)
+    //   since + limit        → head-cut, first N entries after since
+    //                          (covers both incremental poll and history paging)
     if let Some(lim) = limit {
-        let start = entries.len().saturating_sub(lim);
-        entries = entries[start..].to_vec();
+        if since.is_some() {
+            entries.truncate(lim);
+        } else {
+            let start = entries.len().saturating_sub(lim);
+            entries = entries[start..].to_vec();
+        }
     }
 
     let entries: Vec<serde_json::Value> =
