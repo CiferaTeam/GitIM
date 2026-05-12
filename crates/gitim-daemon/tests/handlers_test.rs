@@ -1496,3 +1496,209 @@ async fn test_poll_filters_card_by_channel_membership() {
         changes
     );
 }
+
+// ---------------------------------------------------------------------------
+// handle_read since + limit semantics
+//
+// Three calling modes covered (see docs/plans/2026-05-11-channel-history-pagination/):
+//   - limit only             → tail-cut, last N entries (channel open default)
+//   - since only             → all entries after since (no truncation)
+//   - since + limit          → head-cut, first N entries after since
+//                              (incremental poll and history paging share this branch)
+//
+// These tests bypass `handle_send` to avoid one git commit per message — they
+// write directly into the channel's `.thread` file using the same formatter the
+// daemon uses, then drive `Request::Read` through the standard dispatch.
+// ---------------------------------------------------------------------------
+
+fn seed_channel_with_n_messages(state: &SharedState, channel: &str, count: u64) {
+    use gitim_core::formatter::format_message;
+    use gitim_core::types::Handler;
+    use std::io::Write;
+
+    let author = Handler::new("alice").unwrap();
+    let thread_path = state
+        .repo_root
+        .join("channels")
+        .join(format!("{}.thread", channel));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(&thread_path)
+        .unwrap();
+    for i in 1..=count {
+        let content = format_message(i, 0, &author, "20260511T120000Z", &format!("m{}", i));
+        f.write_all(content.as_bytes()).unwrap();
+    }
+}
+
+fn read_line_numbers(resp_data: serde_json::Value) -> Vec<u64> {
+    resp_data["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .map(|e| e["line_number"].as_u64().unwrap())
+        .collect()
+}
+
+async fn setup_seeded_channel(tmp: &std::path::Path, count: u64) -> SharedState {
+    let state = setup_test_state(tmp);
+    register_test_user(&state, "alice").await;
+    create_test_channel(&state, "general", "alice");
+    seed_channel_with_n_messages(&state, "general", count);
+    state
+}
+
+#[tokio::test]
+async fn test_read_limit_only_returns_last_n() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 100).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(50),
+            since: None,
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    assert_eq!(
+        read_line_numbers(resp.data.unwrap()),
+        (51..=100).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_since_only_returns_all_after() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 100).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: None,
+            since: Some(80),
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    assert_eq!(
+        read_line_numbers(resp.data.unwrap()),
+        (81..=100).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_since_with_limit_paging_back() {
+    // Frontend history-paging use case: oldest in view = 951, fetch [901..=950]
+    // by passing since = oldest - limit - 1 = 900.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 1000).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(50),
+            since: Some(900),
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    assert_eq!(
+        read_line_numbers(resp.data.unwrap()),
+        (901..=950).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_since_with_limit_incremental_poll() {
+    // Incremental poll: caller knows latest seen line = 50, asks for next 30.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 100).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(30),
+            since: Some(50),
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    assert_eq!(
+        read_line_numbers(resp.data.unwrap()),
+        (51..=80).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_since_zero_with_limit_takes_first_n() {
+    // since=0 + limit=N → retain line>0 (all entries) then head-truncate to first N.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 100).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(10),
+            since: Some(0),
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    assert_eq!(
+        read_line_numbers(resp.data.unwrap()),
+        (1..=10).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_since_beyond_max_returns_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 50).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(50),
+            since: Some(100),
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    let entries = resp.data.unwrap()["entries"]
+        .as_array()
+        .expect("entries array")
+        .clone();
+    assert!(entries.is_empty(), "expected empty, got {:?}", entries);
+}
+
+#[tokio::test]
+async fn test_read_limit_zero_returns_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_seeded_channel(tmp.path(), 50).await;
+
+    let resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: Some(0),
+            since: None,
+        },
+        state,
+    )
+    .await;
+    assert!(resp.ok, "read failed: {:?}", resp.error);
+    let entries = resp.data.unwrap()["entries"]
+        .as_array()
+        .expect("entries array")
+        .clone();
+    assert!(entries.is_empty(), "expected empty, got {:?}", entries);
+}

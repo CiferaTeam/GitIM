@@ -27,6 +27,11 @@ interface ChatState {
   threadRoot: Message | null;
   threadMessages: Message[];
   navHistory: NavEntry[];
+  /** True until a paginated read returns fewer entries than requested (i.e.
+   *  we've fetched everything older than what's currently in `messages`).
+   *  Reset to true on channel switch — until the next fetch lands, we don't
+   *  know whether there's more history to load. */
+  hasMoreHistory: boolean;
 
   setConnected: (v: boolean) => void;
   setCurrentUser: (u: string) => void;
@@ -48,6 +53,11 @@ interface ChatState {
   clearUnread: (channel: string) => void;
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
+  /** Insert older messages at the head of `messages`, deduping by line_number
+   *  against existing entries. Resulting list stays ascending by line_number,
+   *  assuming the existing list was already ascending. */
+  prependMessages: (m: Message[]) => void;
+  setHasMoreHistory: (v: boolean) => void;
   addPendingMessage: (m: Message) => void;
   markPendingSent: (pendingId: string, lineNumber: number) => void;
   markPendingFailed: (pendingId: string, lineNumber?: number) => void;
@@ -81,6 +91,7 @@ export const useChatStore = create<ChatState>((set) => ({
   threadRoot: null,
   threadMessages: [],
   navHistory: [],
+  hasMoreHistory: true,
 
   setConnected: (v) => set({ connected: v }),
   setCurrentUser: (u) => set({ currentUser: u }),
@@ -182,6 +193,7 @@ export const useChatStore = create<ChatState>((set) => ({
       pendingScrollLine: null,
       threadRoot: null,
       threadMessages: [],
+      hasMoreHistory: true,
     }),
 
   incrementUnread: (channel, mentioned) =>
@@ -209,7 +221,7 @@ export const useChatStore = create<ChatState>((set) => ({
   // they belong to the previous channel context.
   setMessages: (newMessages) =>
     set((state) => {
-      if (newMessages.length === 0) return { messages: [] };
+      if (newMessages.length === 0) return { messages: [], hasMoreHistory: true };
       const realLineNumbers = new Set(newMessages.map((m) => m.line_number));
       const pendingToKeep = state.messages.filter(
         (m) => m._pendingId && !realLineNumbers.has(m.line_number)
@@ -223,6 +235,20 @@ export const useChatStore = create<ChatState>((set) => ({
       const toAdd = m.filter((msg) => !existing.has(msg.line_number));
       return toAdd.length ? { messages: [...state.messages, ...toAdd] } : {};
     }),
+
+  prependMessages: (older) =>
+    set((state) => {
+      if (older.length === 0) return {};
+      const existing = new Set(state.messages.map((m) => m.line_number));
+      const toAdd = older.filter((m) => !existing.has(m.line_number));
+      if (toAdd.length === 0) return {};
+      // Sort the new entries ascending so the merged list stays in order
+      // regardless of input ordering — callers don't have to pre-sort.
+      const sorted = [...toAdd].sort((a, b) => a.line_number - b.line_number);
+      return { messages: [...sorted, ...state.messages] };
+    }),
+
+  setHasMoreHistory: (v) => set({ hasMoreHistory: v }),
 
   addPendingMessage: (m) =>
     set((state) => ({ messages: [...state.messages, m] })),
@@ -294,5 +320,6 @@ export const useChatStore = create<ChatState>((set) => ({
       threadRoot: null,
       threadMessages: [],
       navHistory: [],
+      hasMoreHistory: true,
     }),
 }));

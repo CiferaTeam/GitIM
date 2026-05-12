@@ -1214,3 +1214,103 @@ describe("daemon-web handlers", () => {
       .toBe("card: unarchive 20260317-120000-abc in general by @lewis");
   });
 });
+
+describe("daemon-web read with since + limit semantics", () => {
+  beforeEach(() => {
+    seedState();
+    // Replace the 2-message generalThread with a 10-message fixture so the
+    // since + limit branching can be exercised with non-trivial slicing.
+    const lines: string[] = [];
+    for (let i = 1; i <= 10; i++) {
+      const ln = String(i).padStart(6, "0");
+      lines.push(`[L${ln}][P000000][@alice][20260511T120000Z] m${i}`);
+    }
+    files.set("/repo/channels/general.thread", lines.join("\n") + "\n");
+  });
+
+  function lineNumbers(res: Awaited<ReturnType<typeof read>>): number[] {
+    return ((res.data?.entries as Array<{ line_number: number }>) ?? []).map(
+      (e) => e.line_number,
+    );
+  }
+
+  it("limit only returns the last N entries", async () => {
+    const res = await read("general", 3);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([8, 9, 10]);
+  });
+
+  it("since only returns all entries after the cursor", async () => {
+    const res = await read("general", undefined, 7);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([8, 9, 10]);
+  });
+
+  it("since + limit head-truncates to the first N entries after the cursor", async () => {
+    const res = await read("general", 3, 2);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([3, 4, 5]);
+  });
+
+  it("since beyond max line returns empty", async () => {
+    const res = await read("general", 5, 100);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([]);
+  });
+
+  it("since + limit=0 returns empty", async () => {
+    const res = await read("general", 0, 2);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([]);
+  });
+
+  it("limit=0 alone returns empty (matches daemon, guards JS slice(-0) edge case)", async () => {
+    const res = await read("general", 0);
+    expect(res.ok).toBe(true);
+    expect(lineNumbers(res)).toEqual([]);
+  });
+});
+
+describe("daemon-web readCard with since + limit semantics", () => {
+  beforeEach(() => {
+    seedState();
+    // Replace the 1-message card discussion fixture with 10 messages so
+    // since + limit head-cut can be exercised meaningfully.
+    const lines: string[] = [];
+    for (let i = 1; i <= 10; i++) {
+      const ln = String(i).padStart(6, "0");
+      lines.push(`[L${ln}][P000000][@alice][20260511T120000Z] cm${i}`);
+    }
+    files.set(
+      "/repo/channels/general/cards/20260317-120000-abc/discussion.thread",
+      lines.join("\n") + "\n",
+    );
+  });
+
+  function entryLines(res: Awaited<ReturnType<typeof readCard>>): number[] {
+    return ((res.data?.entries as Array<{ line_number: number }>) ?? []).map(
+      (e) => e.line_number,
+    );
+  }
+
+  it("readCard with limit only returns the last N entries (tail-cut)", async () => {
+    const res = await readCard("general", "20260317-120000-abc", { limit: 3 });
+    expect(res.ok).toBe(true);
+    expect(entryLines(res)).toEqual([8, 9, 10]);
+  });
+
+  it("readCard with since + limit head-cuts to the first N after the cursor (daemon parity)", async () => {
+    const res = await readCard("general", "20260317-120000-abc", {
+      limit: 3,
+      since: 2,
+    });
+    expect(res.ok).toBe(true);
+    expect(entryLines(res)).toEqual([3, 4, 5]);
+  });
+
+  it("readCard with since only returns all entries after the cursor", async () => {
+    const res = await readCard("general", "20260317-120000-abc", { since: 7 });
+    expect(res.ok).toBe(true);
+    expect(entryLines(res)).toEqual([8, 9, 10]);
+  });
+});

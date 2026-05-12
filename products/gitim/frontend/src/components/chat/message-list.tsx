@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo, useState } from "react";
+import { useRef, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
 import { MessageSquare, Hash } from "lucide-react";
@@ -25,7 +25,16 @@ interface MessageListProps {
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
   onActionSheet?: (msg: Message) => void;
+  /** Fired when the user scrolls within `SCROLL_TOP_THRESHOLD_PX` of the top.
+   *  Caller is responsible for fetching older messages and prepending them
+   *  via the chat store; this component only reports the trigger. Optional —
+   *  card/thread views don't paginate. */
+  onLoadOlder?: () => void;
 }
+
+/** How close to the top counts as "the user is asking for more history."
+ *  Anything beyond this is regarded as still browsing the current page. */
+const SCROLL_TOP_THRESHOLD_PX = 50;
 
 export function MessageList({
   messages,
@@ -44,9 +53,24 @@ export function MessageList({
   onMessageLinkClick,
   onUserProfileClick,
   onActionSheet,
+  onLoadOlder,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const prevLengthRef = useRef(messages.length);
+  // Track first line number, list length, and pre-mutation scrollHeight so we
+  // can distinguish prepend (older history arrived at the head) from append
+  // (anything growing the list — new live message, pending placeholder, poll
+  // delivering newer entries) and adjust scroll position appropriately.
+  //
+  // Why head-line for prepend but length for append: pending outbound
+  // messages live at the tail with line_number = -1, so a line-number-based
+  // append detector ("last line grew") would miss them and the user's just-
+  // sent message would scroll off-screen. Length is the right append signal
+  // because pending always grows the array. Prepend, conversely, is unique
+  // in that the head shrinks — length grows too, so we must check the
+  // prepend signal first and bail out before the append branch.
+  const prevFirstLineRef = useRef<number | undefined>(undefined);
+  const prevLengthRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
@@ -58,18 +82,31 @@ export function MessageList({
     return map;
   }, [messages]);
 
-  useEffect(() => {
-    const prev = prevLengthRef.current;
-    prevLengthRef.current = messages.length;
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
 
-    if (pendingScrollLine !== null && messages.length > 0) {
+    const newFirstLine = messages[0]?.line_number;
+    const newLength = messages.length;
+    const prevFirstLine = prevFirstLineRef.current;
+    const prevLength = prevLengthRef.current;
+    const prevScrollHeight = prevScrollHeightRef.current;
+    const newScrollHeight = el.scrollHeight;
+
+    // Update refs for the next effect cycle BEFORE any early return so
+    // subsequent decisions compare against the most recent state.
+    prevFirstLineRef.current = newFirstLine;
+    prevLengthRef.current = newLength;
+    prevScrollHeightRef.current = newScrollHeight;
+
+    if (pendingScrollLine !== null && newLength > 0) {
       requestAnimationFrame(() => {
         if (!scrollRef.current) return;
-        const el = scrollRef.current.querySelector(
-          `[data-line="${pendingScrollLine}"]`
+        const target = scrollRef.current.querySelector(
+          `[data-line="${pendingScrollLine}"]`,
         ) as HTMLElement | null;
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
           onHighlightLineChange(pendingScrollLine);
         }
         onPendingScrollClear();
@@ -77,10 +114,35 @@ export function MessageList({
       return;
     }
 
-    if (messages.length > prev && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    // Prepend: older messages arrived at the head — preserve the visual
+    // anchor by adding the height delta to scrollTop so the message the
+    // user was looking at stays put. Check this BEFORE the length-based
+    // append branch because a prepend also grows the list.
+    if (
+      prevFirstLine !== undefined &&
+      newFirstLine !== undefined &&
+      newFirstLine < prevFirstLine
+    ) {
+      el.scrollTop = el.scrollTop + (newScrollHeight - prevScrollHeight);
+      return;
+    }
+
+    // Append: anything growing the list at the tail — new live message,
+    // pending placeholder (line_number = -1), poll delivering newer entries.
+    // Length-based detection catches all three; line-number-based detection
+    // would miss the pending case and the user's outbound message would
+    // scroll off-screen.
+    if (newLength > prevLength) {
+      el.scrollTop = newScrollHeight;
     }
   }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);
+
+  function handleScrollEvent(event: React.UIEvent<HTMLDivElement>) {
+    if (!onLoadOlder) return;
+    if (event.currentTarget.scrollTop <= SCROLL_TOP_THRESHOLD_PX) {
+      onLoadOlder();
+    }
+  }
 
   useEffect(() => {
     if (highlightLine === null) return;
@@ -150,6 +212,7 @@ export function MessageList({
       ref={scrollRef}
       data-message-scroll
       className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
+      onScroll={handleScrollEvent}
     >
       {messages.map((msg) => {
         const key = msg._pendingId ?? msg.line_number;

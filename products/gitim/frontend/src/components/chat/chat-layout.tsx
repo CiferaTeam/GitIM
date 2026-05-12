@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
@@ -21,6 +21,7 @@ import { MessageList } from "./message-list";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
 import { UserCard } from "./user-card";
+import { MESSAGES_PAGE_SIZE, computeLoadOlderSince } from "./pagination";
 
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
@@ -142,7 +143,7 @@ export function ChatLayout() {
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(requestSlug, apiChannel, 50);
+      const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
       if (
         res.ok &&
         res.data &&
@@ -177,7 +178,7 @@ export function ChatLayout() {
       setChannels(chRes.data.channels as Channel[]);
     }
     const apiChannel = toApiChannel(requestChannel);
-    const readRes = await client.read(requestSlug, apiChannel, 50);
+    const readRes = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
     if (
       readRes.ok &&
       readRes.data &&
@@ -335,7 +336,7 @@ export function ChatLayout() {
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(requestSlug, apiChannel, 50);
+    const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
     if (
       res.ok &&
       res.data &&
@@ -355,6 +356,73 @@ export function ChatLayout() {
       if (el) el.scrollTop = entry.scrollTop;
     });
   }, [activeSlug, workspaceKey, selectChannel, clearUnread, setMessages, setThreadRoot]);
+
+  // In-flight guard for history paging. Plain ref (not store state) — the
+  // scroll handler may fire many times during a fast scroll, and we drop
+  // calls while a fetch is already pending. Doesn't need re-render triggers.
+  //
+  // Reset on channel / workspace switch so a fetch that's still in flight
+  // for the previous context doesn't silently swallow the user's first
+  // scroll-to-top in the new context. The previous-context response is also
+  // dropped by the stale-check inside handleLoadOlder; this effect just
+  // ensures the new context's scroll handler can fire immediately.
+  const loadingOlderRef = useRef(false);
+  useEffect(() => {
+    loadingOlderRef.current = false;
+  }, [currentChannel, workspaceKey]);
+
+  const handleLoadOlder = useCallback(async () => {
+    if (loadingOlderRef.current) return;
+    if (!activeSlug || !currentChannel) return;
+
+    const snapshot = useChatStore.getState();
+    if (!snapshot.hasMoreHistory) return;
+
+    // Oldest real (non-pending) message currently on screen.
+    const oldestLine = snapshot.messages.find((m) => !m._pendingId)?.line_number;
+    const decision = computeLoadOlderSince(oldestLine, MESSAGES_PAGE_SIZE);
+    if (decision.kind === "skip") {
+      if (decision.reason === "at_top") {
+        snapshot.setHasMoreHistory(false);
+      }
+      return;
+    }
+
+    loadingOlderRef.current = true;
+    const requestSlug = activeSlug;
+    const requestWorkspaceKey = workspaceKey;
+    const requestChannel = currentChannel;
+    const apiChannel = toApiChannel(requestChannel);
+    try {
+      const res = await client.read(
+        requestSlug,
+        apiChannel,
+        MESSAGES_PAGE_SIZE,
+        decision.since,
+      );
+      // Workspace switched or channel switched while in flight — drop.
+      if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) return;
+      if (useChatStore.getState().currentChannel !== requestChannel) return;
+
+      if (!res.ok || !res.data) {
+        // Silent transient failure. Logging only — toast would be noisy for
+        // a background scroll trigger; the next scroll naturally retries.
+        console.warn("Failed to load older messages:", res.error);
+        return;
+      }
+
+      const olderEntries = (res.data.entries ?? []) as Message[];
+      if (olderEntries.length > 0) {
+        useChatStore.getState().prependMessages(olderEntries);
+      }
+      // Short response = no more history beyond what we just got.
+      if (olderEntries.length < MESSAGES_PAGE_SIZE) {
+        useChatStore.getState().setHasMoreHistory(false);
+      }
+    } finally {
+      loadingOlderRef.current = false;
+    }
+  }, [activeSlug, workspaceKey, currentChannel]);
 
   const handleCloseUserCard = useCallback(() => {
     setUserCardHandler(null);
@@ -523,6 +591,7 @@ export function ChatLayout() {
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
           onActionSheet={isMobile ? setActionSheetMessage : undefined}
+          onLoadOlder={handleLoadOlder}
         />
         {currentChannel && !isArchivedView && (
           <InputArea

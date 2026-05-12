@@ -560,15 +560,16 @@ export async function read(
   slug: string,
   channel: string,
   limit?: number,
+  since?: number,
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    return activeBackend.read(channel, limit);
+    return activeBackend.read(channel, limit, since);
   }
   const res = await fetch(`${wsBase(slug)}/im/read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, limit }),
+    body: JSON.stringify({ channel, limit, since }),
   });
   return await res.json();
 }

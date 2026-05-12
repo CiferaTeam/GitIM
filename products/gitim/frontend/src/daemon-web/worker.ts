@@ -85,8 +85,12 @@ const handler: Record<
   me: () => handlers.me(),
   poll: (since?: unknown) => handlers.poll(since as string | undefined),
   channels: () => handlers.channels(),
-  read: (channel: unknown, limit?: unknown) =>
-    handlers.read(channel as string, limit as number | undefined),
+  read: (channel: unknown, limit?: unknown, since?: unknown) =>
+    handlers.read(
+      channel as string,
+      limit as number | undefined,
+      since as number | undefined,
+    ),
   send: (
     channel: unknown,
     body: unknown,

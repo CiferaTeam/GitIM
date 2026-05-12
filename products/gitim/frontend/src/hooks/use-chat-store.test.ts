@@ -32,3 +32,62 @@ describe("useChatStore pending messages", () => {
     expect(useChatStore.getState().messages).toEqual([real]);
   });
 });
+
+describe("useChatStore history pagination", () => {
+  beforeEach(() => {
+    useChatStore.getState().resetForWorkspaceSwitch();
+  });
+
+  it("prependMessages on empty messages stores them as the initial set", () => {
+    useChatStore.getState().prependMessages([msg(10, "old"), msg(11, "older")]);
+    expect(useChatStore.getState().messages.map((m) => m.line_number)).toEqual([
+      10, 11,
+    ]);
+  });
+
+  it("prependMessages places older entries before existing ones and keeps line_number ascending", () => {
+    useChatStore.getState().setMessages([msg(50, "current"), msg(51, "current+1")]);
+    useChatStore.getState().prependMessages([msg(48, "older"), msg(49, "older+1")]);
+    expect(useChatStore.getState().messages.map((m) => m.line_number)).toEqual([
+      48, 49, 50, 51,
+    ]);
+  });
+
+  it("prependMessages skips entries whose line_number already exists", () => {
+    useChatStore.getState().setMessages([msg(50, "current")]);
+    useChatStore
+      .getState()
+      .prependMessages([msg(48, "older"), msg(50, "duplicate")]);
+    expect(useChatStore.getState().messages.map((m) => m.line_number)).toEqual([
+      48, 50,
+    ]);
+    // Existing entry's body must not be clobbered by the duplicate.
+    expect(useChatStore.getState().messages[1].body).toBe("current");
+  });
+
+  it("prependMessages with an empty array is a no-op", () => {
+    const before = [msg(50, "a"), msg(51, "b")];
+    useChatStore.getState().setMessages(before);
+    useChatStore.getState().prependMessages([]);
+    expect(useChatStore.getState().messages.map((m) => m.line_number)).toEqual([
+      50, 51,
+    ]);
+  });
+
+  it("setMessages([]) resets hasMoreHistory to true (re-arming on channel switch)", () => {
+    useChatStore.getState().setHasMoreHistory(false);
+    expect(useChatStore.getState().hasMoreHistory).toBe(false);
+    useChatStore.getState().setMessages([]);
+    expect(useChatStore.getState().hasMoreHistory).toBe(true);
+  });
+
+  it("selectChannel resets hasMoreHistory to true (channel switch via selectChannel path)", () => {
+    useChatStore.getState().setHasMoreHistory(false);
+    useChatStore.getState().selectChannel("other");
+    expect(useChatStore.getState().hasMoreHistory).toBe(true);
+  });
+
+  it("hasMoreHistory defaults to true on a fresh workspace", () => {
+    expect(useChatStore.getState().hasMoreHistory).toBe(true);
+  });
+});
