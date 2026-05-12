@@ -50,17 +50,29 @@ enum Commands {
     Read {
         /// Channel name
         channel: String,
-        /// Maximum number of messages to return.
-        /// Alone: the last N messages in the channel.
-        /// With --since: the first N messages after the cursor.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Maximum number of messages to return",
+            long_help = "Maximum number of messages to return.\n\
+                         \n\
+                         Alone: the last N messages in the channel.\n\
+                         With --since: the first N messages after the cursor."
+        )]
         limit: Option<u64>,
-        /// Return messages with line_number > N (a cursor, not a count).
-        /// Alone: every message after the cursor. With --limit: the first
-        /// LIMIT messages after the cursor — use this to page back through
-        /// history (since = oldest_seen - limit - 1) or to pull incrementally
-        /// from a known cursor.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Return messages with line_number > N (a cursor, not a count)",
+            long_help = "Return messages with line_number > N. SINCE is a cursor, \
+                         not a count.\n\
+                         \n\
+                         Alone:        every message after the cursor.\n\
+                         With --limit: the first LIMIT messages after the cursor.\n\
+                         \n\
+                         Page back through history: since = oldest_seen - limit - 1.\n\
+                         Incremental poll:          since = last_seen_line."
+        )]
         since: Option<u64>,
     },
 
@@ -260,14 +272,27 @@ enum DmCommands {
         /// Author handler (defaults to current user)
         #[arg(short, long)]
         author: Option<String>,
-        /// Maximum number of messages to return.
-        /// Alone: the last N messages. With --since: the first N after the cursor.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Maximum number of messages to return",
+            long_help = "Maximum number of messages to return.\n\
+                         \n\
+                         Alone: the last N messages.\n\
+                         With --since: the first N after the cursor."
+        )]
         limit: Option<u64>,
-        /// Return messages with line_number > N (a cursor, not a count).
-        /// With --limit: the first LIMIT messages after the cursor — use to
-        /// page back (since = oldest_seen - limit - 1) or pull incrementally.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Return messages with line_number > N (a cursor, not a count)",
+            long_help = "Return messages with line_number > N. SINCE is a cursor, \
+                         not a count.\n\
+                         \n\
+                         With --limit: the first LIMIT messages after the cursor.\n\
+                         Use to page back history (since = oldest_seen - limit - 1) \
+                         or to pull incrementally from a known cursor."
+        )]
         since: Option<u64>,
     },
 
@@ -316,14 +341,27 @@ enum CardCommands {
         channel: String,
         /// Card ID
         card_id: String,
-        /// Maximum number of entries.
-        /// Alone: the last N entries. With --since: the first N after the cursor.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Maximum number of entries",
+            long_help = "Maximum number of entries.\n\
+                         \n\
+                         Alone: the last N entries.\n\
+                         With --since: the first N after the cursor."
+        )]
         limit: Option<u64>,
-        /// Return entries with line_number > N (a cursor, not a count).
-        /// With --limit: the first LIMIT entries after the cursor — use to
-        /// page back (since = oldest_seen - limit - 1) or pull incrementally.
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Return entries with line_number > N (a cursor, not a count)",
+            long_help = "Return entries with line_number > N. SINCE is a cursor, \
+                         not a count.\n\
+                         \n\
+                         With --limit: the first LIMIT entries after the cursor.\n\
+                         Use to page back history (since = oldest_seen - limit - 1) \
+                         or to pull incrementally from a known cursor."
+        )]
         since: Option<u64>,
     },
 

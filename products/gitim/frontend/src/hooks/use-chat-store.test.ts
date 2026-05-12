@@ -90,4 +90,20 @@ describe("useChatStore history pagination", () => {
   it("hasMoreHistory defaults to true on a fresh workspace", () => {
     expect(useChatStore.getState().hasMoreHistory).toBe(true);
   });
+
+  it("prependMessages preserves trailing pending entries instead of pulling them to the head", () => {
+    // Defensive: a pending outbound message lives at the tail with
+    // line_number = -1 (smallest in the list). If prependMessages ever sorted
+    // the full merged list instead of just the new batch, the pending entry
+    // would jump to the head and the user's just-sent message would visually
+    // disappear under newly-loaded history. This test pins the contract.
+    useChatStore.getState().setMessages([msg(50, "real")]);
+    useChatStore.getState().addPendingMessage(
+      msg(-1, "outbound", { _pendingId: "p1", _status: "sending" }),
+    );
+    useChatStore.getState().prependMessages([msg(48, "older-a"), msg(49, "older-b")]);
+
+    const lines = useChatStore.getState().messages.map((m) => m.line_number);
+    expect(lines).toEqual([48, 49, 50, -1]);
+  });
 });

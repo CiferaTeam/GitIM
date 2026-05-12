@@ -87,8 +87,8 @@ pub async fn handle_read(
         if since.is_some() {
             entries.truncate(lim);
         } else {
-            let start = entries.len().saturating_sub(lim);
-            entries = entries[start..].to_vec();
+            let drop_count = entries.len().saturating_sub(lim);
+            entries.drain(..drop_count);
         }
     }
 
