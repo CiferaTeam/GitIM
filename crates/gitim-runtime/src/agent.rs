@@ -10,6 +10,13 @@ use gitim_sync::url_redact::redacted_url;
 use crate::daemon_log::daemon_log_path;
 use crate::error::RuntimeError;
 
+const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
+    "-c",
+    "http.lowSpeedLimit=1000",
+    "-c",
+    "http.lowSpeedTime=10",
+];
+
 /// Read a git config key from the given directory.
 /// Returns None if the key is not set.
 pub(crate) fn detect_git_config(key: &str, cwd: &Path) -> Option<String> {
@@ -63,6 +70,7 @@ pub async fn provision_human(
         info!("human dir exists, skipping clone");
     } else {
         let output = Command::new("git")
+            .args(GIT_HTTP_TIMEOUT_ARGS)
             .args(["clone", remote_url, "human"])
             .current_dir(&runtime_dir)
             .output()?;
@@ -147,6 +155,7 @@ pub async fn provision_agent(
         info!(handler = %config.handler, "directory exists, skipping clone");
     } else {
         let output = Command::new("git")
+            .args(GIT_HTTP_TIMEOUT_ARGS)
             .args(["clone", &config.remote_url, &config.handler])
             .current_dir(agents_dir)
             .output()?;

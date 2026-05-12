@@ -51,9 +51,7 @@ pub struct UsageBucket {
 impl UsageBucket {
     fn add_delta(&mut self, delta: &ProviderUsage) {
         self.input = self.input.saturating_add(delta.input_tokens.unwrap_or(0));
-        self.output = self
-            .output
-            .saturating_add(delta.output_tokens.unwrap_or(0));
+        self.output = self.output.saturating_add(delta.output_tokens.unwrap_or(0));
         self.cache_read = self
             .cache_read
             .saturating_add(delta.cache_read_tokens.unwrap_or(0));
@@ -137,9 +135,7 @@ impl AgentUsageLog {
                     // gemini/openclaw to reports_usage=true and the WebUI
                     // would render the numeric path instead of the "该
                     // provider 不上报 token" degradation.
-                    if !provider.is_empty()
-                        && (log.provider != provider || log.model != model)
-                    {
+                    if !provider.is_empty() && (log.provider != provider || log.model != model) {
                         tracing::warn!(
                             handler = %handler,
                             file_provider = %log.provider,
@@ -391,7 +387,10 @@ mod tests {
         );
         let today = log.by_day.get("2026-05-10").unwrap();
         assert_eq!(today.turns, 1);
-        assert_eq!(today.input, 0, "tokens dropped when provider does not report");
+        assert_eq!(
+            today.input, 0,
+            "tokens dropped when provider does not report"
+        );
         assert_eq!(today.output, 0);
         assert_eq!(log.totals.input, 0);
         assert_eq!(log.totals.turns, 1);
@@ -449,11 +448,7 @@ mod tests {
             let day = (today - chrono::Duration::days(offset))
                 .format("%Y-%m-%d")
                 .to_string();
-            log.accumulate(
-                &day,
-                Some(&delta(1, 1, 0, 0)),
-                &format!("{day}T12:00:00Z"),
-            );
+            log.accumulate(&day, Some(&delta(1, 1, 0, 0)), &format!("{day}T12:00:00Z"));
         }
         log.prune_by_day("2026-05-10");
         assert_eq!(log.by_day.len(), RETENTION_DAYS as usize);
@@ -490,13 +485,7 @@ mod tests {
     #[test]
     fn save_writes_atomically_with_chmod_0600() {
         let dir = TempDir::new().unwrap();
-        let mut log = AgentUsageLog::load_or_default(
-            dir.path(),
-            "alice",
-            "claude",
-            "sonnet",
-            true,
-        );
+        let mut log = AgentUsageLog::load_or_default(dir.path(), "alice", "claude", "sonnet", true);
         log.accumulate(
             "2026-05-10",
             Some(&delta(1, 1, 0, 0)),
@@ -520,13 +509,7 @@ mod tests {
     #[test]
     fn save_round_trips_through_disk() {
         let dir = TempDir::new().unwrap();
-        let mut log = AgentUsageLog::load_or_default(
-            dir.path(),
-            "alice",
-            "claude",
-            "sonnet",
-            true,
-        );
+        let mut log = AgentUsageLog::load_or_default(dir.path(), "alice", "claude", "sonnet", true);
         log.accumulate(
             "2026-05-10",
             Some(&delta(1234, 567, 8901, 23)),
@@ -549,13 +532,7 @@ mod tests {
     #[test]
     fn delete_removes_existing_file() {
         let dir = TempDir::new().unwrap();
-        let mut log = AgentUsageLog::load_or_default(
-            dir.path(),
-            "alice",
-            "claude",
-            "sonnet",
-            true,
-        );
+        let mut log = AgentUsageLog::load_or_default(dir.path(), "alice", "claude", "sonnet", true);
         log.accumulate("2026-05-10", None, "2026-05-10T12:00:00Z");
         log.save(dir.path(), "2026-05-10").expect("save");
         AgentUsageLog::delete(dir.path(), "alice").expect("delete");
@@ -589,8 +566,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&initial).unwrap()).unwrap();
 
         // Caller hint says reports_usage = true; loader must ignore that.
-        let loaded =
-            AgentUsageLog::load_or_default(dir.path(), "ada", "", "", true);
+        let loaded = AgentUsageLog::load_or_default(dir.path(), "ada", "", "", true);
         assert!(
             !loaded.provider_reports_usage,
             "disk value must win, otherwise gemini/openclaw recovery silently flips the UI path"

@@ -601,10 +601,7 @@ created_at: "2026-05-09T10:00:00+08:00"
 
         #[test]
         fn rejects_empty() {
-            assert!(matches!(
-                validate_cron_name(""),
-                Err(CronNameError::Empty)
-            ));
+            assert!(matches!(validate_cron_name(""), Err(CronNameError::Empty)));
         }
 
         #[test]
@@ -685,9 +682,8 @@ created_at: "2026-05-09T10:00:00+08:00"
         #[test]
         fn accepts_canonical_shapes() {
             for n in ["a", "weekly-report", "j0", "0-9", "abc-1-23"] {
-                validate_cron_name(n).unwrap_or_else(|e| {
-                    panic!("expected '{n}' to validate, got {e:?}")
-                });
+                validate_cron_name(n)
+                    .unwrap_or_else(|e| panic!("expected '{n}' to validate, got {e:?}"));
             }
         }
 

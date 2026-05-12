@@ -1563,13 +1563,8 @@ async fn crons_run_body(
             // Previously this returned `Json(ErrorBody...)` with no status,
             // which axum maps to 200 OK — a misleading success on the wire.
             let (status, code) = match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    (axum::http::StatusCode::NOT_FOUND, "not_found")
-                }
-                _ => (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "read_failed",
-                ),
+                std::io::ErrorKind::NotFound => (axum::http::StatusCode::NOT_FOUND, "not_found"),
+                _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "read_failed"),
             };
             (
                 status,
@@ -1656,14 +1651,19 @@ struct TimelineResponse {
 /// current month in UTC. Picked over "rolling 30d" because the WebUI is
 /// month-grid-driven; matching the natural frontend default keeps the
 /// boundary behavior intuitive.
-fn default_window_now(now: chrono::DateTime<chrono::Utc>) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+fn default_window_now(
+    now: chrono::DateTime<chrono::Utc>,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
     use chrono::{Datelike, NaiveDate, TimeZone};
     let year = now.year();
     let month = now.month();
     // First day of current month, 00:00:00 UTC.
     let from_date = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");
-    let from = chrono::Utc
-        .from_utc_datetime(&from_date.and_hms_opt(0, 0, 0).expect("00:00:00 always valid"));
+    let from = chrono::Utc.from_utc_datetime(
+        &from_date
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 always valid"),
+    );
     // First day of NEXT month, then minus one second → end of current month.
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
@@ -1671,8 +1671,11 @@ fn default_window_now(now: chrono::DateTime<chrono::Utc>) -> (chrono::DateTime<c
         (year, month + 1)
     };
     let next_date = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid next month");
-    let next_start = chrono::Utc
-        .from_utc_datetime(&next_date.and_hms_opt(0, 0, 0).expect("00:00:00 always valid"));
+    let next_start = chrono::Utc.from_utc_datetime(
+        &next_date
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 always valid"),
+    );
     let to = next_start - chrono::Duration::seconds(1);
     (from, to)
 }
@@ -1724,8 +1727,8 @@ fn synthesize_spec_for_iteration(
     use std::collections::BTreeMap;
 
     let target = Handler::new(&summary.target).map_err(|e| format!("invalid target: {e}"))?;
-    let created_by = Handler::new(&summary.created_by)
-        .map_err(|e| format!("invalid created_by: {e}"))?;
+    let created_by =
+        Handler::new(&summary.created_by).map_err(|e| format!("invalid created_by: {e}"))?;
     Ok(CronSpec {
         version: 1,
         schedule: summary.schedule.clone(),
@@ -1785,10 +1788,7 @@ async fn crons_timeline(
     if from > to {
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(ErrorBody::with_code(
-                "from must be <= to",
-                "invalid_window",
-            )),
+            Json(ErrorBody::with_code("from must be <= to", "invalid_window")),
         )
             .into_response();
     }

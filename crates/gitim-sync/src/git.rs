@@ -5,6 +5,13 @@ use thiserror::Error;
 
 use crate::url_redact::redacted_url;
 
+const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
+    "-c",
+    "http.lowSpeedLimit=1000",
+    "-c",
+    "http.lowSpeedTime=10",
+];
+
 #[derive(Error, Debug)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -36,6 +43,7 @@ impl GitStorage {
 
     pub fn pull_rebase(&self) -> Result<(), GitError> {
         let output = Command::new("git")
+            .args(GIT_HTTP_TIMEOUT_ARGS)
             .args(["pull", "--rebase"])
             .current_dir(&self.root)
             .output()?;
@@ -132,6 +140,7 @@ impl GitStorage {
 
     pub fn push(&self) -> Result<(), GitError> {
         let output = Command::new("git")
+            .args(GIT_HTTP_TIMEOUT_ARGS)
             .args(["push", "-u", "origin", "HEAD"])
             .current_dir(&self.root)
             .output()?;
@@ -154,6 +163,7 @@ impl GitStorage {
 
     pub fn fetch(&self) -> Result<(), GitError> {
         let output = Command::new("git")
+            .args(GIT_HTTP_TIMEOUT_ARGS)
             .args(["fetch", "origin"])
             .current_dir(&self.root)
             .output()?;
@@ -568,6 +578,19 @@ mod tests {
             classify_remote_error(stderr),
             GitError::CommandFailed(_)
         ));
+    }
+
+    #[test]
+    fn remote_git_operations_use_low_speed_timeout() {
+        assert_eq!(
+            GIT_HTTP_TIMEOUT_ARGS,
+            [
+                "-c",
+                "http.lowSpeedLimit=1000",
+                "-c",
+                "http.lowSpeedTime=10",
+            ]
+        );
     }
 
     #[test]

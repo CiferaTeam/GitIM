@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gitim_core::auth_payload::AuthPayload;
@@ -13,6 +14,11 @@ use tokio::net::UnixStream;
 
 use crate::error::ClientError;
 use crate::types::{build_request, ApiResponse};
+
+#[cfg(not(test))]
+const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct GitimClient {
     repo_root: PathBuf,
@@ -50,9 +56,9 @@ impl GitimClient {
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
+        tokio::time::timeout(DAEMON_REQUEST_TIMEOUT, reader.read_line(&mut line))
             .await
+            .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
         if line.is_empty() {
@@ -718,6 +724,7 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+    use tokio::net::UnixListener;
 
     fn write_me_json(repo_root: &Path, body: &str) {
         let dir = repo_root.join(".gitim");
@@ -806,6 +813,24 @@ mod tests {
         // Should fail at me.json read, not at socket connect.
         assert!(matches!(err, ClientError::ProtocolError(_)));
         assert!(err.to_string().contains("me.json"));
+    }
+
+    #[tokio::test]
+    async fn request_times_out_when_daemon_accepts_but_never_replies() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".gitim/run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let socket_path = run_dir.join("gitim.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let _server = tokio::spawn(async move {
+            if let Ok((_stream, _addr)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
+        let client = GitimClient::new(tmp.path());
+        let err = client.status().await.unwrap_err();
+        assert!(matches!(err, ClientError::Timeout));
     }
 
     /// build_request shapes for the new no-param archive-protocol methods.

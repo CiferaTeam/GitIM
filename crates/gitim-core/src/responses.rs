@@ -505,7 +505,7 @@ pub struct CronSummary {
     /// `CronSpec.timezone` — the wire shape is "absent" not "explicit UTC".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>, // timeline: required (Option preserved verbatim)
-    pub target: String, // timeline: required
+    pub target: String,   // timeline: required
     pub enabled: bool,
     pub created_by: String, // timeline: required
     pub created_at: String, // timeline: required (RFC 3339 UTC, ends with 'Z')

@@ -36,9 +36,8 @@ use crate::state::SharedState;
 /// is identical across every variant — clients only ever differentiate on
 /// the code, not the human message.
 fn validate_cron_name(name: &str) -> Result<(), Response> {
-    core_validate_cron_name(name).map_err(|e| {
-        Response::error_with_code(e.to_string(), "invalid_name")
-    })
+    core_validate_cron_name(name)
+        .map_err(|e| Response::error_with_code(e.to_string(), "invalid_name"))
 }
 
 /// Create `crons/<name>/spec.yaml` with the given schedule + target +

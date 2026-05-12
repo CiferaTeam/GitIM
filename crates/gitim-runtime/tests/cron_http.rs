@@ -227,8 +227,7 @@ async fn show_cron_existing() {
     )
     .await;
 
-    let (status, body) =
-        send(env.router, "GET", "/workspaces/test-ws/crons/weekly-report").await;
+    let (status, body) = send(env.router, "GET", "/workspaces/test-ws/crons/weekly-report").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body.get("name").and_then(|v| v.as_str()),
@@ -491,10 +490,7 @@ async fn single_run_rejects_too_long_name() {
     // 64 chars — one over the 63-char fs-portable cap.
     let env = setup();
     let n = "a".repeat(64);
-    let uri = format!(
-        "/workspaces/test-ws/crons/{}/runs/2026-05-11T09-00-00Z",
-        n
-    );
+    let uri = format!("/workspaces/test-ws/crons/{}/runs/2026-05-11T09-00-00Z", n);
     let (status, body) = send(env.router, "GET", &uri).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(

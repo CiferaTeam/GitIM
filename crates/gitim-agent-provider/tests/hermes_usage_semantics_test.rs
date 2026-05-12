@@ -7,7 +7,9 @@
 //! contract; the integration path (drive_session) is verified at runtime via
 //! `agent_loop` integration coverage.
 
-use gitim_agent_provider::hermes::{parse_acp_usage_for_test, parse_notification, ParsedNotification};
+use gitim_agent_provider::hermes::{
+    parse_acp_usage_for_test, parse_notification, ParsedNotification,
+};
 use serde_json::json;
 
 #[test]

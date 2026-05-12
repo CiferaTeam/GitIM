@@ -122,15 +122,15 @@ fn incremental_provider_accumulates_each_turn_directly() {
     drop(s);
 
     // Disk must agree with in-memory (recovery would resume from this).
-    let log =
-        AgentUsageLog::load_or_default(tmp.path(), HANDLER, "mock", "", true);
+    let log = AgentUsageLog::load_or_default(tmp.path(), HANDLER, "mock", "", true);
     assert_eq!(log.totals.input, 300);
     assert_eq!(log.totals.turns, 2);
 }
 
 #[test]
 fn cumulative_provider_subtracts_baseline_per_turn() {
-    let provider = Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
+    let provider =
+        Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
     let (loop_, state, tmp) = harness(provider);
     let agent_clone = tmp.path().join(HANDLER);
 
@@ -157,7 +157,8 @@ fn cumulative_provider_subtracts_baseline_per_turn() {
 
 #[test]
 fn cumulative_provider_resets_baseline_on_session_id_change() {
-    let provider = Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
+    let provider =
+        Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
     let (loop_, state, tmp) = harness(provider);
     let agent_clone = tmp.path().join(HANDLER);
 
@@ -190,7 +191,8 @@ fn cumulative_provider_saturates_when_cache_read_regresses() {
     // mid-session. The normalizer must use saturating_sub instead of
     // panicking or wrapping; the regression is logged via tracing::warn but
     // the bucket only ever advances.
-    let provider = Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
+    let provider =
+        Box::new(MockProvider::new(ProviderConfig::default()).with_usage_is_cumulative(true));
     let (loop_, state, tmp) = harness(provider);
     let agent_clone = tmp.path().join(HANDLER);
 
@@ -219,9 +221,7 @@ fn provider_without_usage_only_advances_turns() {
     // gemini / openclaw: reports_usage() == false. The accumulator must
     // count turns so we have a liveness signal, but never touch the token
     // counters even when (degenerate) usage data is supplied.
-    let provider = Box::new(
-        MockProvider::new(ProviderConfig::default()).with_reports_usage(false),
-    );
+    let provider = Box::new(MockProvider::new(ProviderConfig::default()).with_reports_usage(false));
     let (loop_, state, tmp) = harness(provider);
     let agent_clone = tmp.path().join(HANDLER);
 
@@ -230,7 +230,11 @@ fn provider_without_usage_only_advances_turns() {
     // Even if the provider hands us a non-None ProviderUsage, the
     // reports_usage()=false declaration must short-circuit the token path.
     loop_
-        .update_session_usage(&mut agent_state, Some(&turn(9999, 9999, 9999, 9999)), "sess-A")
+        .update_session_usage(
+            &mut agent_state,
+            Some(&turn(9999, 9999, 9999, 9999)),
+            "sess-A",
+        )
         .unwrap();
     loop_
         .update_session_usage(&mut agent_state, None, "sess-A")

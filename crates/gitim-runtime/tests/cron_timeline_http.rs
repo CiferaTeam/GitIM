@@ -172,7 +172,9 @@ async fn timeline_empty_workspace() {
     let (status, body) = send(env.router, "GET", "/workspaces/test-ws/crons/timeline").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body.get("entries").and_then(|v| v.as_array()).map(|a| a.len()),
+        body.get("entries")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
         Some(0)
     );
     // `truncated` should be omitted on the wire when false (skip_serializing_if).
@@ -225,13 +227,19 @@ async fn timeline_past_only() {
     assert_eq!(pasts.len(), 1, "exactly one past file in window");
     assert_eq!(futures.len(), 0, "to is in the past — no future entries");
     let p = &pasts[0];
-    assert_eq!(p.get("cron_name").and_then(|v| v.as_str()), Some("hourly-job"));
+    assert_eq!(
+        p.get("cron_name").and_then(|v| v.as_str()),
+        Some("hourly-job")
+    );
     assert_eq!(
         p.get("target").and_then(|v| v.as_str()),
         Some("alice"),
         "past entry must carry the cron's target handler",
     );
-    assert!(p.get("thread_url").is_some(), "past entry must carry a thread_url");
+    assert!(
+        p.get("thread_url").is_some(),
+        "past entry must carry a thread_url"
+    );
 }
 
 #[tokio::test]
@@ -265,7 +273,10 @@ async fn timeline_future_only() {
     let (status, body) = send(env.router, "GET", &uri).await;
     assert_eq!(status, StatusCode::OK);
     let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
-    assert!(!entries.is_empty(), "@daily over 3 days emits at least one fire");
+    assert!(
+        !entries.is_empty(),
+        "@daily over 3 days emits at least one fire"
+    );
     for e in entries {
         assert_eq!(e.get("kind").and_then(|v| v.as_str()), Some("future"));
         assert_eq!(
@@ -366,7 +377,10 @@ async fn timeline_includes_missed() {
     let (status, body) = send(env.router, "GET", &uri).await;
     assert_eq!(status, StatusCode::OK);
     let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
-    assert!(!entries.is_empty(), "hourly schedule over 3 days has many entries");
+    assert!(
+        !entries.is_empty(),
+        "hourly schedule over 3 days has many entries"
+    );
     for e in entries {
         assert_eq!(
             e.get("kind").and_then(|v| v.as_str()),
@@ -426,7 +440,9 @@ async fn timeline_window_filter_excludes_outside_entries() {
             "out-of-window thread file leaked: {url}"
         );
         let ts = e.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-        let parsed = DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&Utc);
+        let parsed = DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
         assert!(parsed >= from && parsed <= to, "ts outside window: {ts}");
     }
 }
@@ -568,12 +584,7 @@ async fn timeline_invalid_window_from_after_to_returns_400() {
 #[tokio::test]
 async fn timeline_workspace_not_found() {
     let env = setup();
-    let (status, _body) = send(
-        env.router,
-        "GET",
-        "/workspaces/missing/crons/timeline",
-    )
-    .await;
+    let (status, _body) = send(env.router, "GET", "/workspaces/missing/crons/timeline").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -594,15 +605,9 @@ async fn timeline_does_not_emit_fire_at_created_at_when_window_covers_creation()
     // deterministic output (all theoretical fires ≤ `now` → "missed"
     // unless caught as "past" by an on-disk file).
     let env = setup();
-    let from = "2025-01-01T00:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
-    let to = "2025-01-05T00:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
-    let created_at = "2025-01-01T00:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
+    let from = "2025-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let to = "2025-01-05T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let created_at = "2025-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     set_list_crons(
         &env.table,
         json!([{
@@ -660,15 +665,9 @@ async fn timeline_does_emit_fire_at_window_start_when_after_created_at() {
     // theoretical fire surfaces rather than being lost to strict-after
     // semantics.
     let env = setup();
-    let created_at = "2025-01-01T00:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
-    let from = "2025-02-10T09:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
-    let to = "2025-02-15T00:00:00Z"
-        .parse::<DateTime<Utc>>()
-        .unwrap();
+    let created_at = "2025-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let from = "2025-02-10T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let to = "2025-02-15T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     set_list_crons(
         &env.table,
         json!([{
@@ -758,9 +757,7 @@ async fn timeline_cap_one_cron_other_unaffected() {
     let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
     let b_count = entries
         .iter()
-        .filter(|e| {
-            e.get("cron_name").and_then(|v| v.as_str()) == Some("morning-daily")
-        })
+        .filter(|e| e.get("cron_name").and_then(|v| v.as_str()) == Some("morning-daily"))
         .count();
     assert!(
         b_count >= 25,
@@ -794,4 +791,3 @@ fn kind_counts(entries: &[Value]) -> KindCounts {
         missed,
     }
 }
-
