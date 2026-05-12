@@ -1160,7 +1160,25 @@ fn compute_from_estimate(
     if estimated_tokens == 0 {
         return None;
     }
-    let pct = ((estimated_tokens as f64) / (max as f64) * 100.0).clamp(0.0, 100.0);
+    let pct = (estimated_tokens as f64) / (max as f64) * 100.0;
+    // Overflow guard: the estimator is a monotonic lower bound built from
+    // `tokenize_for_provider(assistant_text_buf)` accumulated across turns.
+    // Once it grows past max it has lost the resolution to mean anything —
+    // clamping to 100 would trip `just_crossed_threshold` and inject the
+    // `[[RESET]]` preamble, which on a cumulative-usage provider (codex
+    // stdout `turn.completed.usage` is session-cumulative; no per-LLM-call
+    // signal is available outside the rollout file) traps the agent in a
+    // reset-spin without any real context pressure. Observed live on cfo
+    // (gpt-5.5): estimated_tokens=518906, max=272000 → 190% → clamp 100 →
+    // RESET loop.
+    //
+    // Returning None is the honest signal: "no trustworthy snapshot". The
+    // HUD treats it as missing data; the threshold-crossing logic doesn't
+    // fire. Provider-reported >=100 still lands via the ProviderReported
+    // branch above and remains authoritative.
+    if pct >= 100.0 {
+        return None;
+    }
     Some(SessionUsageSnapshot {
         session_id: session_id.to_string(),
         input_tokens: None,

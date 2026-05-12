@@ -269,6 +269,57 @@ fn snapshot_returns_none_when_no_data_available() {
 }
 
 #[test]
+fn snapshot_returns_none_when_estimator_overflows_max() {
+    // Regression: when the provider reports no usage (codex 0.130.0-alpha.5
+    // stdout doesn't stream token_count events, so ExecResult.usage = None)
+    // the runtime falls back to compute_from_estimate, which monotonically
+    // accumulates `tokenize_for_provider(assistant_text_buf)` across turns.
+    // Live cfo observed: estimated_tokens=518906 vs max=272000 → 190% →
+    // previously clamp(0, 100) → 100.0 → just_crossed_threshold(prev, 100)
+    // returns true → usage_notice_pending=true → next turn injects the
+    // pressure-relief preamble → agent emits [[RESET]] → false-positive
+    // context wipe. We'd rather show "no snapshot" (empty HUD) than a fake
+    // 100% that trips the RESET pipeline; a real >=100 always lands via
+    // ProviderReported with the actual numbers, which is the trustworthy
+    // path. The estimator is a per-process monotonic lower-bound; once it
+    // outgrows max it's lost the resolution to mean anything.
+    let snap = compute_snapshot(
+        "sess-overflow",
+        None,
+        518_906,
+        Some(272_000),
+        false,
+        "2026-05-12T06:24:51Z",
+    );
+    assert!(snap.is_none(), "expected None, got {snap:?}");
+}
+
+#[test]
+fn snapshot_returns_none_when_cumulative_short_circuit_estimator_overflows() {
+    // Same overflow guard, but reached via the cumulative-provider
+    // short-circuit path (bb66f7d): if usage_is_cumulative=true, the
+    // function routes to compute_from_estimate. That path must respect the
+    // overflow guard too, otherwise codex (now declared cumulative again
+    // to match real stdout semantics) would re-introduce the same fake-100
+    // RESET loop.
+    let snap = compute_snapshot(
+        "sess-cum-overflow",
+        Some(&ProviderUsage {
+            input_tokens: Some(2_846_880), // real cfo cumulative
+            output_tokens: Some(1000),
+            used_percent: None, // no authoritative pct from provider
+            cache_read_tokens: Some(2_673_024),
+            cache_creation_tokens: None,
+        }),
+        518_906,
+        Some(272_000),
+        true, // cumulative — routes through compute_from_estimate
+        "2026-05-12T06:24:51Z",
+    );
+    assert!(snap.is_none(), "expected None, got {snap:?}");
+}
+
+#[test]
 fn snapshot_clamps_above_100_with_warning_signal() {
     let snap = compute_snapshot(
         "sess",
