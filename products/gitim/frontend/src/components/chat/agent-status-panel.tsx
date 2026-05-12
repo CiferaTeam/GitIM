@@ -153,7 +153,7 @@ function AgentRow({
 
   const row = (
     <div
-      className="relative overflow-hidden rounded-md border border-border/60 bg-background/40 animate-[agent-row-enter_180ms_ease-out]"
+      className="relative overflow-hidden rounded-md border border-border/60 bg-background/40"
       data-testid={testId}
     >
       {usageFill && (
@@ -168,7 +168,8 @@ function AgentRow({
         />
       )}
       <div
-        className={`relative z-10 flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors ${
+        key={latest?.timestamp ?? "idle"}
+        className={`relative z-10 flex items-center gap-2 px-2.5 py-1.5 min-w-0 select-none rounded-md transition-colors animate-[agent-row-enter_180ms_ease-out] ${
           hasDetail ? "cursor-default hover:bg-surface-hover/60" : ""
         }`}
       >
@@ -263,7 +264,7 @@ export function AgentStatusPanel() {
               <div className="max-h-[calc(min(70vh,32rem)-3rem)] overflow-y-auto space-y-1.5 pr-1">
                 {sortedAgents.map((agent) => (
                   <AgentRow
-                    key={`${agent.id}-${latestActivity(agent.id, activities)?.timestamp ?? "idle"}`}
+                    key={agent.id}
                     agent={agent}
                     activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
                     testId="agent-full-row"
@@ -277,7 +278,7 @@ export function AgentStatusPanel() {
       <div className="space-y-1.5">
         {previewAgents.map((agent) => (
           <AgentRow
-            key={`${agent.id}-${latestActivity(agent.id, activities)?.timestamp ?? "idle"}`}
+            key={agent.id}
             agent={agent}
             activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
             testId="agent-preview-row"
