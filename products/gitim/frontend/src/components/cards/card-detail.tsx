@@ -214,11 +214,14 @@ export function CardDetail() {
       if (res.ok && res.data) {
         const lineNumber = res.data.line_number as number;
         const syncError = syncFailure(res.data);
+        // commit_only means the local commit succeeded; sync_loop retries on
+        // the next cycle. Treat as sent and soften the notice — the underlying
+        // race (pull-only cycle mid-fetch) usually recovers within seconds.
+        markPendingCardSent(pathKey, pendingId, lineNumber);
         if (syncError) {
-          markPendingCardFailed(pathKey, pendingId, lineNumber);
-          toast.error(`Message saved locally, sync failed: ${syncError}`);
-        } else {
-          markPendingCardSent(pathKey, pendingId, lineNumber);
+          toast.info("Saved locally, syncing to remote…", {
+            description: syncError,
+          });
         }
       } else {
         markPendingCardFailed(pathKey, pendingId);

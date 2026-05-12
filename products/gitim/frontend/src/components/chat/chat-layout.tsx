@@ -239,11 +239,14 @@ export function ChatLayout() {
       if (res.ok && res.data) {
         const lineNumber = res.data.line_number as number;
         const syncError = syncFailure(res.data);
+        // commit_only means the local commit succeeded; sync_loop retries on
+        // the next cycle. Treat as sent and soften the notice — the underlying
+        // race (pull-only cycle mid-fetch) usually recovers within seconds.
+        markPendingSent(pendingId, lineNumber);
         if (syncError) {
-          markPendingFailed(pendingId, lineNumber);
-          toast.error(`Message saved locally, sync failed: ${syncError}`);
-        } else {
-          markPendingSent(pendingId, lineNumber);
+          toast.info("Saved locally, syncing to remote…", {
+            description: syncError,
+          });
         }
       } else {
         markPendingFailed(pendingId);
