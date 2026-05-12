@@ -66,6 +66,10 @@ async fn execute_and_resume_return_completed_with_thread_id() {
     assert_eq!(result1.status, ExecStatus::Completed);
     assert_eq!(result1.output, "Hello from mock codex!");
     assert_eq!(result1.session_token.as_deref(), Some("mock-codex-thread"));
+    let usage1 = result1.usage.expect("turn.completed usage should parse");
+    assert_eq!(usage1.input_tokens, Some(1));
+    assert_eq!(usage1.cache_read_tokens, Some(0));
+    assert_eq!(usage1.output_tokens, Some(1));
 
     let session2 = provider
         .execute(
