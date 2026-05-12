@@ -45,15 +45,14 @@ fn detect_api_failure_returns_only_first_line() {
 }
 
 #[test]
-fn build_prompt_payload_prepends_system_prompt_for_acp() {
-    let payload = build_prompt_payload("events", Some("gitim system"));
-
-    assert!(payload.starts_with("gitim system\n\n---\n\nevents"));
-}
-
-#[test]
-fn build_prompt_payload_ignores_empty_system_prompt() {
-    let payload = build_prompt_payload("events", Some(""));
+fn build_prompt_payload_does_not_inject_system_prompt() {
+    // The runtime's system prompt must NOT enter hermes' conversation
+    // history — it lives in SOUL.md (managed by hermes_profile) so that
+    // hermes' frozen system-prompt slot owns it and the in-loop compressor
+    // cannot summarise it away. Earlier versions of this function prepended
+    // the runtime system prompt to the first user payload; that is exactly
+    // the regression this test guards against.
+    let payload = build_prompt_payload("events");
 
     assert_eq!(payload, "events");
 }

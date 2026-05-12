@@ -11,9 +11,11 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
+    ProviderError, ProviderUsage, Session,
 };
+
+pub mod prompts;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -30,6 +32,44 @@ impl HermesProvider {
 
 #[async_trait]
 impl Provider for HermesProvider {
+    /// Hermes compresses in-loop at `compression.threshold` (default 50%).
+    /// Opt out of the runtime's occupancy gauge + `[[RESET]]` preamble — see
+    /// `Provider::self_managed_context` for the full reasoning.
+    fn self_managed_context(&self) -> bool {
+        true
+    }
+
+    /// Drop sections that assume the Claude-style `AGENTS.md` + `notes/`
+    /// filesystem-memory model. Hermes manages identity / memory through
+    /// SOUL.md + MEMORY.md / USER.md inside the profile directory, and
+    /// re-loads them after every in-loop compression, so re-injecting any
+    /// of this from the runtime side would be noise (or worse, conflict
+    /// with hermes' own guidance).
+    fn prompt_memory(&self, _ctx: &PromptContext) -> String {
+        // hermes injects its own MEMORY_GUIDANCE when the memory tool is
+        // loaded — see run_agent.py::_build_system_prompt.
+        String::new()
+    }
+    fn prompt_reset_protocol(&self, _ctx: &PromptContext) -> String {
+        // hermes self-compresses; no `[[RESET]]` sentinel.
+        String::new()
+    }
+    fn prompt_cold_start(&self, _ctx: &PromptContext) -> String {
+        // No bootstrap of AGENTS.md / notes/ for hermes — memory files live
+        // inside the hermes profile and are seeded by `hermes_profile`.
+        String::new()
+    }
+
+    /// Hermes-flavored identity (drops the `AGENTS.md` / `notes/` carve-out).
+    fn prompt_identity(&self, ctx: &PromptContext) -> String {
+        prompts::identity(ctx)
+    }
+    /// Hermes-flavored collaboration norms (drops the
+    /// "用你的记忆 / `notes/` 跟踪每条线" filesystem-memory suggestion).
+    fn prompt_collaboration(&self, ctx: &PromptContext) -> String {
+        prompts::collaboration(ctx)
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config
@@ -74,7 +114,9 @@ impl Provider for HermesProvider {
         let cancel_token = CancellationToken::new();
         let cancel_token_inner = cancel_token.clone();
 
-        let prompt = build_prompt_payload(prompt, opts.system_prompt.as_deref());
+        // `opts.system_prompt` deliberately unused — SOUL.md is the channel.
+        let _ = &opts.system_prompt;
+        let prompt = build_prompt_payload(prompt);
         let resume_token = opts.resume_token.clone();
         let cwd_str = opts
             .cwd
@@ -162,14 +204,19 @@ pub fn detect_api_failure(output: &str) -> Option<String> {
 
 /// Build the text sent to `session/prompt`.
 ///
-/// Hermes ACP does not expose a per-request system prompt parameter. The
-/// runtime only supplies `system_prompt` on cold start, so prepend it to the
-/// first user payload to seed the ACP session with GitIM operating rules.
-pub fn build_prompt_payload(prompt: &str, system_prompt: Option<&str>) -> String {
-    match system_prompt.filter(|s| !s.is_empty()) {
-        Some(system_prompt) => format!("{system_prompt}\n\n---\n\n{prompt}"),
-        None => prompt.to_string(),
-    }
+/// Hermes ACP does not expose a per-request system prompt parameter. Earlier
+/// versions of this provider prepended the runtime's system prompt to the
+/// first user message, but that put GitIM identity / protocol rules into
+/// hermes' conversation history — where its in-loop compressor was free to
+/// summarise them away.
+///
+/// The system prompt now lives in `~/.hermes/profiles/gitim-<handler>/SOUL.md`
+/// (managed by `gitim_runtime::hermes_profile`), which hermes auto-loads into
+/// its frozen system-prompt slot at every session start and rebuilds after
+/// each compression event. So the ACP user payload is just the user text —
+/// `opts.system_prompt` is intentionally ignored here.
+pub fn build_prompt_payload(prompt: &str) -> String {
+    prompt.to_string()
 }
 
 /// Parse the `params` object from a `session/update` JSON-RPC notification.
