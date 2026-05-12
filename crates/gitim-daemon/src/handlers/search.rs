@@ -1,6 +1,9 @@
 use crate::api::Response;
 use crate::state::SharedState;
 
+const INDEXER_DISABLED_MSG: &str =
+    "search index disabled for this clone (set indexer.enabled=true in .gitim/config.yaml and restart daemon)";
+
 pub async fn handle_search(
     state: SharedState,
     query: Option<String>,
@@ -16,7 +19,7 @@ pub async fn handle_search(
         let guard = state.index.read().unwrap();
         match &*guard {
             Some(idx) => idx.clone(),
-            None => return Response::error("search index not available"),
+            None => return Response::error(INDEXER_DISABLED_MSG),
         }
     };
 
@@ -67,7 +70,7 @@ pub async fn handle_reindex(state: SharedState) -> Response {
         let guard = state.index.read().unwrap();
         match &*guard {
             Some(idx) => idx.clone(),
-            None => return Response::error("search index not available"),
+            None => return Response::error(INDEXER_DISABLED_MSG),
         }
     };
 

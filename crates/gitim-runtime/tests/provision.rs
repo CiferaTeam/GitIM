@@ -30,6 +30,19 @@ async fn test_provision_fresh() {
     let status = client.status().await.unwrap();
     assert!(status.ok);
 
+    // Regression guard: provision must NOT enable the indexer on the agent clone.
+    // config.yaml is written synchronously by the daemon in main.rs before the
+    // Unix socket is created, so it is guaranteed to be on disk by the time
+    // provision_agent returns.
+    let config_content =
+        std::fs::read_to_string(handle.repo_root.join(".gitim/config.yaml")).unwrap();
+    let config: gitim_core::types::config::Config =
+        serde_yaml::from_str(&config_content).unwrap();
+    assert!(
+        !config.indexer.enabled,
+        "agent clone must NOT have indexer enabled"
+    );
+
     stop_daemon(&handle.repo_root).await;
 }
 

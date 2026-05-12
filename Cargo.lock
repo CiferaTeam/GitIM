@@ -803,6 +803,7 @@ dependencies = [
  "gitim-updater",
  "regex",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
 ]
@@ -835,6 +836,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror",
 ]
 

@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IndexerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub version: u32,
@@ -9,6 +15,8 @@ pub struct Config {
     pub endpoint_url: String,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub indexer: IndexerConfig,
 }
 
 fn default_endpoint() -> String {
@@ -49,6 +57,7 @@ impl Default for Config {
             endpoint: default_endpoint(),
             endpoint_url: String::new(),
             daemon: DaemonConfig::default(),
+            indexer: IndexerConfig::default(),
         }
     }
 }
@@ -82,5 +91,26 @@ mod tests {
         let yaml = serde_yaml::to_string(&c).expect("serialize");
         let validated = crate::validator::validate_config(&yaml).expect("validate");
         assert_eq!(validated, c);
+    }
+
+    #[test]
+    fn indexer_defaults_to_disabled() {
+        assert!(!Config::default().indexer.enabled);
+    }
+
+    #[test]
+    fn legacy_yaml_without_indexer_field_parses() {
+        let yaml = "version: 1\nendpoint: github\n";
+        let parsed: Config = serde_yaml::from_str(yaml).expect("deserialize");
+        assert!(!parsed.indexer.enabled);
+    }
+
+    #[test]
+    fn config_default_roundtrips_with_indexer() {
+        let c = Config::default();
+        let yaml = serde_yaml::to_string(&c).expect("serialize");
+        assert!(yaml.contains("indexer:"), "yaml should contain indexer section");
+        let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(parsed.indexer.enabled, c.indexer.enabled);
     }
 }

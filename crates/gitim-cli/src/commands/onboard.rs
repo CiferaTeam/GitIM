@@ -12,6 +12,7 @@ use serde_json::json;
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::config_patch::ensure_config_indexer_enabled;
 
 /// Git server type for onboarding
 #[derive(Clone, Debug)]
@@ -488,6 +489,11 @@ pub async fn cmd_onboard(args: OnboardArgs) {
     if args.debug_http {
         ensure_config_debug_http(&repo_dir, true);
     }
+
+    ensure_config_indexer_enabled(&repo_dir, true).unwrap_or_else(|e| {
+        eprintln!("Error: cannot write indexer config: {e}");
+        process::exit(1);
+    });
 
     if let Err(e) = ensure_daemon(&repo_dir) {
         eprintln!("Error: failed to start daemon: {e}");
