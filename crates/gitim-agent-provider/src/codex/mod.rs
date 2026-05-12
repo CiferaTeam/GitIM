@@ -185,9 +185,10 @@ async fn drive_session(
                         continue;
                     }
 
-                    // Codex streams token_count events mid-session; capture the
-                    // latest cumulative usage. Runs alongside parse_line since
-                    // token_count is an event_msg type parse_line doesn't handle.
+                    // Codex records token_count events in rollouts and may
+                    // stream them in some modes; stdout always ends with
+                    // turn.completed.usage. Capture whichever cumulative
+                    // shape is present.
                     if let Some(usage) = parse_token_count_usage(&line) {
                         latest_usage = Some(usage);
                     }
@@ -224,8 +225,11 @@ async fn drive_session(
                         ParsedMessage::ToolResult { call_id, output } => {
                             try_send_event(&event_tx, Event::ToolResult { call_id, output });
                         }
-                        ParsedMessage::TurnCompleted => {
+                        ParsedMessage::TurnCompleted { usage } => {
                             saw_turn_completed = true;
+                            if let Some(usage) = usage {
+                                latest_usage = Some(usage);
+                            }
                         }
                     }
                 }
@@ -394,7 +398,7 @@ enum ParsedMessage {
     Text { content: String },
     ToolUse { call_id: String, command: String },
     ToolResult { call_id: String, output: String },
-    TurnCompleted,
+    TurnCompleted { usage: Option<ProviderUsage> },
 }
 
 fn parse_line(line: &str) -> Option<ParsedMessage> {
@@ -423,7 +427,9 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 _ => None,
             }
         }
-        "turn.completed" => Some(ParsedMessage::TurnCompleted),
+        "turn.completed" => Some(ParsedMessage::TurnCompleted {
+            usage: raw.usage.as_ref().and_then(parse_codex_usage),
+        }),
         _ => None,
     }
 }
@@ -435,6 +441,8 @@ struct RawLine {
     thread_id: Option<String>,
     #[serde(default)]
     item: Option<RawItem>,
+    #[serde(default)]
+    usage: Option<Value>,
 }
 
 /// Look up the codex session rollout file for `thread_id` and extract a
@@ -563,6 +571,10 @@ fn parse_token_count_usage(line: &str) -> Option<ProviderUsage> {
         return None;
     }
     let total = v.pointer("/payload/info/total_token_usage")?;
+    parse_codex_usage(total)
+}
+
+fn parse_codex_usage(total: &Value) -> Option<ProviderUsage> {
     let input = total
         .get("input_tokens")
         .and_then(serde_json::Value::as_u64);
@@ -836,6 +848,20 @@ mod usage_parse_tests {
             usage.used_percent.is_none(),
             "used_percent left None so compute_snapshot derives it"
         );
+    }
+
+    #[test]
+    fn parse_turn_completed_extracts_stdout_usage() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":47211,"cached_input_tokens":6912,"output_tokens":22,"reasoning_output_tokens":9}}"#;
+        let parsed = parse_line(line).expect("turn.completed parses");
+        let ParsedMessage::TurnCompleted { usage } = parsed else {
+            panic!("expected turn completed");
+        };
+        let usage = usage.expect("usage parses");
+        assert_eq!(usage.input_tokens, Some(47_211));
+        assert_eq!(usage.cache_read_tokens, Some(6_912));
+        assert_eq!(usage.output_tokens, Some(31));
+        assert_eq!(usage.cache_creation_tokens, None);
     }
 
     #[test]
