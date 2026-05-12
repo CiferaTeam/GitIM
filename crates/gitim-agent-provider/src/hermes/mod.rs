@@ -319,12 +319,17 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
-    // ACP spec: session/prompt response carries `result.usage` per the Agent
-    // Client Protocol. Hermes is a Claude wrapper today, so it relays
-    // Anthropic-style snake_case fields. We only see one prompt response
-    // per call (id=3), but keep the same `latest_usage` shape as Pi/Codex
-    // for consistency.
-    let mut latest_usage: Option<ProviderUsage> = None;
+    // Hermes' id=3 prompt response carries `result.usage`, but its values are
+    // session-cumulative billing counters from `run_agent.py`'s
+    // `session_input_tokens += ...` accumulation — not a per-LLM-call shape.
+    // Feeding cumulative numbers to `compute_snapshot` makes
+    // `(input + cache_read) / max` grow monotonically across turns and clamp
+    // at 100%, which then trips `usage_notice_pending` and forces a
+    // `[[RESET]]` loop. Until hermes-agent exposes a per-call usage field,
+    // we surface no usage and let the runtime fall back to its cl100k
+    // estimate. `parse_acp_usage` and the parser tests stay alive so the
+    // semantics are documented and the path is ready to flip back on once
+    // upstream lands per-call counters.
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -572,11 +577,9 @@ async fn drive_session(
                                             .unwrap_or("prompt failed")
                                             .to_string(),
                                     );
-                                } else if let Some(usage_val) = raw.pointer("/result/usage") {
-                                    if let Some(u) = parse_acp_usage(usage_val) {
-                                        latest_usage = Some(u);
-                                    }
                                 }
+                                // result.usage intentionally not consumed —
+                                // see drive_session preamble.
                                 break;
                             }
 
@@ -683,7 +686,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: latest_usage,
+        usage: None,
     });
 }
 

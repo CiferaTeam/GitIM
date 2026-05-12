@@ -45,10 +45,14 @@ fn pi_reports_per_turn_increments() {
 
 #[test]
 fn hermes_reports_per_turn_increments_for_now() {
-    // Tracked under Task 2 — audit hermes result.usage shape and adjust if
-    // it turns out to be cumulative. Default per-turn keeps `last_session_usage`
-    // baseline at zero, which over-counts by zero (delta = current - 0 = current)
-    // when the provider already sends per-turn deltas.
+    // The hermes ACP id=3 prompt response carries session-cumulative usage
+    // (run_agent.py accumulates `session_input_tokens += ...` across LLM
+    // calls). Until upstream exposes a per-call counter, the driver drops
+    // the field entirely (ExecResult.usage stays None), which means the
+    // cumulative-vs-per-turn flag has no observable effect — runtime always
+    // falls back to its cl100k estimate. Keep the default `false` so the
+    // trait wouldn't double-count if a future change reintroduces usage
+    // surfacing without re-auditing the semantics.
     let p = HermesProvider::new(cfg());
     assert!(p.reports_usage());
     assert!(!p.usage_is_cumulative());
