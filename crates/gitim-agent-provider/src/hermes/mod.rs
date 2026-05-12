@@ -83,6 +83,11 @@ impl Provider for HermesProvider {
     fn prompt_collaboration(&self, ctx: &PromptContext) -> String {
         prompts::collaboration(ctx)
     }
+    /// Hermes-flavored gitim CLI guidance (neutralises the AGENTS.md
+    /// continuity-sink line in the board / memory contrast).
+    fn prompt_gitim_api(&self, ctx: &PromptContext) -> String {
+        prompts::gitim_api(ctx)
+    }
 
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self

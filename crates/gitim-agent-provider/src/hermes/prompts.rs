@@ -54,6 +54,41 @@ IM 数据优先用 `gitim read` / `gitim search` / `gitim channels` / `gitim use
     )
 }
 
+/// Hermes-flavored gitim CLI guidance. Three local substitutions on top of
+/// `default_gitim_api` so the section doesn't accidentally re-import
+/// Claude/Codex-only concepts that don't exist in the hermes runtime:
+///   1. Board / memory contrast: the default pitches `AGENTS.md` as the
+///      continuity-storage medium — for hermes, continuity lives in
+///      SOUL.md + MEMORY.md / USER.md, not in the workspace clone.
+///   2. archive-dm granularity: the default cross-references `[[RESET]]`
+///      as the session-level coarse cut, but hermes has no `[[RESET]]`
+///      sentinel — `self_managed_context` opts it out entirely.
+///   3. burn-self guard: the default sells `[[RESET]]` as the "stuck
+///      context" remedy; for hermes the equivalent is "let hermes
+///      auto-compress and ask owner for guidance", burn-self warning
+///      stays.
+pub fn gitim_api(ctx: &PromptContext) -> String {
+    crate::prompts::default_gitim_api(ctx)
+        .replace(
+            "续航信息（在做什么、承诺过什么、下一步什么）\
+             写到 AGENTS.md（runtime 每次唤醒自动注入，零成本进入 context）。",
+            "续航信息（在做什么、承诺过什么、下一步什么）属于你的私有记忆。",
+        )
+        .replace(
+            "leave-channel 切一个频道订阅，archive-dm 切一条 DM 线，\
+             而 `[[RESET]]` 是 session 级的重锤。粒度从细到粗自己挑。",
+            "leave-channel 切一个频道订阅，archive-dm 切一条 DM 线。\
+             粒度从细到粗自己挑。",
+        )
+        .replace(
+            "任务卡住或 context 混乱时，用 `[[RESET]]` 重置 session，\
+             **不是** burn-self —— \
+             reset 之后我还在，burn-self 之后我没了。",
+            "任务卡住或 context 混乱时，先向 owner 请示，**不是** burn-self —— \
+             卡住之后我还在，burn-self 之后我没了。",
+        )
+}
+
 /// Hermes-flavored collaboration norms. Identical to `default_collaboration`
 /// in spirit, but the "用你的记忆 / `notes/` 跟踪每条线" line is rewritten
 /// to drop the filesystem-memory channel suggestion — the local-cost
@@ -177,5 +212,37 @@ mod tests {
         let s = collaboration(&ctx());
         assert!(!s.contains("notes/"), "filesystem memory channel suggestion removed");
         assert!(!s.contains("记忆工具"), "hermes-specific memory guidance not duplicated here");
+    }
+
+    #[test]
+    fn gitim_api_drops_agents_md_continuity_ref() {
+        let s = gitim_api(&ctx());
+        assert!(s.contains("Board 不是你的记忆板"), "board contrast preserved");
+        assert!(
+            !s.contains("写到 AGENTS.md"),
+            "AGENTS.md as continuity sink removed for hermes"
+        );
+        // gitim CLI surface itself must remain — this test would fail loudly
+        // if the replace inadvertently truncated the surrounding section.
+        assert!(s.contains("gitim board publish"));
+        assert!(s.contains("gitim send"));
+    }
+
+    #[test]
+    fn assembled_hermes_system_prompt_has_no_filesystem_memory_refs() {
+        // Belt-and-braces integration check: the full Provider trait
+        // composition is what actually lands in SOUL.md, and at one point
+        // a stray AGENTS.md ref in `default_gitim_api` leaked through
+        // because we'd only checked the identity / collaboration sections.
+        // This test guards the assembled output end-to-end.
+        use crate::{create, ProviderConfig};
+        let provider = create("hermes", ProviderConfig::default()).unwrap();
+        let prompt = provider.build_system_prompt(&ctx());
+        for needle in ["AGENTS.md", "notes/", "[[RESET]]"] {
+            assert!(
+                !prompt.contains(needle),
+                "hermes system_prompt must not contain `{needle}`: found in output"
+            );
+        }
     }
 }
