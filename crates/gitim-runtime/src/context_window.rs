@@ -23,6 +23,13 @@ pub fn default_max_tokens(provider: &str, model: &str) -> Option<u64> {
         "codex" => Some(codex_max_tokens(&m)),
         "mock" => Some(10_000),
         "pi" => Some(200_000),
+        // Self-managed-context providers: the runtime cannot know how much
+        // of its accumulated estimator output has already been compressed
+        // away by the provider's in-loop compressor. Returning `None` here
+        // short-circuits `compute_from_estimate`, which means no occupancy
+        // snapshot, no 80% threshold crossing, no forced `[[RESET]]`. The
+        // provider's own compression budget is the only pressure valve.
+        "hermes" => None,
         _ => Some(200_000),
     }
 }
@@ -133,6 +140,19 @@ mod default_max_tests {
     #[test]
     fn unknown_provider_conservative_fallback() {
         assert_eq!(default_max_tokens("future", "some-model"), Some(200_000));
+    }
+
+    #[test]
+    fn hermes_returns_none_so_estimator_short_circuits() {
+        // Hermes is `self_managed_context = true` (see the trait override on
+        // HermesProvider). Returning `None` here makes
+        // `compute_from_estimate` early-out, which prevents the runtime
+        // from clamping a wildly overestimated `(input + cache_read) / max`
+        // ratio to 100% and triggering the threshold preamble + agent-side
+        // [[RESET]] loop. Hermes' own `compression.threshold` is the only
+        // context-pressure valve.
+        assert_eq!(default_max_tokens("hermes", "MiniMax-M2.7-highspeed"), None);
+        assert_eq!(default_max_tokens("hermes", ""), None);
     }
 }
 

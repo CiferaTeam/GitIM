@@ -35,6 +35,29 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether the provider self-manages its conversation context.
+    ///
+    /// - `false` (default): the runtime is responsible for keeping context
+    ///   pressure under control — it computes occupancy (via provider usage
+    ///   or cl100k estimate), emits a `[系统通知]` preamble when the agent
+    ///   crosses `WARN_AT_PERCENT`, and the agent uses the `[[RESET]]`
+    ///   sentinel to hand off to a fresh session. This is the design built
+    ///   for Claude / Codex, which only do emergency compaction near the
+    ///   model's hard limit.
+    /// - `true`: the provider performs proactive in-loop compression
+    ///   (e.g. hermes-agent's `compression.threshold: 0.5`). The runtime's
+    ///   estimator has no visibility into what the provider compressed, so
+    ///   occupancy computations are unreliable. Self-managed providers opt
+    ///   out of the entire pressure-relief mechanism: no occupancy gauge,
+    ///   no threshold preamble, no forced `[[RESET]]`. Provider identity /
+    ///   persistent memory must survive its own compression — typically by
+    ///   living in files the provider auto-reloads after compression
+    ///   (e.g. hermes SOUL.md / MEMORY.md), not by being re-injected as the
+    ///   first user message of a fresh runtime-side session.
+    fn self_managed_context(&self) -> bool {
+        false
+    }
+
     fn prompt_identity(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_identity(ctx)
     }

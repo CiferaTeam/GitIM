@@ -263,9 +263,17 @@ impl AgentLoop {
         );
 
         let prev_pct = state.session_usage.as_ref().map(|s| s.used_percent);
+        let self_managed = self.provider.self_managed_context();
         if let Some(snap) = &new_snapshot {
             if just_crossed_threshold(prev_pct, snap.used_percent) {
-                state.usage_notice_pending = true;
+                // Self-managed providers (e.g. hermes) compress in-loop and
+                // do not need the runtime-side `[系统通知]` preamble +
+                // `[[RESET]]` handoff. Log the crossing for observability but
+                // do not arm the preamble. For other providers the default
+                // pressure-relief flow stays unchanged.
+                if !self_managed {
+                    state.usage_notice_pending = true;
+                }
                 let est_pct = max
                     .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
                     .unwrap_or(0.0);
@@ -279,6 +287,7 @@ impl AgentLoop {
                     max_tokens = ?max,
                     provider = %self.provider_type,
                     model = %model,
+                    self_managed = self_managed,
                     "threshold_crossed_80pct"
                 );
             }
