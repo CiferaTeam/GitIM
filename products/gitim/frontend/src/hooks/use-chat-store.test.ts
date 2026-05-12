@@ -31,6 +31,69 @@ describe("useChatStore pending messages", () => {
 
     expect(useChatStore.getState().messages).toEqual([real]);
   });
+
+  it("addMessages drops a failed pending when the matching real entry arrives", () => {
+    // Failed-pending leak: HTTP times out, but daemon actually wrote line 17.
+    // Without content-based dedup the "Failed ✗" copy sticks around forever
+    // because its line_number (-1) never collides with the real line.
+    const pending = msg(-1, "你这样昨天那个邮箱测试", {
+      _pendingId: "pending-1",
+      _status: "failed",
+    });
+    const real = msg(17, "你这样昨天那个邮箱测试");
+
+    useChatStore.getState().addPendingMessage(pending);
+    useChatStore.getState().markPendingFailed("pending-1");
+    useChatStore.getState().addMessages([real]);
+
+    expect(useChatStore.getState().messages).toEqual([real]);
+  });
+
+  it("addMessages keeps a failed pending when nothing in the incoming batch matches", () => {
+    // Defensive: don't accidentally drop a truly-failed message just because
+    // *any* new entry arrived. Only matching (author, body) drops it.
+    const pending = msg(-1, "totally different", {
+      _pendingId: "pending-1",
+      _status: "failed",
+    });
+    const real = msg(17, "unrelated content");
+
+    useChatStore.getState().addPendingMessage(pending);
+    useChatStore.getState().markPendingFailed("pending-1");
+    useChatStore.getState().addMessages([real]);
+
+    const lines = useChatStore.getState().messages.map((m) => m.line_number);
+    expect(lines.sort((a, b) => a - b)).toEqual([-1, 17]);
+  });
+
+  it("setMessages drops a failed pending when the new batch contains the matching real entry", () => {
+    const pending = msg(-1, "hello", {
+      _pendingId: "pending-1",
+      _status: "failed",
+    });
+    const real = msg(17, "hello");
+
+    useChatStore.getState().addPendingMessage(pending);
+    useChatStore.getState().markPendingFailed("pending-1");
+    useChatStore.getState().setMessages([real]);
+
+    expect(useChatStore.getState().messages).toEqual([real]);
+  });
+
+  it("markPendingFailed drops the pending if the real entry already arrived", () => {
+    // Symmetric to markPendingSent's realAlreadyArrived check. Ordering can
+    // flip when polling beats our HTTP timeout: real lands first, then our
+    // send call resolves with an error and tries to mark failed.
+    const real = msg(17, "raced through");
+
+    useChatStore.getState().addMessages([real]);
+    useChatStore.getState().addPendingMessage(
+      msg(-1, "raced through", { _pendingId: "pending-1", _status: "sending" })
+    );
+    useChatStore.getState().markPendingFailed("pending-1");
+
+    expect(useChatStore.getState().messages).toEqual([real]);
+  });
 });
 
 describe("useChatStore history pagination", () => {
