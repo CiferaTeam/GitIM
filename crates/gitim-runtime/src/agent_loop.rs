@@ -258,6 +258,7 @@ impl AgentLoop {
             provider_reported,
             state.estimated_tokens,
             max,
+            self.provider.usage_is_cumulative(),
             &now,
         );
 
@@ -1076,16 +1077,30 @@ pub fn compute_snapshot(
     provider_reported: Option<&ProviderUsage>,
     estimated_tokens: u64,
     max_tokens: Option<u64>,
+    usage_is_cumulative: bool,
     updated_at: &str,
 ) -> Option<SessionUsageSnapshot> {
     let (used_percent, source, input_tokens, output_tokens) = if let Some(pu) = provider_reported {
         if let Some(pct) = pu.used_percent {
+            // An explicit `used_percent` is authoritative — providers that
+            // ship it (codex's rate-limit %, some opencode shapes) compute
+            // it themselves against their context window. It is not derived
+            // from the cumulative counts, so the cumulative-flag dodge does
+            // not apply here.
             (
                 pct,
                 UsageSource::ProviderReported,
                 pu.input_tokens,
                 pu.output_tokens,
             )
+        } else if usage_is_cumulative {
+            // Provider reports session-cumulative counts (codex
+            // total_token_usage, hermes session_input_tokens, etc.). Using
+            // those as the numerator against `max_tokens` makes the ratio
+            // climb monotonically across turns and clamp at 100%, which
+            // misrepresents per-LLM-call context occupancy. Fall back to
+            // the cl100k estimate path — that one *is* per-turn-resetting.
+            return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
         } else if let Some(max) = max_tokens {
             let effective = effective_input_tokens(pu);
             if effective == 0 {

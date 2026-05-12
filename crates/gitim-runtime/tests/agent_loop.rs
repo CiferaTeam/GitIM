@@ -161,6 +161,7 @@ fn snapshot_from_claude_provider_reported() {
         }),
         42_000,
         Some(200_000),
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
@@ -187,6 +188,7 @@ fn snapshot_from_claude_aggregates_cache_tokens() {
         }),
         0,
         Some(200_000),
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
@@ -214,6 +216,7 @@ fn snapshot_from_claude_without_cache_still_uses_input_tokens() {
         }),
         0,
         Some(200_000),
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
@@ -233,6 +236,7 @@ fn snapshot_from_codex_used_percent() {
         }),
         0,
         None,
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
@@ -249,6 +253,7 @@ fn snapshot_falls_back_to_estimator() {
         None,
         80_000,
         Some(100_000),
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
@@ -259,7 +264,7 @@ fn snapshot_falls_back_to_estimator() {
 
 #[test]
 fn snapshot_returns_none_when_no_data_available() {
-    let snap = compute_snapshot("sess", None, 0, None, "2026-04-20T10:00:00Z");
+    let snap = compute_snapshot("sess", None, 0, None, false, "2026-04-20T10:00:00Z");
     assert!(snap.is_none());
 }
 
@@ -275,10 +280,71 @@ fn snapshot_clamps_above_100_with_warning_signal() {
         }),
         0,
         None,
+        false,
         "2026-04-20T10:00:00Z",
     )
     .expect("snapshot");
     assert!((snap.used_percent - 100.0).abs() < 0.01);
+}
+
+#[test]
+fn snapshot_cumulative_provider_with_huge_input_falls_back_to_estimate() {
+    // The regression we just patched: a cumulative provider (codex
+    // total_token_usage / hermes session_input_tokens) has been chugging
+    // along and now reports input_tokens far beyond max. The pre-fix path
+    // computed (18.3M + 17.3M) / 272K → clamped to 100 → triggered the
+    // [[RESET]] preamble on every turn. After the fix, cumulative=true
+    // routes to the cl100k estimator, which reads per-turn-accurate state.
+    let snap = compute_snapshot(
+        "sess-cum",
+        Some(&ProviderUsage {
+            input_tokens: Some(18_300_000),
+            output_tokens: Some(87_000),
+            used_percent: None,
+            cache_read_tokens: Some(17_300_000),
+            cache_creation_tokens: None,
+        }),
+        58_000,
+        Some(272_000),
+        true,
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    // estimate path: 58_000 / 272_000 ≈ 21.3%
+    assert!(
+        (snap.used_percent - 21.3).abs() < 0.5,
+        "got {}, want ~21.3",
+        snap.used_percent
+    );
+    assert!(matches!(snap.source, UsageSource::RuntimeEstimated));
+    // Provider counts not propagated when we don't trust them as occupancy.
+    assert!(snap.input_tokens.is_none());
+}
+
+#[test]
+fn snapshot_cumulative_provider_still_honors_explicit_used_percent() {
+    // Even when usage_is_cumulative=true, an explicit `used_percent` from
+    // the provider stays authoritative — that field is computed by the
+    // provider against its own context window, not derived from cumulative
+    // counts, so it isn't subject to the monotonic-growth pathology.
+    let snap = compute_snapshot(
+        "sess-cum-pct",
+        Some(&ProviderUsage {
+            input_tokens: Some(99_999_999),
+            output_tokens: None,
+            used_percent: Some(42.0),
+            ..Default::default()
+        }),
+        0,
+        Some(200_000),
+        true,
+        "2026-04-20T10:00:00Z",
+    )
+    .expect("snapshot");
+
+    assert!((snap.used_percent - 42.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
 }
 
 use gitim_runtime::agent_loop::just_crossed_threshold;
