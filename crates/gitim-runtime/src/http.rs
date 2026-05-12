@@ -2416,6 +2416,55 @@ async fn agents_add(
                             .into_response();
                     }
                 }
+
+                // ── Install GitIM-managed SOUL.md ───────────────────────────
+                // The hermes profile was just clone-created from the user's
+                // active profile, so its SOUL.md is still the hermes-shipped
+                // template (`# Hermes Agent Persona` + comment). Replace it
+                // with our hermes-tailored system prompt so hermes loads
+                // GitIM identity / operating rules into its frozen system-
+                // prompt slot at every session start (and rebuilds after
+                // each in-loop compression event). Failure here is non-
+                // fatal: the agent is still usable, just with hermes'
+                // default persona — log a warning so it's visible.
+                let body = crate::hermes_profile::build_hermes_soul_body(
+                    &req.handler,
+                    req.model.as_deref(),
+                    req.system_prompt.as_deref(),
+                );
+                match crate::hermes_profile::write_soul_md(
+                    &req.handler,
+                    &body,
+                    crate::hermes_profile::SoulWriteMode::Force,
+                ) {
+                    Ok(crate::hermes_profile::SoulWriteOutcome::Wrote) => {
+                        tracing::info!(
+                            handler = %req.handler,
+                            "installed gitim-managed SOUL.md"
+                        );
+                    }
+                    Ok(crate::hermes_profile::SoulWriteOutcome::SkippedUnchanged) => {
+                        tracing::debug!(
+                            handler = %req.handler,
+                            "SOUL.md already up to date"
+                        );
+                    }
+                    Ok(crate::hermes_profile::SoulWriteOutcome::RefusedUserEdited) => {
+                        // Unreachable in Force mode but kept as a typed
+                        // branch — defensive in case the variant grows.
+                        tracing::warn!(
+                            handler = %req.handler,
+                            "SOUL.md write skipped unexpectedly under Force mode"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            handler = %req.handler,
+                            error = %e,
+                            "failed to install SOUL.md; agent will run with hermes default persona"
+                        );
+                    }
+                }
             }
 
             // Apply the user-supplied introduction blurb (if any) to the
@@ -3073,6 +3122,46 @@ async fn agents_patch(
             Json(ErrorBody::new(format!("write me.json failed: {e}"))),
         )
             .into_response();
+    }
+
+    // Sync SOUL.md if the user touched system_prompt and the agent is
+    // hermes. We use PreserveUserEdits — if the user has hand-edited
+    // SOUL.md since provisioning (no marker), the PATCH succeeds for
+    // me.json but the SOUL.md update is refused with a warning. The
+    // user can reconcile manually. SOUL.md is hermes-only; other
+    // providers don't have one.
+    let provider_is_hermes = me.provider.as_deref() == Some("hermes");
+    let system_prompt_patched = req.system_prompt.is_some();
+    if provider_is_hermes && system_prompt_patched {
+        let body = crate::hermes_profile::build_hermes_soul_body(
+            &agent_id,
+            me.model.as_deref(),
+            me.system_prompt.as_deref(),
+        );
+        match crate::hermes_profile::write_soul_md(
+            &agent_id,
+            &body,
+            crate::hermes_profile::SoulWriteMode::PreserveUserEdits,
+        ) {
+            Ok(crate::hermes_profile::SoulWriteOutcome::Wrote) => {
+                tracing::info!(handler = %agent_id, "SOUL.md synced with patched system_prompt");
+            }
+            Ok(crate::hermes_profile::SoulWriteOutcome::SkippedUnchanged) => {}
+            Ok(crate::hermes_profile::SoulWriteOutcome::RefusedUserEdited) => {
+                tracing::warn!(
+                    handler = %agent_id,
+                    "system_prompt patched but SOUL.md has been hand-edited; \
+                     manual reconciliation required"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    handler = %agent_id,
+                    error = %e,
+                    "failed to sync SOUL.md after system_prompt patch"
+                );
+            }
+        }
     }
 
     if model_changed {

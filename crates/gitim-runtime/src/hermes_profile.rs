@@ -5,7 +5,10 @@
 //! convention, path resolution, and shell-out wrappers around the
 //! `hermes profile create / delete` CLI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use gitim_agent_provider::{create, PromptContext, ProviderConfig};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HermesProfileError {
@@ -230,6 +233,206 @@ pub async fn delete_profile_with(handler: &str, bin: &str) -> Result<(), HermesP
     }
 }
 
+/// Compose the full SOUL.md body for a hermes agent: hermes-tailored
+/// system prompt (drops AGENTS.md / notes / [[RESET]] sections — see
+/// `gitim_agent_provider::hermes::prompts`) plus an optional per-agent
+/// suffix from `me.json::system_prompt`.
+///
+/// This is the single source of truth for what ends up in SOUL.md. Both
+/// `add_agent` (provision time) and PATCH (system_prompt update) call it
+/// so the file stays consistent regardless of how the agent state changes.
+pub fn build_hermes_soul_body(
+    handler: &str,
+    model: Option<&str>,
+    custom_system_prompt: Option<&str>,
+) -> String {
+    // `ProviderConfig::default` is fine here — we only need the trait's
+    // prompt methods, not the executable path / env. The trait surface
+    // for system-prompt assembly is stateless wrt config.
+    let provider = create("hermes", ProviderConfig::default())
+        .expect("hermes is a built-in provider");
+    let ctx = PromptContext { handler, model };
+    let mut body = provider.build_system_prompt(&ctx);
+    if let Some(custom) = custom_system_prompt {
+        if !custom.is_empty() {
+            body.push_str("\n\n## 用户自定义指令\n\n");
+            body.push_str(custom);
+        }
+    }
+    body
+}
+
+// ── SOUL.md management ──
+//
+// SOUL.md is hermes' "agent persona" file (see acp_adapter/server.py + run_agent.py
+// `_build_system_prompt`). Hermes loads it as the **frozen** identity slot of every
+// session and rebuilds the prompt after each in-loop compression event, so anything
+// in this file survives compression without runtime re-injection. That's why it's the
+// right place to plant the GitIM system prompt for hermes agents.
+//
+// **Boundary**: SOUL.md is shared territory — the user is allowed to hand-edit it for
+// persona customization, and hermes itself ships a placeholder template at profile-
+// create time. We must not clobber either case silently. The marker discipline below
+// is how we keep the runtime out of files it shouldn't own.
+
+/// First-line marker that identifies a SOUL.md as runtime-managed.
+///
+/// Format: `<!-- gitim-managed-soul: v=1 sha256=<hex> -->\n`
+/// The hex is sha256 of the body (everything after the marker line +
+/// blank line). When the marker is present, we own the file and can rewrite
+/// at will. When it's missing, the file is user-owned (or hermes' shipped
+/// template); we leave it alone and surface that to the caller.
+const SOUL_MARKER_PREFIX: &str = "<!-- gitim-managed-soul: v=1 sha256=";
+const SOUL_MARKER_SUFFIX: &str = " -->";
+
+/// How [`write_soul_md`] should treat a file that exists without our marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoulWriteMode {
+    /// Refuse the write if the file is present but lacks our marker
+    /// (hand-edited by the user, or some unexpected third party). Use this
+    /// for PATCH-time updates so the user's customisation is never silently
+    /// clobbered. Absent file / marker-present-stale → always written.
+    PreserveUserEdits,
+    /// Always (re)write. Use this only at provision time, when the SOUL.md
+    /// we're seeing is the hermes-shipped template from `--clone` and is
+    /// expected to be replaced by the runtime-managed version. After this
+    /// call the file carries our marker, so subsequent
+    /// `PreserveUserEdits` writes correctly distinguish hermes-template
+    /// (now gone) from real user edits.
+    Force,
+}
+
+/// Outcome of a [`write_soul_md`] call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SoulWriteOutcome {
+    /// The file did not exist or was runtime-managed with stale content —
+    /// we wrote fresh content + a refreshed marker.
+    Wrote,
+    /// The file is runtime-managed and already has the requested content;
+    /// nothing on disk changed.
+    SkippedUnchanged,
+    /// `PreserveUserEdits` only: the file exists without our marker. We
+    /// did not touch it. Caller should surface this to the user — typically
+    /// log a warning that the system prompt update did not propagate to
+    /// hermes because the user is managing SOUL.md by hand.
+    RefusedUserEdited,
+}
+
+fn soul_path(handler: &str) -> Result<PathBuf, HermesProfileError> {
+    Ok(profile_dir(handler)?.join("SOUL.md"))
+}
+
+fn soul_marker_line(body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    let hex = hex_encode(&hasher.finalize());
+    format!("{SOUL_MARKER_PREFIX}{hex}{SOUL_MARKER_SUFFIX}\n")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Parse the marker line out of an existing SOUL.md. Returns the recorded
+/// sha256 hex if the first line matches our marker format, `None` otherwise
+/// (which includes the hermes shipped template `# Hermes Agent Persona`).
+fn parse_marker(existing: &str) -> Option<&str> {
+    let first_line = existing.split('\n').next()?;
+    let inner = first_line
+        .strip_prefix(SOUL_MARKER_PREFIX)?
+        .strip_suffix(SOUL_MARKER_SUFFIX)?;
+    Some(inner)
+}
+
+/// Idempotently write the GitIM-managed SOUL.md for `handler`.
+///
+/// `body` is the system-prompt text — caller passes the output of
+/// `Provider::build_system_prompt(ctx)` + any agent-specific suffix. The
+/// function:
+///   1. Computes sha256 of `body`.
+///   2. If the file is absent or starts with our marker:
+///      - Marker hash matches → return `SkippedUnchanged` (no write).
+///      - Marker hash differs or marker missing entirely → write
+///        marker + body, return `Wrote`.
+///   3. If the file exists but has no marker:
+///      - `mode = PreserveUserEdits` → return `RefusedUserEdited` without
+///        touching the file.
+///      - `mode = Force` → overwrite anyway. Provisioning passes `Force`
+///        because the no-marker file is just the hermes-shipped template
+///        from `--clone`, not a real user edit.
+///
+/// Atomic on POSIX: writes to `SOUL.md.tmp` then `rename` so a crash mid-
+/// write cannot leave a truncated SOUL.md.
+pub fn write_soul_md(
+    handler: &str,
+    body: &str,
+    mode: SoulWriteMode,
+) -> Result<SoulWriteOutcome, HermesProfileError> {
+    let path = soul_path(handler)?;
+    write_soul_md_at(&path, body, mode)
+}
+
+/// Test seam: same as [`write_soul_md`] but with explicit destination path.
+pub fn write_soul_md_at(
+    path: &Path,
+    body: &str,
+    mode: SoulWriteMode,
+) -> Result<SoulWriteOutcome, HermesProfileError> {
+    let marker = soul_marker_line(body);
+    let expected_hash = marker
+        .strip_prefix(SOUL_MARKER_PREFIX)
+        .and_then(|rest| rest.strip_suffix(&format!("{SOUL_MARKER_SUFFIX}\n")))
+        .unwrap_or("")
+        .to_string();
+
+    if path.exists() {
+        let existing = std::fs::read_to_string(path)
+            .map_err(|e| HermesProfileError::Other(format!("read {}: {e}", path.display())))?;
+        match parse_marker(&existing) {
+            Some(prev_hash) if prev_hash == expected_hash => {
+                return Ok(SoulWriteOutcome::SkippedUnchanged);
+            }
+            Some(_) => {
+                // runtime-managed but stale — fall through to rewrite.
+            }
+            None => match mode {
+                SoulWriteMode::PreserveUserEdits => {
+                    return Ok(SoulWriteOutcome::RefusedUserEdited);
+                }
+                SoulWriteMode::Force => {
+                    // Hermes-shipped template at provision time; replace it.
+                }
+            },
+        }
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| HermesProfileError::Other(format!("SOUL.md has no parent: {}", path.display())))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| HermesProfileError::Other(format!("mkdir {}: {e}", parent.display())))?;
+
+    let tmp = path.with_extension("md.tmp");
+    let mut content = String::with_capacity(marker.len() + body.len() + 1);
+    content.push_str(&marker);
+    content.push('\n');
+    content.push_str(body);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+
+    std::fs::write(&tmp, &content)
+        .map_err(|e| HermesProfileError::Other(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| HermesProfileError::Other(format!("rename {} -> {}: {e}", tmp.display(), path.display())))?;
+    Ok(SoulWriteOutcome::Wrote)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +466,134 @@ mod tests {
         delete_profile_with("alice", "/nonexistent/binary/xyz")
             .await
             .expect("delete should be best-effort when CLI is missing");
+    }
+
+    mod soul_md_tests {
+        use super::super::{
+            parse_marker, write_soul_md_at, SoulWriteMode, SoulWriteOutcome, SOUL_MARKER_PREFIX,
+        };
+        use tempfile::TempDir;
+
+        fn body_with_marker_hash(s: &str, hash: &str) -> String {
+            format!("{SOUL_MARKER_PREFIX}{hash} -->\n\n{s}\n")
+        }
+
+        #[test]
+        fn writes_fresh_when_file_absent() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            let body = "## op2 — GitIM Coordinator\n\nYou are op2.";
+            let outcome =
+                write_soul_md_at(&path, body, SoulWriteMode::PreserveUserEdits).unwrap();
+            assert_eq!(outcome, SoulWriteOutcome::Wrote);
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(written.starts_with(SOUL_MARKER_PREFIX));
+            assert!(written.contains("You are op2."));
+        }
+
+        #[test]
+        fn skips_when_identical_body() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            let body = "stable identity";
+            assert_eq!(
+                write_soul_md_at(&path, body, SoulWriteMode::PreserveUserEdits).unwrap(),
+                SoulWriteOutcome::Wrote
+            );
+            assert_eq!(
+                write_soul_md_at(&path, body, SoulWriteMode::PreserveUserEdits).unwrap(),
+                SoulWriteOutcome::SkippedUnchanged
+            );
+        }
+
+        #[test]
+        fn rewrites_when_marker_present_but_body_changed() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            assert_eq!(
+                write_soul_md_at(&path, "v1 body", SoulWriteMode::PreserveUserEdits).unwrap(),
+                SoulWriteOutcome::Wrote
+            );
+            let outcome =
+                write_soul_md_at(&path, "v2 body", SoulWriteMode::PreserveUserEdits).unwrap();
+            assert_eq!(outcome, SoulWriteOutcome::Wrote);
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(written.contains("v2 body"));
+            assert!(!written.contains("v1 body"));
+        }
+
+        #[test]
+        fn preserve_mode_refuses_when_no_marker_present() {
+            // PATCH-time semantics: user-edited file is protected.
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            std::fs::write(
+                &path,
+                "# Hermes Agent Persona\n\n<!-- user customised this -->\n",
+            )
+            .unwrap();
+            let outcome =
+                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits)
+                    .unwrap();
+            assert_eq!(outcome, SoulWriteOutcome::RefusedUserEdited);
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(after.contains("Hermes Agent Persona"));
+            assert!(!after.contains("runtime body"));
+        }
+
+        #[test]
+        fn force_mode_overwrites_shipped_template() {
+            // Provision-time semantics: the no-marker file is the
+            // hermes-shipped template freshly cloned by `ensure_profile`,
+            // and the runtime is expected to install its own version on top.
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            std::fs::write(&path, "# Hermes Agent Persona\n\n<!-- template -->\n").unwrap();
+            let outcome = write_soul_md_at(&path, "runtime body", SoulWriteMode::Force).unwrap();
+            assert_eq!(outcome, SoulWriteOutcome::Wrote);
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(after.starts_with(SOUL_MARKER_PREFIX));
+            assert!(after.contains("runtime body"));
+            assert!(!after.contains("Hermes Agent Persona"));
+        }
+
+        #[test]
+        fn force_mode_still_skips_when_marker_matches() {
+            // Even Force shouldn't write when content is byte-identical.
+            // Avoids spurious mtime churn on every provision retry.
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            assert_eq!(
+                write_soul_md_at(&path, "body", SoulWriteMode::Force).unwrap(),
+                SoulWriteOutcome::Wrote
+            );
+            assert_eq!(
+                write_soul_md_at(&path, "body", SoulWriteMode::Force).unwrap(),
+                SoulWriteOutcome::SkippedUnchanged
+            );
+        }
+
+        #[test]
+        fn refuses_when_marker_corrupted() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("SOUL.md");
+            std::fs::write(&path, "<!-- not-our-marker -->\nuser body\n").unwrap();
+            let outcome =
+                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits)
+                    .unwrap();
+            assert_eq!(outcome, SoulWriteOutcome::RefusedUserEdited);
+        }
+
+        #[test]
+        fn parse_marker_handles_our_format() {
+            let raw = body_with_marker_hash("body", "abc123");
+            assert_eq!(parse_marker(&raw), Some("abc123"));
+        }
+
+        #[test]
+        fn parse_marker_returns_none_for_template() {
+            assert!(parse_marker("# Hermes Agent Persona\n").is_none());
+        }
     }
 
     // `default_profile_ready` reads HERMES_HOME, a process-global env var.
