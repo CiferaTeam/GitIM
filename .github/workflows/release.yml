@@ -40,7 +40,7 @@ jobs:
             tool: cross
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -89,7 +89,7 @@ jobs:
 
       - name: Set up QEMU
         if: startsWith(matrix.slug, 'linux-')
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Smoke test (alpine, Linux only)
         if: startsWith(matrix.slug, 'linux-')
@@ -109,7 +109,7 @@ jobs:
           NAME="gitim-${TAG}-${{ matrix.slug }}"
           (cd dist && tar czf "${NAME}.tar.gz" "${NAME}")
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.slug }}
           path: dist/gitim-*.tar.gz
@@ -121,7 +121,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -136,7 +136,7 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: dist-*
