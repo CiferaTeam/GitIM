@@ -38,6 +38,17 @@ impl CodexProvider {
 
 #[async_trait]
 impl Provider for CodexProvider {
+    /// codex stdout's `turn.completed.usage.input_tokens` is the running
+    /// session total (verified by resume probe — see
+    /// `tests/provider_trait_declarations.rs::codex_reports_cumulative_session_usage`).
+    /// `normalize_to_delta` subtracts the per-session baseline so the
+    /// accumulator gets per-turn deltas; `compute_snapshot` short-circuits
+    /// cumulative providers to the estimator (now overflow-guarded) so the
+    /// raw cumulative input doesn't render as a monotonic 100%.
+    fn usage_is_cumulative(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config
@@ -181,16 +192,6 @@ async fn drive_session(
                         continue;
                     }
 
-                    // Codex streams `token_count` events mid-turn. We extract
-                    // `last_token_usage` — the per-LLM-call input — which is
-                    // what `compute_snapshot` needs for context-window
-                    // occupancy. `total_token_usage` is session-cumulative and
-                    // would render `(input + cache_read) / max` as a
-                    // monotonically growing ratio that falsely clamps to 100%.
-                    if let Some(usage) = parse_token_count_usage(&line) {
-                        latest_usage = Some(usage);
-                    }
-
                     let parsed = match parse_line(&line) {
                         Some(parsed) => parsed,
                         None => continue,
@@ -223,12 +224,24 @@ async fn drive_session(
                         ParsedMessage::ToolResult { call_id, output } => {
                             try_send_event(&event_tx, Event::ToolResult { call_id, output });
                         }
-                        ParsedMessage::TurnCompleted => {
-                            // `turn.completed.usage` carries cumulative
-                            // session counts and conflates multi-LLM-call
-                            // turns into a single figure — we ignore it for
-                            // occupancy and rely on the streaming
-                            // `last_token_usage` from `token_count` events.
+                        ParsedMessage::TurnCompleted { usage } => {
+                            // `turn.completed.usage` is the only usage
+                            // signal codex 0.130.0-alpha.5 emits on stdout.
+                            // It's session-cumulative (verified by resume
+                            // probe: turn1 input=22834, turn2 input=45700,
+                            // turn3 input=68580), which is why the codex
+                            // Provider impl declares
+                            // `usage_is_cumulative() == true` — the runtime
+                            // subtracts a per-session baseline for the
+                            // accumulator and routes occupancy through the
+                            // (overflow-guarded) estimator.
+                            //
+                            // 31df93c targeted `event_msg/token_count` from
+                            // the rollout-file schema, which never reaches
+                            // stdout — that path is gone.
+                            if let Some(u) = usage {
+                                latest_usage = Some(u);
+                            }
                             saw_turn_completed = true;
                         }
                     }
@@ -398,7 +411,11 @@ enum ParsedMessage {
     Text { content: String },
     ToolUse { call_id: String, command: String },
     ToolResult { call_id: String, output: String },
-    TurnCompleted,
+    /// codex CLI 0.130.0-alpha.5 emits one of these per `codex exec`
+    /// invocation, with cumulative session usage at the top level. The
+    /// `usage` field is `Some` whenever the LLM call(s) inside the turn
+    /// produced billing data; `None` for empty/error turns or older builds.
+    TurnCompleted { usage: Option<ProviderUsage> },
 }
 
 fn parse_line(line: &str) -> Option<ParsedMessage> {
@@ -427,7 +444,16 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 _ => None,
             }
         }
-        "turn.completed" => Some(ParsedMessage::TurnCompleted),
+        "turn.completed" => {
+            // `usage` shape on stdout matches the rollout-file
+            // `last_token_usage` field layout, so reuse `parse_codex_usage`
+            // for the Value → ProviderUsage projection. It returns None
+            // when no token fields are present (empty `{}` object or
+            // missing entirely), which is fine — turn completion alone
+            // is still a useful stream-end signal.
+            let usage = raw.usage.as_ref().and_then(parse_codex_usage);
+            Some(ParsedMessage::TurnCompleted { usage })
+        }
         _ => None,
     }
 }
@@ -439,6 +465,11 @@ struct RawLine {
     thread_id: Option<String>,
     #[serde(default)]
     item: Option<RawItem>,
+    /// Only populated for `turn.completed` events. Kept as a raw `Value`
+    /// so the parser is forgiving about extra fields codex may add
+    /// (timestamps, request ids, etc.) without breaking deserialization.
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 /// Look up the codex session rollout file for `thread_id` and extract a
@@ -538,45 +569,25 @@ fn parse_rollout_line(line: &str) -> Option<String> {
     None
 }
 
-/// Extract per-LLM-call usage from a `token_count` event_msg.
+/// Project a codex usage JSON object into the provider-agnostic shape.
 ///
-/// Codex CLI emits two distinct figures under `payload.info`:
-/// - `total_token_usage` — cumulative session-so-far billing
-/// - `last_token_usage` — the input/output of the LAST LLM call
+/// Accepts the field layout codex uses for both `turn.completed.usage`
+/// (stdout) and `last_token_usage` / `total_token_usage` (rollout file):
+/// - `input_tokens` — session-cumulative input billing on stdout; the
+///   runtime's `normalize_to_delta` (with `usage_is_cumulative()==true`)
+///   subtracts a per-session baseline to recover per-turn deltas
+/// - `cached_input_tokens` → `cache_read_tokens`
+/// - `output_tokens` + `reasoning_output_tokens` → folded into
+///   `output_tokens` (reasoning models bill these separately but they
+///   consume context just the same)
+/// - `cache_creation_tokens` left `None` — codex's prompt cache is
+///   server-managed; the protocol only surfaces the read side
+/// - `used_percent` left `None` so callers derive occupancy themselves
+///   (or, for cumulative providers, short-circuit to the estimator)
 ///
-/// `compute_snapshot` wants context-window occupancy, which is "how full is
-/// the next LLM call's prompt", not "how many tokens have we billed this
-/// session". Those move on completely different timescales — session billing
-/// grows monotonically across turns; per-call input fluctuates with how much
-/// of the conversation history is being resent. Reading `total_token_usage`
-/// makes `(input + cache_read) / max` climb until it clamps at 100%, which
-/// then trips the `usage_notice_pending` preamble and forces a `[[RESET]]`
-/// loop. So we read `last_token_usage`.
-///
-/// Field mapping into the provider-agnostic `ProviderUsage`:
-/// - `input_tokens` ← `last_token_usage.input_tokens`
-/// - `cache_read_tokens` ← `last_token_usage.cached_input_tokens`
-/// - `output_tokens` ← `last_token_usage.output_tokens`
-///   + `reasoning_output_tokens` (reasoning models bill these separately
-///   but they live in context just the same)
-/// - `cache_creation_tokens` is left `None` — Codex's prompt cache is
-///   server-managed; the protocol surfaces only the read side.
-/// - `used_percent` is left `None` so `compute_snapshot` derives the
-///   percentage from `(input + cache_read) / max_tokens`, matching the
-///   Claude/opencode path.
-///
-/// Returns `None` for non-token_count events, missing `info`, or when the
-/// event carries no token figures (Codex emits placeholder `info: {}`
-/// alongside rate-limit-only updates).
-fn parse_token_count_usage(line: &str) -> Option<ProviderUsage> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    if v.pointer("/payload/type")?.as_str()? != "token_count" {
-        return None;
-    }
-    let last = v.pointer("/payload/info/last_token_usage")?;
-    parse_codex_usage(last)
-}
-
+/// Returns `None` when all three primary fields are missing — that's the
+/// shape codex emits for empty / error turns and the placeholder `{}`
+/// usage object.
 fn parse_codex_usage(total: &Value) -> Option<ProviderUsage> {
     let input = total
         .get("input_tokens")
@@ -839,84 +850,89 @@ mod usage_parse_tests {
     use super::*;
 
     #[test]
-    fn parse_token_count_extracts_last_call_usage() {
-        // Real fixture from cfo's codex (gpt-5.5). total_token_usage is the
-        // session-cumulative billing (12K input + 48K cache_read across many
-        // calls so far); last_token_usage is what the most recent LLM call
-        // actually sent into context (300 fresh + 59700 cached = 60K). Only
-        // the latter belongs in the HUD's `used_percent`.
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12000,"cached_input_tokens":48000,"output_tokens":2400,"reasoning_output_tokens":600,"total_tokens":63000},"last_token_usage":{"input_tokens":300,"cached_input_tokens":59700,"output_tokens":120,"reasoning_output_tokens":40,"total_tokens":60160},"model_context_window":272000},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47.5},"credits":null,"plan_type":"plus"}}}"#;
-        let usage = parse_token_count_usage(line).expect("usage parses");
-        assert_eq!(usage.input_tokens, Some(300));
-        assert_eq!(usage.cache_read_tokens, Some(59_700));
-        // output (120) + reasoning (40) collapsed into one — both consume context.
-        assert_eq!(usage.output_tokens, Some(160));
-        assert_eq!(usage.cache_creation_tokens, None);
-        assert!(
-            usage.used_percent.is_none(),
-            "used_percent left None so compute_snapshot derives it"
-        );
-    }
-
-    #[test]
-    fn parse_turn_completed_carries_no_usage() {
-        // `turn.completed.usage` is per-codex-turn cumulative (summing all
-        // sub-LLM calls' billing within a turn). Surfacing it as occupancy
-        // would resurrect the same monotonic-100% bug we just removed from
-        // `token_count`. Parse the message for stream-end detection but
-        // ignore its `usage` field.
-        let line = r#"{"type":"turn.completed","usage":{"input_tokens":47211,"cached_input_tokens":6912,"output_tokens":22,"reasoning_output_tokens":9}}"#;
+    fn parse_turn_completed_extracts_cumulative_usage() {
+        // Real fixture captured from codex CLI 0.130.0-alpha.5 stdout:
+        // codex emits exactly one `turn.completed` per `codex exec`
+        // invocation, with `usage` at the top level (not nested under
+        // `payload.info`). This is the only usage signal that reaches
+        // stdout — `event_msg/token_count` (which 31df93c targeted) stays
+        // in the rollout file. Verified by running:
+        //   codex exec --json ... "say A" (turn1: input=22834)
+        //   codex exec resume <tid> --json ... "say B" (turn2: input=45700)
+        //   codex exec resume <tid> --json ... "say C" (turn3: input=68580)
+        // monotonically growing across resumes → cumulative session
+        // counts, exactly as 31df93c's commit message warned. We surface
+        // them as-is; the runtime's `normalize_to_delta(cumulative=true)`
+        // path subtracts the per-session baseline so the accumulator gets
+        // per-turn deltas, while `compute_snapshot` routes cumulative
+        // providers through the estimator (now overflow-guarded).
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":45700,"cached_input_tokens":34048,"output_tokens":28,"reasoning_output_tokens":16}}"#;
         let parsed = parse_line(line).expect("turn.completed parses");
-        assert!(matches!(parsed, ParsedMessage::TurnCompleted));
+        match parsed {
+            ParsedMessage::TurnCompleted { usage } => {
+                let usage = usage.expect("usage present");
+                assert_eq!(usage.input_tokens, Some(45_700));
+                assert_eq!(usage.cache_read_tokens, Some(34_048));
+                // output (28) + reasoning (16) collapsed — both consume context.
+                assert_eq!(usage.output_tokens, Some(44));
+                assert_eq!(usage.cache_creation_tokens, None);
+                assert!(
+                    usage.used_percent.is_none(),
+                    "no explicit pct; compute_snapshot derives it"
+                );
+            }
+            other => panic!("expected TurnCompleted with usage, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_token_count_ignores_rate_limit_only_events() {
-        // Codex emits `info: {}` for rate-limit-only token_count events.
-        // The pre-fix parser used to surface `rate_limits.primary.used_percent`
-        // here as if it were context occupancy — it isn't.
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47.5},"credits":null,"plan_type":"plus"}}}"#;
-        assert!(parse_token_count_usage(line).is_none());
+    fn parse_turn_completed_handles_missing_usage_field() {
+        // Defensive: older codex builds or error-path turns may emit
+        // `turn.completed` with no `usage`. Stream-end detection still
+        // needs to fire, but usage is None.
+        let line = r#"{"type":"turn.completed"}"#;
+        let parsed = parse_line(line).expect("turn.completed parses");
+        match parsed {
+            ParsedMessage::TurnCompleted { usage } => assert!(usage.is_none()),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_token_count_skips_non_token_count_payloads() {
-        let line =
-            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"hi"}}"#;
-        assert!(parse_token_count_usage(line).is_none());
+    fn parse_turn_completed_treats_empty_usage_object_as_no_data() {
+        let line = r#"{"type":"turn.completed","usage":{}}"#;
+        let parsed = parse_line(line).expect("turn.completed parses");
+        match parsed {
+            ParsedMessage::TurnCompleted { usage } => assert!(usage.is_none()),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_token_count_handles_zero_input_with_cache() {
-        // Late-session turn: prompt cached entirely; bare input_tokens drops
-        // toward 0 but cached_input_tokens carries the load. Same shape as the
-        // Claude `parse_result_with_cache_only_has_tiny_input` pattern.
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":159500,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":159580},"last_token_usage":{"input_tokens":0,"cached_input_tokens":159500,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":159580},"model_context_window":272000}}}"#;
-        let usage = parse_token_count_usage(line).expect("usage parses");
-        assert_eq!(usage.input_tokens, Some(0));
-        assert_eq!(usage.cache_read_tokens, Some(159_500));
-        // effective_input_tokens (input + cache_read + cache_creation) = 159500,
-        // matching the Claude/opencode authoritative-value path.
+    fn parse_turn_completed_handles_zero_input_with_cache() {
+        // Late-session shape: prompt fully cached, bare input_tokens drops to
+        // 0 while cached_input_tokens carries the load. The accumulator still
+        // gets a meaningful delta via `normalize_to_delta` (cache_read
+        // baseline subtraction).
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":159500,"output_tokens":80,"reasoning_output_tokens":0}}"#;
+        let parsed = parse_line(line).expect("turn.completed parses");
+        match parsed {
+            ParsedMessage::TurnCompleted { usage } => {
+                let usage = usage.expect("usage present");
+                assert_eq!(usage.input_tokens, Some(0));
+                assert_eq!(usage.cache_read_tokens, Some(159_500));
+                assert_eq!(usage.output_tokens, Some(80));
+            }
+            other => panic!("expected TurnCompleted with usage, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_token_count_treats_missing_last_usage_as_no_data() {
-        // Codex emits this shape when info is present but lacks
-        // last_token_usage entirely (e.g. early streaming events before the
-        // first LLM call resolves).
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12000}}}}"#;
-        assert!(parse_token_count_usage(line).is_none());
-    }
-
-    #[test]
-    fn parse_token_count_treats_empty_last_usage_as_no_data() {
-        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{}}}}"#;
-        assert!(parse_token_count_usage(line).is_none());
-    }
-
-    #[test]
-    fn parse_non_event_msg_returns_none() {
+    fn parse_non_turn_completed_returns_none_or_other() {
+        // Non-turn.completed events don't reach the usage path. `parse_line`
+        // either returns a different variant or None — usage extraction
+        // simply doesn't run.
         let line = r#"{"type":"response_item","payload":{"type":"message"}}"#;
-        assert!(parse_token_count_usage(line).is_none());
+        assert!(parse_line(line).is_none());
     }
 }

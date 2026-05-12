@@ -81,8 +81,9 @@ else
     echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hello from mock codex!"}}'
 fi
 
-# Stream a token_count event with last_token_usage — this is what the runtime
-# picks up for context-window occupancy. Real codex CLI emits these alongside
-# turn.completed; we mirror that ordering.
-echo '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":2},"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":2},"model_context_window":272000}}}'
-echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+# Real codex CLI 0.130.0-alpha.5 stdout only emits these top-level types:
+# thread.started / turn.started / item.completed / turn.completed.
+# `event_msg/token_count` events (the rollout-file schema 31df93c targeted)
+# never reach stdout. Mock that constraint so the parser can't be tested
+# against a fixture the real CLI never produces.
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}'
