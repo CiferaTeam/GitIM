@@ -20,13 +20,18 @@ fn claude_reports_per_turn_increments() {
 }
 
 #[test]
-fn codex_reports_session_cumulative() {
+fn codex_reports_per_turn_increments() {
+    // Codex's `token_count.last_token_usage` is the per-LLM-call shape we
+    // capture (overwriting earlier events in the same turn). normalize_to_delta
+    // therefore adds it directly to the daily bucket — no baseline math.
+    // Note: a codex turn that fires multiple LLM calls will only see the
+    // final call's bill, which under-counts; full-fidelity billing would
+    // require summing every `last_token_usage` event during the turn, not
+    // just the most recent one. That's a separate billing-accuracy
+    // improvement, not a context-window-occupancy concern.
     let p = CodexProvider::new(cfg());
     assert!(p.reports_usage());
-    assert!(
-        p.usage_is_cumulative(),
-        "codex token_count event is session-cumulative; runtime relies on this"
-    );
+    assert!(!p.usage_is_cumulative());
 }
 
 #[test]

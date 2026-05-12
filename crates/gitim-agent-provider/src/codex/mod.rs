@@ -38,10 +38,6 @@ impl CodexProvider {
 
 #[async_trait]
 impl Provider for CodexProvider {
-    fn usage_is_cumulative(&self) -> bool {
-        true
-    }
-
     async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
         let exec_path = self
             .config
