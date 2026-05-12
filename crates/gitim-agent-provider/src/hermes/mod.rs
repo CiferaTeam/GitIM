@@ -39,6 +39,20 @@ impl Provider for HermesProvider {
         true
     }
 
+    /// Hermes' ACP `result.usage` reports session-cumulative billing
+    /// (sum of `session_input_tokens` / `session_output_tokens` /
+    /// `session_cache_read_tokens` across every LLM call this hermes
+    /// session has made — see `run_agent.py::run_conversation`'s return
+    /// dict and `acp_adapter/server.py::prompt`'s Usage construction).
+    /// `normalize_to_delta` uses this flag to subtract a per-session
+    /// baseline from each turn's reported total so the accumulator gets
+    /// real per-turn deltas. compute_snapshot is short-circuited by
+    /// `self_managed_context` so the cumulative numbers never feed the
+    /// HUD's occupancy gauge.
+    fn usage_is_cumulative(&self) -> bool {
+        true
+    }
+
     /// Drop sections that assume the Claude-style `AGENTS.md` + `notes/`
     /// filesystem-memory model. Hermes manages identity / memory through
     /// SOUL.md + MEMORY.md / USER.md inside the profile directory, and
@@ -366,17 +380,17 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
-    // Hermes' id=3 prompt response carries `result.usage`, but its values are
-    // session-cumulative billing counters from `run_agent.py`'s
-    // `session_input_tokens += ...` accumulation — not a per-LLM-call shape.
-    // Feeding cumulative numbers to `compute_snapshot` makes
-    // `(input + cache_read) / max` grow monotonically across turns and clamp
-    // at 100%, which then trips `usage_notice_pending` and forces a
-    // `[[RESET]]` loop. Until hermes-agent exposes a per-call usage field,
-    // we surface no usage and let the runtime fall back to its cl100k
-    // estimate. `parse_acp_usage` and the parser tests stay alive so the
-    // semantics are documented and the path is ready to flip back on once
-    // upstream lands per-call counters.
+    // Hermes' id=3 prompt response carries session-cumulative `result.usage`
+    // (input / output / cache_read are `run_agent.py` `session_*_tokens`
+    // running totals across every LLM call in the resumed ACP session).
+    // Capture it as `latest_usage`; the runtime maps these onto per-turn
+    // deltas via `Provider::usage_is_cumulative() -> true` +
+    // `normalize_to_delta`'s baseline math. We do NOT use these numbers
+    // for occupancy — `HermesProvider::self_managed_context() -> true`
+    // routes that path through hermes' own compression instead. Billing
+    // accumulator gets accurate per-turn values, HUD gauge stays off, no
+    // monotonic 100% clamp.
+    let mut latest_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -624,9 +638,11 @@ async fn drive_session(
                                             .unwrap_or("prompt failed")
                                             .to_string(),
                                     );
+                                } else if let Some(usage_val) = raw.pointer("/result/usage") {
+                                    if let Some(u) = parse_acp_usage(usage_val) {
+                                        latest_usage = Some(u);
+                                    }
                                 }
-                                // result.usage intentionally not consumed —
-                                // see drive_session preamble.
                                 break;
                             }
 
@@ -733,7 +749,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: None,
+        usage: latest_usage,
     });
 }
 

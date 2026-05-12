@@ -49,18 +49,22 @@ fn pi_reports_per_turn_increments() {
 }
 
 #[test]
-fn hermes_reports_per_turn_increments_for_now() {
+fn hermes_reports_session_cumulative_and_self_manages_context() {
     // The hermes ACP id=3 prompt response carries session-cumulative usage
-    // (run_agent.py accumulates `session_input_tokens += ...` across LLM
-    // calls). Until upstream exposes a per-call counter, the driver drops
-    // the field entirely (ExecResult.usage stays None), which means the
-    // cumulative-vs-per-turn flag has no observable effect — runtime always
-    // falls back to its cl100k estimate. Keep the default `false` so the
-    // trait wouldn't double-count if a future change reintroduces usage
-    // surfacing without re-auditing the semantics.
+    // straight out of `run_agent.py`'s `session_input_tokens += ...`
+    // accumulation, so `usage_is_cumulative = true` is the honest
+    // declaration — `normalize_to_delta`'s baseline subtraction turns
+    // those running totals into per-turn deltas for the accumulator.
+    //
+    // The dual `self_managed_context = true` is what keeps those
+    // cumulative numbers out of `compute_snapshot`'s occupancy gauge:
+    // hermes' own `compression.threshold: 0.5` is the only context-
+    // pressure valve, the runtime gauge would lie regardless of which
+    // (cumulative or per-call) shape it received.
     let p = HermesProvider::new(cfg());
     assert!(p.reports_usage());
-    assert!(!p.usage_is_cumulative());
+    assert!(p.usage_is_cumulative());
+    assert!(p.self_managed_context());
 }
 
 #[test]
