@@ -15,7 +15,8 @@ use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::agent::{
-    detect_git_config, name_to_handler, provision_agent, provision_human, AgentConfig,
+    detect_git_config, infer_local_human_identity, name_to_handler, provision_agent,
+    provision_human, AgentConfig,
 };
 use crate::agent_loop::AgentLoop;
 use crate::git_config::{
@@ -3906,16 +3907,7 @@ async fn recover_single_workspace(
             }
             _ => {
                 let remote = workspace.join("repo.git").to_string_lossy().into_owned();
-                let display_name = detect_git_config("user.name", &workspace)
-                    .unwrap_or_else(|| "human".to_string());
-                let handler = {
-                    let h = name_to_handler(&display_name);
-                    if h.is_empty() {
-                        "human".to_string()
-                    } else {
-                        h
-                    }
-                };
+                let (handler, display_name) = infer_local_human_identity(&human_dir);
                 (
                     remote,
                     "git".to_string(),
