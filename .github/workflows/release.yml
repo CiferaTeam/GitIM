@@ -61,10 +61,10 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
-          shared-key: release
+      # No rust-cache: cross containers run on a different glibc than the host
+      # runner, and a cached host-built `build-script-build` (libc, etc.) can
+      # land in the cross container and fail with GLIBC version errors at
+      # runtime. Release runs are infrequent — cold-build (~5min) > flaky.
 
       - name: Install cross
         if: matrix.tool == 'cross'
