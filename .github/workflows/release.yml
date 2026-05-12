@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist, e.g. v0.7.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.slug }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - slug: darwin-arm64
+            target: aarch64-apple-darwin
+            os: macos-14
+            tool: cargo
+          - slug: darwin-x86_64
+            target: x86_64-apple-darwin
+            os: macos-14
+            tool: cargo
+          - slug: linux-arm64
+            target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: cross
+          - slug: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: cross
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          [[ -n "$TAG" ]] || { echo "::error::no tag resolved"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install stable toolchain + target
+        run: |
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+          shared-key: release
+
+      - name: Install cross
+        if: matrix.tool == 'cross'
+        run: cargo install cross --locked
+
+      - name: Build
+        shell: bash
+        run: |
+          ${{ matrix.tool }} +stable build --release --target ${{ matrix.target }} \
+            -p gitim-cli -p gitim-daemon -p gitim-runtime
+
+      - name: Stage binaries
+        shell: bash
+        run: |
+          TAG=${{ steps.ver.outputs.tag }}
+          NAME="gitim-${TAG}-${{ matrix.slug }}"
+          mkdir -p "dist/${NAME}"
+          for b in gitim gitim-daemon gitim-runtime; do
+            cp "target/${{ matrix.target }}/release/$b" "dist/${NAME}/"
+          done
+          chmod +x dist/${NAME}/*
+
+      - name: Set up QEMU
+        if: startsWith(matrix.slug, 'linux-')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Smoke test (alpine, Linux only)
+        if: startsWith(matrix.slug, 'linux-')
+        shell: bash
+        run: |
+          ARCH=$([ "${{ matrix.slug }}" = "linux-arm64" ] && echo "linux/arm64" || echo "linux/amd64")
+          TAG=${{ steps.ver.outputs.tag }}
+          NAME="gitim-${TAG}-${{ matrix.slug }}"
+          docker pull --platform "$ARCH" alpine:3 >/dev/null
+          docker run --rm --platform "$ARCH" -v "$PWD/dist/$NAME:/bins:ro" alpine:3 \
+            sh -c '/bins/gitim --version && /bins/gitim-daemon --version && /bins/gitim-runtime --version'
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          TAG=${{ steps.ver.outputs.tag }}
+          NAME="gitim-${TAG}-${{ matrix.slug }}"
+          (cd dist && tar czf "${NAME}.tar.gz" "${NAME}")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.slug }}
+          path: dist/gitim-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Compute SHA256SUMS
+        working-directory: artifacts
+        shell: bash
+        run: |
+          ls -la
+          shasum -a 256 gitim-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG=${{ steps.ver.outputs.tag }}
+          NOTES="docs/releases/${TAG}.md"
+          NOTES_ARGS=()
+          if [[ -f "$NOTES" ]]; then
+            NOTES_ARGS=(--notes-file "$NOTES")
+          else
+            NOTES_ARGS=(--notes "GitIM ${TAG} release")
+          fi
+          cd artifacts
+          ASSETS=(gitim-${TAG}-*.tar.gz SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --title "GitIM ${TAG}" "${NOTES_ARGS[@]}"
+          fi
