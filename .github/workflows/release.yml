@@ -156,7 +156,7 @@ jobs:
         shell: bash
         run: |
           TAG=${{ steps.ver.outputs.tag }}
-          NOTES="docs/releases/${TAG}.md"
+          NOTES="$GITHUB_WORKSPACE/docs/releases/${TAG}.md"
           NOTES_ARGS=()
           if [[ -f "$NOTES" ]]; then
             NOTES_ARGS=(--notes-file "$NOTES")
