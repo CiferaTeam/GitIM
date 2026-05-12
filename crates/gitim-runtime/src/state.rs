@@ -52,6 +52,21 @@ pub struct AgentState {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_notice_pending: bool,
 
+    /// Set by the `[[RESET]]` branch after `clear_session()`. The next
+    /// `run_once` consumes it: if the poll cycle has no external changes,
+    /// the runtime still kicks one cold-start turn with a synthetic
+    /// "post-reset continuation" preamble so the agent can read its memory
+    /// file and naturally pick up unfinished work — instead of sleeping
+    /// forever until an external mention arrives.
+    ///
+    /// Cleared by `clear_session()` like the rest of the session-scoped
+    /// state: PATCH model / provider failure should not leave a stray
+    /// continuation signal armed. The reset branch's "clear-then-set"
+    /// sequence is the only place this flag is supposed to outlive a
+    /// `clear_session()` call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub post_reset_pending: bool,
+
     /// Baseline used to convert cumulative provider usage to per-turn deltas
     /// in the token-statistics layer. Lives next to `session_token` because
     /// it shares the session lifecycle, not because it serves the session
@@ -87,13 +102,22 @@ impl AgentState {
         Ok(())
     }
 
-    /// Clear all fields tied to the current provider session. Called on
-    /// `[[RESET]]` detection and on session failure.
+    /// Clear all fields tied to the current provider session, plus any
+    /// pending cross-cycle signals (`usage_notice_pending`,
+    /// `post_reset_pending`). Called on `[[RESET]]` detection, on session
+    /// failure, and from PATCH-agent paths that effectively start fresh
+    /// (model / system_prompt change).
+    ///
+    /// The reset branch is the one place where a continuation signal is
+    /// supposed to outlive a `clear_session()`: it re-arms
+    /// `post_reset_pending = true` *after* this call so the next cycle
+    /// can self-wake.
     pub fn clear_session(&mut self) {
         self.session_token = None;
         self.session_usage = None;
         self.estimated_tokens = 0;
         self.usage_notice_pending = false;
+        self.post_reset_pending = false;
         self.last_session_usage = None;
     }
 }
@@ -123,6 +147,7 @@ mod tests {
             }),
             estimated_tokens: 125_400,
             usage_notice_pending: false,
+            post_reset_pending: false,
             last_session_usage: None,
         };
 
@@ -166,6 +191,7 @@ mod tests {
             session_usage: None,
             estimated_tokens: 0,
             usage_notice_pending: false,
+            post_reset_pending: false,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
                 usage: ProviderUsage {
@@ -194,6 +220,7 @@ mod tests {
             session_usage: None,
             estimated_tokens: 0,
             usage_notice_pending: false,
+            post_reset_pending: false,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
                 usage: ProviderUsage {
@@ -205,6 +232,81 @@ mod tests {
         state.clear_session();
         assert!(state.last_session_usage.is_none());
         assert!(state.session_token.is_none());
+    }
+
+    #[test]
+    fn post_reset_pending_roundtrips() {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".gitim")).expect("mkdir");
+        let mut state = AgentState::default();
+        state.post_reset_pending = true;
+        state.save(dir.path()).expect("save");
+        let loaded = AgentState::load(dir.path()).expect("load");
+        assert!(loaded.post_reset_pending);
+    }
+
+    #[test]
+    fn post_reset_pending_skips_when_false_serialization() {
+        // Default-false should not leak into the on-disk JSON — keeps the
+        // file clean for the overwhelming majority of agents that never
+        // RESET.
+        let state = AgentState::default();
+        let json = serde_json::to_string(&state).expect("serialize");
+        assert!(
+            !json.contains("post_reset_pending"),
+            "default-false post_reset_pending must skip serialize, got: {json}"
+        );
+    }
+
+    #[test]
+    fn clear_session_also_clears_post_reset_pending() {
+        // Defensive: a stray post_reset_pending should not survive a
+        // PATCH-model / provider-failure path. The RESET branch re-arms it
+        // *after* clear_session — that's the only place it's supposed to
+        // outlive the wipe.
+        let mut state = AgentState {
+            cursor: Some("c".into()),
+            session_token: Some("s".into()),
+            session_usage: None,
+            estimated_tokens: 100,
+            usage_notice_pending: true,
+            post_reset_pending: true,
+            last_session_usage: None,
+        };
+        state.clear_session();
+        assert!(state.session_token.is_none());
+        assert!(!state.usage_notice_pending);
+        assert!(
+            !state.post_reset_pending,
+            "clear_session must wipe post_reset_pending; reset branch re-arms after"
+        );
+    }
+
+    #[test]
+    fn reset_branch_sequence_leaves_post_reset_armed() {
+        // Models the agent_loop reset branch:
+        //   clear_session()         // wipe everything
+        //   post_reset_pending=true // re-arm continuation
+        //   save / load             // survives the cycle boundary
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".gitim")).expect("mkdir");
+        let mut state = AgentState {
+            cursor: Some("c".into()),
+            session_token: Some("s".into()),
+            session_usage: None,
+            estimated_tokens: 100,
+            usage_notice_pending: true,
+            post_reset_pending: false,
+            last_session_usage: None,
+        };
+        state.clear_session();
+        state.post_reset_pending = true;
+        state.save(dir.path()).expect("save");
+
+        let loaded = AgentState::load(dir.path()).expect("load");
+        assert!(loaded.session_token.is_none(), "session wiped");
+        assert!(loaded.post_reset_pending, "continuation re-armed for next cycle");
+        assert_eq!(loaded.cursor.as_deref(), Some("c"), "poller cursor preserved");
     }
 
     #[test]
@@ -220,5 +322,9 @@ mod tests {
         assert!(state.session_usage.is_none());
         assert_eq!(state.estimated_tokens, 0);
         assert!(!state.usage_notice_pending);
+        assert!(
+            !state.post_reset_pending,
+            "field added 2026-05-12 — legacy state must default to false"
+        );
     }
 }

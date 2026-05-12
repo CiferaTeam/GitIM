@@ -525,30 +525,79 @@ impl AgentLoop {
     pub async fn run_once(&mut self) -> Result<bool, RuntimeError> {
         let result = self.poller.poll().await?;
 
-        if result.changes.is_empty() {
-            self.save_state()?;
-            return Ok(false);
-        }
+        // Load state up front so we can decide between "real idle" and
+        // "post-reset self-wake" before any early return. The runtime arms
+        // `post_reset_pending` when the previous cycle ended in `[[RESET]]`,
+        // and the next cycle's job is to give the cold-started agent one
+        // synthetic kick — otherwise the orientation notes it just wrote
+        // would sit unread until something external happens to mention it.
+        let mut state = AgentState::load(&self.repo_root)?;
 
-        let prompt = match format_changes_as_prompt(&result.changes, &self.handler) {
-            Some(p) => p,
-            None => {
-                tracing::debug!("all changes are self-authored, skipping");
+        let external_prompt = if result.changes.is_empty() {
+            None
+        } else {
+            // `format_changes_as_prompt` returns None when every entry was
+            // self-authored — semantically the same as "no external input"
+            // from the agent's point of view.
+            format_changes_as_prompt(&result.changes, &self.handler)
+        };
+
+        // Decide what (if anything) to run this cycle:
+        //   - external input present                  → run with that prompt
+        //   - no external input, post_reset armed     → run a cold-start kick
+        //   - no external input, no continuation flag → idle
+        let prompt = match (external_prompt, state.post_reset_pending) {
+            (Some(p), _) => p,
+            (None, true) => {
+                tracing::info!(
+                    handler = %self.handler,
+                    "post-reset self-wake: empty poll, kicking cold-start continuation turn"
+                );
+                // Sentinel — the post_reset_pending branch below replaces
+                // an empty body with the preamble itself.
+                String::new()
+            }
+            (None, false) => {
+                tracing::debug!("idle: no external changes, no post-reset continuation pending");
                 self.save_state()?;
                 return Ok(false);
             }
         };
+
         info!(prompt = %prompt, "sending to provider");
         self.emit_activity("thinking", "processing...");
 
         let opts = self.build_exec_options();
+
+        // Consume post_reset_pending FIRST. If the body is empty (no external
+        // input on this cycle) the preamble stands alone; otherwise it
+        // prefixes the real changes so the agent sees both "you just
+        // cold-started" *and* "and by the way here's a new message" in one
+        // turn. Clearing the flag before execute mirrors usage_notice's
+        // safety — a mid-turn crash won't cause it to re-fire on restart.
+        let prompt = if state.post_reset_pending {
+            let preamble = build_post_reset_preamble();
+            state.post_reset_pending = false;
+            if prompt.is_empty() {
+                preamble
+            } else {
+                format!("{preamble}\n\n---\n\n{prompt}")
+            }
+        } else {
+            prompt
+        };
 
         // Consume usage_notice_pending (Task 14) and accumulate tiktoken estimate
         // (Task 12) in a single load/save cycle. If the notice flag was set by
         // a previous turn's threshold crossing, prepend the system preamble here
         // and clear the flag before execute — this way a mid-turn crash won't
         // cause the notice to re-fire.
-        let mut state = AgentState::load(&self.repo_root)?;
+        //
+        // In practice usage_notice and post_reset are mutually exclusive
+        // (clear_session wipes usage_notice as part of the RESET path), but
+        // ordering this *after* post_reset is the safer composition: a stray
+        // usage_notice from before a hand-rolled state edit still gets its
+        // own preamble layered on top.
         let prompt = if state.usage_notice_pending {
             let pct = state
                 .session_usage
@@ -744,6 +793,12 @@ impl AgentLoop {
 
             let sid_for_log = state.session_usage.as_ref().map(|s| s.session_id.clone());
             state.clear_session();
+            // Arm the post-reset self-wake so the next run_once cycle kicks
+            // a cold-start turn even if the poll comes back empty. Without
+            // this the agent would silently fall off the loop the moment
+            // it handed off — the orientation notes it just wrote are not
+            // channel events, so nothing else would wake it.
+            state.post_reset_pending = true;
             state.save(&self.repo_root)?;
             tracing::info!(session_id = ?sid_for_log, reason = "agent_emitted_reset", "session_reset");
             self.clear_runtime_session_usage();
@@ -1238,6 +1293,36 @@ pub fn build_usage_notice_preamble(used_percent: f64) -> String {
     )
 }
 
+/// One-shot preamble fired on the first turn after `[[RESET]]` when the
+/// poll cycle has no external changes. Without it the agent would stay
+/// idle indefinitely after a handoff — the orientation notes it just
+/// wrote are passive artifacts (file edits, not channel messages), so
+/// nothing in the poll stream would wake it again until a human or
+/// another agent happens to ping.
+///
+/// The framing mirrors `build_usage_notice_preamble`: speak to the agent
+/// as a model would experience the moment, name the allowed surface
+/// explicitly, and give a clear "do nothing" exit so an empty memory
+/// file doesn't spam noise into channels. The agent decides whether
+/// there's real work to pick up; if not, this turn ends silently and
+/// the runtime returns to its normal poll cadence.
+pub fn build_post_reset_preamble() -> String {
+    String::from(
+        "[系统] 你刚完成上一窗口的 handoff 并冷启动 —— \
+         runtime 还没收到新的外部消息，但上一个你可能在记忆文件里 \
+         留了未完成的 orientation。\n\
+         \n\
+         请按这个顺序判断：\n\
+         1. 读一下你的记忆文件，看上一窗口留了什么方向感 / 未决事项；\n\
+         2. 如果有明确的未完工作 → 自然接回去推进；\n\
+         3. 如果没有指引、或上下文已经收尾 → 不要发任何消息、\
+            不要找事做，直接结束本轮即可（runtime 会回到 idle，\
+            等下一个外部事件再唤醒你）。\n\
+         \n\
+         本提醒仅发送一次。",
+    )
+}
+
 /// Construct a `ProviderConfig` with provider-specific env defaults.
 ///
 /// For the `hermes` provider, injects `HERMES_HOME=<profile_dir>` so the agent
@@ -1289,6 +1374,47 @@ mod tests {
             .expect("hermes AgentLoop should construct without spawning hermes");
         assert_eq!(loop_.handler, "alice");
         assert_eq!(loop_.provider_type, "hermes");
+    }
+
+    #[test]
+    fn post_reset_preamble_names_memory_and_idle_exit() {
+        // The agent needs three pieces of information to do the right thing
+        // after a synthetic cold-start kick: (1) it just reset and is cold,
+        // (2) memory files are the place to look for unfinished work,
+        // (3) doing nothing is a valid outcome — silence > spammy "how can
+        // I help" turns when memory is empty. Each maps to one assertion;
+        // wording can drift but the orienting facts must remain.
+        let p = build_post_reset_preamble();
+        assert!(
+            p.contains("冷启动") || p.contains("handoff"),
+            "preamble must name the cold-start fact: {p}"
+        );
+        assert!(
+            p.contains("记忆文件"),
+            "preamble must point at the memory file as the handoff medium: {p}"
+        );
+        assert!(
+            p.contains("不要发") || p.contains("idle"),
+            "preamble must give an explicit do-nothing exit so empty memory \
+             doesn't spam channels: {p}"
+        );
+    }
+
+    #[test]
+    fn post_reset_preamble_is_distinct_from_usage_notice() {
+        // Defensive: if these two ever converge to the same string we lose
+        // the "post-reset vs over-budget" distinction in logs and tests,
+        // and we'd silently double-send the same content if both flags
+        // fired in the same cycle. Keep them visibly different.
+        let usage = build_usage_notice_preamble(82.0);
+        let post_reset = build_post_reset_preamble();
+        assert_ne!(usage, post_reset);
+        assert!(
+            !post_reset.contains("[[RESET]]"),
+            "post-reset preamble is sent AFTER reset — it must not re-instruct \
+             the agent to emit [[RESET]] (that would tee up an immediate \
+             second reset on an empty session)"
+        );
     }
 
     #[test]
