@@ -266,11 +266,25 @@ impl GitimClient {
         self.request("unarchive_dm", json!({ "peer": peer })).await
     }
 
-    /// List the caller's archived DMs. The daemon resolves the caller via
-    /// `resolve_author` at dispatch time, so the client passes no params —
-    /// matches the `list_archived_channels` shape.
-    pub async fn list_archived_dms(&self) -> Result<ApiResponse, ClientError> {
-        self.request("list_archived_dms", json!({})).await
+    /// List the caller's archived DMs with optional prefix filter + paging.
+    /// The daemon resolves the caller via `resolve_author` at dispatch time;
+    /// `prefix` filters peer handlers case-insensitively, `offset`/`limit`
+    /// drive lazy paging. Daemon also clamps `limit` to `[1,100]` so the
+    /// double-guard in the runtime HTTP layer (Task 4+5) is defence-in-depth.
+    pub async fn list_archived_dms(
+        &self,
+        prefix: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ApiResponse, ClientError> {
+        let mut body = serde_json::Map::new();
+        if let Some(p) = prefix {
+            body.insert("prefix".into(), serde_json::Value::String(p.to_string()));
+        }
+        body.insert("offset".into(), serde_json::Value::Number(offset.into()));
+        body.insert("limit".into(), serde_json::Value::Number(limit.into()));
+        self.request("list_archived_dms", serde_json::Value::Object(body))
+            .await
     }
 
     /// List handlers that have been departed (`archive/users/<h>.meta.yaml`
@@ -849,6 +863,25 @@ mod tests {
 
         let list_dms = build_request("list_archived_dms", json!({}));
         assert_eq!(list_dms, json!({"method": "list_archived_dms"}));
+
+        // Pagination wire shape (Task 4+5): when the client passes
+        // prefix/offset/limit, they ride along inside the same flat JSON
+        // object the daemon dispatches on. If this drifts, the daemon-side
+        // `Request::ListArchivedDms` serde deserializer in api.rs will
+        // silently fall back to defaults and the prefix/page won't apply.
+        let list_dms_paged = build_request(
+            "list_archived_dms",
+            json!({"prefix": "al", "offset": 0, "limit": 5}),
+        );
+        assert_eq!(
+            list_dms_paged,
+            json!({
+                "method": "list_archived_dms",
+                "prefix": "al",
+                "offset": 0,
+                "limit": 5,
+            }),
+        );
 
         let list_users = build_request("list_archived_users", json!({}));
         assert_eq!(list_users, json!({"method": "list_archived_users"}));

@@ -145,7 +145,11 @@ pub async fn cmd_unarchive_dm(client: &GitimClient, mode: &OutputMode, peer: &st
 }
 
 pub async fn cmd_list_archived_dms(client: &GitimClient, mode: &OutputMode) {
-    match client.list_archived_dms().await {
+    // CLI does single-shot listing with no pager UI; ask for the daemon's
+    // max page (100). Users with >100 archived DMs are beyond v1 CLI scope —
+    // they'd use WebUI's incremental loader. If that becomes a real complaint
+    // we add `--prefix` / `--offset` flags here.
+    match client.list_archived_dms(None, 0, 100).await {
         Ok(resp) => {
             if !resp.ok {
                 let msg = resp.error.as_deref().unwrap_or("unknown error");

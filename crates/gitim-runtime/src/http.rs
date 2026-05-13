@@ -1169,15 +1169,35 @@ async fn im_dm_unarchive(
     api_response_to_json(client.unarchive_dm(&peer).await)
 }
 
+/// Query params for `GET /im/dm/archived`. All optional; missing values
+/// resolve to `prefix=None`, `offset=0`, `limit=5` (page-size matches the
+/// WebUI default). `limit` is clamped to `[1,100]` before forwarding so the
+/// daemon — which also enforces the same bound (Task 3) — never sees an
+/// out-of-range value. Defence in depth: the runtime layer is the front
+/// door from the browser, the daemon is the last word.
+#[derive(serde::Deserialize)]
+struct ArchivedDmsQuery {
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 async fn im_list_archived_dms(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(q): axum::extract::Query<ArchivedDmsQuery>,
 ) -> axum::response::Response {
     let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
-    api_response_to_json(client.list_archived_dms().await)
+    let prefix = q.prefix.as_deref();
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(5).clamp(1, 100);
+    api_response_to_json(client.list_archived_dms(prefix, offset, limit).await)
 }
 
 // -- /users/archived + /users/{handler}/unarchive --
