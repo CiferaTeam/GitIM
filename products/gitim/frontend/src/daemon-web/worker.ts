@@ -128,7 +128,10 @@ const handler: Record<
     handlers.listArchivedChannels(),
   archiveDm: (peer: unknown) => handlers.archiveDm(peer as string),
   unarchiveDm: (peer: unknown) => handlers.unarchiveDm(peer as string),
-  listArchivedDms: () => handlers.listArchivedDms(),
+  listArchivedDms: (payload: unknown) =>
+    handlers.listArchivedDms(
+      payload as { prefix?: string; offset?: number; limit?: number } | undefined,
+    ),
   listCards: (query?: unknown) =>
     handlers.listCards((query ?? {}) as handlers.ListCardsQuery),
   createCard: (channel: unknown, title: unknown, opts?: unknown) =>

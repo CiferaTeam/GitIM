@@ -129,7 +129,11 @@ export interface ChannelArchiveBackend {
 export interface DmArchiveBackend {
   archiveDm(peer: string): Promise<ApiResponse>;
   unarchiveDm(peer: string): Promise<ApiResponse>;
-  listArchivedDms(): Promise<ApiResponse>;
+  listArchivedDms(opts?: {
+    prefix?: string;
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResponse>;
 }
 
 export interface BoardBackend {
@@ -450,8 +454,12 @@ export class LocalBackend implements Backend {
   unarchiveDm(peer: string): Promise<ApiResponse> {
     return this.call("unarchiveDm", peer);
   }
-  listArchivedDms(): Promise<ApiResponse> {
-    return this.call("listArchivedDms");
+  listArchivedDms(opts?: {
+    prefix?: string;
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResponse> {
+    return this.call("listArchivedDms", opts);
   }
   createCard(
     channel: string,

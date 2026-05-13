@@ -1120,17 +1120,52 @@ export interface ArchivedDmEntry {
   dm_pair_stem: string;
 }
 
+export interface ArchivedDmsPage {
+  dms: ArchivedDmEntry[];
+  hasMore: boolean;
+}
+
+export interface ListArchivedDmsOptions {
+  prefix?: string;
+  offset?: number;
+  limit?: number;
+}
+
 export async function listArchivedDms(
   slug: string,
-): Promise<ApiResponse<{ dms: ArchivedDmEntry[] }>> {
+  opts?: ListArchivedDmsOptions,
+): Promise<ApiResponse<ArchivedDmsPage>> {
+  const prefix = opts?.prefix ?? "";
+  const offset = opts?.offset ?? 0;
+  const limit = opts?.limit ?? 5;
   if (isLocalMode()) {
     void slug;
-    return localDmArchiveBackend().listArchivedDms() as Promise<
-      ApiResponse<{ dms: ArchivedDmEntry[] }>
-    >;
+    const res = (await localDmArchiveBackend().listArchivedDms({
+      prefix,
+      offset,
+      limit,
+    })) as ApiResponse<{ dms: ArchivedDmEntry[]; has_more: boolean }>;
+    if (!res.ok || !res.data) {
+      return { ok: false, error: res.error, error_code: res.error_code };
+    }
+    return { ok: true, data: { dms: res.data.dms, hasMore: res.data.has_more } };
   }
-  const res = await fetch(`${wsBase(slug)}/im/dm/archived`);
-  return await res.json();
+  const params = new URLSearchParams();
+  if (prefix) params.set("prefix", prefix);
+  params.set("offset", String(offset));
+  params.set("limit", String(limit));
+  const res = await fetch(`${wsBase(slug)}/im/dm/archived?${params}`);
+  const json = (await res.json()) as ApiResponse<{
+    dms: ArchivedDmEntry[];
+    has_more: boolean;
+  }>;
+  if (!json.ok || !json.data) {
+    return { ok: false, error: json.error, error_code: json.error_code };
+  }
+  return {
+    ok: true,
+    data: { dms: json.data.dms, hasMore: json.data.has_more },
+  };
 }
 
 // --- Preflight (global, no slug) ---

@@ -900,11 +900,22 @@ export async function unarchiveDm(peer: string): Promise<ApiResponse> {
   }
 }
 
-export async function listArchivedDms(): Promise<ApiResponse> {
+export async function listArchivedDms(opts?: {
+  prefix?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResponse> {
   try {
+    // Match daemon semantics: case-insensitive prefix, offset clamped to ≥0,
+    // limit clamped to [1, 100]. Peek limit+1 to compute has_more without
+    // counting the full archive directory.
+    const prefix = (opts?.prefix ?? "").toLowerCase();
+    const offset = Math.max(0, opts?.offset ?? 0);
+    const limit = Math.min(100, Math.max(1, opts?.limit ?? 5));
+
     const s = getState();
     const archiveDmDir = `${s.repoDir}/archive/dm`;
-    if (!(await exists(archiveDmDir))) return ok({ dms: [] });
+    if (!(await exists(archiveDmDir))) return ok({ dms: [], has_more: false });
 
     const items = await readdir(archiveDmDir);
     const me = s.me.handler;
@@ -925,11 +936,14 @@ export async function listArchivedDms(): Promise<ApiResponse> {
       } else {
         continue;
       }
+      if (prefix && !peer.toLowerCase().startsWith(prefix)) continue;
       entries.push({ peer, dm_pair_stem: stem });
     }
 
     entries.sort((x, y) => x.peer.localeCompare(y.peer));
-    return ok({ dms: entries });
+    const window = entries.slice(offset, offset + limit + 1);
+    const has_more = window.length > limit;
+    return ok({ dms: window.slice(0, limit), has_more });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }

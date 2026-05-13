@@ -267,6 +267,7 @@ import {
   unarchiveChannel,
   updateCard,
   joinChannel,
+  listArchivedDms,
   unarchiveCard,
 } from "./handlers";
 import { getState, initState, setState } from "./state";
@@ -1312,5 +1313,74 @@ describe("daemon-web readCard with since + limit semantics", () => {
     const res = await readCard("general", "20260317-120000-abc", { since: 7 });
     expect(res.ok).toBe(true);
     expect(entryLines(res)).toEqual([8, 9, 10]);
+  });
+});
+
+describe("daemon-web listArchivedDms pagination", () => {
+  beforeEach(() => {
+    seedState();
+    // Seed 6 archived DMs between lewis and 6 different peers, sorted
+    // alphabetically: alice, bob, bobby, carol, dave, eve.
+    const peers = ["alice", "bob", "bobby", "carol", "dave", "eve"];
+    const fileNames: string[] = [];
+    for (const peer of peers) {
+      // stem is <min>--<max> in lexicographic order
+      const stem = peer < "lewis" ? `${peer}--lewis` : `lewis--${peer}`;
+      const rel = `archive/dm/${stem}.thread`;
+      files.set(
+        `/repo/${rel}`,
+        `[L000001][P000000][@${peer}][20260511T120000Z] hi\n`,
+      );
+      fileNames.push(`${stem}.thread`);
+    }
+    dirs.set("/repo/archive/dm", fileNames);
+    dirs.set("/repo/archive", ["dm"]);
+  });
+
+  it("returns has_more=true when more entries exist after limit", async () => {
+    const res = await listArchivedDms({ prefix: "", offset: 0, limit: 5 });
+    expect(res.ok).toBe(true);
+    expect(res.data?.has_more).toBe(true);
+    const peers = (res.data?.dms as Array<{ peer: string }>).map((d) => d.peer);
+    expect(peers).toEqual(["alice", "bob", "bobby", "carol", "dave"]);
+  });
+
+  it("second page has_more=false when only 1 entry left", async () => {
+    const res = await listArchivedDms({ prefix: "", offset: 5, limit: 5 });
+    expect(res.ok).toBe(true);
+    expect(res.data?.has_more).toBe(false);
+    const peers = (res.data?.dms as Array<{ peer: string }>).map((d) => d.peer);
+    expect(peers).toEqual(["eve"]);
+  });
+
+  it("filters by lowercase prefix case-insensitively", async () => {
+    const res = await listArchivedDms({ prefix: "BO", offset: 0, limit: 10 });
+    expect(res.ok).toBe(true);
+    expect(res.data?.has_more).toBe(false);
+    const peers = (res.data?.dms as Array<{ peer: string }>).map((d) => d.peer);
+    expect(peers).toEqual(["bob", "bobby"]);
+  });
+
+  it("limit=0 clamps to 1", async () => {
+    const res = await listArchivedDms({ prefix: "", offset: 0, limit: 0 });
+    expect(res.ok).toBe(true);
+    const dms = res.data?.dms as Array<{ peer: string }>;
+    expect(dms.length).toBe(1);
+    expect(dms[0].peer).toBe("alice");
+    expect(res.data?.has_more).toBe(true);
+  });
+
+  it("empty archive dir returns empty + has_more=false", async () => {
+    // Wipe the seeded archive contents.
+    for (const peer of ["alice", "bob", "bobby", "carol", "dave", "eve"]) {
+      const stem = peer < "lewis" ? `${peer}--lewis` : `lewis--${peer}`;
+      files.delete(`/repo/archive/dm/${stem}.thread`);
+    }
+    dirs.set("/repo/archive/dm", []);
+
+    const res = await listArchivedDms({ prefix: "", offset: 0, limit: 5 });
+    expect(res.ok).toBe(true);
+    expect(res.data?.dms).toEqual([]);
+    expect(res.data?.has_more).toBe(false);
   });
 });
