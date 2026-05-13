@@ -516,26 +516,22 @@ fn parse_event(line: &str) -> Option<PiEvent> {
     }
 }
 
-/// Concatenate text from a Pi `tool_execution_end.result` object.
+/// Project-wide convention for extracting a tool result into a string —
+/// passthrough for primitive strings, JSON-stringify for everything else.
+/// Matches the Claude, OpenCode, and OpenClaw providers and multica's
+/// `extractToolOutput` / `string(RawMessage)` posture.
 ///
-/// Pi shapes tool results as `{ content: (TextContent | ImageContent)[], details: ... }`
-/// (see `@mariozechner/pi-agent-core` `AgentToolResult`). Image blocks have no
-/// `text` field and contribute nothing here; the LLM sees them as separate
-/// content blocks, but for token-counting and runtime `Event::ToolResult`
-/// purposes we only need a string approximation. Falls back to JSON-stringify
-/// for unexpected shapes (older Pi versions, malformed responses) — same
-/// posture as the Claude provider's `tool_result_content` handling.
+/// The string is consumed by `agent_loop`'s `assistant_text_buf` for the
+/// tiktoken context-window estimate only — it is not surfaced to the UI —
+/// so faithful preservation of `result`'s wire shape beats per-block text
+/// extraction. Pi structures the value as `AgentToolResult` (content blocks
+/// + details) but we treat it opaquely.
 fn extract_tool_result_text(result: &Value) -> String {
     let Some(content) = result.get("content") else {
         return String::new();
     };
     match content {
         Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(""),
         other => other.to_string(),
     }
 }
@@ -851,27 +847,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_execution_end_concatenates_text_blocks() {
-        // result.content is (TextContent | ImageContent)[]; we want the text payload.
+    fn parse_tool_execution_end_stringifies_content_array() {
+        // Matches the project-wide pattern: result.content (a Pi
+        // (TextContent | ImageContent)[]) is preserved as raw JSON so the
+        // assistant_text_buf token estimate sees the same wire bytes the
+        // model emitted. Per-block text extraction was over-engineering.
         let line = r#"{"type":"tool_execution_end","toolCallId":"call_abc123","toolName":"bash","result":{"content":[{"type":"text","text":"first chunk\n"},{"type":"text","text":"second chunk"}],"details":{}},"isError":false}"#;
         let event = parse_event(line).expect("should parse");
         let PiEvent::ToolExecEnd { call_id, output } = event else {
             panic!("expected ToolExecEnd");
         };
         assert_eq!(call_id, "call_abc123");
-        assert_eq!(output, "first chunk\nsecond chunk");
+        // serde_json's compact serialization of the content array.
+        assert_eq!(
+            output,
+            r#"[{"text":"first chunk\n","type":"text"},{"text":"second chunk","type":"text"}]"#
+        );
     }
 
     #[test]
-    fn parse_tool_execution_end_skips_image_blocks() {
-        // Image blocks have no `text` field — they contribute nothing to the
-        // string approximation. The LLM still sees them as separate content.
-        let line = r#"{"type":"tool_execution_end","toolCallId":"c2","toolName":"screenshot","result":{"content":[{"type":"text","text":"saved"},{"type":"image","data":"...base64...","mimeType":"image/png"}]},"isError":false}"#;
+    fn parse_tool_execution_end_preserves_mixed_text_and_image_content() {
+        // Image blocks are kept in the raw JSON — matches Claude/OpenCode
+        // behavior where the LLM sees structured content blocks and we
+        // don't strip them on the way to the token estimator.
+        let line = r#"{"type":"tool_execution_end","toolCallId":"c2","toolName":"screenshot","result":{"content":[{"type":"text","text":"saved"},{"type":"image","data":"abc","mimeType":"image/png"}]},"isError":false}"#;
         let event = parse_event(line).expect("should parse");
         let PiEvent::ToolExecEnd { output, .. } = event else {
             panic!("expected ToolExecEnd");
         };
-        assert_eq!(output, "saved");
+        assert!(output.contains(r#""text":"saved""#));
+        assert!(output.contains(r#""type":"image""#));
     }
 
     #[test]
@@ -973,17 +978,23 @@ mod tests {
     // ── helper unit tests ──
 
     #[test]
-    fn extract_tool_result_text_handles_string_content() {
-        // Defensive: if a tool result ever ships `content: "..."` (string
-        // instead of array) we shouldn't drop it.
+    fn extract_tool_result_text_passthroughs_string_content() {
+        // String passthrough — the one case we don't JSON-stringify, so the
+        // token estimate doesn't pay for an extra layer of quoting.
         let result = serde_json::json!({"content": "raw text", "details": {}});
         assert_eq!(extract_tool_result_text(&result), "raw text");
     }
 
     #[test]
-    fn extract_tool_result_text_falls_back_to_json_for_unknown_shape() {
+    fn extract_tool_result_text_stringifies_non_string_content() {
+        // Anything that isn't a string (array, object, number) goes through
+        // serde's compact JSON — same posture as the other providers in this
+        // crate. Verifying the *shape* (key included) rather than exact bytes
+        // since serde may reorder map keys.
         let result = serde_json::json!({"content": {"unexpected": "shape"}});
         let out = extract_tool_result_text(&result);
+        assert!(out.starts_with('{') && out.ends_with('}'));
         assert!(out.contains("unexpected"));
+        assert!(out.contains("shape"));
     }
 }
