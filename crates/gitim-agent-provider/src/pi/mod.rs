@@ -176,14 +176,17 @@ async fn drive_session(
                                     output.push_str(&content);
                                     try_send_event(&event_tx, Event::Text { content });
                                 }
-                                Some(PiEvent::ToolUse { name, call_id, input }) => {
+                                Some(PiEvent::ThinkingDelta { content }) => {
+                                    try_send_event(&event_tx, Event::Thinking { content });
+                                }
+                                Some(PiEvent::ToolExecStart { tool, call_id, input }) => {
                                     try_send_event(&event_tx, Event::ToolUse {
-                                        tool: name,
+                                        tool,
                                         call_id,
                                         input,
                                     });
                                 }
-                                Some(PiEvent::ToolResult { call_id, output: tool_out }) => {
+                                Some(PiEvent::ToolExecEnd { call_id, output: tool_out }) => {
                                     try_send_event(&event_tx, Event::ToolResult {
                                         call_id,
                                         output: tool_out,
@@ -361,18 +364,29 @@ fn build_get_state_command() -> &'static [u8] {
 }
 
 /// Parsed event from a single Pi RPC stdout line.
+///
+/// Schema source of truth: `@mariozechner/pi-coding-agent` `AgentEvent` (RPC
+/// mode serializes the agent's `session.subscribe` events verbatim to stdout).
+/// Tool calls travel through the **top-level** `tool_execution_*` events, not
+/// through any `assistantMessageEvent.tool_*` shape — the latter does not
+/// exist in pi-ai's `AssistantMessageEvent` union (which uses `toolcall_*` as
+/// streaming markers for the model's incremental JSON-arg emission, with the
+/// full `toolCall` object only on `toolcall_end`).
 #[derive(Debug)]
 enum PiEvent {
     AgentStart,
     TextDelta {
         content: String,
     },
-    ToolUse {
-        name: String,
+    ThinkingDelta {
+        content: String,
+    },
+    ToolExecStart {
+        tool: String,
         call_id: String,
         input: Value,
     },
-    ToolResult {
+    ToolExecEnd {
         call_id: String,
         output: String,
     },
@@ -402,6 +416,13 @@ fn parse_event(line: &str) -> Option<PiEvent> {
         "agent_end" => Some(PiEvent::AgentEnd),
 
         "message_update" => {
+            // pi-ai `AssistantMessageEvent` union; we only surface the two
+            // delta variants that contribute to user-visible state. Streaming
+            // markers (`*_start`/`*_end`, `start`, `done`, `error`) and the
+            // model's incremental tool-call JSON (`toolcall_*`) are skipped —
+            // the actual tool invocation is captured by top-level
+            // `tool_execution_*` events below, which carry the assembled
+            // args / result without us having to reassemble JSON deltas.
             let ae = v.get("assistantMessageEvent")?;
             let sub = ae.get("type")?.as_str()?;
             match sub {
@@ -413,49 +434,39 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                         Some(PiEvent::TextDelta { content: delta })
                     }
                 }
-                "tool_start" => {
-                    let name = ae
-                        .get("tool")
-                        .and_then(|t| t.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let call_id = ae
-                        .get("tool")
-                        .and_then(|t| t.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let input = ae
-                        .get("tool")
-                        .and_then(|t| t.get("input"))
-                        .cloned()
-                        .unwrap_or(Value::Object(Default::default()));
-                    Some(PiEvent::ToolUse {
-                        name,
-                        call_id,
-                        input,
-                    })
-                }
-                "tool_end" => {
-                    let call_id = ae
-                        .get("tool")
-                        .and_then(|t| t.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let output = ae
-                        .get("tool")
-                        .and_then(|t| t.get("result"))
-                        .map(|r| match r {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
-                        .unwrap_or_default();
-                    Some(PiEvent::ToolResult { call_id, output })
+                "thinking_delta" => {
+                    let delta = ae.get("delta")?.as_str()?.to_string();
+                    if delta.is_empty() {
+                        None
+                    } else {
+                        Some(PiEvent::ThinkingDelta { content: delta })
+                    }
                 }
                 _ => None,
             }
+        }
+
+        "tool_execution_start" => {
+            let tool = v.get("toolName")?.as_str()?.to_string();
+            let call_id = v.get("toolCallId")?.as_str()?.to_string();
+            let input = v
+                .get("args")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            Some(PiEvent::ToolExecStart {
+                tool,
+                call_id,
+                input,
+            })
+        }
+
+        "tool_execution_end" => {
+            let call_id = v.get("toolCallId")?.as_str()?.to_string();
+            let output = v
+                .get("result")
+                .map(extract_tool_result_text)
+                .unwrap_or_default();
+            Some(PiEvent::ToolExecEnd { call_id, output })
         }
 
         "turn_end" => {
@@ -502,6 +513,30 @@ fn parse_event(line: &str) -> Option<PiEvent> {
         }
 
         _ => None,
+    }
+}
+
+/// Concatenate text from a Pi `tool_execution_end.result` object.
+///
+/// Pi shapes tool results as `{ content: (TextContent | ImageContent)[], details: ... }`
+/// (see `@mariozechner/pi-agent-core` `AgentToolResult`). Image blocks have no
+/// `text` field and contribute nothing here; the LLM sees them as separate
+/// content blocks, but for token-counting and runtime `Event::ToolResult`
+/// purposes we only need a string approximation. Falls back to JSON-stringify
+/// for unexpected shapes (older Pi versions, malformed responses) — same
+/// posture as the Claude provider's `tool_result_content` handling.
+fn extract_tool_result_text(result: &Value) -> String {
+    let Some(content) = result.get("content") else {
+        return String::new();
+    };
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        other => other.to_string(),
     }
 }
 
@@ -782,5 +817,173 @@ mod tests {
         };
         assert_eq!(command, "prompt");
         assert!(error.contains("startsWith"));
+    }
+
+    // ── tool execution lifecycle (top-level events, NOT nested in assistantMessageEvent) ──
+
+    #[test]
+    fn parse_tool_execution_start_extracts_name_id_and_args() {
+        // Real shape per pi-coding-agent docs/rpc.md §tool_execution_*.
+        let line = r#"{"type":"tool_execution_start","toolCallId":"call_abc123","toolName":"bash","args":{"command":"ls -la"}}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ToolExecStart {
+            tool,
+            call_id,
+            input,
+        } = event
+        else {
+            panic!("expected ToolExecStart, got {event:?}");
+        };
+        assert_eq!(tool, "bash");
+        assert_eq!(call_id, "call_abc123");
+        assert_eq!(input["command"], "ls -la");
+    }
+
+    #[test]
+    fn parse_tool_execution_start_missing_args_yields_empty_object() {
+        // Defensive: pi-ai tools without arguments emit an empty `args` or omit it.
+        let line = r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"now"}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ToolExecStart { input, .. } = event else {
+            panic!("expected ToolExecStart");
+        };
+        assert!(input.is_object(), "args defaults to empty object");
+    }
+
+    #[test]
+    fn parse_tool_execution_end_concatenates_text_blocks() {
+        // result.content is (TextContent | ImageContent)[]; we want the text payload.
+        let line = r#"{"type":"tool_execution_end","toolCallId":"call_abc123","toolName":"bash","result":{"content":[{"type":"text","text":"first chunk\n"},{"type":"text","text":"second chunk"}],"details":{}},"isError":false}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ToolExecEnd { call_id, output } = event else {
+            panic!("expected ToolExecEnd");
+        };
+        assert_eq!(call_id, "call_abc123");
+        assert_eq!(output, "first chunk\nsecond chunk");
+    }
+
+    #[test]
+    fn parse_tool_execution_end_skips_image_blocks() {
+        // Image blocks have no `text` field — they contribute nothing to the
+        // string approximation. The LLM still sees them as separate content.
+        let line = r#"{"type":"tool_execution_end","toolCallId":"c2","toolName":"screenshot","result":{"content":[{"type":"text","text":"saved"},{"type":"image","data":"...base64...","mimeType":"image/png"}]},"isError":false}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ToolExecEnd { output, .. } = event else {
+            panic!("expected ToolExecEnd");
+        };
+        assert_eq!(output, "saved");
+    }
+
+    #[test]
+    fn parse_tool_execution_end_missing_content_yields_empty_string() {
+        let line = r#"{"type":"tool_execution_end","toolCallId":"c3","toolName":"noop","result":{"details":{}},"isError":false}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ToolExecEnd { output, .. } = event else {
+            panic!("expected ToolExecEnd");
+        };
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn parse_tool_execution_update_is_skipped() {
+        // tool_execution_update streams partial output (e.g. bash stdout as it
+        // arrives). Surfacing each chunk would flood the activity feed, and
+        // partialResult is cumulative not incremental — tool_execution_end
+        // carries the final result we already capture.
+        let line = r#"{"type":"tool_execution_update","toolCallId":"c1","toolName":"bash","args":{"command":"ls"},"partialResult":{"content":[{"type":"text","text":"so far"}],"details":{}}}"#;
+        assert!(parse_event(line).is_none());
+    }
+
+    // ── thinking ──
+
+    #[test]
+    fn parse_thinking_delta_extracts_content() {
+        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm, considering options"},"message":{}}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::ThinkingDelta { content } = event else {
+            panic!("expected ThinkingDelta, got {event:?}");
+        };
+        assert_eq!(content, "hmm, considering options");
+    }
+
+    #[test]
+    fn parse_empty_thinking_delta_returns_none() {
+        // Same posture as text_delta — empty deltas are noise.
+        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":""},"message":{}}"#;
+        assert!(parse_event(line).is_none());
+    }
+
+    // ── streaming markers we intentionally drop ──
+
+    #[test]
+    fn parse_toolcall_streaming_events_are_skipped() {
+        // pi-ai emits `toolcall_start/delta/end` as the model streams its tool-
+        // call args as JSON deltas. We don't need them — `tool_execution_start`
+        // gives us the assembled args downstream. Each form must return None.
+        let start = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":1},"message":{}}"#;
+        let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"\"command\":\"ls\""},"message":{}}"#;
+        let end = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"ls"}}},"message":{}}"#;
+        assert!(parse_event(start).is_none(), "toolcall_start dropped");
+        assert!(parse_event(delta).is_none(), "toolcall_delta dropped");
+        assert!(parse_event(end).is_none(), "toolcall_end dropped");
+    }
+
+    #[test]
+    fn parse_text_and_thinking_boundary_events_are_skipped() {
+        // text_start/end, thinking_start/end, and the `start` marker are
+        // streaming scaffolding — only the *_delta variants carry content.
+        for line in [
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"start"},"message":{}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0},"message":{}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"hello"},"message":{}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0},"message":{}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"…"},"message":{}}"#,
+        ] {
+            assert!(
+                parse_event(line).is_none(),
+                "expected None for boundary event: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_unknown_top_level_events_are_skipped() {
+        // Pi RPC emits several lifecycle events we don't need to act on:
+        // turn_start, message_start/end, queue_update, compaction_*,
+        // auto_retry_*, extension_error. All must parse to None so the
+        // read loop simply continues.
+        for line in [
+            r#"{"type":"turn_start"}"#,
+            r#"{"type":"message_start","message":{}}"#,
+            r#"{"type":"message_end","message":{}}"#,
+            r#"{"type":"queue_update","steering":[],"followUp":[]}"#,
+            r#"{"type":"compaction_start"}"#,
+            r#"{"type":"compaction_end","result":{}}"#,
+            r#"{"type":"auto_retry_start"}"#,
+            r#"{"type":"auto_retry_end","success":true}"#,
+            r#"{"type":"extension_error","extensionPath":"x","event":"y","error":"z"}"#,
+        ] {
+            assert!(
+                parse_event(line).is_none(),
+                "expected None for event: {line}"
+            );
+        }
+    }
+
+    // ── helper unit tests ──
+
+    #[test]
+    fn extract_tool_result_text_handles_string_content() {
+        // Defensive: if a tool result ever ships `content: "..."` (string
+        // instead of array) we shouldn't drop it.
+        let result = serde_json::json!({"content": "raw text", "details": {}});
+        assert_eq!(extract_tool_result_text(&result), "raw text");
+    }
+
+    #[test]
+    fn extract_tool_result_text_falls_back_to_json_for_unknown_shape() {
+        let result = serde_json::json!({"content": {"unexpected": "shape"}});
+        let out = extract_tool_result_text(&result);
+        assert!(out.contains("unexpected"));
     }
 }
