@@ -213,6 +213,21 @@ async fn drive_session(
                                     }
                                     // Continue reading for the getState response.
                                 }
+                                Some(PiEvent::AutoRetryFailed { final_error: err }) => {
+                                    // Sticky failure — first auto-retry exhaustion wins, so
+                                    // a stray success later doesn't paper over the error.
+                                    let msg = err.unwrap_or_else(|| {
+                                        "pi exhausted automatic retries".to_string()
+                                    });
+                                    warn!(pid, error = %msg, "pi auto-retry failed");
+                                    if final_status == ExecStatus::Completed {
+                                        final_status = ExecStatus::Failed;
+                                        final_error = Some(msg.clone());
+                                    }
+                                    try_send_event(&event_tx, Event::Error { content: msg });
+                                    // Keep reading — pi may still emit turn_end / agent_end
+                                    // after retries fail, and we want a clean session shutdown.
+                                }
                                 Some(PiEvent::GetStateResponse { session_id: sid }) => {
                                     session_id = sid;
                                     // We have the session ID — break out of the read loop.
@@ -395,6 +410,13 @@ enum PiEvent {
         usage: Option<ProviderUsage>,
     },
     AgentEnd,
+    /// Emitted only when pi's automatic retry on a transient error has
+    /// exhausted all attempts (`auto_retry_end {success: false}`). The
+    /// `success: true` shape is dropped by `parse_event` since it carries
+    /// no actionable info — the next turn will just resume normally.
+    AutoRetryFailed {
+        final_error: Option<String>,
+    },
     GetStateResponse {
         session_id: String,
     },
@@ -467,6 +489,23 @@ fn parse_event(line: &str) -> Option<PiEvent> {
                 .map(extract_tool_result_text)
                 .unwrap_or_default();
             Some(PiEvent::ToolExecEnd { call_id, output })
+        }
+
+        "auto_retry_end" => {
+            // pi retries transient LLM errors (rate limits, 5xx) automatically.
+            // success=true means the retry worked and the session continues
+            // normally — no UI signal needed. success=false means all attempts
+            // exhausted; we surface the failure so the runtime can mark the
+            // turn as Failed and the user sees an error in the activity feed.
+            // Matches multica's pi.go handling.
+            if v.get("success").and_then(Value::as_bool) != Some(false) {
+                return None;
+            }
+            let final_error = v
+                .get("finalError")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            Some(PiEvent::AutoRetryFailed { final_error })
         }
 
         "turn_end" => {
@@ -953,19 +992,21 @@ mod tests {
 
     #[test]
     fn parse_unknown_top_level_events_are_skipped() {
-        // Pi RPC emits several lifecycle events we don't need to act on:
+        // Pi session emits several lifecycle events we don't need to act on:
         // turn_start, message_start/end, queue_update, compaction_*,
-        // auto_retry_*, extension_error. All must parse to None so the
-        // read loop simply continues.
+        // auto_retry_start, session_info_changed, thinking_level_changed,
+        // extension_error. All must parse to None so the read loop continues.
+        // `auto_retry_end` is handled separately (see auto_retry_end_* tests).
         for line in [
             r#"{"type":"turn_start"}"#,
             r#"{"type":"message_start","message":{}}"#,
             r#"{"type":"message_end","message":{}}"#,
             r#"{"type":"queue_update","steering":[],"followUp":[]}"#,
-            r#"{"type":"compaction_start"}"#,
-            r#"{"type":"compaction_end","result":{}}"#,
-            r#"{"type":"auto_retry_start"}"#,
-            r#"{"type":"auto_retry_end","success":true}"#,
+            r#"{"type":"compaction_start","reason":"threshold"}"#,
+            r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"result":{}}"#,
+            r#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":1000,"errorMessage":"rate limit"}"#,
+            r#"{"type":"session_info_changed","name":"x"}"#,
+            r#"{"type":"thinking_level_changed","level":"medium"}"#,
             r#"{"type":"extension_error","extensionPath":"x","event":"y","error":"z"}"#,
         ] {
             assert!(
@@ -973,6 +1014,38 @@ mod tests {
                 "expected None for event: {line}"
             );
         }
+    }
+
+    // ── auto_retry_end: failure surfaces, success is silent ──
+
+    #[test]
+    fn parse_auto_retry_end_success_returns_none() {
+        // Successful retries are silent — the next turn just continues.
+        let line = r#"{"type":"auto_retry_end","success":true,"attempt":2}"#;
+        assert!(parse_event(line).is_none());
+    }
+
+    #[test]
+    fn parse_auto_retry_end_failure_captures_final_error() {
+        let line = r#"{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"rate limited by anthropic.com"}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::AutoRetryFailed { final_error } = event else {
+            panic!("expected AutoRetryFailed, got {event:?}");
+        };
+        assert_eq!(final_error.as_deref(), Some("rate limited by anthropic.com"));
+    }
+
+    #[test]
+    fn parse_auto_retry_end_failure_without_final_error_yields_none_error() {
+        // `finalError` is optional in pi's schema — when absent, the
+        // drive_session dispatch substitutes a generic message so the user
+        // still gets a non-empty Event::Error.
+        let line = r#"{"type":"auto_retry_end","success":false,"attempt":3}"#;
+        let event = parse_event(line).expect("should parse");
+        let PiEvent::AutoRetryFailed { final_error } = event else {
+            panic!("expected AutoRetryFailed");
+        };
+        assert!(final_error.is_none());
     }
 
     // ── helper unit tests ──
