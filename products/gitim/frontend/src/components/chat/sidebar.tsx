@@ -30,6 +30,14 @@ interface SidebarProps {
 const KNOWN_AGENT_STORAGE_PREFIX = "gitim-known-agents:";
 const PINNED_CONVERSATIONS_STORAGE_PREFIX = "gitim-pinned-conversations:";
 
+// Archived DMs are loaded one page at a time. 5 is a sidebar-friendly batch
+// — small enough that the section doesn't dwarf the active DM list, large
+// enough that a typical user can find what they want in 1–2 pages.
+const ARCHIVED_DMS_PAGE_SIZE = 5;
+// Debounce window between the user typing in the prefix filter and the
+// fetch firing. 300ms is the standard "feels responsive without flooding".
+const ARCHIVED_DMS_PREFIX_DEBOUNCE_MS = 300;
+
 interface PinnedConversations {
   channels: Set<string>;
   dms: Set<string>;
@@ -158,12 +166,23 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
-  const archivedDms = useChatStore((s) => s.archivedDms);
+  // Pull each field of `archivedDmsView` individually — returning the
+  // object itself works, but selecting fields keeps re-render scope tight
+  // (and matches the project's selector style; see memory note on
+  // `project_zustand_selector_pitfalls.md`).
+  const archivedDmsView = useChatStore((s) => s.archivedDmsView);
+  const resetArchivedDmsView = useChatStore((s) => s.resetArchivedDmsView);
+  const appendArchivedDmsPage = useChatStore(
+    (s) => s.appendArchivedDmsPage,
+  );
+  const setArchivedDmsLoading = useChatStore(
+    (s) => s.setArchivedDmsLoading,
+  );
+  const setArchivedDmsError = useChatStore((s) => s.setArchivedDmsError);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
   const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
-  const setArchivedDms = useChatStore((s) => s.setArchivedDms);
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
@@ -177,7 +196,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [archivedLoading, setArchivedLoading] = useState(false);
   const [archivedDmsOpen, setArchivedDmsOpen] = useState(false);
-  const [archivedDmsLoading, setArchivedDmsLoading] = useState(false);
+  // The input value the user is *currently typing*. We debounce before
+  // pushing it into the store so each keystroke doesn't trigger a fetch.
+  const [pendingDmQuery, setPendingDmQuery] = useState("");
+  const dmQueryDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [knownAgentIds, setKnownAgentIds] = useState<Set<string>>(
     () => readKnownAgentIds(activeWorkspaceKey),
   );
@@ -410,42 +434,101 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     return null;
   }
 
+  // Fetches a page of archived DMs and writes it into the store. Handles
+  // the reset-vs-append decision (offset === 0 means "first page for this
+  // query") and drops the response if the user changed the prefix while
+  // the request was in flight — the store's `query` field is the source
+  // of truth for "what the user is asking for right now".
+  async function fetchArchivedDmsPage(query: string, offset: number) {
+    if (!activeSlug) return;
+    if (offset === 0) {
+      resetArchivedDmsView(query);
+    }
+    setArchivedDmsLoading(true);
+    try {
+      const res = await client.listArchivedDms(activeSlug, {
+        prefix: query,
+        offset,
+        limit: ARCHIVED_DMS_PAGE_SIZE,
+      });
+      // Race guard: if the user typed again during the fetch, the store's
+      // applied query has moved on. Drop this stale response without touching
+      // state — the newer fetch will refill the view.
+      const liveQuery =
+        useChatStore.getState().archivedDmsView?.query;
+      if (liveQuery !== query) return;
+      if (res.ok && res.data) {
+        appendArchivedDmsPage({
+          items: res.data.dms,
+          hasMore: res.data.hasMore,
+        });
+        setArchivedDmsLoading(false);
+      } else {
+        const message = res.error ?? "unknown";
+        setArchivedDmsError(message);
+        toast.error(`Failed to load archived DMs: ${message}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "network error";
+      setArchivedDmsError(message);
+      toast.error(`Failed to load archived DMs: ${message}`);
+    }
+  }
+
   async function handleToggleArchivedDmsSection() {
     const next = !archivedDmsOpen;
     setArchivedDmsOpen(next);
-    // Always refetch on expand — same rationale as channels: the archive list
-    // can change out-of-band (peer archives, CLI archive, etc.) and a session
-    // cache would hide those events.
-    if (next) {
-      if (!activeSlug) return;
-      setArchivedDmsLoading(true);
-      try {
-        const res = await client.listArchivedDms(activeSlug);
-        if (res.ok && res.data) {
-          // Synthesize Channel-shaped entries keyed by sorted-pair stem so the
-          // existing chat-layout / sidebar code paths (which key on `name`)
-          // work without special casing.
-          const dms: Channel[] = res.data.dms.map((entry) => {
-            const sorted = [currentUser, entry.peer].sort();
-            return {
-              name: `${sorted[0]}--${sorted[1]}`,
-              kind: "dm" as const,
-              unreadCount: 0,
-              hasMention: false,
-              members: sorted,
-            };
-          });
-          setArchivedDms(dms);
-        } else {
-          toast.error(
-            `Failed to load archived DMs: ${res.error ?? "unknown"}`,
-          );
-        }
-      } finally {
-        setArchivedDmsLoading(false);
-      }
+    // First-time expand: fetch page 1 with whatever prefix is currently
+    // staged (typically empty). Subsequent expands keep whatever was
+    // already loaded — markDmArchived invalidation flips the view back to
+    // null, so the next expand after archive-from-elsewhere is a fresh
+    // refetch automatically.
+    if (next && archivedDmsView === null) {
+      await fetchArchivedDmsPage(pendingDmQuery, 0);
     }
   }
+
+  // Auto-refetch when an in-place invalidation (e.g. `markDmArchived` from
+  // SSE or an active-DM archive) drops the view back to null while the
+  // section is open. Without this, the section would render "Loading…"
+  // forever — the user would have to manually collapse / re-expand.
+  useEffect(() => {
+    if (
+      archivedDmsOpen &&
+      archivedDmsView === null &&
+      activeSlug &&
+      !dmQueryDebounceRef.current
+    ) {
+      void fetchArchivedDmsPage(pendingDmQuery, 0);
+    }
+    // `fetchArchivedDmsPage` is a closure over store actions / activeSlug
+    // — none of those change identity per render in a way that would
+    // re-fire this effect spuriously, but listing them keeps the lint rule
+    // honest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivedDmsOpen, archivedDmsView, activeSlug]);
+
+  function handleDmPrefixChange(value: string) {
+    setPendingDmQuery(value);
+    if (dmQueryDebounceRef.current) {
+      clearTimeout(dmQueryDebounceRef.current);
+    }
+    dmQueryDebounceRef.current = setTimeout(() => {
+      dmQueryDebounceRef.current = null;
+      void fetchArchivedDmsPage(value, 0);
+    }, ARCHIVED_DMS_PREFIX_DEBOUNCE_MS);
+  }
+
+  // Clean up any pending debounced fetch on unmount so a late-firing
+  // setTimeout doesn't write to an unmounted store consumer.
+  useEffect(() => {
+    return () => {
+      if (dmQueryDebounceRef.current) {
+        clearTimeout(dmQueryDebounceRef.current);
+        dmQueryDebounceRef.current = null;
+      }
+    };
+  }, []);
 
   async function handleArchiveDm(dmName: string) {
     if (!activeSlug) return;
@@ -770,7 +853,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           })}
         </div>
 
-        {/* Archived DMs section — collapsed by default; lazy-loaded on expand. */}
+        {/* Archived DMs section — collapsed by default; lazy + paginated +
+            prefix-filterable. The view is server-driven: each expand /
+            keystroke / Load-more triggers a fresh `client.listArchivedDms`
+            call rather than walking a fully-loaded in-memory list. */}
         <div className="pt-2 mt-2 border-t border-border/60 shrink-0">
           <button
             type="button"
@@ -785,59 +871,139 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               ].join(" ")}
             />
             <span className="uppercase font-semibold tracking-wider">Archived DMs</span>
-            {archivedDms.length > 0 && (
+            {archivedDmsView && archivedDmsView.items.length > 0 && (
               <span className="ml-1 text-text-faint font-mono">
-                {archivedDms.length}
+                {archivedDmsView.items.length}
+                {archivedDmsView.hasMore ? "+" : ""}
               </span>
             )}
           </button>
           {archivedDmsOpen && (
-            <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
-              {archivedDms.length === 0 ? (
-                <li className="px-2 py-1.5 text-[11px] text-text-muted">
-                  {archivedDmsLoading ? "Loading…" : "No archived DMs"}
-                </li>
-              ) : (
-                archivedDms.map((dm) => {
-                  const isActive = currentChannel === dm.name;
-                  const peer = peerFromDmName(dm.name);
-                  const label = peer ?? dm.name;
-                  return (
-                    <li
-                      key={dm.name}
-                      data-testid="sidebar-archived-dm-item"
-                      className={[
-                        "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
-                        isActive
-                          ? "bg-surface/60 text-foreground opacity-100"
-                          : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
-                      ].join(" ")}
-                      title="Archived — read only. Click to view; use the restore button to unarchive."
-                      onClick={() => onChannelSelect(dm.name)}
-                    >
-                      <AtSign className="size-3 text-text-faint shrink-0" />
-                      <span className="truncate flex-1">{label}</span>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        title={
-                          peer
-                            ? `Unarchive DM with @${peer}`
-                            : `Unarchive DM ${dm.name}`
-                        }
-                        className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleUnarchiveDm(dm.name);
-                        }}
+            <div className="mt-1 space-y-1">
+              {/* Prefix filter — debounced server-side search by peer
+                  handle. Empty input = full archive (paginated). */}
+              <div className="relative px-1">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-text-faint" />
+                <input
+                  type="text"
+                  value={pendingDmQuery}
+                  onChange={(e) => handleDmPrefixChange(e.target.value)}
+                  placeholder="Filter by handle..."
+                  data-testid="sidebar-archived-dm-filter"
+                  className="w-full h-7 pl-7 pr-2 rounded-md border border-border/60 bg-background/60 text-xs placeholder:text-text-faint focus:outline-none focus:ring-1 focus:ring-ring/50"
+                />
+              </div>
+              <ul className="space-y-0.5 max-h-40 overflow-y-auto">
+                {(() => {
+                  // Initial expand: view is null until the first response
+                  // lands. Show a Loading placeholder so the section doesn't
+                  // appear empty during the round-trip.
+                  if (archivedDmsView === null) {
+                    return (
+                      <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                        Loading…
+                      </li>
+                    );
+                  }
+                  if (archivedDmsView.error) {
+                    return (
+                      <li className="flex items-center justify-between px-2 py-1.5 text-[11px] text-destructive">
+                        <span className="truncate">
+                          Failed: {archivedDmsView.error}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          title="Retry"
+                          onClick={() =>
+                            fetchArchivedDmsPage(archivedDmsView.query, 0)
+                          }
+                        >
+                          <span className="text-[11px]">Retry</span>
+                        </Button>
+                      </li>
+                    );
+                  }
+                  if (
+                    archivedDmsView.loading &&
+                    archivedDmsView.items.length === 0
+                  ) {
+                    return (
+                      <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                        Loading…
+                      </li>
+                    );
+                  }
+                  if (archivedDmsView.items.length === 0) {
+                    return (
+                      <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                        {archivedDmsView.query
+                          ? "No matches"
+                          : "No archived DMs"}
+                      </li>
+                    );
+                  }
+                  return archivedDmsView.items.map((entry) => {
+                    const name = entry.dm_pair_stem;
+                    const isActive = currentChannel === name;
+                    // The daemon includes `peer` directly, so we don't have to
+                    // run `peerFromDmName` against the stem here — saves a
+                    // string split and works even when the stored handler is
+                    // out-of-sync (e.g. mid-handler-rename) since the daemon
+                    // computed `peer` against the request's authenticated user.
+                    const label = entry.peer;
+                    return (
+                      <li
+                        key={name}
+                        data-testid="sidebar-archived-dm-item"
+                        className={[
+                          "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
+                          isActive
+                            ? "bg-surface/60 text-foreground opacity-100"
+                            : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
+                        ].join(" ")}
+                        title="Archived — read only. Click to view; use the restore button to unarchive."
+                        onClick={() => onChannelSelect(name)}
                       >
-                        <ArchiveRestore className="size-3" />
-                      </Button>
-                    </li>
-                  );
-                })
-              )}
-            </ul>
+                        <AtSign className="size-3 text-text-faint shrink-0" />
+                        <span className="truncate flex-1">{label}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          title={`Unarchive DM with @${label}`}
+                          className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleUnarchiveDm(name);
+                          }}
+                        >
+                          <ArchiveRestore className="size-3" />
+                        </Button>
+                      </li>
+                    );
+                  });
+                })()}
+              </ul>
+              {archivedDmsView &&
+                archivedDmsView.hasMore &&
+                archivedDmsView.items.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="w-full justify-center text-[11px] text-text-muted hover:text-foreground"
+                    disabled={archivedDmsView.loading}
+                    onClick={() =>
+                      fetchArchivedDmsPage(
+                        archivedDmsView.query,
+                        archivedDmsView.offset,
+                      )
+                    }
+                    data-testid="sidebar-archived-dm-load-more"
+                  >
+                    {archivedDmsView.loading ? "Loading…" : "Load more"}
+                  </Button>
+                )}
+            </div>
           )}
         </div>
       </div>

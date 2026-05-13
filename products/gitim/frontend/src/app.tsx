@@ -149,7 +149,6 @@ export default function App() {
   const setMessages = useChatStore((s) => s.setMessages);
   const selectChannel = useChatStore((s) => s.selectChannel);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
-  const setArchivedDms = useChatStore((s) => s.setArchivedDms);
   const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
   const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
@@ -279,6 +278,10 @@ export default function App() {
         workspaceKey === workspaceRef.current;
       const previousChannel = useChatStore.getState().currentChannel;
 
+      // Archived DMs are *not* fetched here — they're lazy-loaded by the
+      // sidebar on first expand (and paginated + prefix-filtered server
+      // side). Including them in this bootstrap pre-loaded the entire
+      // archive on every workspace activation, which doesn't scale.
       const [
         meRes,
         channelsRes,
@@ -287,7 +290,6 @@ export default function App() {
         cardsRes,
         boardsRes,
         archivedChannelsRes,
-        archivedDmsRes,
         archivedCardsRes,
       ] = await Promise.all([
         client.me(slug),
@@ -299,7 +301,6 @@ export default function App() {
         client.listCards(slug),
         client.listBoards(slug),
         client.listArchivedChannels(slug),
-        client.listArchivedDms(slug),
         client.listArchivedCards(slug),
       ]);
 
@@ -313,7 +314,6 @@ export default function App() {
           cardsRes,
           boardsRes,
           archivedChannelsRes,
-          archivedDmsRes,
           archivedCardsRes,
         ].some(isUnknownWorkspaceResponse)
       ) {
@@ -330,34 +330,18 @@ export default function App() {
           ? (boardsRes.data.boards as BoardSummary[])
           : useBoardStore.getState().boards;
       const state = useChatStore.getState();
-      const currentHandler =
-        meRes.ok && meRes.data
-          ? (meRes.data.handler as string)
-          : state.currentUser;
       const archivedChannels =
         archivedChannelsRes.ok && archivedChannelsRes.data
           ? (archivedChannelsRes.data.channels as Channel[])
           : state.archivedChannels;
-      const archivedDms =
-        archivedDmsRes.ok && archivedDmsRes.data
-          ? archivedDmsRes.data.dms.map((dm) => {
-              const members = dm.dm_pair_stem.includes("--")
-                ? dm.dm_pair_stem.split("--")
-                : [currentHandler, dm.peer].filter(Boolean).sort();
-              return {
-                name: dm.dm_pair_stem,
-                kind: "dm" as const,
-                unreadCount: 0,
-                hasMention: false,
-                members,
-              };
-            })
-          : state.archivedDms;
-      const selectableChannels = [
-        ...nextChannels,
-        ...archivedChannels,
-        ...archivedDms,
-      ];
+      const selectableChannels = [...nextChannels, ...archivedChannels];
+      // DM stems look like `<min>--<max>`. We can't probe the archive view
+      // for them at bootstrap (lazy-loaded), so treat any `--`-shaped name
+      // as potentially-selectable — daemon's read handler falls back to
+      // archive/ automatically, so if the DM is gone the user will see an
+      // empty timeline rather than getting silently bounced to general.
+      const isDmStem = (name: string): boolean =>
+        name.includes("--") && !nextChannels.some((c) => c.name === name);
       const boardState = useBoardStore.getState();
       const storedUiState = readUiState(workspaceKey);
       // Three-tier board handler resolution:
@@ -380,17 +364,21 @@ export default function App() {
       // In-session preserve still wins so SSE/poll-reset doesn't clobber the
       // user's current view; stored selection is the cross-refresh source of
       // truth on first load; general → first channel is the last-resort fallback.
+      // Archived DMs are accepted via `isDmStem` since they're no longer in the
+      // bootstrap payload — the read endpoint falls back to archive content.
+      const isSelectable = (name: string): boolean =>
+        selectableChannels.some((c) => c.name === name) || isDmStem(name);
       let nextChannel: string | null = null;
       if (
         options.preserveSelection &&
         previousChannel &&
-        selectableChannels.some((c) => c.name === previousChannel)
+        isSelectable(previousChannel)
       ) {
         nextChannel = previousChannel;
       }
       if (nextChannel === null) {
         const storedChannel = storedUiState.channel;
-        if (storedChannel && selectableChannels.some((c) => c.name === storedChannel)) {
+        if (storedChannel && isSelectable(storedChannel)) {
           nextChannel = storedChannel;
         }
       }
@@ -423,7 +411,6 @@ export default function App() {
       if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
       if (archivedChannelsRes.ok && archivedChannelsRes.data)
         setArchivedChannels(archivedChannels);
-      if (archivedDmsRes.ok && archivedDmsRes.data) setArchivedDms(archivedDms);
       if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
       if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
       if (cardsRes.ok && cardsRes.data) {
@@ -472,7 +459,6 @@ export default function App() {
         cardsRes.ok &&
         boardsRes.ok &&
         archivedChannelsRes.ok &&
-        archivedDmsRes.ok &&
         archivedCardsRes.ok &&
         (readRes === null || readRes.ok) &&
         (selectedBoardRes === null || selectedBoardRes.ok) &&
@@ -485,7 +471,6 @@ export default function App() {
       setCurrentUser,
       setChannels,
       setArchivedChannels,
-      setArchivedDms,
       setUsers,
       setAgents,
       setCards,

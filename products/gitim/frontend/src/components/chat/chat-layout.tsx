@@ -64,7 +64,6 @@ export function ChatLayout() {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
-  const archivedDms = useChatStore((s) => s.archivedDms);
   const currentUser = useChatStore((s) => s.currentUser);
   const isGuest = useChatStore((s) => s.isGuest);
   const users = useChatStore((s) => s.users);
@@ -110,11 +109,18 @@ export function ChatLayout() {
   // it never shows up in the active `channels` list. Read-only view: message
   // fetch already works (daemon's read handler falls back to archive/
   // automatically), but writes must be blocked.
+  // A selection is "archived" iff it isn't in active channels AND either
+  // matches an archived channel record OR has DM-stem shape (`--`-joined,
+  // and not a known archived channel name). The shape proxy is necessary
+  // because the archived DMs view is now lazy-loaded and may be null when
+  // the user lands on an archived DM via a stored selection. Worst case is
+  // a false-positive banner over an empty timeline if the daemon can't
+  // resolve the name — recoverable on the next channel poll.
   const isArchivedView =
     !!currentChannel &&
     !currentChannelData &&
     (archivedChannels.some((c) => c.name === currentChannel) ||
-      archivedDms.some((c) => c.name === currentChannel));
+      currentChannel.includes("--"));
   const showJoinBanner =
     !isArchivedView &&
     !!currentChannelData &&
@@ -563,9 +569,16 @@ export function ChatLayout() {
           <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 bg-muted/50">
             <span className="text-xs text-muted-foreground">
               {(() => {
+                // When `isArchivedView` is true the current selection isn't in
+                // active channels. It's a DM iff its name is the sorted-pair
+                // stem (`<min>--<max>`) and not a known archived channel — the
+                // shape check works whether the view has been expanded yet or
+                // not, so this banner stays correct for deep-linked archived
+                // DMs.
                 const isDm =
                   !!currentChannel &&
-                  archivedDms.some((c) => c.name === currentChannel);
+                  currentChannel.includes("--") &&
+                  !archivedChannels.some((c) => c.name === currentChannel);
                 if (isDm && currentChannel) {
                   const peer =
                     currentChannel

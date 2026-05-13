@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Message } from "../lib/types";
+import type { ArchivedDmEntry } from "../lib/client";
+import type { Channel, Message } from "../lib/types";
 import { useChatStore } from "./use-chat-store";
+
+function dmEntry(stem: string, peer: string): ArchivedDmEntry {
+  return { dm_pair_stem: stem, peer };
+}
 
 function msg(line: number, body: string, extra: Partial<Message> = {}): Message {
   return {
@@ -168,5 +173,245 @@ describe("useChatStore history pagination", () => {
 
     const lines = useChatStore.getState().messages.map((m) => m.line_number);
     expect(lines).toEqual([48, 49, 50, -1]);
+  });
+});
+
+describe("useChatStore archivedDmsView", () => {
+  beforeEach(() => {
+    useChatStore.getState().resetForWorkspaceSwitch();
+  });
+
+  it("starts null on a fresh workspace (not initialized until first expand)", () => {
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("resetArchivedDmsView writes a fresh view with the given query", () => {
+    useChatStore.getState().resetArchivedDmsView("ali");
+    const view = useChatStore.getState().archivedDmsView;
+    expect(view).not.toBeNull();
+    expect(view).toEqual({
+      items: [],
+      offset: 0,
+      hasMore: true,
+      query: "ali",
+      loading: false,
+      error: null,
+    });
+  });
+
+  it("resetArchivedDmsView clears any stale items / error / offset from a prior view", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("alice--bob", "alice"), dmEntry("bob--carol", "carol")],
+      hasMore: true,
+    });
+    useChatStore.getState().setArchivedDmsError("boom");
+
+    useChatStore.getState().resetArchivedDmsView("carol");
+
+    expect(useChatStore.getState().archivedDmsView).toEqual({
+      items: [],
+      offset: 0,
+      hasMore: true,
+      query: "carol",
+      loading: false,
+      error: null,
+    });
+  });
+
+  it("appendArchivedDmsPage is a no-op when the view is null", () => {
+    useChatStore
+      .getState()
+      .appendArchivedDmsPage({ items: [dmEntry("a--b", "a")], hasMore: false });
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("appendArchivedDmsPage extends items + advances offset + overwrites hasMore", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("alice--bob", "alice"), dmEntry("bob--carol", "carol")],
+      hasMore: true,
+    });
+
+    let view = useChatStore.getState().archivedDmsView!;
+    expect(view.items.map((e) => e.dm_pair_stem)).toEqual([
+      "alice--bob",
+      "bob--carol",
+    ]);
+    expect(view.offset).toBe(2);
+    expect(view.hasMore).toBe(true);
+
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("carol--dave", "dave")],
+      hasMore: false,
+    });
+
+    view = useChatStore.getState().archivedDmsView!;
+    expect(view.items.map((e) => e.dm_pair_stem)).toEqual([
+      "alice--bob",
+      "bob--carol",
+      "carol--dave",
+    ]);
+    expect(view.offset).toBe(3);
+    expect(view.hasMore).toBe(false);
+  });
+
+  it("appendArchivedDmsPage deduplicates by dm_pair_stem (idempotent retry)", () => {
+    // Same page could land twice if a race / retry causes overlap; we must
+    // not double-render the same entry.
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("alice--bob", "alice"), dmEntry("bob--carol", "carol")],
+      hasMore: true,
+    });
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("bob--carol", "carol"), dmEntry("carol--dave", "dave")],
+      hasMore: false,
+    });
+
+    const view = useChatStore.getState().archivedDmsView!;
+    expect(view.items.map((e) => e.dm_pair_stem)).toEqual([
+      "alice--bob",
+      "bob--carol",
+      "carol--dave",
+    ]);
+    // offset advanced by the count of *incoming* page entries; pagination is
+    // server-side so the daemon owns offset semantics, not the client.
+    expect(view.offset).toBe(4);
+    expect(view.hasMore).toBe(false);
+  });
+
+  it("appendArchivedDmsPage clears any prior error", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().setArchivedDmsError("transient");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("a--b", "a")],
+      hasMore: false,
+    });
+    expect(useChatStore.getState().archivedDmsView!.error).toBeNull();
+  });
+
+  it("setArchivedDmsLoading toggles loading and clears error on enter", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().setArchivedDmsError("oops");
+
+    useChatStore.getState().setArchivedDmsLoading(true);
+    let view = useChatStore.getState().archivedDmsView!;
+    expect(view.loading).toBe(true);
+    expect(view.error).toBeNull();
+
+    useChatStore.getState().setArchivedDmsLoading(false);
+    view = useChatStore.getState().archivedDmsView!;
+    expect(view.loading).toBe(false);
+  });
+
+  it("setArchivedDmsLoading is a no-op when the view is null", () => {
+    useChatStore.getState().setArchivedDmsLoading(true);
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("setArchivedDmsError writes the error and stops loading", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().setArchivedDmsLoading(true);
+    useChatStore.getState().setArchivedDmsError("backend down");
+    const view = useChatStore.getState().archivedDmsView!;
+    expect(view.error).toBe("backend down");
+    expect(view.loading).toBe(false);
+  });
+
+  it("setArchivedDmsError is a no-op when the view is null", () => {
+    useChatStore.getState().setArchivedDmsError("ignored");
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("markDmArchived invalidates the view (sets it back to null)", () => {
+    // The view is paginated and order-dependent; we can't know where a
+    // freshly-archived DM belongs in the sorted result. Force a refetch.
+    const dm: Channel = {
+      name: "alice--bob",
+      kind: "dm",
+      unreadCount: 0,
+      hasMention: false,
+      members: ["alice", "bob"],
+    };
+    useChatStore.getState().setChannels([dm]);
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("bob--carol", "carol")],
+      hasMore: false,
+    });
+
+    useChatStore.getState().markDmArchived("alice--bob");
+
+    expect(useChatStore.getState().channels).toEqual([]);
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("markDmUnarchived removes the entry from the view and synthesizes a Channel back into channels", () => {
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [
+        dmEntry("alice--bob", "alice"),
+        dmEntry("bob--carol", "carol"),
+      ],
+      hasMore: false,
+    });
+
+    useChatStore.getState().markDmUnarchived("alice--bob");
+
+    const view = useChatStore.getState().archivedDmsView!;
+    expect(view.items.map((e) => e.dm_pair_stem)).toEqual(["bob--carol"]);
+    // Synthesized Channel keyed by the same stem so existing channel-name
+    // code paths keep working without special-casing.
+    const channels = useChatStore.getState().channels;
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      name: "alice--bob",
+      kind: "dm",
+      unreadCount: 0,
+      hasMention: false,
+      members: ["alice", "bob"],
+    });
+  });
+
+  it("markDmUnarchived does not double-insert if the DM is already in channels", () => {
+    const dm: Channel = {
+      name: "alice--bob",
+      kind: "dm",
+      unreadCount: 0,
+      hasMention: false,
+      members: ["alice", "bob"],
+    };
+    useChatStore.getState().setChannels([dm]);
+    useChatStore.getState().resetArchivedDmsView("");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("alice--bob", "alice")],
+      hasMore: false,
+    });
+
+    useChatStore.getState().markDmUnarchived("alice--bob");
+
+    expect(useChatStore.getState().channels).toHaveLength(1);
+    expect(
+      useChatStore.getState().archivedDmsView!.items.length,
+    ).toBe(0);
+  });
+
+  it("markDmUnarchived when the view is null still seeds a synthesized Channel (handles SSE-driven unarchive before expand)", () => {
+    useChatStore.getState().markDmUnarchived("alice--bob");
+    const channels = useChatStore.getState().channels;
+    expect(channels).toHaveLength(1);
+    expect(channels[0].name).toBe("alice--bob");
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+
+  it("resetForWorkspaceSwitch clears archivedDmsView back to null", () => {
+    useChatStore.getState().resetArchivedDmsView("foo");
+    useChatStore.getState().appendArchivedDmsPage({
+      items: [dmEntry("a--b", "a")],
+      hasMore: false,
+    });
+    useChatStore.getState().resetForWorkspaceSwitch();
+    expect(useChatStore.getState().archivedDmsView).toBeNull();
   });
 });
