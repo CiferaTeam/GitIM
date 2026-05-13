@@ -439,12 +439,17 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             handle_unarchive_dm(state, peer, resolved_author).await
         }
         Request::ListArchivedUsers => handle_list_archived_users(state).await,
-        Request::ListArchivedDms { author } => {
+        Request::ListArchivedDms {
+            author,
+            prefix,
+            offset,
+            limit,
+        } => {
             let resolved_author = match resolve_author(author, &state).await {
                 Ok(a) => a,
                 Err(r) => return r,
             };
-            handle_list_archived_dms(state, resolved_author).await
+            handle_list_archived_dms(state, resolved_author, prefix, offset, limit).await
         }
         Request::DepartUser { handler } => handle_depart_user(state, handler).await,
         Request::BoardShow { handler } => {

@@ -272,9 +272,23 @@ pub async fn handle_list_archived_users(state: SharedState) -> Response {
 /// `author` as the peer; this branch is unreachable through normal
 /// `archive_dm` flow because that requires `author != peer`, but the
 /// listing tolerates the malformed file shape rather than panicking.
-pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Response {
+pub async fn handle_list_archived_dms(
+    state: SharedState,
+    author: String,
+    prefix: Option<String>,
+    offset: usize,
+    limit: usize,
+) -> Response {
     use gitim_core::dm::parse_dm_filename;
     use gitim_core::responses::{ArchivedDmEntry, ListArchivedDmsResponse};
+
+    if limit == 0 || limit > 100 {
+        return Response::error(format!("invalid limit {limit}: must be 1..=100"));
+    }
+    let needle = prefix
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
 
     let arch_dm_dir = state.repo_root.join("archive").join("dm");
     let mut entries: Vec<ArchivedDmEntry> = Vec::new();
@@ -298,6 +312,9 @@ pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Res
                     // Caller did not participate in this DM — skip.
                     continue;
                 };
+                if !needle.is_empty() && !peer.to_ascii_lowercase().starts_with(&needle) {
+                    continue;
+                }
                 entries.push(ArchivedDmEntry {
                     peer: peer.to_string(),
                     dm_pair_stem: stem,
@@ -306,12 +323,13 @@ pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Res
         }
     }
     entries.sort_by(|a, b| a.peer.cmp(&b.peer));
-    // has_more: pagination wiring lands in a follow-up task; pre-paginated
-    // callers always see the full list, so the remaining-pages flag is false.
-    let payload = ListArchivedDmsResponse {
-        dms: entries,
-        has_more: false,
-    };
+
+    // Peek limit+1 to compute has_more without counting the whole directory.
+    let window: Vec<_> = entries.into_iter().skip(offset).take(limit + 1).collect();
+    let has_more = window.len() > limit;
+    let dms: Vec<_> = window.into_iter().take(limit).collect();
+
+    let payload = ListArchivedDmsResponse { dms, has_more };
     Response::success(serde_json::to_value(payload).unwrap())
 }
 

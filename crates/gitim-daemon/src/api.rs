@@ -345,6 +345,12 @@ pub enum Request {
     ListArchivedDms {
         #[serde(default)]
         author: Option<String>,
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_archived_dms_limit")]
+        limit: usize,
     },
     #[serde(rename = "depart_user")]
     DepartUser { handler: String },
@@ -454,6 +460,10 @@ fn default_limit() -> usize {
     50
 }
 
+fn default_archived_dms_limit() -> usize {
+    5
+}
+
 fn default_role() -> String {
     "member".to_string()
 }
@@ -525,6 +535,46 @@ mod tests {
         let req2: Request = serde_json::from_str(json_no_ch).unwrap();
         match req2 {
             Request::ListArchivedCards { channel } => assert_eq!(channel, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn list_archived_dms_request_carries_pagination() {
+        let json = r#"{"method":"list_archived_dms","author":"alice","prefix":"bo","offset":5,"limit":10}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedDms {
+                author,
+                prefix,
+                offset,
+                limit,
+            } => {
+                assert_eq!(author.as_deref(), Some("alice"));
+                assert_eq!(prefix.as_deref(), Some("bo"));
+                assert_eq!(offset, 5);
+                assert_eq!(limit, 10);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn list_archived_dms_request_defaults() {
+        let json = r#"{"method":"list_archived_dms"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedDms {
+                author,
+                prefix,
+                offset,
+                limit,
+            } => {
+                assert!(author.is_none());
+                assert!(prefix.is_none());
+                assert_eq!(offset, 0);
+                assert_eq!(limit, 5);
+            }
             _ => panic!("wrong variant"),
         }
     }
@@ -779,7 +829,7 @@ mod tests {
         let json = r#"{"method":"list_archived_dms","author":"alice"}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         match req {
-            Request::ListArchivedDms { author } => {
+            Request::ListArchivedDms { author, .. } => {
                 assert_eq!(author, Some("alice".to_string()));
             }
             _ => panic!("wrong variant"),
@@ -789,7 +839,7 @@ mod tests {
         let json_no_author = r#"{"method":"list_archived_dms"}"#;
         let req2: Request = serde_json::from_str(json_no_author).unwrap();
         match req2 {
-            Request::ListArchivedDms { author } => assert_eq!(author, None),
+            Request::ListArchivedDms { author, .. } => assert_eq!(author, None),
             _ => panic!("wrong variant"),
         }
     }

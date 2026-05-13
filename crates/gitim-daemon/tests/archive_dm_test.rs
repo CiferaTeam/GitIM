@@ -952,3 +952,211 @@ async fn test_poll_emits_dm_unarchived_event() {
         "unarchive should surface thread content (active path re-appears with full file)",
     );
 }
+
+// ─── 16. Task 2+3: prefix/offset/limit pagination on list_archived_dms ────────
+//
+// Coverage: page boundary (has_more transitions), exact-fit edge, prefix
+// filter (case-insensitive in input AND content), empty prefix, invalid
+// limit guard. Seeds archive/dm/ directly + git-commits to skip the
+// archive_dm RPC's full file-move ceremony — we're only testing the
+// listing handler's filter+page logic.
+
+async fn list_archived_dms_paged(
+    state: Arc<AppState>,
+    author: &str,
+    prefix: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> gitim_daemon::api::Response {
+    let mut body = serde_json::json!({
+        "method": "list_archived_dms",
+        "author": author,
+        "offset": offset,
+        "limit": limit,
+    });
+    if let Some(p) = prefix {
+        body["prefix"] = serde_json::Value::String(p.to_string());
+    }
+    let req: Request = serde_json::from_value(body).unwrap();
+    handle_request(req, state).await
+}
+
+/// Seed `archive/dm/<me>--<peer>.thread` (canonicalized sorted) for each
+/// peer, ensure each peer has a users/<peer>.meta.yaml file (handler
+/// dispatch doesn't read users dir, but parse_dm_filename does no
+/// existence check — still nice to be hermetic), and git-commit so the
+/// working tree stays clean for any follow-on assertions.
+async fn seed_archived_dms(state: &Arc<AppState>, me: &str, peers: &[&str]) {
+    let arch_dir = state.repo_root.join("archive").join("dm");
+    std::fs::create_dir_all(&arch_dir).unwrap();
+    for peer in peers {
+        let users_meta = state
+            .repo_root
+            .join("users")
+            .join(format!("{}.meta.yaml", peer));
+        if !users_meta.exists() {
+            std::fs::write(
+                &users_meta,
+                format!("display_name: {}\nrole: dev\nintroduction: hi\n", peer),
+            )
+            .unwrap();
+        }
+        let (first, second) = if me < *peer {
+            (me, *peer)
+        } else {
+            (*peer, me)
+        };
+        let stem = format!("{}--{}", first, second);
+        std::fs::write(
+            arch_dir.join(format!("{}.thread", stem)),
+            format!(
+                "[L000001][P000000][@{}][20260509T100000Z] hey\n",
+                me
+            ),
+        )
+        .unwrap();
+    }
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&state.repo_root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "seed archived dms"]);
+}
+
+fn peers_in(resp: &gitim_daemon::api::Response) -> Vec<String> {
+    resp.data
+        .as_ref()
+        .unwrap()
+        .get("dms")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["peer"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn has_more_of(resp: &gitim_daemon::api::Response) -> bool {
+    resp.data
+        .as_ref()
+        .unwrap()
+        .get("has_more")
+        .unwrap()
+        .as_bool()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_happy_path_first_page_has_more() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(
+        &state,
+        "alice",
+        &["bob", "carol", "dave", "erin", "frank", "grace"],
+    )
+    .await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", None, 0, 5).await;
+    assert!(resp.ok, "list failed: {:?}", resp.error);
+    let peers = peers_in(&resp);
+    assert_eq!(
+        peers,
+        vec!["bob", "carol", "dave", "erin", "frank"],
+        "first page should be the alphabetical first 5"
+    );
+    assert!(has_more_of(&resp), "6 entries, limit 5 — has_more must be true");
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_second_page_no_more() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(
+        &state,
+        "alice",
+        &["bob", "carol", "dave", "erin", "frank", "grace"],
+    )
+    .await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", None, 5, 5).await;
+    assert!(resp.ok, "list failed: {:?}", resp.error);
+    let peers = peers_in(&resp);
+    assert_eq!(peers, vec!["grace"]);
+    assert!(!has_more_of(&resp), "single tail entry — has_more must be false");
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_exact_fit_no_more() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob", "carol", "dave", "erin", "frank"]).await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", None, 0, 5).await;
+    assert!(resp.ok);
+    assert_eq!(peers_in(&resp).len(), 5);
+    assert!(
+        !has_more_of(&resp),
+        "exact-fit page: peek limit+1 finds nothing extra, has_more=false"
+    );
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_prefix_filter_lowercase() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob", "bobby", "carol"]).await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", Some("bo"), 0, 5).await;
+    assert!(resp.ok);
+    assert_eq!(peers_in(&resp), vec!["bob", "bobby"]);
+    assert!(!has_more_of(&resp));
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_prefix_filter_case_insensitive() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob", "bobby", "carol"]).await;
+
+    // Uppercase input must match the same lowercased peers.
+    let resp = list_archived_dms_paged(state.clone(), "alice", Some("BO"), 0, 5).await;
+    assert!(resp.ok);
+    assert_eq!(peers_in(&resp), vec!["bob", "bobby"]);
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_empty_prefix_returns_all() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob", "carol", "dave"]).await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", Some(""), 0, 5).await;
+    assert!(resp.ok);
+    assert_eq!(peers_in(&resp), vec!["bob", "carol", "dave"]);
+    assert!(!has_more_of(&resp));
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_invalid_limit_zero() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob"]).await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", None, 0, 0).await;
+    assert!(!resp.ok, "limit=0 must be rejected");
+    let err = resp.error.unwrap();
+    assert!(err.contains("invalid limit"), "err: {}", err);
+}
+
+#[tokio::test]
+async fn test_list_archived_dms_paged_invalid_limit_over_100() {
+    let (_tmp, state) = setup_test_repo().await;
+    seed_archived_dms(&state, "alice", &["bob"]).await;
+
+    let resp = list_archived_dms_paged(state.clone(), "alice", None, 0, 101).await;
+    assert!(!resp.ok, "limit>100 must be rejected");
+    let err = resp.error.unwrap();
+    assert!(err.contains("invalid limit"), "err: {}", err);
+}
