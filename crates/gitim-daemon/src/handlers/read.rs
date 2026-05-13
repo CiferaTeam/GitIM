@@ -306,7 +306,12 @@ pub async fn handle_list_archived_dms(state: SharedState, author: String) -> Res
         }
     }
     entries.sort_by(|a, b| a.peer.cmp(&b.peer));
-    let payload = ListArchivedDmsResponse { dms: entries };
+    // has_more: pagination wiring lands in a follow-up task; pre-paginated
+    // callers always see the full list, so the remaining-pages flag is false.
+    let payload = ListArchivedDmsResponse {
+        dms: entries,
+        has_more: false,
+    };
     Response::success(serde_json::to_value(payload).unwrap())
 }
 

@@ -225,6 +225,8 @@ pub struct ArchivedDmEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListArchivedDmsResponse {
     pub dms: Vec<ArchivedDmEntry>,
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 /// Shared response shape for `Request::JoinChannel` and
@@ -874,6 +876,20 @@ mod tests {
     }
 
     #[test]
+    fn list_archived_dms_response_has_more_field() {
+        let r = ListArchivedDmsResponse {
+            dms: vec![],
+            has_more: true,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["has_more"], serde_json::json!(true));
+        // Backward compatible: missing has_more deserializes as false (default).
+        let r2: ListArchivedDmsResponse =
+            serde_json::from_str(r#"{"dms":[]}"#).unwrap();
+        assert!(!r2.has_more);
+    }
+
+    #[test]
     fn list_archived_dms_response_wire_shape() {
         let r = ListArchivedDmsResponse {
             dms: vec![
@@ -886,6 +902,7 @@ mod tests {
                     dm_pair_stem: "bob--charlie".to_string(),
                 },
             ],
+            has_more: false,
         };
         let v = serde_json::to_value(&r).unwrap();
         let arr = v.get("dms").unwrap().as_array().unwrap();
