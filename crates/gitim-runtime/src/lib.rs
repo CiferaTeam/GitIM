@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod background;
+pub mod cli;
 pub mod context_window;
 pub mod daemon_log;
 pub mod email_propagation;

@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.command {
         None => run_server(args.port, args.daemon).await,
-        Some(cmd) => run_cli(cmd),
+        Some(cmd) => run_cli(cmd).await,
     }
 }
 
@@ -92,7 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Tracing is initialized at WARN level (not INFO like server mode) so the
 /// CLI's JSON stdout output stays clean for downstream parsing.
-fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// Async because subcommand bodies will issue HTTP requests via
+/// `gitim_runtime::cli::Client` (reqwest non-blocking). The bodies stay
+/// `todo!()` at this stage — Task 4 only refactors the dispatch shape.
+async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .init();
