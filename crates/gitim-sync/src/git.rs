@@ -472,6 +472,70 @@ impl GitStorage {
         self.root.join(".git/rebase-merge").exists()
             || self.root.join(".git/rebase-apply").exists()
     }
+
+    /// Best-effort recovery from a wedged rebase / detached HEAD state.
+    /// Idempotent: safe to call when nothing is wrong (returns Ok with no
+    /// side effects).
+    ///
+    /// Sequence:
+    ///   1. `git rebase --abort` (verified by Layer A — Ok means markers gone)
+    ///   2. If markers persist (abort couldn't recognise it), force-remove
+    ///      `.git/rebase-merge` / `.git/rebase-apply` directly
+    ///   3. If HEAD is still detached, reattach by force-creating the local
+    ///      default branch at the current SHA — preserves any unpushed work
+    ///      that lived on the detached commit
+    pub fn recover_from_stale_rebase(&self) -> Result<(), GitError> {
+        let _ = self.abort_rebase();
+
+        if self.has_stale_rebase_state() {
+            let merge_dir = self.root.join(".git/rebase-merge");
+            if merge_dir.exists() {
+                std::fs::remove_dir_all(&merge_dir)?;
+            }
+            let apply_dir = self.root.join(".git/rebase-apply");
+            if apply_dir.exists() {
+                std::fs::remove_dir_all(&apply_dir)?;
+            }
+        }
+
+        if !self.head_is_on_branch()? {
+            let branch = self.default_branch_from_origin_head()?;
+            let output = Command::new("git")
+                .args(["checkout", "-B", &branch, "HEAD"])
+                .current_dir(&self.root)
+                .output()?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve the default branch name via `refs/remotes/origin/HEAD`.
+    /// Used by stale-rebase recovery to know where to reattach. Returns
+    /// `CommandFailed` if origin/HEAD is unset (caller must decide whether
+    /// to escalate or pick a fallback).
+    fn default_branch_from_origin_head(&self) -> Result<String, GitError> {
+        let output = Command::new("git")
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "origin/HEAD not set: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        full.strip_prefix("refs/remotes/origin/")
+            .map(str::to_string)
+            .ok_or_else(|| {
+                GitError::CommandFailed(format!("unexpected origin/HEAD: {full}"))
+            })
+    }
 }
 
 fn is_rate_limited(stderr: &str) -> bool {
@@ -727,6 +791,160 @@ mod tests {
             matches!(result, Err(GitError::DetachedHead)),
             "expected DetachedHead, got {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn recover_from_stale_rebase_clears_orphan_state_dir() {
+        // Stale state that `git rebase --abort` cannot recognise as a
+        // real rebase: a `.git/rebase-merge` directory left over from a
+        // killed daemon mid-cleanup. abort_rebase returns Err (Layer A);
+        // recover_from_stale_rebase must finish the job by force-removing
+        // the dir.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Seed a commit so HEAD resolves to something — otherwise
+        // symbolic-ref on a freshly-init repo is its own edge case.
+        std::process::Command::new("git")
+            .args(["config", "user.email", "t@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("seed"), "seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".git/rebase-merge")).unwrap();
+        let repo = GitStorage::new(dir.path());
+        assert!(repo.has_stale_rebase_state());
+
+        repo.recover_from_stale_rebase().unwrap();
+        assert!(
+            !repo.has_stale_rebase_state(),
+            "stale rebase dir must be gone after recovery"
+        );
+        assert!(
+            repo.head_is_on_branch().unwrap(),
+            "HEAD must be on a branch after recovery"
+        );
+    }
+
+    #[test]
+    fn recover_from_stale_rebase_reattaches_detached_head() {
+        let bare_dir = tempfile::TempDir::new().unwrap();
+        let clone_dir = tempfile::TempDir::new().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(bare_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare_dir.path().to_str().unwrap(),
+                clone_dir.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "t@test.com"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(clone_dir.path().join("seed"), "seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        // Production clones from a GitHub remote get origin/HEAD set
+        // automatically; a `git init --bare` test fixture does not, so
+        // do it explicitly to match the real-world precondition.
+        std::process::Command::new("git")
+            .args(["remote", "set-head", "origin", "main"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+
+        // Add one more local commit so we can verify recovery preserves
+        // unpushed work.
+        std::fs::write(clone_dir.path().join("local"), "local").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "local-only"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        let pre_sha = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(clone_dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Detach + simulate stale rebase state.
+        std::process::Command::new("git")
+            .args(["checkout", &pre_sha])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(clone_dir.path().join(".git/rebase-merge")).unwrap();
+
+        let repo = GitStorage::new(clone_dir.path());
+        repo.recover_from_stale_rebase().unwrap();
+
+        assert!(!repo.has_stale_rebase_state());
+        assert!(
+            repo.head_is_on_branch().unwrap(),
+            "HEAD must be re-attached"
+        );
+        let post_sha = repo.rev_parse("HEAD").unwrap();
+        assert_eq!(post_sha, pre_sha, "recovery must preserve current SHA");
+        assert!(
+            repo.has_unpushed_commits().unwrap(),
+            "unpushed local commit must survive recovery"
         );
     }
 
