@@ -75,6 +75,9 @@ use tempfile::TempDir;
 use gitim_runtime::http::{RuntimeState, SharedRuntimeState};
 use gitim_runtime::update::{run_async_install_and_spawn, AsyncPhaseOutcome};
 
+mod common;
+use common::HomeGuard;
+
 // -- helpers ----------------------------------------------------------------
 
 /// Path to the compiled `fake-gitim-runtime` bin. Cargo sets
@@ -220,36 +223,10 @@ impl Drop for FakeVersionGuard {
     }
 }
 
-/// RAII guard to point `HOME` at an isolated tempdir. The failure-branch
-/// respawn helper calls `recover_from_config`, which reads
-/// `$HOME/.gitim/runtime.json`. Without this guard the test reads the dev
-/// machine's real workspace config and tries to provision it — which either
-/// succeeds (polluting the dev environment) or fails noisily.
-struct HomeGuard {
-    _tmp: TempDir,
-    original: Option<std::ffi::OsString>,
-}
-
-impl HomeGuard {
-    fn install() -> Self {
-        let tmp = TempDir::new().expect("home tempdir");
-        let original = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        Self {
-            _tmp: tmp,
-            original,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match self.original.take() {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-}
+// HOME isolation: the failure-branch respawn helper calls
+// `recover_from_config`, which reads `$HOME/.gitim/runtime.json`. Without
+// `HomeGuard` the test reads the dev machine's real workspace config and
+// tries to provision it.
 
 // -- tests ------------------------------------------------------------------
 

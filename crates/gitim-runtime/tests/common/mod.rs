@@ -6,8 +6,15 @@ use std::process::Command;
 use gitim_client::GitimClient;
 use tempfile::{Builder, TempDir};
 
-/// Ensure `gitim-daemon` binary is findable by adding target/debug to PATH.
-/// Uses Once to avoid UB from concurrent set_var in multi-threaded test runner.
+/// Ensure `gitim-daemon` binary is findable by adding target/debug to PATH,
+/// and redirect daemon logs out of the developer's real `~/.gitim/logs/`.
+///
+/// Uses `Once` to avoid UB from concurrent set_var in multi-threaded test
+/// runner — `call_once` serializes all env mutation through a single thread.
+///
+/// **Every test that spawns a daemon must call this first.** Skipping it
+/// leaves `daemon_log::logs_dir()` falling back to `$HOME/.gitim/logs/`,
+/// which would pollute the developer machine.
 pub fn ensure_daemon_in_path() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -23,6 +30,14 @@ pub fn ensure_daemon_in_path() {
                 format!("{}:{}", target_debug.display(), current_path),
             );
         }
+
+        // Redirect daemon logs from ~/.gitim/logs/ into a TempDir for this
+        // test process. `daemon_log::logs_dir()` honors GITIM_LOG_DIR.
+        // We `keep()` the TempDir intentionally — RAII drop would wipe the
+        // dir while daemons may still be writing. OS temp reaper collects
+        // it after the test binary exits.
+        let log_tmp = TempDir::new().expect("tempdir for GITIM_LOG_DIR");
+        std::env::set_var("GITIM_LOG_DIR", log_tmp.keep());
     });
 }
 
@@ -33,10 +48,19 @@ pub fn short_tempdir() -> TempDir {
 
 /// Temporarily point HOME at a fresh tempdir so tests that hit runtime routes
 /// persisting `~/.gitim/runtime.json` cannot mutate the developer machine's
-/// real GitIM config.
+/// real GitIM config. Restores the prior HOME on drop.
+///
+/// Scope: this only covers `~/.gitim/runtime.json` and anything else keyed off
+/// `dirs::home_dir()`. Daemon log pollution is handled separately by
+/// `ensure_daemon_in_path` setting `GITIM_LOG_DIR`, so a test that only spawns
+/// a daemon (without touching runtime.json) doesn't need a HomeGuard.
+///
+/// Note: `std::env::set_var("HOME", ...)` is process-global and not thread-safe.
+/// Tests using this guard should be serialised with `#[serial(...)]` to avoid
+/// races when running in cargo test's default multi-thread mode.
 pub struct HomeGuard {
     original: Option<std::ffi::OsString>,
-    _tmp: TempDir,
+    tmp: TempDir,
 }
 
 impl HomeGuard {
@@ -44,10 +68,13 @@ impl HomeGuard {
         let tmp = TempDir::new().expect("tempdir for HOME");
         let original = std::env::var_os("HOME");
         std::env::set_var("HOME", tmp.path());
-        Self {
-            original,
-            _tmp: tmp,
-        }
+        Self { original, tmp }
+    }
+
+    /// The tempdir HOME is currently pointing at. Useful for tests that need
+    /// to write fixtures like `<home>/.gitim/runtime.json`.
+    pub fn path(&self) -> &std::path::Path {
+        self.tmp.path()
     }
 }
 

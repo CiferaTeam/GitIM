@@ -34,37 +34,8 @@ use gitim_runtime::http::{
 use gitim_runtime::user_config::{UserConfig, WorkspaceEntry};
 use gitim_runtime::workspace::WorkspaceContext;
 
-/// Swap `HOME` to a tempdir for the duration of a test and restore on drop.
-/// Paired with `#[serial(home_env)]` so the process-global var can't race.
-struct HomeGuard {
-    original: Option<std::ffi::OsString>,
-    _tmp: TempDir,
-}
-
-impl HomeGuard {
-    fn install() -> (Self, std::path::PathBuf) {
-        let tmp = TempDir::new().expect("tempdir for HOME");
-        let path = tmp.path().to_path_buf();
-        let original = std::env::var_os("HOME");
-        std::env::set_var("HOME", &path);
-        (
-            Self {
-                original,
-                _tmp: tmp,
-            },
-            path,
-        )
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match self.original.take() {
-            Some(val) => std::env::set_var("HOME", val),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-}
+mod common;
+use common::HomeGuard;
 
 /// Write `~/.gitim/runtime.json` with the v2 schema. Mirrors the on-disk shape
 /// that `user_config::write` produces, so we exercise the read path end-to-end.
@@ -100,7 +71,8 @@ fn insert_ws(state: &SharedRuntimeState, slug: &str, path: &Path) {
 #[tokio::test]
 #[serial(home_env)]
 async fn recover_multiple_workspaces_from_user_config() {
-    let (_home_guard, home) = HomeGuard::install();
+    let home_guard = HomeGuard::install();
+    let home = home_guard.path();
 
     // Three workspace dirs on disk. No `.gitim-runtime/human` → the expensive
     // provisioning branch short-circuits and recovery populates ctx only.
@@ -120,7 +92,7 @@ async fn recover_multiple_workspaces_from_user_config() {
             entry("ws-c", "C", &ws_c),
         ],
     };
-    write_runtime_json(&home, &cfg);
+    write_runtime_json(home, &cfg);
 
     let state = empty_state();
     recover_from_config(state.clone()).await;
@@ -148,7 +120,8 @@ async fn recover_multiple_workspaces_from_user_config() {
 #[tokio::test]
 #[serial(home_env)]
 async fn recover_skips_missing_workspace_path() {
-    let (_home_guard, home) = HomeGuard::install();
+    let home_guard = HomeGuard::install();
+    let home = home_guard.path();
 
     let ws_tmp = TempDir::new().unwrap();
     let ws_real = ws_tmp.path().join("real");
@@ -163,7 +136,7 @@ async fn recover_skips_missing_workspace_path() {
             entry("ghost", "Ghost", &ws_missing),
         ],
     };
-    write_runtime_json(&home, &cfg);
+    write_runtime_json(home, &cfg);
 
     let state = empty_state();
     recover_from_config(state.clone()).await;
@@ -184,7 +157,8 @@ async fn recover_skips_missing_workspace_path() {
 #[tokio::test]
 #[serial(home_env)]
 async fn recover_skips_duplicate_workspace_path_entries() {
-    let (_home_guard, home) = HomeGuard::install();
+    let home_guard = HomeGuard::install();
+    let home = home_guard.path();
 
     let ws_tmp = TempDir::new().unwrap();
     let shared = ws_tmp.path().join("shared");
@@ -197,7 +171,7 @@ async fn recover_skips_duplicate_workspace_path_entries() {
             entry("shared-b", "Shared B", &shared),
         ],
     };
-    write_runtime_json(&home, &cfg);
+    write_runtime_json(home, &cfg);
 
     let state = empty_state();
     recover_from_config(state.clone()).await;
@@ -221,7 +195,8 @@ async fn recover_skips_duplicate_workspace_path_entries() {
 #[tokio::test]
 #[serial(home_env)]
 async fn recover_populates_all_workspaces_even_without_human_dir() {
-    let (_home_guard, home) = HomeGuard::install();
+    let home_guard = HomeGuard::install();
+    let home = home_guard.path();
 
     let ws_tmp = TempDir::new().unwrap();
     let a = ws_tmp.path().join("alpha");
@@ -233,7 +208,7 @@ async fn recover_populates_all_workspaces_even_without_human_dir() {
         runtime_id: String::new(),
         workspaces: vec![entry("alpha", "Alpha", &a), entry("beta", "Beta", &b)],
     };
-    write_runtime_json(&home, &cfg);
+    write_runtime_json(home, &cfg);
 
     let state = empty_state();
     recover_from_config(state.clone()).await;

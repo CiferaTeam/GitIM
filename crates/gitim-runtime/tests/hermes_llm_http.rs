@@ -16,6 +16,8 @@ use tower::ServiceExt;
 
 use gitim_runtime::http::create_router;
 
+mod common;
+
 async fn body_to_json(resp: axum::response::Response) -> serde_json::Value {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).expect("response body is valid JSON")
@@ -554,6 +556,10 @@ async fn agents_add_hermes_happy_path_writes_me_json() {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
+    // Daemon spawn happens via provision_agent; isolate its log target so it
+    // doesn't write into ~/.gitim/logs/. Also puts gitim-daemon in PATH.
+    common::ensure_daemon_in_path();
+
     let (_guard, hermes_home_path) = HermesHomeGuard::install_empty();
 
     // A fake hermes binary: always exits 0, records invocations but doesn't
@@ -701,6 +707,9 @@ async fn agents_add_hermes_happy_path_writes_me_json() {
 async fn agents_add_hermes_apply_model_config_failure_rollbacks() {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    // Daemon spawn happens via provision_agent; isolate its log target.
+    common::ensure_daemon_in_path();
 
     let (_guard, hermes_home_path) = HermesHomeGuard::install_empty();
 

@@ -53,36 +53,8 @@ use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::slug;
 use gitim_runtime::workspace::WorkspaceContext;
 
-// -- RAII HOME guard --------------------------------------------------------
-
-/// Swaps `HOME` to a fresh tempdir and restores the prior value on drop.
-/// Pairs with `#[serial(http_workspaces_home)]` so only one guard is live at
-/// a time — avoiding the multi-threaded `set_var` race.
-struct HomeGuard {
-    original: Option<std::ffi::OsString>,
-    _tmp: TempDir,
-}
-
-impl HomeGuard {
-    fn install() -> Self {
-        let tmp = TempDir::new().expect("tempdir for HOME");
-        let original = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        Self {
-            original,
-            _tmp: tmp,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match self.original.take() {
-            Some(val) => std::env::set_var("HOME", val),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-}
+mod common;
+use common::HomeGuard;
 
 // -- Request helpers --------------------------------------------------------
 
