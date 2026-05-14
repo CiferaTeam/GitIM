@@ -122,20 +122,14 @@ pub enum ExecStatus {
     Timeout,
 }
 
-/// Per-turn usage as reported by a provider.
-///
-/// Providers fill different subsets:
-/// - Claude / opencode populate `input_tokens` / `output_tokens` (+ cache
-///   variants when prompt caching is active); `used_percent` is `None`.
-/// - Codex populates `input_tokens` / `cache_read_tokens` /
-///   `output_tokens` from `total_token_usage`; `cache_creation_tokens` and
-///   `used_percent` are `None`.
-/// - Mock fills whatever the test configures.
+/// Per-turn usage as reported by a provider. Each provider fills the
+/// subset its API exposes; missing fields stay `None`.
 ///
 /// True context-window occupancy is
-/// `input_tokens + cache_read_tokens + cache_creation_tokens`. `input_tokens`
-/// alone excludes cached content and will underreport by orders of magnitude
-/// once caching kicks in — compute consumers must sum the three.
+/// `input_tokens + cache_read_tokens + cache_creation_tokens`.
+/// `input_tokens` alone excludes cached content and underreports by
+/// orders of magnitude once caching kicks in — consumers must sum the
+/// three.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]

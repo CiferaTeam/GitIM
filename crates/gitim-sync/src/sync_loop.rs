@@ -450,36 +450,23 @@ where
                 }
             }
             Err(_) => {
-                // Rebase failed. Two failure modes from here:
+                // Rebase failed. Two paths:
                 //
-                //   1. All local unpushed files belong to the resolvable set
-                //      (`*.thread` additions, `*.meta.yaml` changes, board
-                //      documents). Discard
-                //      the partial rebase, re-apply via the content-aware
-                //      resolvers below.
-                //   2. Any local unpushed file is OUTSIDE that set
-                //      (`crons/<name>/spec.yaml`, an arbitrary doc, a binary
-                //      asset, future protocol additions). The resolvable
-                //      path's `discard_unpushed` would `git reset --hard
-                //      @{upstream}` and silently destroy those edits. There
-                //      is no generic content-aware resolver for arbitrary
-                //      files, so we bail: abort the rebase (which leaves HEAD
-                //      and working tree intact), warn, and let the next cycle
-                //      retry. The user keeps their commit.
+                //   1. All unpushed files are in the resolvable set
+                //      (`*.thread`, `*.meta.yaml`, `showboards/*/board.md`):
+                //      discard the partial rebase and re-apply via the
+                //      content-aware resolvers below.
+                //   2. Any unpushed file is OUTSIDE that set (cron specs,
+                //      docs, binaries, future protocol additions): abort
+                //      the rebase, warn, retry next cycle. There is no
+                //      generic content-aware resolver, so falling through
+                //      to `discard_unpushed` (= `git reset --hard
+                //      @{upstream}`) would silently destroy those edits.
                 //
-                // The detection is "did the unpushed range touch any file
-                // outside the resolvable set" — not "is the
-                // conflict on a non-resolvable file". A single unpushed
-                // commit that touches both a thread file and a cron spec
-                // would otherwise have its spec destroyed even when only the
-                // thread side actually conflicts.
-                //
-                // We use `all_unpushed_before_rebase`, captured before the
-                // rebase started: after a failed rebase the working tree is
-                // in a partial / detached state where `@{upstream}..HEAD`
-                // can return empty or otherwise-wrong results, and falling
-                // through to discard_unpushed on a false-empty list is the
-                // exact data-loss path this guard exists to prevent.
+                // The guard is "did the unpushed range *touch* any file
+                // outside the resolvable set", not "is the conflict on a
+                // non-resolvable file" — a commit that touches a thread
+                // and a cron spec would otherwise lose the spec.
                 let has_unresolvable = all_unpushed_before_rebase.iter().any(|p| {
                     let path_str = p.to_string_lossy();
                     let is_board =

@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -589,7 +588,7 @@ fn extract_tool_result_text(result: &Value) -> String {
 ///   which is correct cost-wise but wrong window-occupancy-wise.
 ///
 /// Returns `None` if the value isn't an object or every numeric field is
-/// missing — Pi's stub responses sometimes carry an empty `usage: {}`.
+/// missing — pi sometimes emits an empty `usage: {}` on degenerate paths.
 fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
     let obj = v.as_object()?;
     let input = obj.get("input").and_then(Value::as_u64);
@@ -606,21 +605,6 @@ fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
     })
-}
-
-// ── Deserialize helpers (kept minimal — we use Value-based parsing above) ──
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct RawPiResponse {
-    #[serde(rename = "type")]
-    r#type: String,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    success: Option<bool>,
-    #[serde(default)]
-    data: Option<Value>,
 }
 
 #[cfg(test)]

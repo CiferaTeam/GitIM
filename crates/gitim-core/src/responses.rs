@@ -3,8 +3,6 @@
 //! One struct per `Request` variant's success `data`. Daemon handlers
 //! construct these and `serde_json::to_value` them into the response
 //! envelope; clients reach them via `ApiResponse::parse_data::<T>()`.
-//! Field renames anywhere here surface as compile errors at every
-//! call site instead of silent `unwrap_or("unknown")` fallbacks.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

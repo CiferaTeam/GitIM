@@ -66,15 +66,14 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
-    /// Build an AgentLoop with default settings.
-    /// Reads handler from `.gitim/me.json`. Restores state from disk if available.
+    /// Defaults: provider `claude`, handler from `.gitim/me.json`,
+    /// state restored from disk if present.
     pub fn with_defaults(repo_root: &Path) -> Result<Self, RuntimeError> {
         let handler = read_handler_from_me_json(repo_root)?;
         Self::with_provider(repo_root, "claude", &handler)
     }
 
-    /// Build an AgentLoop with a specified provider type and handler.
-    /// Restores state from disk if available.
+    /// Explicit provider + handler. State restored from disk if present.
     pub fn with_provider(
         repo_root: &Path,
         provider_type: &str,
@@ -1450,11 +1449,9 @@ mod tests {
         assert!(!is_provider_failure_status(&ExecStatus::Aborted));
     }
 
-    /// Build a minimal AgentLoop + SharedRuntimeState + workspace with one
-    /// agent that has a 89%-full `session_usage` snapshot installed. Returns
-    /// the loop, the shared state, and a broadcast receiver wired to the
-    /// workspace's activity channel. Caller can drive `clear_runtime_session_usage`
-    /// and assert both the state mutation and the broadcast side-effect.
+    /// Harness with a single agent at 89% `session_usage`. Returns the
+    /// loop, shared state, broadcast receiver on the workspace activity
+    /// channel, and the workspace tempdir.
     fn harness_with_usage_snapshot(
         handler: &str,
         slug: &str,

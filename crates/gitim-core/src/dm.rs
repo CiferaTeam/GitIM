@@ -1,9 +1,7 @@
 use crate::types::Handler;
 
-/// Generate a normalized DM filename from two handlers.
-///
-/// The filename format is: `{first}--{second}` where first and second are
-/// the two handlers sorted in lexicographic order.
+/// DM filename for a handler pair: `{first}--{second}`, where the two
+/// handlers are sorted in lexicographic order.
 pub fn dm_filename(a: &Handler, b: &Handler) -> String {
     let (first, second) = if a.as_str() <= b.as_str() {
         (a.as_str(), b.as_str())
@@ -13,9 +11,8 @@ pub fn dm_filename(a: &Handler, b: &Handler) -> String {
     format!("{}--{}", first, second)
 }
 
-/// Parse a DM filename into the two participant handlers.
-///
-/// Returns `None` if the filename is not a valid DM filename.
+/// Split a DM filename stem back into its two handlers, or `None`
+/// if the stem isn't a valid `{first}--{second}` shape.
 pub fn parse_dm_filename(stem: &str) -> Option<(&str, &str)> {
     let idx = stem.find("--")?;
     let first = &stem[..idx];

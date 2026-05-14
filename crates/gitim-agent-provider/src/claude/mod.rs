@@ -544,12 +544,13 @@ struct RawMessage {
     request: Option<Value>,
 }
 
-/// Usage block from Claude stream-json's final "result" message.
+/// Usage block from Claude stream-json — appears on both per-iteration
+/// `assistant` messages and the final `result` message.
 ///
-/// Anthropic reports `input_tokens` **excluding** cache hits. Real context
-/// window occupancy is the sum `input + cache_read + cache_creation`, so
-/// these three fields are propagated into `ProviderUsage` and aggregated at
-/// the runtime layer when computing percentages.
+/// Anthropic reports `input_tokens` **excluding** cache hits. Real
+/// context-window occupancy is the sum `input + cache_read +
+/// cache_creation`, so all three are propagated into `ProviderUsage`
+/// and aggregated by the runtime when computing percentages.
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeUsage {
     #[serde(default)]

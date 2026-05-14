@@ -750,8 +750,6 @@ mod tests {
             _ => panic!("wrong variant"),
         }
 
-        // Author omitted — serde(default) deserializes to None; resolve_author
-        // fills it in dispatch.
         let json_no_author = r#"{"method":"unarchive_user","handler":"bob"}"#;
         let req2: Request = serde_json::from_str(json_no_author).unwrap();
         match req2 {
@@ -775,8 +773,6 @@ mod tests {
             _ => panic!("wrong variant"),
         }
 
-        // Author omitted — serde(default) deserializes to None; resolve_author
-        // fills it in dispatch.
         let json_no_author = r#"{"method":"archive_dm","peer":"bob"}"#;
         let req2: Request = serde_json::from_str(json_no_author).unwrap();
         match req2 {
@@ -800,8 +796,6 @@ mod tests {
             _ => panic!("wrong variant"),
         }
 
-        // Author omitted — serde(default) deserializes to None; resolve_author
-        // fills it in dispatch.
         let json_no_author = r#"{"method":"unarchive_dm","peer":"bob"}"#;
         let req2: Request = serde_json::from_str(json_no_author).unwrap();
         match req2 {
