@@ -573,7 +573,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   return (
-    <div className="w-64 shrink-0 border-r border-border bg-card/40 flex flex-col overflow-hidden">
+    <div className="w-64 shrink-0 border-r border-border bg-card/40 flex flex-col overflow-hidden h-full">
       {/* Agent status panel */}
       <AgentStatusPanel />
 

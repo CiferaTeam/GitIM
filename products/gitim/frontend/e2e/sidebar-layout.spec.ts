@@ -212,6 +212,39 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
   await expect(page.getByTestId("agent-full-row").nth(0)).toContainText("agent-20");
 });
 
+test("chat sidebar keeps every section inside the viewport when content overflows", async ({ page }) => {
+  await stubRuntime(page);
+  // Squeeze viewport vertically so sidebar sections compete for space.
+  // Without the fix, the sidebar root has no resolved height — sections
+  // expand to their natural height and the DMs block gets pushed below
+  // the viewport and clipped by the parent's overflow-hidden.
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await page.goto("/chat");
+
+  const sidebar = page.locator(".w-64").first();
+  const dmsHeading = page.getByText("Direct Messages", { exact: true });
+
+  await expect(dmsHeading).toBeVisible();
+
+  const [sidebarBox, dmsBox] = await Promise.all([
+    sidebar.boundingBox(),
+    dmsHeading.boundingBox(),
+  ]);
+  const viewport = page.viewportSize();
+
+  expect(sidebarBox).not.toBeNull();
+  expect(dmsBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+
+  // Sidebar fills the viewport vertically — no taller, no shorter.
+  expect(sidebarBox!.height).toBeLessThanOrEqual(viewport!.height);
+  // DMs heading sits inside the sidebar, not pushed below it.
+  expect(dmsBox!.y).toBeGreaterThanOrEqual(sidebarBox!.y);
+  expect(dmsBox!.y + dmsBox!.height).toBeLessThanOrEqual(
+    sidebarBox!.y + sidebarBox!.height,
+  );
+});
+
 test("chat sidebar pins channels and direct messages per workspace", async ({ page }) => {
   await stubRuntime(page);
   await page.goto("/chat");
