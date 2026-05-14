@@ -10,6 +10,7 @@
 //! `use crate::cli::{Client, CliError};` without three separate imports.
 
 pub mod cmd_add_agent;
+pub mod cmd_burn_agent;
 pub mod cmd_list_agents;
 pub mod cmd_runtime_id;
 pub mod cmd_status;

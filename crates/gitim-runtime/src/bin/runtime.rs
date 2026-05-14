@@ -116,8 +116,29 @@ enum Command {
         #[arg(long = "llm-model")]
         llm_model: Option<String>,
     },
-    /// Hard-delete an agent (irreversible).
-    BurnAgent,
+    /// Depart an agent from the workspace.
+    ///
+    /// Default: ritual burn via `POST /agents/burn` — runs the archive
+    /// protocol (audit commits + workspace-wide departure event) then
+    /// removes the clone. Use `--hard` to skip the protocol and quietly
+    /// delete via `POST /agents/remove` with `hard_delete: true`.
+    BurnAgent {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Agent id to burn. Note this is the agent **id**, which is what
+        /// `/agents/list` returns under `agents[].id`. It happens to equal
+        /// the handler today, but the wire shape is id-based on both
+        /// `/burn` and `/remove`.
+        #[arg(long)]
+        id: String,
+        /// Hard remove: bypass the ritual-burn audit protocol and call
+        /// `/agents/remove { hard_delete: true }` instead. No SSE
+        /// broadcast, no archive commits. Use only when the ritual path
+        /// can't run (broken daemon, missing remote, dev resets).
+        #[arg(long)]
+        hard: bool,
+    },
     /// Update an existing agent's editable fields.
     UpdateAgent,
     /// Run provider preflight checks (binary present, version, hello round-trip).
@@ -146,8 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error,
-        resolve_base_url, Client, CliError, ErrorResponse,
+        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces,
+        from_cli_error, resolve_base_url, Client, CliError, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -197,7 +218,11 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             };
             cmd_add_agent::run(&client, args).await
         }
-        Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
+        Command::BurnAgent {
+            workspace,
+            id,
+            hard,
+        } => cmd_burn_agent::run(&client, workspace, id, hard).await,
         Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
         Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
     };
