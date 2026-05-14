@@ -6,8 +6,15 @@ use std::process::Command;
 use gitim_client::GitimClient;
 use tempfile::{Builder, TempDir};
 
-/// Ensure `gitim-daemon` binary is findable by adding target/debug to PATH.
-/// Uses Once to avoid UB from concurrent set_var in multi-threaded test runner.
+/// Ensure `gitim-daemon` binary is findable by adding target/debug to PATH,
+/// and redirect daemon logs out of the developer's real `~/.gitim/logs/`.
+///
+/// Uses `Once` to avoid UB from concurrent set_var in multi-threaded test
+/// runner — `call_once` serializes all env mutation through a single thread.
+///
+/// **Every test that spawns a daemon must call this first.** Skipping it
+/// leaves `daemon_log::logs_dir()` falling back to `$HOME/.gitim/logs/`,
+/// which would pollute the developer machine.
 pub fn ensure_daemon_in_path() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -23,6 +30,14 @@ pub fn ensure_daemon_in_path() {
                 format!("{}:{}", target_debug.display(), current_path),
             );
         }
+
+        // Redirect daemon logs from ~/.gitim/logs/ into a TempDir for this
+        // test process. `daemon_log::logs_dir()` honors GITIM_LOG_DIR.
+        // We `keep()` the TempDir intentionally — RAII drop would wipe the
+        // dir while daemons may still be writing. OS temp reaper collects
+        // it after the test binary exits.
+        let log_tmp = TempDir::new().expect("tempdir for GITIM_LOG_DIR");
+        std::env::set_var("GITIM_LOG_DIR", log_tmp.keep());
     });
 }
 
