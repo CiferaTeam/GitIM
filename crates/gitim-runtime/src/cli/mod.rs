@@ -11,6 +11,7 @@
 
 pub mod cmd_runtime_id;
 pub mod cmd_status;
+pub mod cmd_workspaces;
 pub mod dto;
 pub mod exit_code;
 pub mod http;

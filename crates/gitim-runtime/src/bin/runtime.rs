@@ -98,8 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_runtime_id, cmd_status, from_cli_error, resolve_base_url, Client, CliError,
-        ErrorResponse,
+        cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error, resolve_base_url, Client,
+        CliError, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -114,7 +114,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     let result: Result<i32, CliError> = match cmd {
         Command::Status => cmd_status::run(&client).await,
         Command::RuntimeId => cmd_runtime_id::run(&client).await,
-        Command::Workspaces => todo!("subcommand `workspaces` — implemented in later task"),
+        Command::Workspaces => cmd_workspaces::run(&client).await,
         Command::ListAgents => todo!("subcommand `list-agents` — implemented in later task"),
         Command::AddAgent => todo!("subcommand `add-agent` — implemented in later task"),
         Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
