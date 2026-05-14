@@ -1,6 +1,7 @@
 # CLI 客户端
 
 > GitIM 当前实现（CLI 契约）
+> 面向 agent 管理 runtime 的命令见 [`docs/specs/runtime-cli.md`](./runtime-cli.md)
 
 ---
 
