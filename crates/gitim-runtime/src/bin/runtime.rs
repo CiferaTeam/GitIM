@@ -65,7 +65,15 @@ enum Command {
     /// List workspaces known to the runtime.
     Workspaces,
     /// List agents in a workspace.
-    ListAgents,
+    ListAgents {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Include sensitive fields (repo_path, system_prompt, env). Env values
+        /// still pass through secret-key redaction before printing.
+        #[arg(long)]
+        detailed: bool,
+    },
     /// Provision a new agent in a workspace.
     AddAgent,
     /// Hard-delete an agent (irreversible).
@@ -98,8 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error, resolve_base_url, Client,
-        CliError, ErrorResponse,
+        cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error,
+        resolve_base_url, Client, CliError, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -115,7 +123,10 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::Status => cmd_status::run(&client).await,
         Command::RuntimeId => cmd_runtime_id::run(&client).await,
         Command::Workspaces => cmd_workspaces::run(&client).await,
-        Command::ListAgents => todo!("subcommand `list-agents` — implemented in later task"),
+        Command::ListAgents {
+            workspace,
+            detailed,
+        } => cmd_list_agents::run(&client, workspace, detailed).await,
         Command::AddAgent => todo!("subcommand `add-agent` — implemented in later task"),
         Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
         Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
