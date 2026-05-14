@@ -26,7 +26,7 @@ use crate::git_config::{
 use crate::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };
-use crate::gitignore::ensure_env_gitignored;
+use crate::gitignore::ensure_defaults_gitignored;
 use gitim_client::GitimClient;
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
@@ -4449,7 +4449,7 @@ async fn provision_local_workspace(
             )
         })?;
 
-    apply_dotenv_gitignore(&human_dir);
+    apply_default_gitignore(&human_dir);
 
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
@@ -4573,7 +4573,7 @@ async fn provision_github_workspace(
                 )
             })?;
 
-        apply_dotenv_gitignore(&final_human);
+        apply_default_gitignore(&final_human);
 
         // Best-effort email fetch: a failure or null email (private account)
         // falls back to the `<handler>@gitim` sentinel. Never blocks init —
@@ -5033,11 +5033,12 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
     (router, state)
 }
 
-/// Ensure the human clone's .gitignore excludes .env and commit if we added it.
-/// Best-effort — failures are logged, not propagated; a missing rule is cosmetic,
-/// the secret file is per-clone anyway.
-fn apply_dotenv_gitignore(human_clone: &Path) {
-    match ensure_env_gitignored(human_clone) {
+/// Apply the curated default .gitignore pattern set to the human clone and
+/// commit if anything was added. Best-effort — failures are logged, not
+/// propagated; missing rules are cosmetic in isolation but matter in
+/// aggregate (see crate::gitignore for the rationale).
+fn apply_default_gitignore(human_clone: &Path) {
+    match ensure_defaults_gitignored(human_clone) {
         Ok(false) => {}
         Ok(true) => {
             let add = std::process::Command::new("git")
@@ -5066,7 +5067,7 @@ fn apply_dotenv_gitignore(human_clone: &Path) {
                     "user.name=system",
                     "commit",
                     "-m",
-                    "chore: gitignore .env (runtime init)",
+                    "chore: gitignore agent memory + local artifact patterns (runtime init)",
                 ])
                 .current_dir(human_clone)
                 .output();
@@ -5084,7 +5085,7 @@ fn apply_dotenv_gitignore(human_clone: &Path) {
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "ensure_env_gitignored failed");
+            tracing::warn!(error = %e, "ensure_defaults_gitignored failed");
         }
     }
 }

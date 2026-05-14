@@ -1,4 +1,6 @@
-//! Verifies .gitignore contains .env after workspace init (local mode).
+//! Verifies workspace init (local mode) writes the curated default
+//! .gitignore pattern set and commits it exactly once. `.env` is the
+//! canary pattern checked here; the full set is in `gitignore::DEFAULT_PATTERNS`.
 
 mod common;
 
@@ -133,10 +135,13 @@ async fn local_git_init_commits_env_gitignore_exactly_once() {
     let log = String::from_utf8_lossy(&out.stdout);
     // Count only our specific commit — ensure_repo also touches .gitignore (adds .gitim/ rule),
     // so the total commit count may be > 1. Idempotence means our rule was added exactly once.
-    let our_commits = log.lines().filter(|l| l.contains("gitignore .env")).count();
+    let our_commits = log
+        .lines()
+        .filter(|l| l.contains("gitignore agent memory"))
+        .count();
     assert_eq!(
         our_commits, 1,
-        "expected exactly one 'chore: gitignore .env' commit, got {our_commits}: {log}"
+        "expected exactly one 'chore: gitignore agent memory ...' commit, got {our_commits}: {log}"
     );
 
     kill_daemon_in(&workspace_path);
