@@ -671,3 +671,549 @@ mod argv_dispatch_tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod argv_subcommand_tests {
+    //! Per-subcommand argv parse catalog. Each subcommand gets a minimum-args
+    //! happy parse, a fully-populated happy parse where relevant, missing-required
+    //! fail cases, and conflict cases. These tests cover the clap surface only —
+    //! handler behavior is tested separately via the cli::cmd_* modules.
+    use super::*;
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    // ------------------------------------------------------------------
+    // status
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn status_parses() {
+        let args = Args::try_parse_from(["gitim-runtime", "status"]).expect("parse must succeed");
+        assert!(matches!(args.command, Some(Command::Status)));
+    }
+
+    // ------------------------------------------------------------------
+    // runtime-id
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn runtime_id_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "runtime-id"]).expect("parse must succeed");
+        assert!(matches!(args.command, Some(Command::RuntimeId)));
+    }
+
+    // ------------------------------------------------------------------
+    // workspaces
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn workspaces_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "workspaces"]).expect("parse must succeed");
+        assert!(matches!(args.command, Some(Command::Workspaces)));
+    }
+
+    // ------------------------------------------------------------------
+    // list-agents
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn list_agents_minimal_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "list-agents"]).expect("parse must succeed");
+        assert!(matches!(
+            args.command,
+            Some(Command::ListAgents {
+                workspace: None,
+                detailed: false
+            })
+        ));
+    }
+
+    #[test]
+    fn list_agents_with_workspace_and_detailed() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "list-agents",
+            "--workspace",
+            "ws-a",
+            "--detailed",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::ListAgents {
+                workspace,
+                detailed,
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("ws-a"));
+                assert!(detailed);
+            }
+            other => panic!("expected ListAgents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_agents_detailed_only() {
+        let args = Args::try_parse_from(["gitim-runtime", "list-agents", "--detailed"])
+            .expect("parse must succeed");
+        match args.command {
+            Some(Command::ListAgents {
+                workspace,
+                detailed,
+            }) => {
+                assert!(workspace.is_none());
+                assert!(detailed);
+            }
+            other => panic!("expected ListAgents, got {other:?}"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // add-agent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn add_agent_minimal_required_args() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "tester",
+            "--display-name",
+            "Tester",
+            "--provider",
+            "claude",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::AddAgent {
+                workspace,
+                handler,
+                display_name,
+                provider,
+                model,
+                system_prompt,
+                system_prompt_file,
+                env,
+                introduction,
+                no_join_general,
+                llm_provider,
+                llm_model,
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(handler, "tester");
+                assert_eq!(display_name, "Tester");
+                assert_eq!(provider, "claude");
+                assert!(model.is_none());
+                assert!(system_prompt.is_none());
+                assert!(system_prompt_file.is_none());
+                assert!(env.is_empty());
+                assert!(introduction.is_none());
+                assert!(!no_join_general);
+                assert!(llm_provider.is_none());
+                assert!(llm_model.is_none());
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_agent_full_args() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--workspace",
+            "ws-a",
+            "--handler",
+            "alice",
+            "--display-name",
+            "Alice",
+            "--provider",
+            "hermes",
+            "--model",
+            "gpt-5",
+            "--system-prompt",
+            "be careful",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "BAZ=qux",
+            "--introduction",
+            "Hi, I'm Alice",
+            "--no-join-general",
+            "--llm-provider",
+            "anthropic",
+            "--llm-model",
+            "claude-opus-4-7",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::AddAgent {
+                workspace,
+                handler,
+                display_name,
+                provider,
+                model,
+                system_prompt,
+                system_prompt_file,
+                env,
+                introduction,
+                no_join_general,
+                llm_provider,
+                llm_model,
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("ws-a"));
+                assert_eq!(handler, "alice");
+                assert_eq!(display_name, "Alice");
+                assert_eq!(provider, "hermes");
+                assert_eq!(model.as_deref(), Some("gpt-5"));
+                assert_eq!(system_prompt.as_deref(), Some("be careful"));
+                assert!(system_prompt_file.is_none());
+                assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
+                assert_eq!(introduction.as_deref(), Some("Hi, I'm Alice"));
+                assert!(no_join_general);
+                assert_eq!(llm_provider.as_deref(), Some("anthropic"));
+                assert_eq!(llm_model.as_deref(), Some("claude-opus-4-7"));
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_agent_system_prompt_file_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "tester",
+            "--display-name",
+            "Tester",
+            "--provider",
+            "claude",
+            "--system-prompt-file",
+            "/tmp/prompt.md",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::AddAgent {
+                system_prompt,
+                system_prompt_file,
+                ..
+            }) => {
+                assert!(system_prompt.is_none());
+                assert_eq!(system_prompt_file, Some(PathBuf::from("/tmp/prompt.md")));
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_agent_missing_handler_fails() {
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--display-name",
+            "Tester",
+            "--provider",
+            "claude",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_agent_missing_display_name_fails() {
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "tester",
+            "--provider",
+            "claude",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_agent_missing_provider_fails() {
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "tester",
+            "--display-name",
+            "Tester",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_agent_system_prompt_conflicts() {
+        // --system-prompt and --system-prompt-file are mutually exclusive.
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "tester",
+            "--display-name",
+            "Tester",
+            "--provider",
+            "claude",
+            "--system-prompt",
+            "inline",
+            "--system-prompt-file",
+            "/tmp/y",
+        ]);
+        assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // burn-agent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn burn_agent_minimal_required_args() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "agent-1"])
+                .expect("parse must succeed");
+        match args.command {
+            Some(Command::BurnAgent {
+                workspace,
+                id,
+                hard,
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(id, "agent-1");
+                assert!(!hard);
+            }
+            other => panic!("expected BurnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burn_agent_with_hard() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "x", "--hard"])
+                .expect("parse must succeed");
+        match args.command {
+            Some(Command::BurnAgent {
+                workspace,
+                id,
+                hard,
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(id, "x");
+                assert!(hard);
+            }
+            other => panic!("expected BurnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burn_agent_with_workspace() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "burn-agent",
+            "--workspace",
+            "ws-a",
+            "--id",
+            "agent-1",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::BurnAgent {
+                workspace,
+                id,
+                hard,
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("ws-a"));
+                assert_eq!(id, "agent-1");
+                assert!(!hard);
+            }
+            other => panic!("expected BurnAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burn_agent_missing_id_fails() {
+        let result = Args::try_parse_from(["gitim-runtime", "burn-agent"]);
+        assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // update-agent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn update_agent_minimal_required_args() {
+        // --id is the only parse-time required arg. An empty patch is the
+        // CLI/runtime's job to reject, not clap's.
+        let args =
+            Args::try_parse_from(["gitim-runtime", "update-agent", "--id", "agent-1"])
+                .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                workspace,
+                id,
+                system_prompt,
+                system_prompt_file,
+                model,
+                introduction,
+                env,
+                dotenv_file,
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(id, "agent-1");
+                assert!(system_prompt.is_none());
+                assert!(system_prompt_file.is_none());
+                assert!(model.is_none());
+                assert!(introduction.is_none());
+                assert!(env.is_empty());
+                assert!(dotenv_file.is_none());
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_with_system_prompt_and_env() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--workspace",
+            "ws-a",
+            "--id",
+            "agent-1",
+            "--system-prompt",
+            "new prompt",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "BAZ=qux",
+            "--introduction",
+            "new blurb",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                workspace,
+                id,
+                system_prompt,
+                env,
+                introduction,
+                ..
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("ws-a"));
+                assert_eq!(id, "agent-1");
+                assert_eq!(system_prompt.as_deref(), Some("new prompt"));
+                assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
+                assert_eq!(introduction.as_deref(), Some("new blurb"));
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_with_model_and_dotenv_file() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "agent-1",
+            "--model",
+            "claude-opus-4-7",
+            "--dotenv-file",
+            "/tmp/.env",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                id,
+                model,
+                dotenv_file,
+                ..
+            }) => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(model.as_deref(), Some("claude-opus-4-7"));
+                assert_eq!(dotenv_file, Some(PathBuf::from("/tmp/.env")));
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_missing_id_fails() {
+        let result = Args::try_parse_from(["gitim-runtime", "update-agent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_agent_system_prompt_conflicts() {
+        // Same mutually-exclusive pair as add-agent.
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "agent-1",
+            "--system-prompt",
+            "inline",
+            "--system-prompt-file",
+            "/tmp/y",
+        ]);
+        assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // preflight
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn preflight_positional_provider() {
+        let args = Args::try_parse_from(["gitim-runtime", "preflight", "claude"])
+            .expect("parse must succeed");
+        match args.command {
+            Some(Command::Preflight {
+                provider,
+                llm_provider,
+                llm_model,
+            }) => {
+                assert_eq!(provider, "claude");
+                assert!(llm_provider.is_none());
+                assert!(llm_model.is_none());
+            }
+            other => panic!("expected Preflight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_hermes_with_llm() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "preflight",
+            "hermes",
+            "--llm-provider",
+            "gemini",
+            "--llm-model",
+            "gemini-2.0-flash-exp",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::Preflight {
+                provider,
+                llm_provider,
+                llm_model,
+            }) => {
+                assert_eq!(provider, "hermes");
+                assert_eq!(llm_provider.as_deref(), Some("gemini"));
+                assert_eq!(llm_model.as_deref(), Some("gemini-2.0-flash-exp"));
+            }
+            other => panic!("expected Preflight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_missing_positional_provider_fails() {
+        let result = Args::try_parse_from(["gitim-runtime", "preflight"]);
+        assert!(result.is_err());
+    }
+}
