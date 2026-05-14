@@ -303,6 +303,14 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+
+    // Persist the actually-bound port as a CLI discovery hint. Best-effort:
+    // a failure here doesn't block serving — the CLI falls back to
+    // DEFAULT_PORT if this hint is missing or stale.
+    if let Err(e) = gitim_runtime::user_config::write_listen_port(port) {
+        tracing::warn!(error = %e, port, "failed to persist listen_port hint");
+    }
+
     let mut server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     // Wait for shutdown signal; also bail if the server itself errors out

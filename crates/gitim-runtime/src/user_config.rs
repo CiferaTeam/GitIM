@@ -17,6 +17,15 @@ pub struct UserConfig {
     pub runtime_id: String,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceEntry>,
+    /// Best-effort hint of the port the runtime last bound on. Written after
+    /// a successful `TcpListener::bind` in server mode (`run_shell`) and read
+    /// by the CLI to discover where a running runtime is serving HTTP.
+    /// Absent (`None`) when the field has never been written — e.g. legacy
+    /// runtime.json predating this feature, or a runtime that crashed before
+    /// the first bind. Stale values are tolerated: CLI falls back to
+    /// `DEFAULT_PORT` if the persisted port refuses connections.
+    #[serde(default)]
+    pub listen_port: Option<u16>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -50,6 +59,24 @@ pub fn write_to(cfg: &UserConfig, path: &Path) -> std::io::Result<()> {
     }
     let json = serde_json::to_string_pretty(cfg).unwrap();
     std::fs::write(path, json)
+}
+
+/// Best-effort persistence of the bound listen port. Reads the existing
+/// config, sets `listen_port`, writes it back as a merge so `runtime_id` and
+/// `workspaces` survive untouched. Callers (`run_shell`) must NOT treat a
+/// failure here as fatal — the runtime keeps serving even if the hint can't
+/// be written; the CLI will fall back to `DEFAULT_PORT`.
+pub fn write_listen_port(port: u16) -> std::io::Result<()> {
+    match config_path() {
+        Some(p) => write_listen_port_at(port, &p),
+        None => Ok(()),
+    }
+}
+
+pub fn write_listen_port_at(port: u16, path: &Path) -> std::io::Result<()> {
+    let mut cfg = read_from(Some(path));
+    cfg.listen_port = Some(port);
+    write_to(&cfg, path)
 }
 
 /// Read or generate the device-bound runtime ID.
@@ -282,6 +309,64 @@ mod tests {
         assert_eq!(after.workspaces.len(), 2);
         assert_eq!(after.workspaces[0].slug, "frontend");
         assert_eq!(after.workspaces[1].slug, "backend");
+    }
+
+    #[test]
+    fn write_listen_port_creates_file_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        assert!(!path.exists());
+        write_listen_port_at(16868, &path).unwrap();
+        let cfg = read_from(Some(&path));
+        assert_eq!(cfg.listen_port, Some(16868));
+        assert!(cfg.runtime_id.is_empty());
+        assert!(cfg.workspaces.is_empty());
+    }
+
+    #[test]
+    fn write_listen_port_preserves_runtime_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let mut cfg = UserConfig {
+            runtime_id: "abc".to_string(),
+            ..UserConfig::default()
+        };
+        cfg.upsert(sample("frontend", "Frontend", "/ws/frontend"));
+        cfg.upsert(sample("backend", "Backend", "/ws/backend"));
+        write_to(&cfg, &path).unwrap();
+
+        write_listen_port_at(17000, &path).unwrap();
+        let after = read_from(Some(&path));
+        assert_eq!(after.runtime_id, "abc");
+        assert_eq!(after.workspaces.len(), 2);
+        assert_eq!(after.workspaces[0].slug, "frontend");
+        assert_eq!(after.workspaces[1].slug, "backend");
+        assert_eq!(after.listen_port, Some(17000));
+    }
+
+    #[test]
+    fn write_listen_port_updates_existing_port() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let cfg = UserConfig {
+            listen_port: Some(16868),
+            ..UserConfig::default()
+        };
+        write_to(&cfg, &path).unwrap();
+
+        write_listen_port_at(17000, &path).unwrap();
+        let after = read_from(Some(&path));
+        assert_eq!(after.listen_port, Some(17000));
+    }
+
+    #[test]
+    fn read_listen_port_legacy_file_no_port_field() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        std::fs::write(&path, r#"{"runtime_id":"xxx","workspaces":[]}"#).unwrap();
+        let cfg = read_from(Some(&path));
+        assert_eq!(cfg.listen_port, None);
+        assert_eq!(cfg.runtime_id, "xxx");
     }
 
     #[test]
