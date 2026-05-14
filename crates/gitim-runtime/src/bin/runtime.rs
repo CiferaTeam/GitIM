@@ -86,30 +86,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// One-shot CLI dispatch. Each variant's body is filled in by later tasks
-/// in the runtime-cli plan (Tasks 6-12); this scaffold just establishes the
-/// command surface so the clap derive compiles and `--help` is meaningful.
+/// One-shot CLI dispatch. Subcommand bodies live in `cli::cmd_*` modules and
+/// return `Result<i32, CliError>`; this function owns the exit-code mapping
+/// and the stderr error envelope so each handler stays focused on the HTTP
+/// composition.
 ///
 /// Tracing is initialized at WARN level (not INFO like server mode) so the
 /// CLI's JSON stdout output stays clean for downstream parsing.
 ///
-/// Async because subcommand bodies will issue HTTP requests via
-/// `gitim_runtime::cli::Client` (reqwest non-blocking). The bodies stay
-/// `todo!()` at this stage — Task 4 only refactors the dispatch shape.
+/// Async because subcommand bodies issue HTTP requests via
+/// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
+    use gitim_runtime::cli::{
+        cmd_runtime_id, cmd_status, from_cli_error, resolve_base_url, Client, CliError,
+        ErrorResponse,
+    };
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .init();
 
-    match cmd {
-        Command::Status => todo!("subcommand `status` — implemented in later task"),
-        Command::RuntimeId => todo!("subcommand `runtime-id` — implemented in later task"),
+    // `--port` is server-only today; CLI discovers via the env / runtime.json
+    // / DEFAULT_PORT chain. T13 may add a CLI-side `--port` flag — until then
+    // the priority chain is the single source of truth.
+    let client = Client::new(resolve_base_url(None));
+
+    let result: Result<i32, CliError> = match cmd {
+        Command::Status => cmd_status::run(&client).await,
+        Command::RuntimeId => cmd_runtime_id::run(&client).await,
         Command::Workspaces => todo!("subcommand `workspaces` — implemented in later task"),
         Command::ListAgents => todo!("subcommand `list-agents` — implemented in later task"),
         Command::AddAgent => todo!("subcommand `add-agent` — implemented in later task"),
         Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
         Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
         Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
+    };
+
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            // Stderr carries an ErrorResponse-shaped envelope so scripts can
+            // parse a uniform `{ok, error, error_code?}` from either runtime
+            // 4xx bodies or CLI-side failures. Mirroring the wire shape
+            // keeps downstream tooling simple.
+            let envelope = ErrorResponse {
+                ok: false,
+                error: err.to_string(),
+                error_code: match &err {
+                    CliError::ResponseErrorCode { code, .. } => Some(code.clone()),
+                    _ => None,
+                },
+            };
+            // Best-effort serialize; if even this fails, fall back to the
+            // Display string to avoid swallowing the original error.
+            match serde_json::to_string_pretty(&envelope) {
+                Ok(s) => eprintln!("{s}"),
+                Err(_) => eprintln!("{err}"),
+            }
+            std::process::exit(from_cli_error(&err));
+        }
     }
 }
 

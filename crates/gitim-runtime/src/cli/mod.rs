@@ -9,6 +9,8 @@
 //! Pulling the most-used types up here so subcommand modules can write
 //! `use crate::cli::{Client, CliError};` without three separate imports.
 
+pub mod cmd_runtime_id;
+pub mod cmd_status;
 pub mod dto;
 pub mod exit_code;
 pub mod http;
