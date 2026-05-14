@@ -200,6 +200,8 @@ mod tests {
                     used_percent: Some(0.42),
                     cache_read_tokens: Some(150_000),
                     cache_creation_tokens: Some(900),
+                    context_tokens: None,
+                    context_window_tokens: None,
                 },
             }),
         };

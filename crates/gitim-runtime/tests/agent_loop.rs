@@ -185,6 +185,7 @@ fn snapshot_from_claude_aggregates_cache_tokens() {
             used_percent: None,
             cache_read_tokens: Some(159_500),
             cache_creation_tokens: Some(220),
+            ..Default::default()
         }),
         0,
         Some(200_000),
@@ -213,6 +214,7 @@ fn snapshot_from_claude_without_cache_still_uses_input_tokens() {
             used_percent: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            ..Default::default()
         }),
         0,
         Some(200_000),
@@ -310,6 +312,7 @@ fn snapshot_returns_none_when_cumulative_short_circuit_estimator_overflows() {
             used_percent: None, // no authoritative pct from provider
             cache_read_tokens: Some(2_673_024),
             cache_creation_tokens: None,
+            ..Default::default()
         }),
         518_906,
         Some(272_000),
@@ -354,6 +357,7 @@ fn snapshot_cumulative_provider_with_huge_input_falls_back_to_estimate() {
             used_percent: None,
             cache_read_tokens: Some(17_300_000),
             cache_creation_tokens: None,
+            ..Default::default()
         }),
         58_000,
         Some(272_000),
@@ -395,6 +399,32 @@ fn snapshot_cumulative_provider_still_honors_explicit_used_percent() {
     .expect("snapshot");
 
     assert!((snap.used_percent - 42.0).abs() < 0.01);
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
+fn snapshot_cumulative_provider_uses_explicit_context_window() {
+    let snap = compute_snapshot(
+        "sess-codex-context",
+        Some(&ProviderUsage {
+            input_tokens: Some(12_184_040),
+            output_tokens: Some(77_996),
+            used_percent: None,
+            cache_read_tokens: Some(11_479_040),
+            cache_creation_tokens: None,
+            context_tokens: Some(89_677),
+            context_window_tokens: Some(258_400),
+        }),
+        312_168,
+        Some(272_000),
+        true,
+        "2026-05-14T09:46:16Z",
+    )
+    .expect("snapshot");
+
+    assert!((snap.used_percent - 34.7047).abs() < 0.01);
+    assert_eq!(snap.input_tokens, Some(12_184_040));
+    assert_eq!(snap.max_tokens, Some(258_400));
     assert!(matches!(snap.source, UsageSource::ProviderReported));
 }
 

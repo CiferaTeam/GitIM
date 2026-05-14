@@ -426,6 +426,8 @@ impl AgentLoop {
             // used_percent is provider-authoritative; passing through but the
             // accumulator ignores it.
             used_percent: current.used_percent,
+            context_tokens: current.context_tokens,
+            context_window_tokens: current.context_window_tokens,
         };
 
         // Cache reads aren't monotone (Anthropic's prompt cache can be
@@ -1124,9 +1126,10 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
 ///
 /// Authoritative-value policy (matches 01-design.md §4.5):
 /// 1. provider_reported.used_percent (Codex)
-/// 2. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude)
-/// 3. estimated_tokens / max_tokens (fallback)
-/// 4. None (no data available)
+/// 2. provider_reported.context_tokens / context_window_tokens (Codex rollout)
+/// 3. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude)
+/// 4. estimated_tokens / max_tokens (fallback)
+/// 5. None (no data available)
 ///
 /// For Claude, Anthropic's `input_tokens` excludes tokens served from the
 /// prompt cache. With caching active, `input_tokens` drops to a few hundred
@@ -1144,7 +1147,9 @@ pub fn compute_snapshot(
     usage_is_cumulative: bool,
     updated_at: &str,
 ) -> Option<SessionUsageSnapshot> {
-    let (used_percent, source, input_tokens, output_tokens) = if let Some(pu) = provider_reported {
+    let (used_percent, source, input_tokens, output_tokens, snapshot_max_tokens) = if let Some(pu) =
+        provider_reported
+    {
         if let Some(pct) = pu.used_percent {
             // An explicit `used_percent` is authoritative — providers that
             // ship it (codex's rate-limit %, some opencode shapes) compute
@@ -1156,6 +1161,20 @@ pub fn compute_snapshot(
                 UsageSource::ProviderReported,
                 pu.input_tokens,
                 pu.output_tokens,
+                max_tokens,
+            )
+        } else if let (Some(context_tokens), Some(context_window)) =
+            (pu.context_tokens, pu.context_window_tokens)
+        {
+            if context_window == 0 {
+                return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+            }
+            (
+                (context_tokens as f64) / (context_window as f64) * 100.0,
+                UsageSource::ProviderReported,
+                pu.input_tokens,
+                pu.output_tokens,
+                Some(context_window),
             )
         } else if usage_is_cumulative {
             // Provider reports session-cumulative counts (codex
@@ -1176,6 +1195,7 @@ pub fn compute_snapshot(
                 UsageSource::ProviderReported,
                 pu.input_tokens,
                 pu.output_tokens,
+                max_tokens,
             )
         } else {
             return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
@@ -1189,7 +1209,7 @@ pub fn compute_snapshot(
         session_id: session_id.to_string(),
         input_tokens,
         output_tokens,
-        max_tokens,
+        max_tokens: snapshot_max_tokens,
         used_percent,
         source,
         updated_at: updated_at.to_string(),

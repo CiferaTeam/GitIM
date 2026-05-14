@@ -122,20 +122,21 @@ pub enum ExecStatus {
     Timeout,
 }
 
-/// Per-turn usage as reported by a provider.
+/// Usage as reported by a provider.
 ///
 /// Providers fill different subsets:
-/// - Claude / opencode populate `input_tokens` / `output_tokens` (+ cache
+/// - Claude / opencode / pi populate `input_tokens` / `output_tokens` (+ cache
 ///   variants when prompt caching is active); `used_percent` is `None`.
-/// - Codex populates `input_tokens` / `cache_read_tokens` /
-///   `output_tokens` from `total_token_usage`; `cache_creation_tokens` and
-///   `used_percent` are `None`.
+/// - Codex populates billing/statistics fields from cumulative stdout
+///   `turn.completed.usage`, and may separately populate `context_tokens` /
+///   `context_window_tokens` from rollout `last_token_usage.total_tokens` /
+///   `model_context_window`.
 /// - Mock fills whatever the test configures.
 ///
-/// True context-window occupancy is
-/// `input_tokens + cache_read_tokens + cache_creation_tokens`. `input_tokens`
-/// alone excludes cached content and will underreport by orders of magnitude
-/// once caching kicks in — compute consumers must sum the three.
+/// Claude-style context-window occupancy is
+/// `input_tokens + cache_read_tokens + cache_creation_tokens`. Codex differs:
+/// its `cached_input_tokens` are already included in `input_tokens`, so Codex
+/// should report explicit context fields instead of using that aggregate.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +152,12 @@ pub struct ProviderUsage {
     /// (Claude `cache_creation_input_tokens`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<u64>,
+    /// Current context-window tokens as reported by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Provider-reported context-window capacity matching `context_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
 }
 
 /// Context passed to prompt generation methods.

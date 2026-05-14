@@ -27,10 +27,9 @@ fn codex_reports_cumulative_session_usage() {
     //   turn1 input=22834 → turn2 input=45700 → turn3 input=68580.
     // The runtime's `normalize_to_delta` subtracts the per-session
     // baseline (stored in AgentState.last_session_usage) to recover the
-    // per-turn delta for the accumulator. `compute_snapshot` routes
-    // cumulative providers through the (overflow-guarded) estimator so
-    // the raw cumulative input never lands on the HUD as a monotonically
-    // climbing 100%.
+    // per-turn delta for the accumulator. The HUD must not use raw cumulative
+    // input as occupancy; Codex supplies current context separately from the
+    // rollout token_count path when available.
     let p = CodexProvider::new(cfg());
     assert!(p.reports_usage());
     assert!(p.usage_is_cumulative());

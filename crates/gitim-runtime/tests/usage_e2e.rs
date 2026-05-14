@@ -92,6 +92,8 @@ fn turn(input: u64, output: u64, cache_read: u64, cache_creation: u64) -> Provid
         cache_read_tokens: Some(cache_read),
         cache_creation_tokens: Some(cache_creation),
         used_percent: None,
+        context_tokens: None,
+        context_window_tokens: None,
     }
 }
 

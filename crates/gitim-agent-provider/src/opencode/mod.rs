@@ -376,6 +376,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                     used_percent: None,
                     cache_read_tokens: Some(tokens.cache.read),
                     cache_creation_tokens: Some(tokens.cache.write),
+                    context_tokens: None,
+                    context_window_tokens: None,
                 },
             })
         }
