@@ -5,7 +5,7 @@ use std::time::Duration;
 use gitim_agent_provider::{
     create, ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage,
 };
-use gitim_client::GitimClient;
+use gitim_client::{ensure_daemon_with_log, GitimClient};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -207,6 +207,17 @@ impl AgentLoop {
         state.cursor = self.poller.cursor().map(|s| s.to_string());
         state.session_token = self.session_token.clone();
         state.save(&self.repo_root)
+    }
+
+    pub async fn ensure_daemon_running(&self) -> Result<(), RuntimeError> {
+        let repo_root = self.repo_root.clone();
+        let log_path = crate::daemon_log::daemon_log_path(&repo_root);
+        tokio::task::spawn_blocking(move || ensure_daemon_with_log(&repo_root, &log_path))
+            .await
+            .map_err(|e| {
+                RuntimeError::PollFailed(format!("daemon restart task panicked: {e}"))
+            })??;
+        Ok(())
     }
 
     fn build_exec_options(&self) -> ExecOptions {
@@ -932,6 +943,29 @@ impl AgentLoop {
                     return Ok(());
                 }
                 Err(e) => {
+                    if is_daemon_not_running_poll_error(&e) {
+                        tracing::warn!(
+                            handler = %self.handler,
+                            "agent daemon missing during poll; attempting restart"
+                        );
+                        match self.ensure_daemon_running().await {
+                            Ok(()) => {
+                                consecutive_errors = 0;
+                                tracing::info!(
+                                    handler = %self.handler,
+                                    "agent daemon restarted after poll failure"
+                                );
+                                continue;
+                            }
+                            Err(restart_err) => {
+                                tracing::error!(
+                                    handler = %self.handler,
+                                    error = %restart_err,
+                                    "agent daemon restart failed"
+                                );
+                            }
+                        }
+                    }
                     consecutive_errors += 1;
                     let backoff = Duration::from_secs(
                         (2u64.saturating_pow(consecutive_errors)).min(MAX_BACKOFF_SECS),
@@ -953,6 +987,10 @@ impl AgentLoop {
 
 fn is_provider_failure_status(status: &ExecStatus) -> bool {
     matches!(status, ExecStatus::Failed | ExecStatus::Timeout)
+}
+
+pub(crate) fn is_daemon_not_running_poll_error(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::PollFailed(msg) if msg == "daemon not running")
 }
 
 /// Extract a short snippet from tool input for logging.
@@ -1467,6 +1505,19 @@ mod tests {
         assert!(is_provider_failure_status(&ExecStatus::Failed));
         assert!(!is_provider_failure_status(&ExecStatus::Completed));
         assert!(!is_provider_failure_status(&ExecStatus::Aborted));
+    }
+
+    #[test]
+    fn daemon_not_running_poll_error_is_recoverable() {
+        assert!(is_daemon_not_running_poll_error(&RuntimeError::PollFailed(
+            "daemon not running".to_string()
+        )));
+        assert!(!is_daemon_not_running_poll_error(
+            &RuntimeError::PollFailed("poll response missing data".to_string())
+        ));
+        assert!(!is_daemon_not_running_poll_error(
+            &RuntimeError::ProviderFailed("daemon not running".to_string())
+        ));
     }
 
     /// Build a minimal AgentLoop + SharedRuntimeState + workspace with one

@@ -18,7 +18,7 @@ use crate::agent::{
     detect_git_config, infer_local_human_identity, name_to_handler, provision_agent,
     provision_human, AgentConfig,
 };
-use crate::agent_loop::AgentLoop;
+use crate::agent_loop::{is_daemon_not_running_poll_error, AgentLoop};
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
     WorkspaceConfig,
@@ -27,7 +27,7 @@ use crate::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };
 use crate::gitignore::ensure_defaults_gitignored;
-use gitim_client::GitimClient;
+use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::url_redact::redacted_url;
@@ -556,6 +556,13 @@ fn human_client(
     }
 }
 
+async fn ensure_daemon_with_runtime_log(repo_root: PathBuf) -> Result<(), ClientError> {
+    let log_path = crate::daemon_log::daemon_log_path(&repo_root);
+    tokio::task::spawn_blocking(move || ensure_daemon_with_log(&repo_root, &log_path))
+        .await
+        .map_err(|e| ClientError::ConnectionFailed(format!("daemon restart task panicked: {e}")))?
+}
+
 fn api_response_to_json(
     result: Result<gitim_client::ApiResponse, gitim_client::ClientError>,
 ) -> axum::response::Response {
@@ -728,9 +735,10 @@ async fn im_poll(
     WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<PollRequest>,
 ) -> axum::response::Response {
-    let client = match human_client(&state, &slug) {
-        Ok(c) => c,
-        Err(e) => return e,
+    let repo_root = match with_workspace_snapshot(&state, &slug, |ctx| human_repo_path(ctx)) {
+        Ok(Some(p)) => p,
+        Ok(None) => return human_not_initialized(),
+        Err(r) => return r,
     };
 
     let cursor = match with_workspace_snapshot(&state, &slug, |ctx| {
@@ -740,7 +748,31 @@ async fn im_poll(
         Err(r) => return r,
     };
 
-    let result = client.poll(cursor.as_deref()).await;
+    let client = GitimClient::new(&repo_root);
+    let mut result = client.poll(cursor.as_deref()).await;
+    if matches!(result, Err(ClientError::DaemonNotRunning)) {
+        tracing::warn!(
+            slug = %slug,
+            repo = %repo_root.display(),
+            "human daemon missing during poll; attempting restart"
+        );
+        if let Err(e) = ensure_daemon_with_runtime_log(repo_root.clone()).await {
+            tracing::error!(
+                slug = %slug,
+                repo = %repo_root.display(),
+                error = %e,
+                "human daemon restart failed"
+            );
+            result = Err(e);
+        } else {
+            tracing::info!(
+                slug = %slug,
+                repo = %repo_root.display(),
+                "human daemon restarted after poll failure"
+            );
+            result = GitimClient::new(&repo_root).poll(cursor.as_deref()).await;
+        }
+    }
 
     if let Ok(ref resp) = result {
         if resp.ok {
@@ -2872,6 +2904,32 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                     return;
                 }
                 Err(e) => {
+                    if is_daemon_not_running_poll_error(&e) {
+                        tracing::warn!(
+                            agent = %owned_id,
+                            slug = %owned_slug,
+                            "agent daemon missing during poll; attempting restart"
+                        );
+                        match agent_loop.ensure_daemon_running().await {
+                            Ok(()) => {
+                                consecutive_errors = 0;
+                                tracing::info!(
+                                    agent = %owned_id,
+                                    slug = %owned_slug,
+                                    "agent daemon restarted after poll failure"
+                                );
+                                continue;
+                            }
+                            Err(restart_err) => {
+                                tracing::error!(
+                                    agent = %owned_id,
+                                    slug = %owned_slug,
+                                    error = %restart_err,
+                                    "agent daemon restart failed"
+                                );
+                            }
+                        }
+                    }
                     consecutive_errors += 1;
                     let backoff = std::time::Duration::from_secs(
                         (2u64.saturating_pow(consecutive_errors)).min(MAX_BACKOFF_SECS),

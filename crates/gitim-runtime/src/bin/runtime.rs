@@ -1,12 +1,33 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gitim_runtime::http::DEFAULT_PORT;
 use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
+fn runtime_pid_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".gitim/runtime.pid"))
+}
+
+fn runtime_pid_file_points_to_current_process() -> bool {
+    let Some(pid_path) = runtime_pid_path() else {
+        return true;
+    };
+    pid_file_points_to_process(&pid_path, std::process::id())
+}
+
+fn pid_file_points_to_process(pid_path: &Path, pid: u32) -> bool {
+    match std::fs::read_to_string(pid_path) {
+        Ok(recorded) => recorded.trim() == pid.to_string(),
+        Err(_) => true,
+    }
+}
+
 fn cleanup_pid_file() {
-    if let Some(home) = dirs::home_dir() {
-        let _ = std::fs::remove_file(home.join(".gitim/runtime.pid"));
+    let Some(pid_path) = runtime_pid_path() else {
+        return;
+    };
+    if runtime_pid_file_points_to_current_process() {
+        let _ = std::fs::remove_file(pid_path);
     }
 }
 
@@ -227,8 +248,10 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 eprintln!("no activity for 24h — shutting down");
-                cleanup_pid_file();
-                gitim_runtime::workspace::kill_managed_daemons(&idle_state);
+                if runtime_pid_file_points_to_current_process() {
+                    cleanup_pid_file();
+                    gitim_runtime::workspace::kill_managed_daemons(&idle_state);
+                }
                 std::process::exit(0);
             }
         }
@@ -278,9 +301,15 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     server.abort();
 
     // Kill all managed daemons on shutdown
-    cleanup_pid_file();
-    gitim_runtime::workspace::kill_managed_daemons(&state);
-    eprintln!("all daemons stopped");
+    if runtime_pid_file_points_to_current_process() {
+        cleanup_pid_file();
+        gitim_runtime::workspace::kill_managed_daemons(&state);
+        eprintln!("all daemons stopped");
+    } else {
+        eprintln!(
+            "runtime pid changed; assuming replacement runtime took over, skipping daemon stop"
+        );
+    }
     Ok(())
 }
 
@@ -295,4 +324,27 @@ async fn shutdown_signal() {
     }
 
     eprintln!("\nshutting down...");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_file_owner_matches_expected_process() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("runtime.pid");
+        std::fs::write(&path, "12345\n").expect("pid file");
+
+        assert!(pid_file_points_to_process(&path, 12345));
+        assert!(!pid_file_points_to_process(&path, 54321));
+    }
+
+    #[test]
+    fn missing_pid_file_keeps_current_process_responsible() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("missing.pid");
+
+        assert!(pid_file_points_to_process(&path, 12345));
+    }
 }
