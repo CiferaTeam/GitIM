@@ -583,6 +583,81 @@ fn test_pull_only_via_fetch_rebase() {
 }
 
 #[test]
+fn test_sync_cycle_recovers_from_mid_rebase_state() {
+    // Production failure mode: a prior sync cycle started a rebase, hit a
+    // conflict, and the daemon was killed/restarted before either
+    // `discard_unpushed`+resolve or `abort_rebase` ran. The clone is left
+    // with `.git/rebase-merge` on disk and HEAD detached. Every subsequent
+    // `has_unpushed_commits` then trips on `@{upstream}` and the cycle
+    // silently no-ops — daemon looks alive but neither pushes nor fetches.
+    //
+    // Layer D contract: the cycle detects this state at the top, recovers,
+    // and proceeds. We don't assert push success here because the conflict
+    // path beyond recovery is exercised by other tests; we only assert
+    // that the cycle is no longer paralyzed by the wedge.
+    let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
+
+    let thread_a = clone_a_dir.path().join("channels/general.thread");
+    let thread_b = clone_b_dir.path().join("channels/general.thread");
+
+    let alice = Handler::new("alice").unwrap();
+    let bob = Handler::new("bob").unwrap();
+
+    let a_content = format_message(1, 0, &alice, "20260317T100000Z", "alice msg");
+    std::fs::write(&thread_a, &a_content).unwrap();
+    let repo_a = GitStorage::new(clone_a_dir.path());
+    repo_a
+        .add_and_commit(&["channels/general.thread"], "alice msg")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    let b_content = format_message(1, 0, &bob, "20260317T100100Z", "bob msg");
+    std::fs::write(&thread_b, &b_content).unwrap();
+    let repo_b = GitStorage::new(clone_b_dir.path());
+    repo_b
+        .add_and_commit(&["channels/general.thread"], "bob msg")
+        .unwrap();
+
+    // Induce mid-rebase state — do NOT abort.
+    repo_b.fetch().unwrap();
+    let _rebase_result = repo_b.rebase_onto_origin();
+    assert!(
+        repo_b.has_stale_rebase_state(),
+        "test fixture: rebase should leave markers on disk"
+    );
+
+    let auth_failed = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(auth_failed);
+    let commit_lock = Mutex::new(());
+    let cycle_done = Arc::new(AtomicBool::new(false));
+    let cycle_done_flag = cycle_done.clone();
+
+    run_sync_cycle(
+        &repo_b,
+        &mut circuit,
+        &commit_lock,
+        &|| {},
+        &|_, _, _| {},
+        &|_head| {},
+        &|| cycle_done_flag.store(true, Ordering::SeqCst),
+        Some(&("Bob".to_string(), "bob@test.com".to_string())),
+    );
+
+    assert!(
+        cycle_done.load(Ordering::SeqCst),
+        "on_cycle_done must fire even when recovery runs"
+    );
+    assert!(
+        !repo_b.has_stale_rebase_state(),
+        "rebase markers must be cleaned up by the cycle"
+    );
+    assert!(
+        repo_b.head_is_on_branch().unwrap(),
+        "HEAD must be reattached to a branch after recovery"
+    );
+}
+
+#[test]
 fn test_pull_only_abort_rebase_preserves_racing_commit() {
     let (_bare_dir, clone_a_dir, clone_b_dir) = setup_two_clones();
 

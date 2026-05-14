@@ -216,8 +216,42 @@ where
         return SyncOutcome::AuthCircuitOpen;
     }
 
+    // Top-of-cycle self-heal. A prior cycle (or an external git op) may
+    // have left `.git/rebase-merge` on disk with HEAD detached — every
+    // `@{upstream}`-dependent op then errors with "HEAD does not point to
+    // a branch" and the cycle silently no-ops forever. Unblock that here
+    // so the rest of the loop can run normally.
+    if repo.has_stale_rebase_state() {
+        warn!("sync: stale rebase state detected at cycle start, recovering");
+        if let Err(e) = repo.recover_from_stale_rebase() {
+            error!("sync: stale rebase recovery failed: {}", e);
+            on_cycle_done();
+            return SyncOutcome::Normal;
+        }
+        info!("sync: stale rebase recovered, continuing cycle");
+    }
+
     let has_unpushed = match repo.has_unpushed_commits() {
         Ok(v) => v,
+        Err(GitError::DetachedHead) => {
+            // Detached HEAD without rebase markers — someone (or some
+            // killed mid-op) left us off-branch. Reattach and retry once;
+            // bail this cycle if the second probe still fails.
+            warn!("sync: detached HEAD outside rebase, attempting reattach");
+            if let Err(e) = repo.recover_from_stale_rebase() {
+                error!("sync: detached-HEAD recovery failed: {}", e);
+                on_cycle_done();
+                return SyncOutcome::Normal;
+            }
+            match repo.has_unpushed_commits() {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("sync: still failing after detached-HEAD recovery: {}", e);
+                    on_cycle_done();
+                    return SyncOutcome::Normal;
+                }
+            }
+        }
         Err(e) => {
             warn!("sync: failed to check unpushed commits: {}", e);
             on_cycle_done();
