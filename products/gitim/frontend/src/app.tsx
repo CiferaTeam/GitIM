@@ -32,7 +32,7 @@ import { readUiState } from "./lib/ui-state";
 import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
 const LOCAL_POLL_INTERVAL_MS = 7000;
@@ -565,12 +565,34 @@ export default function App() {
           if (change.kind === "card_meta") {
             // Only meta changes (status/labels/assignee/creation) require a
             // list refresh; thread-only changes are applied in-place below.
+            // No toast for card_meta — the resulting Kanban/list re-render
+            // is itself the awareness signal, so a toast would be redundant
+            // noise that also lacks a self-filter (PollChange has no
+            // top-level author).
             needCardRefresh = true;
           } else if (change.entries?.length) {
             const parsed = parseCardScope(change.channel);
             if (parsed) {
               const pathKey = `${parsed.channel}/${parsed.cardId}`;
               addCardMessages(pathKey, change.entries as Message[]);
+            }
+            // Awareness toast for new discussion messages — unlike meta
+            // changes, thread updates have no natural visual surface unless
+            // the card detail is open. Filter to others-only (entries carry
+            // author); pairs with the self-filter idiom for unread counting
+            // below.
+            const me = useChatStore.getState().currentUser;
+            const others = (change.entries as Message[]).filter(
+              (e) => e.author !== me
+            );
+            if (others.length > 0 && parsed) {
+              const shortId = parsed.cardId.slice(0, 8);
+              const authors = Array.from(
+                new Set(others.map((e) => `@${e.author}`))
+              ).join(", ");
+              const noun =
+                others.length === 1 ? "new message" : `${others.length} new messages`;
+              toast.info(`Card #${shortId}: ${noun} from ${authors}`);
             }
           }
           continue;
