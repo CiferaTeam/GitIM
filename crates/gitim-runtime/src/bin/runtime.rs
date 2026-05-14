@@ -140,7 +140,45 @@ enum Command {
         hard: bool,
     },
     /// Update an existing agent's editable fields.
-    UpdateAgent,
+    ///
+    /// V1 supports omitting a flag (no-op) or setting a value. There is
+    /// no "clear to null" path — `--clear-*` flags can be added in a
+    /// future revision if the demand shows up. At least one update flag
+    /// must be specified; an empty patch is treated as a user mistake
+    /// and rejected client-side.
+    UpdateAgent {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Agent id to patch. Wire shape matches the path param of
+        /// `PATCH /workspaces/{slug}/agents/{id}`.
+        #[arg(long)]
+        id: String,
+        /// Inline replacement system prompt. Mutually exclusive with
+        /// `--system-prompt-file`.
+        #[arg(long = "system-prompt", conflicts_with = "system_prompt_file")]
+        system_prompt: Option<String>,
+        /// Read system prompt from a file (≤ 64KB).
+        #[arg(long = "system-prompt-file")]
+        system_prompt_file: Option<PathBuf>,
+        /// Replacement model id (provider-specific). Stop the agent first
+        /// — the runtime rejects model changes on running agents.
+        #[arg(long)]
+        model: Option<String>,
+        /// Replacement introduction blurb.
+        #[arg(long)]
+        introduction: Option<String>,
+        /// Repeatable: `--env KEY=VALUE`. Any occurrence replaces the
+        /// agent's whole env map (the runtime contract is wholesale
+        /// replace, not merge).
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Write `.env` file content from this path (≤ 64KB). Writes are
+        /// fail-fast on size; the file lands at the agent clone root with
+        /// chmod 0600.
+        #[arg(long = "dotenv-file")]
+        dotenv_file: Option<PathBuf>,
+    },
     /// Run provider preflight checks (binary present, version, hello round-trip).
     Preflight,
 }
@@ -167,8 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces,
-        from_cli_error, resolve_base_url, Client, CliError, ErrorResponse,
+        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_runtime_id, cmd_status,
+        cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url, Client, CliError,
+        ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -223,7 +262,28 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             id,
             hard,
         } => cmd_burn_agent::run(&client, workspace, id, hard).await,
-        Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
+        Command::UpdateAgent {
+            workspace,
+            id,
+            system_prompt,
+            system_prompt_file,
+            model,
+            introduction,
+            env,
+            dotenv_file,
+        } => {
+            let args = cmd_update_agent::Args {
+                workspace,
+                id,
+                system_prompt,
+                system_prompt_file,
+                model,
+                introduction,
+                env,
+                dotenv_file,
+            };
+            cmd_update_agent::run(&client, args).await
+        }
         Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
     };
 
