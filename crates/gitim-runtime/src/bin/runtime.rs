@@ -48,11 +48,11 @@ struct Args {
     command: Option<Command>,
 
     /// Port to bind the HTTP server on (server mode only).
-    #[arg(long, global = true)]
+    #[arg(long)]
     port: Option<u16>,
 
     /// Daemonize: fork-exec a detached server and exit (server mode only).
-    #[arg(long, short = 'd', global = true)]
+    #[arg(long, short = 'd')]
     daemon: bool,
 }
 
@@ -89,7 +89,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// One-shot CLI dispatch. Each variant's body is filled in by later tasks
 /// in the runtime-cli plan (Tasks 6-12); this scaffold just establishes the
 /// command surface so the clap derive compiles and `--help` is meaningful.
+///
+/// Tracing is initialized at WARN level (not INFO like server mode) so the
+/// CLI's JSON stdout output stays clean for downstream parsing.
 fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .init();
+
     match cmd {
         Command::Status => todo!("subcommand `status` — implemented in later task"),
         Command::RuntimeId => todo!("subcommand `runtime-id` — implemented in later task"),
@@ -339,7 +346,7 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod tests {
+mod pid_file_tests {
     use super::*;
 
     #[test]
@@ -358,5 +365,72 @@ mod tests {
         let path = tmp.path().join("missing.pid");
 
         assert!(pid_file_points_to_process(&path, 12345));
+    }
+}
+
+#[cfg(test)]
+mod argv_dispatch_tests {
+    //! Argv parsing boundary tests. These verify the basic dispatch contract:
+    //! no-subcommand → server mode, subcommand → CLI mode, and server-only
+    //! flags (`--port`, `--daemon`) are rejected when a subcommand is present
+    //! so they can't be silently ignored. The full per-subcommand argv test
+    //! catalog lives in Task 13.
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn no_args_means_server_mode() {
+        let args = Args::try_parse_from(["gitim-runtime"]).expect("parse must succeed");
+        assert!(args.command.is_none());
+        assert!(!args.daemon);
+        assert!(args.port.is_none());
+    }
+
+    #[test]
+    fn port_flag_at_top_level() {
+        let args = Args::try_parse_from(["gitim-runtime", "--port", "5000"])
+            .expect("parse must succeed");
+        assert!(args.command.is_none());
+        assert_eq!(args.port, Some(5000));
+    }
+
+    #[test]
+    fn daemon_flag_at_top_level() {
+        let args = Args::try_parse_from(["gitim-runtime", "-d"]).expect("parse must succeed");
+        assert!(args.command.is_none());
+        assert!(args.daemon);
+    }
+
+    #[test]
+    fn subcommand_alone() {
+        let args = Args::try_parse_from(["gitim-runtime", "status"]).expect("parse must succeed");
+        assert!(matches!(args.command, Some(Command::Status)));
+    }
+
+    #[test]
+    fn port_with_subcommand_rejected() {
+        // --port is server-mode-only; combining it with a subcommand should
+        // be an "unexpected argument" error, not a silent no-op.
+        let result = Args::try_parse_from(["gitim-runtime", "status", "--port", "8080"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn legacy_positional_rejected() {
+        // The pre-CLI positional form (`gitim-runtime <url> <handler> <name>`)
+        // must not parse as a subcommand or as bare server-mode args.
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "https://github.com/o/r",
+            "handler",
+            "name",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_subcommand_rejected() {
+        let result = Args::try_parse_from(["gitim-runtime", "fly-to-mars"]);
+        assert!(result.is_err());
     }
 }
