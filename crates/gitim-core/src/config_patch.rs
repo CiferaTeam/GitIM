@@ -74,8 +74,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let gitim_dir = tmp.path().join(".gitim");
         fs::create_dir_all(&gitim_dir).unwrap();
-        fs::write(gitim_dir.join("config.yaml"), "version: 1\nindexer:\n  enabled: false\n")
-            .unwrap();
+        fs::write(
+            gitim_dir.join("config.yaml"),
+            "version: 1\nindexer:\n  enabled: false\n",
+        )
+        .unwrap();
         ensure_config_indexer_enabled(tmp.path(), true).unwrap();
         assert!(read_config(&tmp).indexer.enabled);
     }

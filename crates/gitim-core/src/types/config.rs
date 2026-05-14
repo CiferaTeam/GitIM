@@ -109,7 +109,10 @@ mod tests {
     fn config_default_roundtrips_with_indexer() {
         let c = Config::default();
         let yaml = serde_yaml::to_string(&c).expect("serialize");
-        assert!(yaml.contains("indexer:"), "yaml should contain indexer section");
+        assert!(
+            yaml.contains("indexer:"),
+            "yaml should contain indexer section"
+        );
         let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(parsed.indexer.enabled, c.indexer.enabled);
     }

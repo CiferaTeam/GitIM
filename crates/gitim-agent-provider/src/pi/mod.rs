@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -497,7 +496,6 @@ fn parse_event(line: &str) -> Option<PiEvent> {
             // normally — no UI signal needed. success=false means all attempts
             // exhausted; we surface the failure so the runtime can mark the
             // turn as Failed and the user sees an error in the activity feed.
-            // Matches multica's pi.go handling.
             if v.get("success").and_then(Value::as_bool) != Some(false) {
                 return None;
             }
@@ -557,8 +555,7 @@ fn parse_event(line: &str) -> Option<PiEvent> {
 
 /// Project-wide convention for extracting a tool result into a string —
 /// passthrough for primitive strings, JSON-stringify for everything else.
-/// Matches the Claude, OpenCode, and OpenClaw providers and multica's
-/// `extractToolOutput` / `string(RawMessage)` posture.
+/// Matches the Claude, OpenCode, and OpenClaw providers.
 ///
 /// The string is consumed by `agent_loop`'s `assistant_text_buf` for the
 /// tiktoken context-window estimate only — it is not surfaced to the UI —
@@ -591,7 +588,7 @@ fn extract_tool_result_text(result: &Value) -> String {
 ///   which is correct cost-wise but wrong window-occupancy-wise.
 ///
 /// Returns `None` if the value isn't an object or every numeric field is
-/// missing — Pi's stub responses sometimes carry an empty `usage: {}`.
+/// missing — pi sometimes emits an empty `usage: {}` on degenerate paths.
 fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
     let obj = v.as_object()?;
     let input = obj.get("input").and_then(Value::as_u64);
@@ -610,21 +607,6 @@ fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
         context_tokens: None,
         context_window_tokens: None,
     })
-}
-
-// ── Deserialize helpers (kept minimal — we use Value-based parsing above) ──
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct RawPiResponse {
-    #[serde(rename = "type")]
-    r#type: String,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    success: Option<bool>,
-    #[serde(default)]
-    data: Option<Value>,
 }
 
 #[cfg(test)]
@@ -1034,7 +1016,10 @@ mod tests {
         let PiEvent::AutoRetryFailed { final_error } = event else {
             panic!("expected AutoRetryFailed, got {event:?}");
         };
-        assert_eq!(final_error.as_deref(), Some("rate limited by anthropic.com"));
+        assert_eq!(
+            final_error.as_deref(),
+            Some("rate limited by anthropic.com")
+        );
     }
 
     #[test]

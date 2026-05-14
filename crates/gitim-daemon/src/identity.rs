@@ -236,21 +236,11 @@ mod tests {
 
     #[test]
     fn github_curl_failure_returns_curl_error() {
-        // Using a clearly invalid token against a non-routable host forces curl to fail.
-        // We override the URL indirectly by using a bad token that will get rejected, BUT
-        // to avoid real network calls in unit tests we use a localhost port that isn't listening,
-        // which makes curl exit non-zero.
-        //
-        // We can't easily mock curl here, so instead we verify that supplying a token
-        // against an unreachable endpoint produces CurlFailed.  We use
-        // http://127.0.0.1:1 which is always refused immediately.
-        //
-        // Note: the GitServer arg is intentionally ignored in the current implementation
-        // (routing is driven purely by AuthPayload variant), so we pass GitHub here.
+        // Routing is driven by AuthPayload variant, not the GitServer arg.
+        // Use the Gitea variant (which accepts a url) pointed at
+        // 127.0.0.1:1 — always refused, so curl exits non-zero.
         let result = infer_identity(
             GitServer::GitHub,
-            // We can't override the GitHub URL from the outside, so test the Gitea/GitLab
-            // variants instead which accept a url parameter.
             AuthPayload::Gitea {
                 token: "fake-token".to_string(),
                 url: "http://127.0.0.1:1".to_string(),

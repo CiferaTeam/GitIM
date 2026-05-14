@@ -1,7 +1,7 @@
 //! Cron engine — scans `crons/<name>/spec.yaml`, decides which specs are
 //! due for the **current** clone, and writes the matching theoretical-time
-//! `<ts>.thread` files. Driven by a 60-second interval task spawned in
-//! `lifecycle` (see Task 2.7).
+//! `<ts>.thread` files. Driven by a 60-second interval task spawned by
+//! `state::AppState::spawn_cron_engine`.
 //!
 //! The engine never *catches up* historically (per design.md "Catch-up
 //! strategy"). It computes one "next fire after the latest existing fire"

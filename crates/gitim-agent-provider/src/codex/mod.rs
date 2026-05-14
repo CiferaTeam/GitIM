@@ -225,19 +225,14 @@ async fn drive_session(
                             try_send_event(&event_tx, Event::ToolResult { call_id, output });
                         }
                         ParsedMessage::TurnCompleted { usage } => {
-                            // `turn.completed.usage` is the only usage
-                            // billing signal codex 0.130.0-alpha.5 emits on
-                            // stdout. It's session-cumulative (verified by resume
-                            // probe: turn1 input=22834, turn2 input=45700,
-                            // turn3 input=68580), which is why the codex
-                            // Provider impl declares
-                            // `usage_is_cumulative() == true` — the runtime
-                            // subtracts a per-session baseline for the
-                            // accumulator. Context-window occupancy is filled
-                            // separately from rollout token_count events below.
-                            //
-                            // `event_msg/token_count` stays in the rollout
-                            // file, not stdout, so it is scanned by thread_id
+                            // `turn.completed.usage` is the only billing
+                            // signal codex emits on stdout, and it's
+                            // session-cumulative. The codex `Provider`
+                            // impl declares `usage_is_cumulative() == true`
+                            // so the runtime subtracts a per-session
+                            // baseline for the accumulator. Context-window
+                            // occupancy is filled separately from rollout
+                            // `token_count` events scanned by thread_id
                             // after the process exits.
                             if let Some(u) = usage {
                                 latest_usage = Some(u);
@@ -411,15 +406,27 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 
 #[derive(Debug)]
 enum ParsedMessage {
-    ThreadStarted { id: String },
-    Text { content: String },
-    ToolUse { call_id: String, command: String },
-    ToolResult { call_id: String, output: String },
+    ThreadStarted {
+        id: String,
+    },
+    Text {
+        content: String,
+    },
+    ToolUse {
+        call_id: String,
+        command: String,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
     /// codex CLI 0.130.0-alpha.5 emits one of these per `codex exec`
     /// invocation, with cumulative session usage at the top level. The
     /// `usage` field is `Some` whenever the LLM call(s) inside the turn
     /// produced billing data; `None` for empty/error turns or older builds.
-    TurnCompleted { usage: Option<ProviderUsage> },
+    TurnCompleted {
+        usage: Option<ProviderUsage>,
+    },
 }
 
 fn parse_line(line: &str) -> Option<ParsedMessage> {
@@ -934,21 +941,14 @@ mod usage_parse_tests {
 
     #[test]
     fn parse_turn_completed_extracts_cumulative_usage() {
-        // Real fixture captured from codex CLI 0.130.0-alpha.5 stdout:
-        // codex emits exactly one `turn.completed` per `codex exec`
-        // invocation, with `usage` at the top level (not nested under
-        // `payload.info`). This is the only usage signal that reaches
-        // stdout — `event_msg/token_count` (which 31df93c targeted) stays
-        // in the rollout file. Verified by running:
-        //   codex exec --json ... "say A" (turn1: input=22834)
-        //   codex exec resume <tid> --json ... "say B" (turn2: input=45700)
-        //   codex exec resume <tid> --json ... "say C" (turn3: input=68580)
-        // monotonically growing across resumes → cumulative session
-        // counts, exactly as 31df93c's commit message warned. We surface
-        // them as-is for billing; the runtime's
-        // `normalize_to_delta(cumulative=true)` path subtracts the per-session
-        // baseline so the accumulator gets per-turn deltas. Current context
-        // occupancy comes from rollout token_count, not this stdout object.
+        // Fixture from codex CLI stdout: one `turn.completed` per
+        // `codex exec` invocation, with `usage` at the top level (not
+        // nested under `payload.info`). Counts are session-cumulative
+        // across `codex exec resume` calls. We surface them as-is for
+        // billing; the runtime's `normalize_to_delta(cumulative=true)`
+        // path subtracts the per-session baseline so the accumulator
+        // gets per-turn deltas. Context occupancy comes from rollout
+        // `token_count`, not this stdout object.
         let line = r#"{"type":"turn.completed","usage":{"input_tokens":45700,"cached_input_tokens":34048,"output_tokens":28,"reasoning_output_tokens":16}}"#;
         let parsed = parse_line(line).expect("turn.completed parses");
         match parsed {

@@ -374,7 +374,7 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
 ///
 /// Spawns `claude --print` with minimal-context flags, sends a fixed prompt,
 /// and returns a classified [`PreflightResult`]. Used by the HTTP preflight
-/// route once Task 5 wires it up.
+/// route.
 pub async fn preflight_claude() -> PreflightResult {
     preflight_claude_with("claude", Duration::from_secs(60)).await
 }

@@ -122,21 +122,18 @@ pub enum ExecStatus {
     Timeout,
 }
 
-/// Usage as reported by a provider.
+/// Usage as reported by a provider. Each provider fills the subset
+/// its API exposes; missing fields stay `None`.
 ///
-/// Providers fill different subsets:
-/// - Claude / opencode / pi populate `input_tokens` / `output_tokens` (+ cache
-///   variants when prompt caching is active); `used_percent` is `None`.
-/// - Codex populates billing/statistics fields from cumulative stdout
-///   `turn.completed.usage`, and may separately populate `context_tokens` /
-///   `context_window_tokens` from rollout `last_token_usage.total_tokens` /
-///   `model_context_window`.
-/// - Mock fills whatever the test configures.
-///
-/// Claude-style context-window occupancy is
-/// `input_tokens + cache_read_tokens + cache_creation_tokens`. Codex differs:
-/// its `cached_input_tokens` are already included in `input_tokens`, so Codex
-/// should report explicit context fields instead of using that aggregate.
+/// Context-window occupancy semantics differ by provider:
+/// - Claude / opencode / pi: sum `input_tokens + cache_read_tokens +
+///   cache_creation_tokens` — cache hits are excluded from
+///   `input_tokens` alone and underreport by orders of magnitude
+///   once caching kicks in.
+/// - Codex: read `context_tokens` / `context_window_tokens`
+///   directly. `cached_input_tokens` is already counted inside
+///   `input_tokens` there, so the Claude-style sum would
+///   double-count.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]

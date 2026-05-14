@@ -3,8 +3,6 @@
 //! One struct per `Request` variant's success `data`. Daemon handlers
 //! construct these and `serde_json::to_value` them into the response
 //! envelope; clients reach them via `ApiResponse::parse_data::<T>()`.
-//! Field renames anywhere here surface as compile errors at every
-//! call site instead of silent `unwrap_or("unknown")` fallbacks.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -164,11 +162,8 @@ pub struct ArchivedUserEntry {
 /// Response payload for `Request::ListArchivedUsers`.
 ///
 /// Wire shape: `users` is a list of `{handler, display_name?}` objects.
-/// The pre-archive-protocol shape — bare handler strings — was a dead
-/// contract: the WebUI's `ArchivedUserEntry` already typed `display_name`
-/// optional, but the daemon never emitted it, so archived agent cards
-/// always fell back to bare handler. Promoting the row to an object is
-/// a hard wire change; the only client is the WebUI we control.
+/// `display_name` is best-effort — daemon emits it when known, clients
+/// must tolerate its absence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListArchivedUsersResponse {
     pub users: Vec<ArchivedUserEntry>,
@@ -323,9 +318,8 @@ pub struct CardSummary {
     pub card_id: String,
     pub channel: String,
     pub title: String,
-    /// `CardStatus::as_str()` value (e.g. `"open"`, `"in_progress"`,
-    /// `"done"`). Kept as String here so the wire schema doesn't depend
-    /// on the daemon's enum implementation.
+    /// `CardStatus::as_str()` value: `"todo"`, `"doing"`, or `"done"`.
+    /// Kept as String so the wire schema doesn't depend on the enum.
     pub status: String,
     pub labels: Vec<String>,
     /// `null` on the wire when no assignee is set.
@@ -725,7 +719,7 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         // Default call: only `users`. `archived_users` is skipped when None
-        // so wire shape stays backward-compatible with pre-A.6 clients.
+        // so older clients that don't know the field still parse cleanly.
         assert_eq!(obj.len(), 1);
         let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
@@ -884,8 +878,7 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["has_more"], serde_json::json!(true));
         // Backward compatible: missing has_more deserializes as false (default).
-        let r2: ListArchivedDmsResponse =
-            serde_json::from_str(r#"{"dms":[]}"#).unwrap();
+        let r2: ListArchivedDmsResponse = serde_json::from_str(r#"{"dms":[]}"#).unwrap();
         assert!(!r2.has_more);
     }
 

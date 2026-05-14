@@ -504,20 +504,13 @@ fn compute_next_fire(
 
     // Mirror the engine's GRACE_WINDOW clamp so list/show reports
     // exactly what `cron_engine::scan_due` will see on its next tick.
-    // Earlier code clamped to `>= now` so the UI always read "in the
-    // future" — that hid the engine's real decision and could disagree
-    // across the grace boundary.
+    // `next_fire` may land in the past 120s when a spec is overdue but
+    // inside the grace window — the engine will fire it on the very
+    // next tick. UI layers wanting to display "about to fire" branch
+    // on that locally.
     //
-    // After this change `next_fire` may briefly land in the past 120s
-    // (the engine will fire that timestamp on its very next tick). UI
-    // layers wanting to display "about to fire" can branch on that
-    // locally; the wire value matches engine semantics 1:1.
-    //
-    // The 2-minute window is duplicated from `cron_engine::GRACE_WINDOW`
-    // — keeping the constant module-private to the engine rather than
-    // exporting it because the engine is the source of truth and any
-    // change to the value should ripple by intent, not by accidental
-    // import.
+    // The 120s window is duplicated from `cron_engine::GRACE_WINDOW`
+    // (kept module-private — the engine is source of truth).
     let cutoff = now - chrono::Duration::seconds(120);
     let anchor = if raw_anchor < cutoff {
         cutoff
@@ -828,22 +821,19 @@ mod compute_next_fire_tests {
         }
     }
 
-    /// After the GRACE_WINDOW alignment, compute_next_fire reports the
-    /// engine's actual next fire — which can be in the past 120s when
-    /// the spec is overdue but inside the window. Pre-fix code clamped
-    /// this to `>= now`, hiding the truth.
+    /// After GRACE_WINDOW alignment, compute_next_fire reports the
+    /// engine's actual next fire — which can land in the past 120s
+    /// when the spec is overdue but inside the window.
     #[test]
     fn returns_overdue_when_in_grace_window() {
         let tmp = TempDir::new().unwrap();
-        // Spec with a stale anchor (well outside the grace window). The
-        // engine clamps the anchor to now-120s, and `* * * * *` after
+        // Spec with a stale anchor (well outside the grace window).
+        // Engine clamps the anchor to now-120s, and `* * * * *` after
         // now-120s lands in the past relative to `now`.
         let spec = build_spec("* * * * *", "2026-05-01T00:00:00Z");
-        // Now at exactly :30 of a minute. cutoff = now - 120s = previous
-        // minute :28. Next `* * * * *` after :28 is the previous minute :29? No:
-        // `* * * * *` matches every minute boundary, so next after
-        // a :28 is :29? Actually * * * * * fires every minute on the 0-second.
-        // Next after 23:58:30 is 23:59:00. <= now (00:00:30) → returned.
+        // now = 2026-05-09 00:00:30; cutoff = now - 120s = 23:58:30.
+        // `* * * * *` fires on each minute boundary, so next after
+        // 23:58:30 is 23:59:00 — ≤ now → returned.
         let now = chrono::Utc.with_ymd_and_hms(2026, 5, 9, 0, 0, 30).unwrap();
         let nf = compute_next_fire(tmp.path(), &spec, now).expect("returns a value");
         let parsed: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(&nf)

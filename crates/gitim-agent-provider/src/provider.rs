@@ -61,27 +61,35 @@ pub trait Provider: Send + Sync {
     fn prompt_identity(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_identity(ctx)
     }
+
     fn prompt_communication_style(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_communication_style(ctx)
     }
+
     fn prompt_cognitive_loop(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_cognitive_loop(ctx)
     }
+
     fn prompt_collaboration(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_collaboration(ctx)
     }
+
     fn prompt_memory(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_memory(ctx)
     }
+
     fn prompt_reset_protocol(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_reset_protocol(ctx)
     }
+
     fn prompt_cold_start(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_cold_start(ctx)
     }
+
     fn prompt_gitim_api(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_gitim_api(ctx)
     }
+
     fn prompt_host_safety(&self, ctx: &PromptContext) -> String {
         crate::prompts::default_host_safety(ctx)
     }
@@ -101,9 +109,8 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Create a provider for the given type.
-///
-/// Supported types: "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "cursor", "mock", "pi".
+/// Create a provider for the given type — see the match below for
+/// the supported `provider_type` strings.
 pub fn create(
     provider_type: &str,
     config: ProviderConfig,

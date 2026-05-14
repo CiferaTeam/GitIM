@@ -249,8 +249,8 @@ pub fn build_hermes_soul_body(
     // `ProviderConfig::default` is fine here — we only need the trait's
     // prompt methods, not the executable path / env. The trait surface
     // for system-prompt assembly is stateless wrt config.
-    let provider = create("hermes", ProviderConfig::default())
-        .expect("hermes is a built-in provider");
+    let provider =
+        create("hermes", ProviderConfig::default()).expect("hermes is a built-in provider");
     let ctx = PromptContext { handler, model };
     let mut body = provider.build_system_prompt(&ctx);
     if let Some(custom) = custom_system_prompt {
@@ -411,9 +411,9 @@ pub fn write_soul_md_at(
         }
     }
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| HermesProfileError::Other(format!("SOUL.md has no parent: {}", path.display())))?;
+    let parent = path.parent().ok_or_else(|| {
+        HermesProfileError::Other(format!("SOUL.md has no parent: {}", path.display()))
+    })?;
     std::fs::create_dir_all(parent)
         .map_err(|e| HermesProfileError::Other(format!("mkdir {}: {e}", parent.display())))?;
 
@@ -428,8 +428,13 @@ pub fn write_soul_md_at(
 
     std::fs::write(&tmp, &content)
         .map_err(|e| HermesProfileError::Other(format!("write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| HermesProfileError::Other(format!("rename {} -> {}: {e}", tmp.display(), path.display())))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        HermesProfileError::Other(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })?;
     Ok(SoulWriteOutcome::Wrote)
 }
 
@@ -483,8 +488,7 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let path = tmp.path().join("SOUL.md");
             let body = "## op2 — GitIM Coordinator\n\nYou are op2.";
-            let outcome =
-                write_soul_md_at(&path, body, SoulWriteMode::PreserveUserEdits).unwrap();
+            let outcome = write_soul_md_at(&path, body, SoulWriteMode::PreserveUserEdits).unwrap();
             assert_eq!(outcome, SoulWriteOutcome::Wrote);
             let written = std::fs::read_to_string(&path).unwrap();
             assert!(written.starts_with(SOUL_MARKER_PREFIX));
@@ -533,8 +537,7 @@ mod tests {
             )
             .unwrap();
             let outcome =
-                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits)
-                    .unwrap();
+                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits).unwrap();
             assert_eq!(outcome, SoulWriteOutcome::RefusedUserEdited);
             let after = std::fs::read_to_string(&path).unwrap();
             assert!(after.contains("Hermes Agent Persona"));
@@ -579,8 +582,7 @@ mod tests {
             let path = tmp.path().join("SOUL.md");
             std::fs::write(&path, "<!-- not-our-marker -->\nuser body\n").unwrap();
             let outcome =
-                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits)
-                    .unwrap();
+                write_soul_md_at(&path, "runtime body", SoulWriteMode::PreserveUserEdits).unwrap();
             assert_eq!(outcome, SoulWriteOutcome::RefusedUserEdited);
         }
 

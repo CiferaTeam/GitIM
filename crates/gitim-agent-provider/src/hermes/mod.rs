@@ -39,16 +39,11 @@ impl Provider for HermesProvider {
         true
     }
 
-    /// Hermes' ACP `result.usage` reports session-cumulative billing
-    /// (sum of `session_input_tokens` / `session_output_tokens` /
-    /// `session_cache_read_tokens` across every LLM call this hermes
-    /// session has made — see `run_agent.py::run_conversation`'s return
-    /// dict and `acp_adapter/server.py::prompt`'s Usage construction).
+    /// Hermes' ACP `result.usage` is session-cumulative.
     /// `normalize_to_delta` uses this flag to subtract a per-session
-    /// baseline from each turn's reported total so the accumulator gets
-    /// real per-turn deltas. compute_snapshot is short-circuited by
-    /// `self_managed_context` so the cumulative numbers never feed the
-    /// HUD's occupancy gauge.
+    /// baseline so the accumulator gets real per-turn deltas;
+    /// `self_managed_context` short-circuits `compute_snapshot` so the
+    /// cumulative numbers never feed the HUD occupancy gauge.
     fn usage_is_cumulative(&self) -> bool {
         true
     }
@@ -304,26 +299,18 @@ pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
 
 /// Map a Hermes `usage` object to the provider-agnostic `ProviderUsage`.
 ///
-/// Hermes surfaces usage in two distinct shapes:
+/// Hermes surfaces usage in two shapes:
+/// 1. session/prompt response — ACP snake_case (`input_tokens`, etc.)
+/// 2. session/update `usage_update` — Hermes' camelCase
+///    (`inputTokens`, etc.)
 ///
-/// 1. **session/prompt response** (id=3) — ACP-spec snake_case:
-///    `{input_tokens, output_tokens, cache_read_input_tokens?,
-///      cache_creation_input_tokens?}` — Hermes wraps Claude today and
-///    relays Anthropic fields verbatim per the Agent Client Protocol.
-///
-/// 2. **session/update with sessionUpdate=usage_update** — Hermes' own
-///    mid-stream push, camelCase: `{inputTokens, outputTokens,
-///    cacheReadInputTokens?, cacheCreationInputTokens?}`. The existing
-///    `parse_usage_update_returns_none` test fixture documents the
-///    camelCase shape; this used to be intentionally ignored.
-///
-/// Accept both naming conventions in one parser: try snake_case first
-/// (it's what the ACP spec mandates), then camelCase as a fallback.
-/// Returns `None` when none of the four counts are present, so an empty
+/// Try snake_case first (ACP spec), camelCase as fallback. Returns
+/// `None` when none of the four counts are present, so empty
 /// `usage: {}` doesn't fabricate a 0% snapshot.
-/// Test-only re-export so `tests/hermes_usage_semantics_test.rs` can pin the
-/// shape of the id=3 prompt-response usage parser. Production code paths still
-/// reach `parse_acp_usage` through the private module boundary.
+///
+/// `parse_acp_usage_for_test` is a test-only re-export so
+/// `tests/hermes_usage_semantics_test.rs` can pin the prompt-response
+/// shape.
 pub fn parse_acp_usage_for_test(v: &Value) -> Option<ProviderUsage> {
     parse_acp_usage(v)
 }
@@ -387,16 +374,11 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
-    // Hermes' id=3 prompt response carries session-cumulative `result.usage`
-    // (input / output / cache_read are `run_agent.py` `session_*_tokens`
-    // running totals across every LLM call in the resumed ACP session).
-    // Capture it as `latest_usage`; the runtime maps these onto per-turn
-    // deltas via `Provider::usage_is_cumulative() -> true` +
-    // `normalize_to_delta`'s baseline math. We do NOT use these numbers
-    // for occupancy — `HermesProvider::self_managed_context() -> true`
-    // routes that path through hermes' own compression instead. Billing
-    // accumulator gets accurate per-turn values, HUD gauge stays off, no
-    // monotonic 100% clamp.
+    // Hermes' id=3 prompt response carries session-cumulative `result.usage`.
+    // Capture it as `latest_usage`; the runtime maps these to per-turn deltas
+    // via `Provider::usage_is_cumulative() -> true`. Occupancy is owned by
+    // hermes' own compression (`self_managed_context() -> true`), so these
+    // numbers feed only the billing accumulator, never the HUD gauge.
     let mut latest_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();

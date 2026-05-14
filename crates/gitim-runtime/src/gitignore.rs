@@ -95,10 +95,7 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
 /// line of the form `!<...P...>`, we skip that pattern. This preserves the
 /// user's explicit "I want this tracked" intent — same policy the original
 /// `.env`-only implementation used.
-pub fn ensure_patterns_gitignored(
-    clone_root: &Path,
-    patterns: &[&str],
-) -> std::io::Result<bool> {
+pub fn ensure_patterns_gitignored(clone_root: &Path, patterns: &[&str]) -> std::io::Result<bool> {
     let path = clone_root.join(".gitignore");
     let current = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -220,11 +217,7 @@ mod tests {
     fn recognizes_rooted_form_as_equivalent() {
         let dir = tmpdir();
         fs::write(dir.path().join(".gitignore"), "/AGENTS.md\n/.env\n").unwrap();
-        let changed = ensure_patterns_gitignored(
-            dir.path(),
-            &["AGENTS.md", ".env"],
-        )
-        .unwrap();
+        let changed = ensure_patterns_gitignored(dir.path(), &["AGENTS.md", ".env"]).unwrap();
         assert!(
             !changed,
             "rooted form /pattern must count as covering pattern"
@@ -237,20 +230,13 @@ mod tests {
         // User explicitly wants AGENTS.md tracked. They don't have an opinion
         // on the other defaults.
         fs::write(dir.path().join(".gitignore"), "*\n!AGENTS.md\n").unwrap();
-        let changed = ensure_patterns_gitignored(
-            dir.path(),
-            &["AGENTS.md", "CLAUDE.md"],
-        )
-        .unwrap();
+        let changed = ensure_patterns_gitignored(dir.path(), &["AGENTS.md", "CLAUDE.md"]).unwrap();
         assert!(changed, "CLAUDE.md should still get appended");
         let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(content.lines().any(|l| l.trim() == "CLAUDE.md"));
         // AGENTS.md must NOT have been re-added (would conflict with !AGENTS.md)
         assert_eq!(
-            content
-                .lines()
-                .filter(|l| l.trim() == "AGENTS.md")
-                .count(),
+            content.lines().filter(|l| l.trim() == "AGENTS.md").count(),
             0,
             "must not append AGENTS.md when !AGENTS.md is present"
         );

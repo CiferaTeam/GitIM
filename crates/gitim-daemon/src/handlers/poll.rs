@@ -9,26 +9,16 @@ use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
-    // Self-departure check (archive-protocol B.4).
+    // Self-departure check. If `archive/users/<self_handler>.meta.yaml`
+    // exists, this daemon's own agent has been departed (via burn-self,
+    // or another clone burning this handler and the change syncing in).
+    // Surfacing a tagged `self_departed` error lets the runtime fast-path
+    // into self-cleanup (kill daemon + rm clone + agents removal + SSE)
+    // instead of exponential backoff on a corpse.
     //
-    // If `archive/users/<self_handler>.meta.yaml` exists, this daemon's
-    // own agent has been departed — most commonly via `gitim burn-self`
-    // (C.3) writing the depart commits, but also reachable when another
-    // clone burns this handler and the change syncs in. Either way the
-    // agent_loop on the runtime side has nothing useful to do here:
-    // every other poll branch would either return stale data or trip
-    // the existing per-author commit-time guard. Surfacing a tagged
-    // `self_departed` error lets the runtime fast-path into self-cleanup
-    // (kill daemon + rm clone + ctx.agents removal + SSE) instead of
-    // falling into exponential backoff on a corpse.
-    //
-    // Placed at the very top so we skip the rest of the I/O (rev-parse,
-    // diff, membership cache) once the agent is gone — there's no
-    // reason to do the work when the response is going to be discarded.
-    //
-    // Guest sessions never write the user.meta.yaml in the first place,
-    // so this check is a no-op for them; admin/system identity is also
-    // unaffected because it isn't tracked in users/.
+    // Placed first so we skip the rest of the I/O once the agent is gone.
+    // No-op for guest sessions (they never write user.meta.yaml) and for
+    // admin/system identities (not tracked in users/).
     let self_handler_snapshot = state.current_user.read().await.clone();
     if let Some(handler) = self_handler_snapshot.as_deref() {
         let archive_path = state

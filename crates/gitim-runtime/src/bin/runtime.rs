@@ -145,7 +145,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Capture canonical exe BEFORE any self-replace could run. After
     // replace_binaries swaps the on-disk file, Linux `current_exe()` returns
     // "<path> (deleted)" for this inode — too late then. Stored in
-    // RuntimeState so the Task 6/7 update endpoint can strict-mode-check the
+    // RuntimeState so the self-update endpoint can strict-mode-check the
     // install dir and pick the fork-exec target.
     let canonical_exe = std::env::current_exe()?.canonicalize()?;
 

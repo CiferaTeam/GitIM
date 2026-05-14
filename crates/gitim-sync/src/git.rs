@@ -362,8 +362,9 @@ impl GitStorage {
 
     /// List ALL files changed between upstream and HEAD (no pathspec filter).
     /// Used by sync_loop's rebase-conflict path to detect local edits that
-    /// fall outside the resolvable set (`*.thread`, `*.meta.yaml`) so they
-    /// aren't silently destroyed by a `git reset --hard @{upstream}`.
+    /// fall outside the resolvable set (`*.thread`, `*.meta.yaml`,
+    /// `showboards/*/board.md`) so they aren't silently destroyed by a
+    /// `git reset --hard @{upstream}`.
     pub fn changed_files_unpushed_all(&self) -> Result<Vec<PathBuf>, GitError> {
         let output = Command::new("git")
             .args(["diff", "--name-only", "@{upstream}..HEAD"])
@@ -469,8 +470,7 @@ impl GitStorage {
     /// or `.git/rebase-apply`). Used both by `abort_rebase`'s post-check and by
     /// the sync loop's top-of-cycle stale-rebase recovery probe.
     pub fn has_stale_rebase_state(&self) -> bool {
-        self.root.join(".git/rebase-merge").exists()
-            || self.root.join(".git/rebase-apply").exists()
+        self.root.join(".git/rebase-merge").exists() || self.root.join(".git/rebase-apply").exists()
     }
 
     /// Best-effort recovery from a wedged rebase / detached HEAD state.
@@ -532,9 +532,7 @@ impl GitStorage {
         let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
         full.strip_prefix("refs/remotes/origin/")
             .map(str::to_string)
-            .ok_or_else(|| {
-                GitError::CommandFailed(format!("unexpected origin/HEAD: {full}"))
-            })
+            .ok_or_else(|| GitError::CommandFailed(format!("unexpected origin/HEAD: {full}")))
     }
 }
 

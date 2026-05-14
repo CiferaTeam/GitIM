@@ -30,7 +30,6 @@ pub async fn start_unix_socket(
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
 
-            // Request-response mode until subscribe
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let parsed = serde_json::from_str::<Request>(&line);
                 let is_subscribe = matches!(&parsed, Ok(Request::Subscribe));
@@ -49,7 +48,6 @@ pub async fn start_unix_socket(
                 line.clear();
 
                 if is_subscribe {
-                    // Enter push mode
                     debug!("client entered subscribe mode");
                     handle_subscribed(&mut reader, &mut writer, &state).await;
                     return;

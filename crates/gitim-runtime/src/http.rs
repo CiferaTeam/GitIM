@@ -93,7 +93,7 @@ struct HealthResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Phase 4 typed response shapes — see docs/plans/protocol-typing/plan.md
+// Typed response shapes.
 //
 // One Response struct per success path; ErrorBody for every failure path
 // (the legacy `Json(serde_json::json!({"ok": false, "error": ...}))` shape).
@@ -341,9 +341,8 @@ impl Default for RuntimeState {
         // via `run_shell()` which computes + passes the real path into
         // `create_router_with_exe` — this fallback only matters in unit/IT
         // tests that call `RuntimeState::default()` / `create_router()`
-        // directly. A placeholder at `/nonexistent/gitim-runtime` keeps
-        // Task 6/7 strict-mode checks safe: the update endpoint will refuse
-        // to self-replace a path that doesn't exist.
+        // directly. A placeholder at `/nonexistent/gitim-runtime` keeps the
+        // self-update endpoint safe: it refuses to replace a missing path.
         let canonical_exe_path = std::env::current_exe()
             .and_then(|p| p.canonicalize())
             .unwrap_or_else(|_| PathBuf::from("/nonexistent/gitim-runtime"));
@@ -1613,8 +1612,8 @@ async fn crons_run_body(
             // Status code matches the failure mode:
             //   NotFound  → 404 (TOCTOU disappear between is_file and read)
             //   anything else → 500 (perm denied, IO error, etc.)
-            // Previously this returned `Json(ErrorBody...)` with no status,
-            // which axum maps to 200 OK — a misleading success on the wire.
+            // Bare `Json(ErrorBody...)` without an explicit status maps to
+            // 200 OK on the wire, so the status tuple is load-bearing.
             let (status, code) = match e.kind() {
                 std::io::ErrorKind::NotFound => (axum::http::StatusCode::NOT_FOUND, "not_found"),
                 _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "read_failed"),
@@ -2067,9 +2066,8 @@ async fn agents_add(
 
     // Provider whitelist runs before workspace lookup so invalid input is
     // rejected even when the runtime has no workspaces yet.
-    // `mock` is permitted because existing E2E tests (agent-interaction.spec.ts)
-    // provision an agent with provider=mock; the UI still only offers
-    // claude/codex per Q1 scope.
+    // `mock` is permitted because E2E tests (agent-interaction.spec.ts)
+    // provision an agent with provider=mock.
     match req.provider.as_str() {
         "claude" | "codex" | "opencode" | "pi" | "hermes" | "mock" => {}
         other => {
@@ -3422,8 +3420,8 @@ async fn agents_patch(
 /// archives DMs, archives user entry, then physically deletes clone). Use `agents/stop`
 /// for non-destructive pause.
 ///
-/// This endpoint is preserved for at least one release for backward compatibility.
-/// WebUI will switch to `agents/burn` in E.3.
+/// Retained for backward compatibility with older WebUI builds — the current
+/// WebUI calls `agents/burn` directly.
 async fn agents_remove(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -4989,8 +4987,8 @@ pub fn create_router() -> (Router, SharedRuntimeState) {
 }
 
 /// Production entry point: caller supplies the canonical exe path captured
-/// at startup (before any binary self-replace). Task 6/7 self-update reads
-/// this from `state.canonical_exe_path`.
+/// at startup (before any binary self-replace). Self-update reads this
+/// from `state.canonical_exe_path`.
 pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRuntimeState) {
     let inner = RuntimeState {
         canonical_exe_path,
@@ -5169,10 +5167,10 @@ fn is_valid_env_key(k: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the `/workspaces` request/response types (Task 5).
+    //! Unit tests for the `/workspaces` request/response types.
     //! Full HTTP integration coverage — lifecycle with real filesystem,
     //! slug collisions, 404s, error bodies — lives in
-    //! `tests/http_workspaces.rs` (Task 10).
+    //! `tests/http_workspaces.rs`.
 
     use super::*;
 

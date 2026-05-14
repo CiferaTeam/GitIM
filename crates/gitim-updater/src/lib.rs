@@ -19,10 +19,8 @@ pub const BINARIES: &[&str] = &["gitim", "gitim-daemon", "gitim-runtime"];
 /// All failure modes across fetch / download / extract / install.
 ///
 /// Variants with `#[from]` chain the underlying error for context.
-/// `MissingBinary` is constructed by callers (not by this crate yet) —
-/// it's the variant the Task 6 runtime endpoint returns when an extracted
-/// archive is missing one of `BINARIES`, before the async install phase
-/// starts.
+/// `MissingBinary` is the variant callers return when an extracted
+/// archive is missing one of `BINARIES`.
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error("unsupported platform: os={os}, arch={arch}")]
@@ -53,11 +51,7 @@ pub enum UpdateError {
 /// Parse a `major.minor.patch` version string, tolerating an optional leading `v`.
 ///
 /// Returns `None` for malformed input (missing component, non-numeric, pre-release
-/// suffix, etc.). Empty string -> `None`. Four-segment inputs like `"1.2.3.4"` and
-/// pre-release suffixes are rejected — this is **stricter than** the original CLI
-/// helper (`crates/gitim-cli/src/commands/update.rs`), which silently discarded
-/// trailing segments. The tighter contract is intentional: fail-closed on anything
-/// we don't fully understand.
+/// suffix, four-segment, etc.). Fail-closed on anything we don't fully understand.
 pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let s = s.strip_prefix('v').unwrap_or(s);
     let mut parts = s.split('.');
@@ -149,14 +143,9 @@ pub fn detect_platform() -> Result<String, UpdateError> {
     Ok(format!("{os_name}-{arch_name}"))
 }
 
-// Base-URL overrides used by the runtime E2E test. Unset in production; when
-// absent the defaults produce the same strings the original hard-coded URLs
-// did, so the existing URL-contract tests (`download_url_contract`,
-// `latest_release_api_url_contract`) continue to pass untouched. The
-// indirection is a **test-only seam** — callers never pass URLs explicitly.
-//
-// Deliberately read inside the helper (not at `static` init) so a test setting
-// the env var takes effect in the current process without reloading.
+// Test-only seam: `GITIM_RELEASES_API_URL` / `GITIM_RELEASES_DOWNLOAD_URL`
+// override the default GitHub hosts. Read inside the helper (not at static
+// init) so a test setting the env var takes effect in the same process.
 fn releases_api_base() -> String {
     std::env::var("GITIM_RELEASES_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
 }
@@ -358,11 +347,6 @@ fn set_exec_perms(_path: &Path) -> std::io::Result<()> {
 ///   copying. Rollback renames `.old` back to the destination.
 /// - `Remove`: the destination did not previously exist, so the new copy is
 ///   the only file on disk. Rollback removes the stranded copy.
-///
-/// The previous implementation only tracked the `Restore` case, which meant a
-/// partial-install failure on a fresh destination left the new binary
-/// stranded after rollback — inconsistent with the "atomic or not at all"
-/// contract.
 enum RollbackAction {
     Restore { dest: PathBuf, backup: PathBuf },
     Remove { dest: PathBuf },
