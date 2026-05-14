@@ -24,6 +24,11 @@ pub enum GitError {
     RateLimited,
     #[error("authentication failed: {0}")]
     AuthFailed(String),
+    /// HEAD is detached from any branch. Operations that resolve
+    /// `@{upstream}` (push, fetch, rev-list, diff against upstream)
+    /// cannot proceed until HEAD is reattached.
+    #[error("HEAD is detached: not pointing to a branch")]
+    DetachedHead,
 }
 
 pub struct GitStorage {
@@ -176,6 +181,14 @@ impl GitStorage {
     }
 
     pub fn has_unpushed_commits(&self) -> Result<bool, GitError> {
+        // `@{upstream}` requires HEAD to be on a branch (it's per-branch
+        // config). Probe HEAD first via `symbolic-ref --quiet` so the caller
+        // gets a typed DetachedHead error instead of a generic CommandFailed
+        // — sync_cycle uses this to decide whether to auto-recover vs. bail.
+        if !self.head_is_on_branch()? {
+            return Err(GitError::DetachedHead);
+        }
+
         let output = Command::new("git")
             .args(["rev-list", "--count", "@{upstream}..HEAD"])
             .current_dir(&self.root)
@@ -190,6 +203,28 @@ impl GitStorage {
             .parse()
             .unwrap_or(0);
         Ok(count > 0)
+    }
+
+    /// True iff `.git/HEAD` resolves to a symbolic ref (i.e. a branch),
+    /// false on detached HEAD. Used as a precondition probe for any
+    /// `@{upstream}`-dependent operation.
+    pub fn head_is_on_branch(&self) -> Result<bool, GitError> {
+        let output = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        // `--quiet` makes detached HEAD exit non-zero with no output and no
+        // stderr. We treat that specifically as detached; any other
+        // non-zero exit is a real error.
+        if output.status.success() {
+            return Ok(true);
+        }
+        if output.stderr.is_empty() && output.stdout.is_empty() {
+            return Ok(false);
+        }
+        Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
     }
 
     pub fn rev_parse(&self, reference: &str) -> Result<String, GitError> {
@@ -623,6 +658,76 @@ mod tests {
             .unwrap();
         let repo = GitStorage::new(dir.path());
         repo.abort_rebase().unwrap();
+    }
+
+    #[test]
+    fn has_unpushed_commits_returns_detached_head_error_when_detached() {
+        let bare_dir = tempfile::TempDir::new().unwrap();
+        let clone_dir = tempfile::TempDir::new().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare_dir.path().to_str().unwrap(),
+                clone_dir.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "a@test.com"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "A"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(clone_dir.path().join("seed.txt"), "seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+
+        // Detach HEAD by checking out the current commit by SHA. Mirrors
+        // the production failure: rebase mid-flight leaves HEAD pointing
+        // at a commit rather than refs/heads/main, and every `@{upstream}`
+        // lookup then errors with "HEAD does not point to a branch".
+        let sha_out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+        std::process::Command::new("git")
+            .args(["checkout", &sha])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+
+        let repo = GitStorage::new(clone_dir.path());
+        let result = repo.has_unpushed_commits();
+        assert!(
+            matches!(result, Err(GitError::DetachedHead)),
+            "expected DetachedHead, got {:?}",
+            result
+        );
     }
 
     #[test]
