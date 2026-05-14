@@ -42,9 +42,9 @@ impl Provider for CodexProvider {
     /// session total (verified by resume probe — see
     /// `tests/provider_trait_declarations.rs::codex_reports_cumulative_session_usage`).
     /// `normalize_to_delta` subtracts the per-session baseline so the
-    /// accumulator gets per-turn deltas; `compute_snapshot` short-circuits
-    /// cumulative providers to the estimator (now overflow-guarded) so the
-    /// raw cumulative input doesn't render as a monotonic 100%.
+    /// accumulator gets per-turn deltas. The HUD must not use that raw
+    /// cumulative input as context occupancy; current context is attached
+    /// separately from rollout `token_count` when available.
     fn usage_is_cumulative(&self) -> bool {
         true
     }
@@ -226,19 +226,19 @@ async fn drive_session(
                         }
                         ParsedMessage::TurnCompleted { usage } => {
                             // `turn.completed.usage` is the only usage
-                            // signal codex 0.130.0-alpha.5 emits on stdout.
-                            // It's session-cumulative (verified by resume
+                            // billing signal codex 0.130.0-alpha.5 emits on
+                            // stdout. It's session-cumulative (verified by resume
                             // probe: turn1 input=22834, turn2 input=45700,
                             // turn3 input=68580), which is why the codex
                             // Provider impl declares
                             // `usage_is_cumulative() == true` — the runtime
                             // subtracts a per-session baseline for the
-                            // accumulator and routes occupancy through the
-                            // (overflow-guarded) estimator.
+                            // accumulator. Context-window occupancy is filled
+                            // separately from rollout token_count events below.
                             //
-                            // 31df93c targeted `event_msg/token_count` from
-                            // the rollout-file schema, which never reaches
-                            // stdout — that path is gone.
+                            // `event_msg/token_count` stays in the rollout
+                            // file, not stdout, so it is scanned by thread_id
+                            // after the process exits.
                             if let Some(u) = usage {
                                 latest_usage = Some(u);
                             }
@@ -282,11 +282,15 @@ async fn drive_session(
         final_error = Some("codex stream ended without turn.completed".to_string());
     }
 
-    // If codex failed and we have a thread_id, try to enrich the error by
-    // scanning the session rollout file — codex writes richer diagnostics
-    // there (subagent_notification errors, credit-exhaustion token_count)
-    // than it streams to stdout.
+    if let Some(tid) = thread_id.as_deref() {
+        if let Some(context_usage) = read_rollout_context_usage(tid) {
+            attach_context_usage(&mut latest_usage, context_usage);
+        }
+    }
+
     if final_status == ExecStatus::Failed {
+        // Codex writes richer diagnostics to the session rollout file than it
+        // streams to stdout, so failed turns get one more pass over that file.
         if let Some(tid) = thread_id.as_deref() {
             if let Some(reason) = diagnose_rollout_failure(tid) {
                 final_error = append_failure_detail(final_error, reason);
@@ -445,12 +449,11 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             }
         }
         "turn.completed" => {
-            // `usage` shape on stdout matches the rollout-file
-            // `last_token_usage` field layout, so reuse `parse_codex_usage`
-            // for the Value → ProviderUsage projection. It returns None
-            // when no token fields are present (empty `{}` object or
-            // missing entirely), which is fine — turn completion alone
-            // is still a useful stream-end signal.
+            // `usage` on stdout uses the same field names as Codex token
+            // usage structs, but the values are session-cumulative billing
+            // totals. Current window context comes from rollout token_count.
+            // Empty or missing usage is fine: turn completion alone is still
+            // a useful stream-end signal.
             let usage = raw.usage.as_ref().and_then(parse_codex_usage);
             Some(ParsedMessage::TurnCompleted { usage })
         }
@@ -481,6 +484,19 @@ fn diagnose_rollout_failure(thread_id: &str) -> Option<String> {
     let rollout = find_rollout_file(&codex_home.join("sessions"), thread_id)?;
     let content = std::fs::read_to_string(&rollout).ok()?;
     scan_rollout_content(&content)
+}
+
+fn read_rollout_context_usage(thread_id: &str) -> Option<ProviderUsage> {
+    let codex_home = codex_home()?;
+    let rollout = find_rollout_file(&codex_home.join("sessions"), thread_id)?;
+    let content = std::fs::read_to_string(&rollout).ok()?;
+    scan_rollout_context_usage(&content)
+}
+
+fn attach_context_usage(latest_usage: &mut Option<ProviderUsage>, context_usage: ProviderUsage) {
+    let usage = latest_usage.get_or_insert_with(ProviderUsage::default);
+    usage.context_tokens = context_usage.context_tokens;
+    usage.context_window_tokens = context_usage.context_window_tokens;
 }
 
 fn codex_home() -> Option<PathBuf> {
@@ -550,6 +566,33 @@ fn scan_rollout_content(content: &str) -> Option<String> {
     credits_exhausted.or(missing_final_message)
 }
 
+fn scan_rollout_context_usage(content: &str) -> Option<ProviderUsage> {
+    for line in content.lines().rev() {
+        if let Some(usage) = parse_token_count_context_usage(line) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn parse_token_count_context_usage(line: &str) -> Option<ProviderUsage> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.pointer("/payload/type")?.as_str()? != "token_count" {
+        return None;
+    }
+    let context_tokens = v
+        .pointer("/payload/info/last_token_usage/total_tokens")
+        .and_then(Value::as_u64)?;
+    let context_window = v
+        .pointer("/payload/info/model_context_window")
+        .and_then(Value::as_u64)?;
+    Some(ProviderUsage {
+        context_tokens: Some(context_tokens),
+        context_window_tokens: Some(context_window),
+        ..Default::default()
+    })
+}
+
 /// Strong signal: a `response_item.message` with an embedded
 /// `<subagent_notification>` whose status is `errored`.
 fn parse_rollout_line(line: &str) -> Option<String> {
@@ -582,8 +625,8 @@ fn parse_rollout_line(line: &str) -> Option<String> {
 ///   consume context just the same)
 /// - `cache_creation_tokens` left `None` — codex's prompt cache is
 ///   server-managed; the protocol only surfaces the read side
-/// - `used_percent` left `None` so callers derive occupancy themselves
-///   (or, for cumulative providers, short-circuit to the estimator)
+/// - `used_percent` left `None`; context occupancy comes from rollout
+///   `token_count.info.last_token_usage.total_tokens`, not stdout
 ///
 /// Returns `None` when all three primary fields are missing — that's the
 /// shape codex emits for empty / error turns and the placeholder `{}`
@@ -616,6 +659,8 @@ fn parse_codex_usage(total: &Value) -> Option<ProviderUsage> {
         used_percent: None,
         cache_read_tokens: cached,
         cache_creation_tokens: None,
+        context_tokens: None,
+        context_window_tokens: None,
     })
 }
 
@@ -783,6 +828,44 @@ mod rollout_tests {
     }
 
     #[test]
+    fn scan_rollout_context_usage_reads_last_token_count() {
+        let earlier = r#"{"timestamp":"2026-05-14T09:46:01.602Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12094493,"cached_input_tokens":11403904,"output_tokens":57855,"reasoning_output_tokens":20011,"total_tokens":12152348},"last_token_usage":{"input_tokens":88362,"cached_input_tokens":87936,"output_tokens":37,"reasoning_output_tokens":0,"total_tokens":88399},"model_context_window":258400},"rate_limits":null}}"#;
+        let latest = r#"{"timestamp":"2026-05-14T09:46:16.121Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12184040,"cached_input_tokens":11479040,"output_tokens":57985,"reasoning_output_tokens":20011,"total_tokens":12242025},"last_token_usage":{"input_tokens":89547,"cached_input_tokens":75136,"output_tokens":130,"reasoning_output_tokens":0,"total_tokens":89677},"model_context_window":258400},"rate_limits":null}}"#;
+        let content = format!("{earlier}\n{latest}");
+
+        let usage = scan_rollout_context_usage(&content).expect("context usage");
+
+        assert_eq!(usage.context_tokens, Some(89_677));
+        assert_eq!(usage.context_window_tokens, Some(258_400));
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.cache_read_tokens, None);
+    }
+
+    #[test]
+    fn attach_context_usage_preserves_cumulative_billing_fields() {
+        let mut latest_usage = Some(ProviderUsage {
+            input_tokens: Some(12_184_040),
+            output_tokens: Some(77_996),
+            cache_read_tokens: Some(11_479_040),
+            ..Default::default()
+        });
+        let context_usage = ProviderUsage {
+            context_tokens: Some(89_677),
+            context_window_tokens: Some(258_400),
+            ..Default::default()
+        };
+
+        attach_context_usage(&mut latest_usage, context_usage);
+
+        let usage = latest_usage.expect("usage");
+        assert_eq!(usage.input_tokens, Some(12_184_040));
+        assert_eq!(usage.output_tokens, Some(77_996));
+        assert_eq!(usage.cache_read_tokens, Some(11_479_040));
+        assert_eq!(usage.context_tokens, Some(89_677));
+        assert_eq!(usage.context_window_tokens, Some(258_400));
+    }
+
+    #[test]
     fn extract_subagent_error_tolerates_surrounding_whitespace() {
         let text = "<subagent_notification>\n{\"status\":{\"errored\":\"boom\"}}\n</subagent_notification>";
         assert_eq!(extract_subagent_error(text).as_deref(), Some("boom"));
@@ -862,10 +945,10 @@ mod usage_parse_tests {
         //   codex exec resume <tid> --json ... "say C" (turn3: input=68580)
         // monotonically growing across resumes → cumulative session
         // counts, exactly as 31df93c's commit message warned. We surface
-        // them as-is; the runtime's `normalize_to_delta(cumulative=true)`
-        // path subtracts the per-session baseline so the accumulator gets
-        // per-turn deltas, while `compute_snapshot` routes cumulative
-        // providers through the estimator (now overflow-guarded).
+        // them as-is for billing; the runtime's
+        // `normalize_to_delta(cumulative=true)` path subtracts the per-session
+        // baseline so the accumulator gets per-turn deltas. Current context
+        // occupancy comes from rollout token_count, not this stdout object.
         let line = r#"{"type":"turn.completed","usage":{"input_tokens":45700,"cached_input_tokens":34048,"output_tokens":28,"reasoning_output_tokens":16}}"#;
         let parsed = parse_line(line).expect("turn.completed parses");
         match parsed {
@@ -878,7 +961,7 @@ mod usage_parse_tests {
                 assert_eq!(usage.cache_creation_tokens, None);
                 assert!(
                     usage.used_percent.is_none(),
-                    "no explicit pct; compute_snapshot derives it"
+                    "stdout usage does not carry context percentage"
                 );
             }
             other => panic!("expected TurnCompleted with usage, got {other:?}"),

@@ -421,6 +421,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                     used_percent: None,
                     cache_read_tokens: u.cache_read_tokens,
                     cache_creation_tokens: u.cache_creation_tokens,
+                    context_tokens: None,
+                    context_window_tokens: None,
                 });
                 Some(ParsedMessage::AssistantEvents { events, usage })
             }
@@ -444,6 +446,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 used_percent: None,
                 cache_read_tokens: u.cache_read_tokens,
                 cache_creation_tokens: u.cache_creation_tokens,
+                context_tokens: None,
+                context_window_tokens: None,
             }),
         }),
         "log" => {

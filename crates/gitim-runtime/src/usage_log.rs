@@ -325,6 +325,8 @@ mod tests {
             cache_read_tokens: Some(cr),
             cache_creation_tokens: Some(cc),
             used_percent: None,
+            context_tokens: None,
+            context_window_tokens: None,
         }
     }
 

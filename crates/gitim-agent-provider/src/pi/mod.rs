@@ -607,6 +607,8 @@ fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
         used_percent: None,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
+        context_tokens: None,
+        context_window_tokens: None,
     })
 }
 
