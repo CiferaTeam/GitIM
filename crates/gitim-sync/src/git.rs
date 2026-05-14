@@ -362,8 +362,9 @@ impl GitStorage {
 
     /// List ALL files changed between upstream and HEAD (no pathspec filter).
     /// Used by sync_loop's rebase-conflict path to detect local edits that
-    /// fall outside the resolvable set (`*.thread`, `*.meta.yaml`) so they
-    /// aren't silently destroyed by a `git reset --hard @{upstream}`.
+    /// fall outside the resolvable set (`*.thread`, `*.meta.yaml`,
+    /// `showboards/*/board.md`) so they aren't silently destroyed by a
+    /// `git reset --hard @{upstream}`.
     pub fn changed_files_unpushed_all(&self) -> Result<Vec<PathBuf>, GitError> {
         let output = Command::new("git")
             .args(["diff", "--name-only", "@{upstream}..HEAD"])

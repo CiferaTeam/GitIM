@@ -669,12 +669,10 @@ mod usage_parse_tests {
 
     #[test]
     fn assistant_message_surfaces_per_iteration_usage() {
-        // T1 iteration 3 of sid f6cf86eb-a78d-4d61-87b8-2edc2d1985ae (framer-opus,
-        // 2026-04-21). The runtime previously read the aggregated result.usage
-        // (sum across 3 iterations = 177k tokens) as window occupancy, which
-        // inflated the denominator 3x and fired the 80% preamble at what was
-        // actually ~30% real window usage. Per-iteration usage carried on the
-        // assistant message is the authoritative window-occupancy signal.
+        // Per-iteration usage carried on the assistant message is the
+        // authoritative window-occupancy signal. The aggregated
+        // `result.usage` is a sum across all iterations and inflates the
+        // denominator (N× cached context) — never use it for occupancy.
         let line = r#"{
             "type": "assistant",
             "session_id": "sess-abc",

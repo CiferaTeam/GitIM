@@ -158,8 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gitim_sync::watcher::FileEvent::ThreadModified(name) => {
                     tracing::debug!("thread modified: {}", name);
                     watcher_state.thread_cache.write().await.remove(&name);
-                    // Safe: handler/channel names MUST NOT contain "--" (spec §3.2, §4.1)
-                    // so "--" only appears in DM filenames as the separator
+                    // Safe: handler/channel names must not contain "--"
+                    // (per handler/channel naming rules), so "--" only
+                    // appears in DM filenames as the separator.
                     let kind = if name.contains("--") { "dm" } else { "channel" };
                     let _ = watcher_state
                         .event_tx
@@ -170,7 +171,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 gitim_sync::watcher::FileEvent::MetaModified(name) => {
                     tracing::debug!("meta modified: {}", name);
-                    // Could trigger user list refresh here
                 }
             }
         }

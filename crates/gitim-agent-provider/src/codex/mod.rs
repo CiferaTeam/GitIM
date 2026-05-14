@@ -226,19 +226,12 @@ async fn drive_session(
                         }
                         ParsedMessage::TurnCompleted { usage } => {
                             // `turn.completed.usage` is the only usage
-                            // signal codex 0.130.0-alpha.5 emits on stdout.
-                            // It's session-cumulative (verified by resume
-                            // probe: turn1 input=22834, turn2 input=45700,
-                            // turn3 input=68580), which is why the codex
-                            // Provider impl declares
-                            // `usage_is_cumulative() == true` — the runtime
-                            // subtracts a per-session baseline for the
-                            // accumulator and routes occupancy through the
-                            // (overflow-guarded) estimator.
-                            //
-                            // 31df93c targeted `event_msg/token_count` from
-                            // the rollout-file schema, which never reaches
-                            // stdout — that path is gone.
+                            // signal codex emits on stdout, and it's
+                            // session-cumulative. The codex `Provider` impl
+                            // declares `usage_is_cumulative() == true` so
+                            // the runtime subtracts a per-session baseline
+                            // for the accumulator and routes occupancy
+                            // through the (overflow-guarded) estimator.
                             if let Some(u) = usage {
                                 latest_usage = Some(u);
                             }
@@ -851,21 +844,14 @@ mod usage_parse_tests {
 
     #[test]
     fn parse_turn_completed_extracts_cumulative_usage() {
-        // Real fixture captured from codex CLI 0.130.0-alpha.5 stdout:
-        // codex emits exactly one `turn.completed` per `codex exec`
-        // invocation, with `usage` at the top level (not nested under
-        // `payload.info`). This is the only usage signal that reaches
-        // stdout — `event_msg/token_count` (which 31df93c targeted) stays
-        // in the rollout file. Verified by running:
-        //   codex exec --json ... "say A" (turn1: input=22834)
-        //   codex exec resume <tid> --json ... "say B" (turn2: input=45700)
-        //   codex exec resume <tid> --json ... "say C" (turn3: input=68580)
-        // monotonically growing across resumes → cumulative session
-        // counts, exactly as 31df93c's commit message warned. We surface
-        // them as-is; the runtime's `normalize_to_delta(cumulative=true)`
-        // path subtracts the per-session baseline so the accumulator gets
-        // per-turn deltas, while `compute_snapshot` routes cumulative
-        // providers through the estimator (now overflow-guarded).
+        // Fixture from codex CLI stdout: one `turn.completed` per
+        // `codex exec` invocation, with `usage` at the top level (not
+        // nested under `payload.info`). Counts are session-cumulative
+        // across `codex exec resume` calls. We surface them as-is; the
+        // runtime's `normalize_to_delta(cumulative=true)` path subtracts
+        // the per-session baseline so the accumulator gets per-turn
+        // deltas, while `compute_snapshot` routes cumulative providers
+        // through the estimator.
         let line = r#"{"type":"turn.completed","usage":{"input_tokens":45700,"cached_input_tokens":34048,"output_tokens":28,"reasoning_output_tokens":16}}"#;
         let parsed = parse_line(line).expect("turn.completed parses");
         match parsed {

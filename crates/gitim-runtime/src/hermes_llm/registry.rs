@@ -1,4 +1,5 @@
-// Mirrored from hermes_cli/auth.py:PROVIDER_REGISTRY @ v0.10.0 (2026.4.16, verified Phase 0). Resync on hermes minor bumps; CI does not enforce.
+// Mirrored from hermes_cli/auth.py:PROVIDER_REGISTRY @ v0.10.0 (2026.4.16).
+// Resync on hermes minor bumps; CI does not enforce.
 
 /// Which wire protocol the provider speaks.
 ///

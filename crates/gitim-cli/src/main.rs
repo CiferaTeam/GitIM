@@ -1050,7 +1050,7 @@ mod tests {
     // -- cron subcommand parsing -----------------------------------------
     //
     // These lock the clap surface: required flags, mutually-exclusive
-    // pairs, and the canonical syntax Lane D's prompt template will tell
+    // pairs, and the canonical syntax the agent prompt templates tell
     // agents to type. Drift in any of these would either break the docs
     // or bury an error behind clap's generic "unexpected argument".
 

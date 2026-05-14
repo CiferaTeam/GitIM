@@ -497,7 +497,6 @@ fn parse_event(line: &str) -> Option<PiEvent> {
             // normally — no UI signal needed. success=false means all attempts
             // exhausted; we surface the failure so the runtime can mark the
             // turn as Failed and the user sees an error in the activity feed.
-            // Matches multica's pi.go handling.
             if v.get("success").and_then(Value::as_bool) != Some(false) {
                 return None;
             }
@@ -557,8 +556,7 @@ fn parse_event(line: &str) -> Option<PiEvent> {
 
 /// Project-wide convention for extracting a tool result into a string —
 /// passthrough for primitive strings, JSON-stringify for everything else.
-/// Matches the Claude, OpenCode, and OpenClaw providers and multica's
-/// `extractToolOutput` / `string(RawMessage)` posture.
+/// Matches the Claude, OpenCode, and OpenClaw providers.
 ///
 /// The string is consumed by `agent_loop`'s `assistant_text_buf` for the
 /// tiktoken context-window estimate only — it is not surfaced to the UI —

@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn read_since_with_limit_paging_back() {
-        // Translates "translate older messages": oldest in screen = 951,
+        // Simulates "load older messages": oldest in screen = 951,
         // caller passes since = oldest - limit - 1 = 900 to fetch [901..=950].
         let f = make_thread_file(1000);
         let entries = read_thread_entries(f.path(), Some(50), Some(900)).unwrap();

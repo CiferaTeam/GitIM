@@ -91,7 +91,7 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
                 return Err(ParseError::FirstLineNotMessage(file_line_idx + 1));
             }
             if let Some(ref mut body) = current_body {
-                // Strip leading space escape if the remainder starts with [L (spec 5.3 rule 5)
+                // Strip leading space escape if the remainder starts with [L (continuation rule)
                 let content = if line.starts_with(" [L") {
                     &line[1..]
                 } else {

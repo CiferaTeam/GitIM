@@ -248,9 +248,9 @@ mod tests {
         assert_eq!(merged, base);
     }
 
-    /// onboard.rs:230 explicitly drops the `guest` field when a guest later
-    /// claims an identity. `clear_guest` is the typed equivalent and survives
-    /// serialization (`None` + skip_serializing_if removes it from disk).
+    /// `clear_guest` drops the `guest` field on disk via `None` +
+    /// `skip_serializing_if` — mirrors the on-disk shape after a guest
+    /// claims a real identity.
     #[test]
     fn clear_guest_removes_field_from_disk() {
         let mut me = MeJson {

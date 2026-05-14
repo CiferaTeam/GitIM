@@ -11,8 +11,8 @@ use crate::output::OutputMode;
 /// No `--handler` argument and no confirmation prompt — the handler is
 /// resolved from local `.gitim/me.json` inside `client.depart_self()`,
 /// and LLM-driven callers do not benefit from a CLI prompt. The
-/// irreversibility contract lives in the agent prompts (see Part D of
-/// the archive-protocol plan), not in the CLI surface.
+/// irreversibility contract lives in the agent prompts, not in the
+/// CLI surface.
 pub async fn cmd_burn_self(client: &GitimClient, mode: &OutputMode) {
     match client.depart_self().await {
         Ok(resp) => {

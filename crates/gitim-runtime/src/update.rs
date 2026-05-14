@@ -48,8 +48,8 @@ use crate::http::SharedRuntimeState;
 const SANITY_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 202 body when all sync validation passes and the async phase has been
-/// spawned. The caller polls (Task 7) or just waits for the runtime HTTP
-/// server to restart.
+/// spawned. The caller waits for the runtime HTTP server to restart (the
+/// fork-exec child takes over on the same port).
 #[derive(Debug, Serialize)]
 pub struct UpdateJob {
     pub job_id: String,
@@ -65,8 +65,8 @@ pub struct UpdateError {
     pub detail: String,
 }
 
-/// Error code constants. Keep in sync with the WebUI switch statement and the
-/// Task 6 plan doc — these strings are part of the HTTP contract.
+/// Error code constants — part of the HTTP contract. Keep in sync with the
+/// WebUI switch statement that maps these to toast messages.
 pub mod error_codes {
     pub const RUNTIME_NOT_INSTALLED: &str = "runtime_not_installed";
     pub const UNSUPPORTED_PLATFORM: &str = "unsupported_platform";
@@ -321,7 +321,7 @@ async fn run_sync_phase() -> Result<(UpdateJob, tempfile::TempDir, PathBuf), Upd
     sanity_check_new_runtime(&new_runtime, &latest_tag).await?;
 
     // All sync checks passed. Build the job description. The async phase
-    // (Task 7) takes the tempdir and the new_runtime path.
+    // takes the tempdir and the new_runtime path.
     let job = UpdateJob {
         job_id: uuid::Uuid::new_v4().to_string(),
         target_version: latest_tag,

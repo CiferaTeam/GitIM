@@ -269,8 +269,8 @@ impl GitimClient {
     /// List the caller's archived DMs with optional prefix filter + paging.
     /// The daemon resolves the caller via `resolve_author` at dispatch time;
     /// `prefix` filters peer handlers case-insensitively, `offset`/`limit`
-    /// drive lazy paging. Daemon also clamps `limit` to `[1,100]` so the
-    /// double-guard in the runtime HTTP layer (Task 4+5) is defence-in-depth.
+    /// drive lazy paging. Daemon clamps `limit` to `[1,100]`; the runtime
+    /// HTTP layer also clamps as defence-in-depth.
     pub async fn list_archived_dms(
         &self,
         prefix: Option<&str>,
@@ -294,9 +294,8 @@ impl GitimClient {
     }
 
     /// Restore a departed user — moves `archive/users/<handler>.meta.yaml`
-    /// back to `users/<handler>.meta.yaml`. The runtime burn endpoint
-    /// (B.1) drives departure via `depart_user`; this is the inverse, so
-    /// WebUI can offer a recovery path on the archived-agent view (E.3).
+    /// back to `users/<handler>.meta.yaml`. The inverse of `depart_user`,
+    /// used by WebUI to offer a recovery path from the archived-agent view.
     ///
     /// Daemon resolves caller via the connection's me.json when `author`
     /// is omitted — matches `archive_dm` / `unarchive_dm` shape.
@@ -495,18 +494,15 @@ impl GitimClient {
     /// The daemon walks an idempotent multi-commit phase chain and uses
     /// `archive/users/<handler>.meta.yaml` as the single source of truth
     /// for "depart complete" — so retrying after a partial failure is
-    /// safe and resumes from the first incomplete step. C.1 will add
-    /// the rest of the archive-protocol surface (`archive_dm`,
-    /// `unarchive_dm`, etc.) to this client; B.1 only needs `depart_user`
-    /// to unblock the runtime burn endpoint.
+    /// safe and resumes from the first incomplete step.
     pub async fn depart_user(&self, handler: &str) -> Result<ApiResponse, ClientError> {
         self.request("depart_user", json!({ "handler": handler }))
             .await
     }
 
     /// Read this client's own handler from `<repo_root>/.gitim/me.json` and
-    /// request the daemon to depart that handler. Used by `gitim burn-self`
-    /// (C.3) — the agent self-burning its own identity.
+    /// request the daemon to depart that handler. Used by `gitim burn-self` —
+    /// the agent self-burning its own identity.
     ///
     /// **No handler parameter is accepted** to prevent cross-burn from
     /// caller code (CLI, runtime SDK, etc.) reaching into a clone and
@@ -847,8 +843,8 @@ mod tests {
         assert!(matches!(err, ClientError::Timeout));
     }
 
-    /// build_request shapes for the new no-param archive-protocol methods.
-    /// These are the wire payloads the daemon will dispatch on; if the
+    /// build_request shapes for the no-param archive-protocol methods.
+    /// These are the wire payloads the daemon dispatches on; if the
     /// method strings drift the daemon-side switch in handlers/depart.rs
     /// will silently fail to match.
     #[test]
@@ -864,9 +860,9 @@ mod tests {
         let list_dms = build_request("list_archived_dms", json!({}));
         assert_eq!(list_dms, json!({"method": "list_archived_dms"}));
 
-        // Pagination wire shape (Task 4+5): when the client passes
-        // prefix/offset/limit, they ride along inside the same flat JSON
-        // object the daemon dispatches on. If this drifts, the daemon-side
+        // Pagination wire shape: when the client passes prefix/offset/limit,
+        // they ride along inside the same flat JSON object the daemon
+        // dispatches on. If this drifts, the daemon-side
         // `Request::ListArchivedDms` serde deserializer in api.rs will
         // silently fall back to defaults and the prefix/page won't apply.
         let list_dms_paged = build_request(

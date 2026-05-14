@@ -587,11 +587,11 @@ impl AgentLoop {
             prompt
         };
 
-        // Consume usage_notice_pending (Task 14) and accumulate tiktoken estimate
-        // (Task 12) in a single load/save cycle. If the notice flag was set by
-        // a previous turn's threshold crossing, prepend the system preamble here
-        // and clear the flag before execute — this way a mid-turn crash won't
-        // cause the notice to re-fire.
+        // Consume usage_notice_pending and accumulate the tiktoken estimate
+        // in a single load/save cycle. If the notice flag was set by a
+        // previous turn's threshold crossing, prepend the system preamble
+        // here and clear the flag before execute — this way a mid-turn
+        // crash won't cause the notice to re-fire.
         //
         // In practice usage_notice and post_reset are mutually exclusive
         // (clear_session wipes usage_notice as part of the RESET path), but
@@ -611,7 +611,7 @@ impl AgentLoop {
             prompt
         };
 
-        // Pre-execute tiktoken accumulation (Task 12).
+        // Pre-execute tiktoken accumulation.
         // Cold start (no resume token) → reset estimator and seed with the system prompt.
         // Every turn adds the user prompt before execute; assistant text is added after.
         let cold_start = self.session_token.is_none();
@@ -1123,10 +1123,15 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
 /// Compute a `SessionUsageSnapshot` from available usage signals.
 ///
 /// Authoritative-value policy (matches 01-design.md §4.5):
-/// 1. provider_reported.used_percent (Codex)
-/// 2. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude)
-/// 3. estimated_tokens / max_tokens (fallback)
-/// 4. None (no data available)
+/// 1. provider_reported.used_percent — providers that compute it
+///    against their own context window (Codex rate-limit %).
+/// 2. provider_reported is session-cumulative (`usage_is_cumulative`) —
+///    fall through to the estimate path so the ratio resets per turn
+///    instead of monotonically clamping at 100% (codex total_token_usage,
+///    hermes session_input_tokens).
+/// 3. provider_reported.(input + cache_read + cache_creation) / max_tokens (Claude).
+/// 4. estimated_tokens / max_tokens (cl100k fallback).
+/// 5. None (no data available).
 ///
 /// For Claude, Anthropic's `input_tokens` excludes tokens served from the
 /// prompt cache. With caching active, `input_tokens` drops to a few hundred
@@ -1263,14 +1268,10 @@ pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
 /// agent as a model would experience context pressure — "handoff, not
 /// completion" framing. Per 01-design.md §4.5.
 ///
-/// Rewritten after the 2026-04-21 repro (sid f6cf86eb, framer-opus): the
-/// previous numbered list had "停下所有新的工具调用" as step 1 and "在记忆
-/// 文件里留一段 orientation" as step 2, which literally contradicts itself
-/// (writing to a memory file requires Read + Edit). Under context pressure
-/// the agent resolved the conflict loosely and fired misdirected side
-/// actions (wrong-channel DMs) before the `[[RESET]]` sentinel. The
-/// rewritten copy uses a single flowing imperative that names the allowed
-/// tool surface explicitly.
+/// Uses a single flowing imperative that names the allowed tool surface
+/// explicitly — a numbered list with "stop all tool calls" then "write
+/// orientation to memory" is self-contradictory under pressure and the
+/// agent resolves it loosely (misdirected side actions before `[[RESET]]`).
 pub fn build_usage_notice_preamble(used_percent: f64) -> String {
     format!(
         "[系统通知] 对话窗口已用 {pct:.0}%。\n\
@@ -1564,7 +1565,7 @@ mod tests {
 
     #[test]
     fn format_changes_renders_cron_thread_with_cron_scope() {
-        // P1 regression guard: the runtime side must render `kind:
+        // Regression guard: the runtime side must render `kind:
         // "cron_thread"` ChannelChanges with a `[CRON <name>]` scope tag,
         // matching the daemon's poll branch that emits
         // `channel: "cron:<name>"` + `kind: "cron_thread"`. Without this,
