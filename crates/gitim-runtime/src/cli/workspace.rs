@@ -61,10 +61,16 @@ pub async fn resolve_workspace(
     client: &Client,
     requested: Option<&str>,
 ) -> Result<String, CliError> {
+    // Runtime wraps the list as `{ workspaces: [...] }` (see http.rs
+    // `WorkspacesListResponse`). Parse the wrapper, then extract slugs.
+    #[derive(serde::Deserialize)]
+    struct WrappedList {
+        workspaces: Vec<WorkspaceLite>,
+    }
     let value = client.get("/workspaces").await?;
-    let entries: Vec<WorkspaceLite> = serde_json::from_value(value)
+    let wrapped: WrappedList = serde_json::from_value(value)
         .map_err(|e| CliError::Parse(format!("/workspaces body: {e}")))?;
-    let slugs: Vec<String> = entries.into_iter().map(|w| w.slug).collect();
+    let slugs: Vec<String> = wrapped.workspaces.into_iter().map(|w| w.slug).collect();
     select_workspace(requested, &slugs)
 }
 
