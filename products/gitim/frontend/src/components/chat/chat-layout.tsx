@@ -471,7 +471,7 @@ export function ChatLayout() {
   return (
     <div className="flex h-full overflow-hidden">
       {/* Desktop sidebar */}
-      <div className="hidden md:block">
+      <div className="hidden md:block h-full">
         <Sidebar
           onChannelSelect={handleChannelSelect}
           onStartDm={handleStartDm}
