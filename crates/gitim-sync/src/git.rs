@@ -409,13 +409,33 @@ impl GitStorage {
         Ok(())
     }
 
-    /// Best-effort abort any in-progress rebase. Always succeeds.
+    /// Abort any in-progress rebase and verify the on-disk markers are gone.
+    ///
+    /// Idempotent: returns Ok when no rebase exists. Returns Err when rebase
+    /// state (`.git/rebase-merge` or `.git/rebase-apply`) persists after the
+    /// abort attempt — callers rely on Ok meaning "HEAD is back on a branch
+    /// and `@{upstream}` is usable again", which is false while those
+    /// directories remain.
     pub fn abort_rebase(&self) -> Result<(), GitError> {
         let _ = Command::new("git")
             .args(["rebase", "--abort"])
             .current_dir(&self.root)
             .output();
+
+        if self.has_stale_rebase_state() {
+            return Err(GitError::CommandFailed(
+                "rebase state persisted after abort".to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    /// True when the working tree has leftover rebase markers (`.git/rebase-merge`
+    /// or `.git/rebase-apply`). Used both by `abort_rebase`'s post-check and by
+    /// the sync loop's top-of-cycle stale-rebase recovery probe.
+    pub fn has_stale_rebase_state(&self) -> bool {
+        self.root.join(".git/rebase-merge").exists()
+            || self.root.join(".git/rebase-apply").exists()
     }
 }
 
@@ -603,6 +623,35 @@ mod tests {
             .unwrap();
         let repo = GitStorage::new(dir.path());
         repo.abort_rebase().unwrap();
+    }
+
+    #[test]
+    fn abort_rebase_returns_err_when_state_persists() {
+        // The motivating case: a real rebase got into a state where
+        // `git rebase --abort` cannot clean it up (file lock, partial fs
+        // failure, daemon killed mid-cleanup). We simulate this by creating
+        // a `.git/rebase-merge` directory that git won't recognise as a
+        // valid rebase to abort — git will report "No rebase in progress"
+        // and leave the directory in place. The contract: abort_rebase MUST
+        // refuse to claim success while the on-disk rebase markers remain,
+        // because every downstream caller treats Ok as "you can safely use
+        // @{upstream} again" and that's false here.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let rebase_dir = dir.path().join(".git/rebase-merge");
+        std::fs::create_dir_all(&rebase_dir).unwrap();
+
+        let repo = GitStorage::new(dir.path());
+        let result = repo.abort_rebase();
+        assert!(
+            result.is_err(),
+            "abort_rebase must Err when rebase state persists on disk"
+        );
     }
 
     #[test]
