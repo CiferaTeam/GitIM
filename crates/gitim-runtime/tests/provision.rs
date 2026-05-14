@@ -36,8 +36,7 @@ async fn test_provision_fresh() {
     // provision_agent returns.
     let config_content =
         std::fs::read_to_string(handle.repo_root.join(".gitim/config.yaml")).unwrap();
-    let config: gitim_core::types::config::Config =
-        serde_yaml::from_str(&config_content).unwrap();
+    let config: gitim_core::types::config::Config = serde_yaml::from_str(&config_content).unwrap();
     assert!(
         !config.indexer.enabled,
         "agent clone must NOT have indexer enabled"

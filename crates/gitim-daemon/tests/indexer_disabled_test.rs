@@ -77,7 +77,10 @@ async fn indexer_disabled_skips_index_creation() {
 
     // Mimic what main.rs does at startup
     let result = AppState::initialize_index(&state);
-    assert!(result.is_ok(), "initialize_index should not fail when disabled");
+    assert!(
+        result.is_ok(),
+        "initialize_index should not fail when disabled"
+    );
 
     // state.index must remain None
     assert!(
@@ -106,7 +109,10 @@ async fn indexer_disabled_skips_index_creation() {
         state.clone(),
     )
     .await;
-    assert!(!resp.ok, "Search must return error when indexer is disabled");
+    assert!(
+        !resp.ok,
+        "Search must return error when indexer is disabled"
+    );
     let error_msg = resp.error.as_deref().unwrap_or("");
     assert!(
         error_msg.contains("disabled"),

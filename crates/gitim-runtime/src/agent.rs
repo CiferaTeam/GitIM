@@ -88,14 +88,10 @@ pub(crate) fn infer_local_human_identity(human_dir: &Path) -> (String, String) {
     if let Some(identity) = read_me_json_identity(human_dir) {
         return identity;
     }
-    let display_name = detect_git_config_local("user.name", human_dir)
-        .unwrap_or_else(|| "human".to_string());
+    let display_name =
+        detect_git_config_local("user.name", human_dir).unwrap_or_else(|| "human".to_string());
     let h = name_to_handler(&display_name);
-    let handler = if h.is_empty() {
-        "human".to_string()
-    } else {
-        h
-    };
+    let handler = if h.is_empty() { "human".to_string() } else { h };
     (handler, display_name)
 }
 

@@ -878,8 +878,7 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["has_more"], serde_json::json!(true));
         // Backward compatible: missing has_more deserializes as false (default).
-        let r2: ListArchivedDmsResponse =
-            serde_json::from_str(r#"{"dms":[]}"#).unwrap();
+        let r2: ListArchivedDmsResponse = serde_json::from_str(r#"{"dms":[]}"#).unwrap();
         assert!(!r2.has_more);
     }
 

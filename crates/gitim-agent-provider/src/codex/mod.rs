@@ -400,15 +400,27 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 
 #[derive(Debug)]
 enum ParsedMessage {
-    ThreadStarted { id: String },
-    Text { content: String },
-    ToolUse { call_id: String, command: String },
-    ToolResult { call_id: String, output: String },
+    ThreadStarted {
+        id: String,
+    },
+    Text {
+        content: String,
+    },
+    ToolUse {
+        call_id: String,
+        command: String,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
     /// codex CLI 0.130.0-alpha.5 emits one of these per `codex exec`
     /// invocation, with cumulative session usage at the top level. The
     /// `usage` field is `Some` whenever the LLM call(s) inside the turn
     /// produced billing data; `None` for empty/error turns or older builds.
-    TurnCompleted { usage: Option<ProviderUsage> },
+    TurnCompleted {
+        usage: Option<ProviderUsage>,
+    },
 }
 
 fn parse_line(line: &str) -> Option<ParsedMessage> {

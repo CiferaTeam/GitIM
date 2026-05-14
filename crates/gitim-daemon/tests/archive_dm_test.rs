@@ -1001,18 +1001,11 @@ async fn seed_archived_dms(state: &Arc<AppState>, me: &str, peers: &[&str]) {
             )
             .unwrap();
         }
-        let (first, second) = if me < *peer {
-            (me, *peer)
-        } else {
-            (*peer, me)
-        };
+        let (first, second) = if me < *peer { (me, *peer) } else { (*peer, me) };
         let stem = format!("{}--{}", first, second);
         std::fs::write(
             arch_dir.join(format!("{}.thread", stem)),
-            format!(
-                "[L000001][P000000][@{}][20260509T100000Z] hey\n",
-                me
-            ),
+            format!("[L000001][P000000][@{}][20260509T100000Z] hey\n", me),
         )
         .unwrap();
     }
@@ -1072,7 +1065,10 @@ async fn test_list_archived_dms_paged_happy_path_first_page_has_more() {
         vec!["bob", "carol", "dave", "erin", "frank"],
         "first page should be the alphabetical first 5"
     );
-    assert!(has_more_of(&resp), "6 entries, limit 5 — has_more must be true");
+    assert!(
+        has_more_of(&resp),
+        "6 entries, limit 5 — has_more must be true"
+    );
 }
 
 #[tokio::test]
@@ -1089,7 +1085,10 @@ async fn test_list_archived_dms_paged_second_page_no_more() {
     assert!(resp.ok, "list failed: {:?}", resp.error);
     let peers = peers_in(&resp);
     assert_eq!(peers, vec!["grace"]);
-    assert!(!has_more_of(&resp), "single tail entry — has_more must be false");
+    assert!(
+        !has_more_of(&resp),
+        "single tail entry — has_more must be false"
+    );
 }
 
 #[tokio::test]

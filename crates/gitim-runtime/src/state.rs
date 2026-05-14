@@ -305,8 +305,15 @@ mod tests {
 
         let loaded = AgentState::load(dir.path()).expect("load");
         assert!(loaded.session_token.is_none(), "session wiped");
-        assert!(loaded.post_reset_pending, "continuation re-armed for next cycle");
-        assert_eq!(loaded.cursor.as_deref(), Some("c"), "poller cursor preserved");
+        assert!(
+            loaded.post_reset_pending,
+            "continuation re-armed for next cycle"
+        );
+        assert_eq!(
+            loaded.cursor.as_deref(),
+            Some("c"),
+            "poller cursor preserved"
+        );
     }
 
     #[test]

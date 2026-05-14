@@ -210,14 +210,23 @@ mod tests {
     #[test]
     fn collaboration_drops_filesystem_memory_refs() {
         let s = collaboration(&ctx());
-        assert!(!s.contains("notes/"), "filesystem memory channel suggestion removed");
-        assert!(!s.contains("记忆工具"), "hermes-specific memory guidance not duplicated here");
+        assert!(
+            !s.contains("notes/"),
+            "filesystem memory channel suggestion removed"
+        );
+        assert!(
+            !s.contains("记忆工具"),
+            "hermes-specific memory guidance not duplicated here"
+        );
     }
 
     #[test]
     fn gitim_api_drops_agents_md_continuity_ref() {
         let s = gitim_api(&ctx());
-        assert!(s.contains("Board 不是你的记忆板"), "board contrast preserved");
+        assert!(
+            s.contains("Board 不是你的记忆板"),
+            "board contrast preserved"
+        );
         assert!(
             !s.contains("写到 AGENTS.md"),
             "AGENTS.md as continuity sink removed for hermes"

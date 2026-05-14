@@ -1014,7 +1014,10 @@ mod tests {
         let PiEvent::AutoRetryFailed { final_error } = event else {
             panic!("expected AutoRetryFailed, got {event:?}");
         };
-        assert_eq!(final_error.as_deref(), Some("rate limited by anthropic.com"));
+        assert_eq!(
+            final_error.as_deref(),
+            Some("rate limited by anthropic.com")
+        );
     }
 
     #[test]

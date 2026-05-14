@@ -78,8 +78,7 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         let author = Handler::new("alice").unwrap();
         for i in 1..=count {
-            let content =
-                format_message(i, 0, &author, "20260511T120000Z", &format!("msg {}", i));
+            let content = format_message(i, 0, &author, "20260511T120000Z", &format!("msg {}", i));
             f.write_all(content.as_bytes()).unwrap();
         }
         f
