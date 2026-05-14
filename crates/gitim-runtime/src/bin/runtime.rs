@@ -75,7 +75,47 @@ enum Command {
         detailed: bool,
     },
     /// Provision a new agent in a workspace.
-    AddAgent,
+    AddAgent {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Agent handler — lowercase a-z 0-9 hyphens, 1-39 chars. Required.
+        /// Runtime enforces the format and uniqueness against the workspace.
+        #[arg(long)]
+        handler: String,
+        /// Human-readable display name. Required.
+        #[arg(long = "display-name")]
+        display_name: String,
+        /// LLM provider (claude / codex / hermes / opencode / pi).
+        /// Runtime owns the whitelist — invalid values come back as 4xx.
+        #[arg(long)]
+        provider: String,
+        /// Optional model override (e.g. "claude-opus-4-7"). Provider-specific
+        /// semantics; passed through verbatim.
+        #[arg(long)]
+        model: Option<String>,
+        /// Inline system prompt. Mutually exclusive with --system-prompt-file.
+        #[arg(long = "system-prompt", conflicts_with = "system_prompt_file")]
+        system_prompt: Option<String>,
+        /// Read system prompt from a file (≤ 64KB).
+        #[arg(long = "system-prompt-file")]
+        system_prompt_file: Option<PathBuf>,
+        /// Repeatable: --env KEY=VALUE. Empty values are allowed.
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Optional human blurb shown on the agent card.
+        #[arg(long)]
+        introduction: Option<String>,
+        /// Opt the new agent out of joining #general. Default: join.
+        #[arg(long = "no-join-general")]
+        no_join_general: bool,
+        /// Hermes only: LLM provider id (e.g. "anthropic", "custom:foo").
+        #[arg(long = "llm-provider")]
+        llm_provider: Option<String>,
+        /// Hermes only: model id to set as profile default.
+        #[arg(long = "llm-model")]
+        llm_model: Option<String>,
+    },
     /// Hard-delete an agent (irreversible).
     BurnAgent,
     /// Update an existing agent's editable fields.
@@ -106,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error,
+        cmd_add_agent, cmd_list_agents, cmd_runtime_id, cmd_status, cmd_workspaces, from_cli_error,
         resolve_base_url, Client, CliError, ErrorResponse,
     };
 
@@ -127,7 +167,36 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             workspace,
             detailed,
         } => cmd_list_agents::run(&client, workspace, detailed).await,
-        Command::AddAgent => todo!("subcommand `add-agent` — implemented in later task"),
+        Command::AddAgent {
+            workspace,
+            handler,
+            display_name,
+            provider,
+            model,
+            system_prompt,
+            system_prompt_file,
+            env,
+            introduction,
+            no_join_general,
+            llm_provider,
+            llm_model,
+        } => {
+            let args = cmd_add_agent::Args {
+                workspace,
+                handler,
+                display_name,
+                provider,
+                model,
+                system_prompt,
+                system_prompt_file,
+                env,
+                introduction,
+                no_join_general,
+                llm_provider,
+                llm_model,
+            };
+            cmd_add_agent::run(&client, args).await
+        }
         Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
         Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
         Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
