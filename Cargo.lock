@@ -897,6 +897,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "mockito",
+ "percent-encoding",
  "regex",
  "reqwest",
  "serde",

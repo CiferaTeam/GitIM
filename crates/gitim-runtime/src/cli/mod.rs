@@ -12,6 +12,7 @@
 pub mod cmd_add_agent;
 pub mod cmd_burn_agent;
 pub mod cmd_list_agents;
+pub mod cmd_preflight;
 pub mod cmd_runtime_id;
 pub mod cmd_status;
 pub mod cmd_update_agent;

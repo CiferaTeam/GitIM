@@ -180,7 +180,28 @@ enum Command {
         dotenv_file: Option<PathBuf>,
     },
     /// Run provider preflight checks (binary present, version, hello round-trip).
-    Preflight,
+    ///
+    /// Calls `GET /preflight/{provider}` (root-level, not workspace-scoped).
+    /// Response is provider-specific and passed through verbatim to stdout.
+    /// `--llm-provider` / `--llm-model` are hermes-only — supplying them with
+    /// any other provider is rejected client-side (exit 1) without an HTTP
+    /// round-trip.
+    Preflight {
+        /// Provider to preflight: claude, codex, opencode, pi, hermes.
+        /// Unknown values are rejected by the server with HTTP 400 — the
+        /// CLI doesn't maintain its own whitelist so adding a provider on
+        /// the runtime side doesn't require a coupled CLI change.
+        #[arg(value_name = "PROVIDER")]
+        provider: String,
+        /// Hermes only: LLM provider id (e.g. "anthropic", "custom:foo").
+        /// Forwarded as `?llm_provider=...` query param.
+        #[arg(long = "llm-provider")]
+        llm_provider: Option<String>,
+        /// Hermes only: model id to use for the preflight hello.
+        /// Forwarded as `?llm_model=...` query param.
+        #[arg(long = "llm-model")]
+        llm_model: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -205,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_runtime_id, cmd_status,
+        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_preflight, cmd_runtime_id, cmd_status,
         cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url, Client, CliError,
         ErrorResponse,
     };
@@ -284,7 +305,11 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             };
             cmd_update_agent::run(&client, args).await
         }
-        Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
+        Command::Preflight {
+            provider,
+            llm_provider,
+            llm_model,
+        } => cmd_preflight::run(&client, provider, llm_provider, llm_model).await,
     };
 
     match result {
