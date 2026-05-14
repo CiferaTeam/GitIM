@@ -9,10 +9,15 @@
 //! Pulling the most-used types up here so subcommand modules can write
 //! `use crate::cli::{Client, CliError};` without three separate imports.
 
+pub mod dto;
 pub mod exit_code;
 pub mod http;
 pub mod workspace;
 
+pub use dto::{
+    agent_detail_from_value, redact_env_secrets, AddAgentResponse, AgentDetail, AgentView,
+    ErrorResponse, RuntimeStatus,
+};
 pub use exit_code::from_cli_error;
 pub use http::{resolve_base_url, Client, CliError};
 pub use workspace::{resolve_workspace, select_workspace};
