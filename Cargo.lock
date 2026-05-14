@@ -886,6 +886,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "clap",
  "dirs",
  "futures",
  "gitim-agent-provider",

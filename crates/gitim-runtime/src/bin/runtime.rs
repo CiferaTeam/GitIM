@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use clap::{Parser, Subcommand};
+
 use gitim_runtime::http::DEFAULT_PORT;
-use gitim_runtime::{provision_agent, AgentConfig, AgentLoop};
 
 fn runtime_pid_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".gitim/runtime.pid"))
@@ -31,16 +32,79 @@ fn cleanup_pid_file() {
     }
 }
 
+/// gitim-runtime: dual-mode binary.
+///
+/// No subcommand: runs the HTTP server (default; backs the WebUI and agent
+/// lifecycle). With a subcommand: one-shot CLI that shells out to a running
+/// runtime over HTTP, so AI agents and scripts can drive the runtime without
+/// the WebUI.
+///
+/// Subcommand bodies are placeholders in this scaffolding pass — actual
+/// behavior lands in later tasks (Tasks 6-12 of the runtime-cli plan).
+#[derive(Parser, Debug)]
+#[command(name = "gitim-runtime", version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Port to bind the HTTP server on (server mode only).
+    #[arg(long, global = true)]
+    port: Option<u16>,
+
+    /// Daemonize: fork-exec a detached server and exit (server mode only).
+    #[arg(long, short = 'd', global = true)]
+    daemon: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Show runtime status (running/stopped, port, version).
+    Status,
+    /// Print the device-bound runtime ID.
+    RuntimeId,
+    /// List workspaces known to the runtime.
+    Workspaces,
+    /// List agents in a workspace.
+    ListAgents,
+    /// Provision a new agent in a workspace.
+    AddAgent,
+    /// Hard-delete an agent (irreversible).
+    BurnAgent,
+    /// Update an existing agent's editable fields.
+    UpdateAgent,
+    /// Run provider preflight checks (binary present, version, hello round-trip).
+    Preflight,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    // --version: print and exit before anything else
-    if args.get(1).map(|s| s.as_str()) == Some("--version") {
-        println!("gitim-runtime {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    match args.command {
+        None => run_server(args.port, args.daemon).await,
+        Some(cmd) => run_cli(cmd),
     }
+}
 
+/// One-shot CLI dispatch. Each variant's body is filled in by later tasks
+/// in the runtime-cli plan (Tasks 6-12); this scaffold just establishes the
+/// command surface so the clap derive compiles and `--help` is meaningful.
+fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        Command::Status => todo!("subcommand `status` — implemented in later task"),
+        Command::RuntimeId => todo!("subcommand `runtime-id` — implemented in later task"),
+        Command::Workspaces => todo!("subcommand `workspaces` — implemented in later task"),
+        Command::ListAgents => todo!("subcommand `list-agents` — implemented in later task"),
+        Command::AddAgent => todo!("subcommand `add-agent` — implemented in later task"),
+        Command::BurnAgent => todo!("subcommand `burn-agent` — implemented in later task"),
+        Command::UpdateAgent => todo!("subcommand `update-agent` — implemented in later task"),
+        Command::Preflight => todo!("subcommand `preflight` — implemented in later task"),
+    }
+}
+
+/// Server mode: same boot path as before the CLI split. Initializes tracing,
+/// runs env preflight, then either daemonizes or runs the shell directly.
+async fn run_server(port: Option<u16>, daemon: bool) -> Result<(), Box<dyn std::error::Error>> {
     gitim_runtime::tool_path::ensure_common_tool_paths();
 
     tracing_subscriber::fmt::init();
@@ -51,63 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Parse flags
-    let daemon = args.iter().any(|a| a == "--daemon" || a == "-d");
-    let port = parse_port(&args);
-
-    // Shell mode: no positional args, or --port/--daemon present
-    if daemon || port.is_some() || args.len() == 1 {
-        let port = port.unwrap_or(DEFAULT_PORT);
-        if daemon {
-            return daemonize(port);
-        }
-        return run_shell(port).await;
+    let port = port.unwrap_or(DEFAULT_PORT);
+    if daemon {
+        return daemonize(port);
     }
-
-    // Legacy agent mode: gitim-runtime <remote_url> <handler> <display_name> [agents_dir]
-    if args.len() < 4 {
-        eprintln!("Usage:");
-        eprintln!("  gitim-runtime [--port <PORT>] [-d|--daemon]               (shell mode, default port {DEFAULT_PORT})");
-        eprintln!(
-            "  gitim-runtime <remote_url> <handler> <display_name> [agents_dir]  (agent mode)"
-        );
-        std::process::exit(1);
-    }
-
-    let remote_url = &args[1];
-    let handler = &args[2];
-    let display_name = &args[3];
-    let agents_dir = if args.len() > 4 {
-        PathBuf::from(&args[4])
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("gitim-agents")
-    };
-
-    std::fs::create_dir_all(&agents_dir)?;
-
-    eprintln!("provisioning agent @{handler} ...");
-    let config = AgentConfig {
-        handler: handler.clone(),
-        display_name: display_name.clone(),
-        remote_url: remote_url.clone(),
-        github_email: None,
-    };
-    let handle = provision_agent(&agents_dir, &config, true).await?;
-    eprintln!("agent ready at {}", handle.repo_root.display());
-
-    eprintln!("starting agent loop (ctrl-c to stop) ...");
-    let mut agent_loop = AgentLoop::with_defaults(&handle.repo_root)?;
-    agent_loop.run().await?;
-
-    Ok(())
-}
-
-fn parse_port(args: &[String]) -> Option<u16> {
-    args.windows(2)
-        .find(|w| w[0] == "--port")
-        .map(|w| w[1].parse().expect("invalid port number"))
+    run_shell(port).await
 }
 
 fn daemonize(port: u16) -> Result<(), Box<dyn std::error::Error>> {
