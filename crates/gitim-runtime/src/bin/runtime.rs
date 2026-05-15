@@ -206,12 +206,43 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    // Bypass `Args::parse()` because that calls `clap::Error::exit()` with
+    // clap's default exit code 2 for parse failures, which conflicts with
+    // the spec §4 mapping (1 = CLI / argv error, 2 = permanent server
+    // error). We discriminate clap's error kinds ourselves so:
+    //   - --help / --version → stdout + exit 0
+    //   - any other parse error → stderr + exit 1
+    let args = match Args::try_parse_from(std::env::args()) {
+        Ok(a) => a,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            match e.kind() {
+                // Help / version are not failures — clap routes their
+                // formatted output through `e.print()` to stdout. Our
+                // contract says exit 0 in this case.
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                | ErrorKind::DisplayVersion => {
+                    let _ = e.print();
+                    std::process::exit(0);
+                }
+                // All real argv failures — unknown args, missing required,
+                // value parse error, conflicts, etc. Print to stderr and
+                // exit 1 per spec §4.
+                _ => {
+                    let _ = e.print();
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
 
     if let Err(msg) = validate_args(&args) {
         eprintln!("{msg}");
-        // Exit code 2 matches clap's convention for argv errors.
-        std::process::exit(2);
+        // Spec §4: argv / config errors exit 1. clap's own parse errors
+        // and our `validate_args` rejections both fall into this class;
+        // 2 is reserved for runtime-side permanent failures.
+        std::process::exit(1);
     }
 
     match args.command {
@@ -730,6 +761,51 @@ mod argv_dispatch_tests {
         // Server-mode default invocation.
         let args = Args::try_parse_from(["gitim-runtime"]).expect("clap accepts no args");
         assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn daemon_alone_no_subcommand_validates_ok() {
+        // Server-mode `-d` (daemonize) is supported on its own.
+        let args = Args::try_parse_from(["gitim-runtime", "-d"])
+            .expect("clap accepts -d in server mode");
+        assert!(args.daemon);
+        assert!(args.command.is_none());
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn port_and_daemon_alone_no_subcommand_validates_ok() {
+        // Combined server-mode flags without a subcommand: the documented
+        // way to spawn a detached server on a fixed port. Must validate.
+        let args = Args::try_parse_from(["gitim-runtime", "--port", "5000", "-d"])
+            .expect("clap accepts --port -d in server mode");
+        assert_eq!(args.port, Some(5000));
+        assert!(args.daemon);
+        assert!(args.command.is_none());
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn port_with_subcommand_validates_err_to_exit_1() {
+        // Companion to `port_before_subcommand_at_top_level_parses_but_validate_rejects`
+        // pinning the ergonomic identity: clap accepts the parse, validate
+        // rejects, and `main` will exit 1 for that rejection (spec §4 —
+        // CLI / argv class). This test only exercises the validate step;
+        // the actual `process::exit(1)` is verified end-to-end by
+        // `cli_subprocess_smoke`.
+        let args = Args::try_parse_from(["gitim-runtime", "--port", "5000", "status"])
+            .expect("clap accepts --port at top level even with a subcommand");
+        assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn daemon_with_subcommand_validates_err() {
+        // Same shape for `-d`. Locks the contract from the validate side
+        // so a future refactor of `validate_args` can't silently let
+        // server-mode flags through with a subcommand.
+        let args = Args::try_parse_from(["gitim-runtime", "-d", "status"])
+            .expect("clap accepts -d at top level even with a subcommand");
+        assert!(validate_args(&args).is_err());
     }
 
     #[test]

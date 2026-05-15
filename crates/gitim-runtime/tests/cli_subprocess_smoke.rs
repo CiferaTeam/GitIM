@@ -133,8 +133,10 @@ fn test_unknown_subcommand_exits_nonzero() {
         !output.status.success(),
         "expected non-zero exit for unknown subcommand, got success",
     );
-    // clap returns exit code 2 for unrecognized subcommands.
-    assert_eq!(output.status.code(), Some(2));
+    // Spec §4 maps argv parse errors to exit 1 (CLI internal error).
+    // clap's own default is 2; we override in `main` so the agent's
+    // exit-code mapper sees a uniform 1 = CLI / argv class.
+    assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
     assert!(
         stderr.contains("unrecognized subcommand"),
@@ -147,7 +149,8 @@ fn test_unknown_subcommand_exits_nonzero() {
 fn test_legacy_positional_form_rejected() {
     // The pre-CLI form was `gitim-runtime <url> <handler> <name>`. T1
     // retired it; this test pins the end-to-end behaviour so a regression
-    // doesn't silently re-introduce the positional surface.
+    // doesn't silently re-introduce the positional surface. Exit 1 per
+    // spec §4 (argv / parse error class).
     let output = base_command()
         .args(["https://github.com/o/r", "handler", "displayname"])
         .output()
@@ -156,7 +159,7 @@ fn test_legacy_positional_form_rejected() {
         !output.status.success(),
         "legacy positional form must be rejected, got success",
     );
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 // ---------------------------------------------------------------------------
