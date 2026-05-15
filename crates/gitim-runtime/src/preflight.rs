@@ -2,11 +2,29 @@
 //! Used by /preflight/{provider} HTTP endpoint.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Per-call overrides for agent-aware preflight invocations.
+///
+/// Used by `preflight_for_add_request` (and direct callers from `agents_add`)
+/// to inject the agent's actual env vars and model into the provider CLI
+/// subprocess, so the preflight verifies the same configuration the agent
+/// will eventually run under — not the runtime's default profile.
+///
+/// `Default::default()` produces the legacy behavior used by the
+/// `/preflight/{provider}` HTTP route: inherited env, default preflight model.
+#[derive(Debug, Clone, Default)]
+pub struct PreflightOverrides {
+    /// Extra env vars to merge into the child process (overrides inherited values).
+    pub env_override: Option<HashMap<String, String>>,
+    /// Model name to pass on the CLI (replaces the per-provider preflight constant).
+    pub model_override: Option<String>,
+}
 
 /// Why a preflight attempt failed. Serialized as snake_case so the
 /// WebUI can branch on a stable string (`not_installed`, `timeout`, `other`).
@@ -236,14 +254,26 @@ fn parse_claude_result(stdout: &str) -> Result<String, String> {
         })
 }
 
-/// Run a real-hello ping against the Claude CLI at `bin`.
+/// Run a real-hello ping against the Claude CLI at `bin`, with optional
+/// per-call overrides for env vars and model name.
 ///
 /// Returns a `PreflightResult` that captures the outcome with a stable error
 /// taxonomy (`NotInstalled` / `Timeout` / `Other`). Split from
 /// [`preflight_claude`] so tests can inject fake binaries (e.g. `/bin/false`,
 /// a stalling shell script) to exercise each error branch without needing a
 /// logged-in Claude CLI.
-pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightResult {
+///
+/// When `overrides.env_override` is `Some`, those key/values are merged into
+/// the child process (overriding any inherited values with the same key).
+/// When `overrides.model_override` is `Some`, that string is used as the
+/// `--model` argv value (and reflected in `PreflightResult.model_used`);
+/// otherwise [`CLAUDE_PREFLIGHT_MODEL`] is used. `Default::default()` therefore
+/// preserves the legacy behavior used by [`preflight_claude_with`].
+pub async fn preflight_claude_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
     let started = Instant::now();
 
     // Isolate cwd so Claude doesn't pick up project memory, settings, or
@@ -260,10 +290,15 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
         }
     };
 
+    let model = overrides
+        .model_override
+        .as_deref()
+        .unwrap_or(CLAUDE_PREFLIGHT_MODEL);
+
     let mut cmd = tokio::process::Command::new(bin);
     cmd.current_dir(tmpdir.path())
         .arg("--print")
-        .args(["--model", CLAUDE_PREFLIGHT_MODEL])
+        .args(["--model", model])
         .args(["--output-format", "json"])
         .args(["--setting-sources", ""])
         .args(["--tools", ""])
@@ -275,6 +310,10 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -356,7 +395,7 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
         PreflightResult::success(
             "claude",
             None,
-            Some(CLAUDE_PREFLIGHT_MODEL.to_string()),
+            Some(model.to_string()),
             duration_ms,
             Some(truncate(&text, PREVIEW_TRUNCATE)),
         )
@@ -368,6 +407,16 @@ pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightRes
             duration_ms,
         )
     }
+}
+
+/// Run a real-hello ping against the Claude CLI at `bin`.
+///
+/// Thin wrapper over [`preflight_claude_with_config`] preserved for the
+/// `/preflight/{provider}` HTTP route and tests that don't need agent-aware
+/// overrides. New call sites that have access to an agent's env/model should
+/// prefer [`preflight_claude_with_config`] directly.
+pub async fn preflight_claude_with(bin: &str, timeout: Duration) -> PreflightResult {
+    preflight_claude_with_config(bin, timeout, PreflightOverrides::default()).await
 }
 
 /// Run a real-hello preflight against the default `claude` binary.
@@ -383,10 +432,11 @@ pub async fn preflight_claude() -> PreflightResult {
 /// [`CLAUDE_PREFLIGHT_MODEL`]: predictable response-time and cost.
 const CODEX_PREFLIGHT_MODEL: &str = "gpt-5.4-mini";
 
-/// Run a real-hello ping against the Codex CLI at `bin`.
+/// Run a real-hello ping against the Codex CLI at `bin`, with optional
+/// per-call overrides for env vars and model name.
 ///
-/// Mirrors [`preflight_claude_with`]: isolates cwd, spawns the CLI with a
-/// fixed prompt, enforces a timeout, and classifies the result with the same
+/// Mirrors [`preflight_claude_with_config`]: isolates cwd, spawns the CLI with
+/// a fixed prompt, enforces a timeout, and classifies the result with the same
 /// `NotInstalled` / `Timeout` / `Other` taxonomy.
 ///
 /// The shape diverges in two places:
@@ -394,7 +444,14 @@ const CODEX_PREFLIGHT_MODEL: &str = "gpt-5.4-mini";
 /// 2. `codex exec --json` emits JSONL (one JSON object per line), not a
 ///    single JSON array. We scan for `turn.completed` (the stream terminator)
 ///    and extract the `agent_message` text from the matching `item.completed`.
-pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResult {
+///
+/// Override semantics match the claude variant. `Default::default()` preserves
+/// the legacy behavior used by [`preflight_codex_with`].
+pub async fn preflight_codex_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
     let started = Instant::now();
 
     let tmpdir = match tempfile::tempdir() {
@@ -409,6 +466,11 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
         }
     };
 
+    let model = overrides
+        .model_override
+        .as_deref()
+        .unwrap_or(CODEX_PREFLIGHT_MODEL);
+
     let mut cmd = tokio::process::Command::new(bin);
     cmd.current_dir(tmpdir.path())
         .arg("exec")
@@ -417,12 +479,16 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
         // `--skip-git-repo-check`, codex refuses to run with "Not inside a
         // trusted directory".
         .arg("--skip-git-repo-check")
-        .args(["--model", CODEX_PREFLIGHT_MODEL])
+        .args(["--model", model])
         .arg("Reply with exactly: GITIM_OK")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
 
     // Codex is happy with a null stdin — unlike claude, no need to drop
     // the write end to signal EOF.
@@ -535,7 +601,7 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
         PreflightResult::success(
             "codex",
             None,
-            Some(CODEX_PREFLIGHT_MODEL.to_string()),
+            Some(model.to_string()),
             duration_ms,
             Some(truncate(&text, PREVIEW_TRUNCATE)),
         )
@@ -547,6 +613,16 @@ pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResu
             duration_ms,
         )
     }
+}
+
+/// Run a real-hello ping against the Codex CLI at `bin`.
+///
+/// Thin wrapper over [`preflight_codex_with_config`] preserved for the
+/// `/preflight/{provider}` HTTP route and tests that don't need agent-aware
+/// overrides. New call sites that have access to an agent's env/model should
+/// prefer [`preflight_codex_with_config`] directly.
+pub async fn preflight_codex_with(bin: &str, timeout: Duration) -> PreflightResult {
+    preflight_codex_with_config(bin, timeout, PreflightOverrides::default()).await
 }
 
 /// Run a real-hello preflight against the default `codex` binary.
