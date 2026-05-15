@@ -188,6 +188,7 @@ export interface PollResponse {
 }
 
 export type CardStatus = "todo" | "doing" | "done";
+export type ArchivedVia = "channel" | "manual";
 
 export interface Card {
   card_id: string;
@@ -199,6 +200,7 @@ export interface Card {
   created_by: string;
   created_at: string;
   updated_at: string;
+  archived_via?: ArchivedVia;
 }
 
 export interface CardFilter {
