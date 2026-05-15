@@ -376,3 +376,32 @@ async fn archive_card_rolls_back_yaml_when_commit_fails() {
     //   5. chmod 0755 .git/objects to restore.
 }
 
+/// Manual test: simulate create_dir_all failure (step 7), verify yaml stamp is rolled back.
+/// Failure mode: make the archive directory unwritable so create_dir_all fails before git mv.
+#[tokio::test]
+#[ignore]
+async fn archive_card_rolls_back_yaml_when_create_dir_fails() {
+    // No way to inject create_dir_all failure deterministically via the current test fixture.
+    // Manual verification steps:
+    //   1. Create a card in a test repo (channel "dev", card id <id>).
+    //   2. mkdir -p archive/channels/dev && chmod 0555 archive/channels/dev
+    //      so create_dir_all("archive/channels/dev/cards") fails with EACCES.
+    //   3. Call archive_card — expect Response::error containing "failed to create archive dir".
+    //   4. Read channels/dev/cards/<id>/card.meta.yaml — archived_via must be absent (yaml restored).
+    //   5. chmod 0755 archive/channels/dev to restore.
+}
+
+/// Manual test: simulate git mv failure (step 8), verify yaml stamp is rolled back.
+/// Failure mode: make the source directory read-only so git mv cannot rename it.
+#[tokio::test]
+#[ignore]
+async fn archive_card_rolls_back_yaml_when_git_mv_fails() {
+    // No way to inject git mv failure deterministically via the current test fixture.
+    // Manual verification steps:
+    //   1. Create a card in a test repo (channel "dev", card id <id>).
+    //   2. chmod 0555 channels/dev/cards/<id> so git mv cannot move the directory.
+    //   3. Call archive_card — expect Response::error containing "git mv failed".
+    //   4. Read channels/dev/cards/<id>/card.meta.yaml — archived_via must be absent (yaml restored).
+    //   5. chmod 0755 channels/dev/cards/<id> to restore.
+}
+

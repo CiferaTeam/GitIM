@@ -247,6 +247,46 @@ pub async fn handle_create_card(
     Response::success(serde_json::to_value(payload).unwrap())
 }
 
+/// Restore `card.meta.yaml` to its last-committed state after a failed
+/// archive attempt.  Runs `git reset HEAD -- <meta_rel>` then
+/// `git checkout -- <meta_rel>`.  Failures are logged but do not change
+/// the caller's return value — the original error is still what gets
+/// reported.
+fn restore_card_yaml(state: &SharedState, meta_rel: &str) {
+    match std::process::Command::new("git")
+        .args(["reset", "HEAD", "--", meta_rel])
+        .current_dir(&state.repo_root)
+        .output()
+    {
+        Ok(out) if !out.status.success() => {
+            error!(
+                "archive_card: yaml reset failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(e) => {
+            error!("archive_card: yaml reset spawn failed: {}", e);
+        }
+        _ => {}
+    }
+    match std::process::Command::new("git")
+        .args(["checkout", "--", meta_rel])
+        .current_dir(&state.repo_root)
+        .output()
+    {
+        Ok(out) if !out.status.success() => {
+            error!(
+                "archive_card: yaml checkout failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(e) => {
+            error!("archive_card: yaml checkout spawn failed: {}", e);
+        }
+        _ => {}
+    }
+}
+
 pub async fn handle_archive_card(
     state: SharedState,
     channel: String,
@@ -322,6 +362,9 @@ pub async fn handle_archive_card(
     }
 
     // 7. Create archive target parent directory
+    // meta_rel is needed for yaml restore in step 7/8 failure paths and step 9 rollback.
+    let from_rel = &located.rel_path; // channels/<ch>/cards/<id>
+    let meta_rel = format!("{}/card.meta.yaml", from_rel);
     let archive_cards_dir = state
         .repo_root
         .join("archive")
@@ -329,13 +372,15 @@ pub async fn handle_archive_card(
         .join(ch_name.to_string())
         .join("cards");
     if let Err(e) = std::fs::create_dir_all(&archive_cards_dir) {
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!("failed to create archive dir: {}", e));
     }
 
     // 8. git mv (directory rename — git 2.x handles directories atomically)
-    let from_rel = &located.rel_path; // channels/<ch>/cards/<id>
     let to_rel = format!("archive/channels/{}/cards/{}", ch_name, card_id);
     if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
+        // git mv hasn't moved the directory yet — only yaml needs restoring.
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!("git mv failed: {}", e));
     }
 
@@ -355,15 +400,7 @@ pub async fn handle_archive_card(
         }
         // Restore the yaml file to its committed state: unstage then restore
         // working tree (undoes both the yaml stamp and any staged changes from git mv).
-        let meta_rel = format!("{}/card.meta.yaml", from_rel);
-        let _ = std::process::Command::new("git")
-            .args(["reset", "HEAD", "--", &meta_rel])
-            .current_dir(&state.repo_root)
-            .output();
-        let _ = std::process::Command::new("git")
-            .args(["checkout", "--", &meta_rel])
-            .current_dir(&state.repo_root)
-            .output();
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!(
             "archive_card commit failed: {}; rolled back git mv",
             e
