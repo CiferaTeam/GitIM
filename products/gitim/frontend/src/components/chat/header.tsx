@@ -65,13 +65,12 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
   if (isDm) {
     const parts = currentChannel.split("--");
     if (parts.length === 2) {
-      const other = parts.find((p) => p !== currentUser) ?? parts[0];
-      displayName = `@${other}`;
+      displayName = parts.find((p) => p !== currentUser) ?? parts[0];
     } else {
-      displayName = `@${currentChannel}`;
+      displayName = currentChannel;
     }
   } else {
-    displayName = `#${currentChannel}`;
+    displayName = currentChannel;
   }
 
   const members = channel?.members ?? [];

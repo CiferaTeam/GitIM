@@ -464,8 +464,8 @@ export function ChatLayout() {
   const isDm = currentChannelData?.kind === "dm";
   const mobileChannelLabel = currentChannel
     ? isDm
-      ? `@${currentChannel.split("--").find((p) => p !== currentUser) ?? currentChannel}`
-      : `#${currentChannel}`
+      ? currentChannel.split("--").find((p) => p !== currentUser) ?? currentChannel
+      : currentChannel
     : "Select a channel";
 
   return (
