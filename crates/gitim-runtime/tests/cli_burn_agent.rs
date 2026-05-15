@@ -117,11 +117,13 @@ fn workspace_has_agent(state: &SharedRuntimeState, slug: &str, id: &str) -> bool
 /// which is unique to the burn endpoint (`/remove` never invokes daemon
 /// RPC).
 ///
-/// Why we observe `CliError::HttpStatus(500, body)` rather than
-/// `CliError::ResponseErrorCode`: the shared `process_response` short-
-/// circuits on 5xx without parsing the body — see `cli/http.rs`. The
-/// body excerpt still contains the `error_code` string so the test can
-/// fingerprint the endpoint.
+/// We observe `CliError::ResponseErrorCode { code: "daemon_depart_failed",
+/// http_status: 500, .. }`. The CLI's `process_response` parses the body
+/// regardless of HTTP status and the structured `error_code` takes
+/// precedence over status-based classification — see `cli/http.rs`. The
+/// agent's exit-code mapper then classifies this as **permanent** (exit
+/// code 2): the daemon was reachable but the depart logic refused, so
+/// retrying without operator intervention won't help.
 ///
 /// This test spawns a real `gitim-daemon` process; we install
 /// `ensure_daemon_in_path` to redirect its logs out of `~/.gitim/logs/`,
@@ -153,32 +155,29 @@ async fn test_burn_default_calls_burn_endpoint() {
         false, // default: ritual burn
     )
     .await
-    .expect_err("agent without provisioned user.meta.yaml must surface a 5xx");
+    .expect_err("agent without provisioned user.meta.yaml must surface an error");
 
     match &err {
-        CliError::HttpStatus(status, body) => {
-            assert_eq!(*status, 500, "burn daemon failure must be 5xx");
+        CliError::ResponseErrorCode { code, http_status, .. } => {
+            assert_eq!(*http_status, 500, "burn daemon failure must be 5xx");
             // `daemon_depart_failed` and `daemon_unreachable` are both
             // exclusive to the burn handler — either one proves we hit
-            // `/burn` rather than `/remove`. Match on the strings inside
-            // the body excerpt since 5xx skips structured parsing.
-            let hits_burn_path = body.contains("daemon_depart_failed")
-                || body.contains("daemon_unreachable")
-                || body.contains("depart_user");
+            // `/burn` rather than `/remove`.
             assert!(
-                hits_burn_path,
-                "body must fingerprint /burn endpoint, got: {body}",
+                code == "daemon_depart_failed" || code == "daemon_unreachable",
+                "expected /burn-exclusive error_code, got: {code}",
             );
         }
         other => panic!(
-            "expected HttpStatus(500, …) from /burn daemon RPC, got: {other:?}",
+            "expected ResponseErrorCode from /burn daemon RPC, got: {other:?}",
         ),
     }
-    // 5xx is classified transient per `exit_code::from_cli_error`. Lock
-    // that contract so a future change to `process_response` doesn't
-    // silently downgrade burn-failure to permanent (we want agents to
-    // be allowed to retry on transient daemon issues).
-    assert_eq!(from_cli_error(&err), 3);
+    // Structured `error_code` → permanent (exit 2) per
+    // `exit_code::from_cli_error`. The daemon was reachable and gave a
+    // structured rejection; the agent should NOT auto-retry. Lock this
+    // contract so future tweaks to `process_response` don't silently flip
+    // burn failures back to transient (3) on a body that has a clear code.
+    assert_eq!(from_cli_error(&err), 2);
 
     // Best-effort: kill the daemon `ensure_daemon_with_log` spawned for
     // the burn attempt. The test process exits soon after, but stopping

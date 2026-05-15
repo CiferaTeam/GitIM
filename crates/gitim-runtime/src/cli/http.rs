@@ -4,13 +4,16 @@
 //!
 //! - Port discovery follows a strict priority: `--port` flag → `GITIM_RUNTIME_PORT`
 //!   env → persisted `listen_port` in `~/.gitim/runtime.json` → `DEFAULT_PORT`.
-//! - Error classification keys off the response body's `error_code` field, NOT
-//!   HTTP status alone. The runtime sometimes returns HTTP 200 with
-//!   `{ok:false, error_code:"..."}` for permanent errors, and sometimes 4xx +
-//!   error_code; both map to `CliError::ResponseErrorCode` so the agent can
-//!   distinguish permanent (don't retry) from transient (may retry) failures.
-//! - HTTP 5xx is unconditionally transient; HTTP 4xx without `error_code` is
-//!   treated as permanent (covered downstream by `exit_code::from_cli_error`).
+//! - Error classification is body-first: the response body is always parsed
+//!   regardless of HTTP status, and the canonical signal is the JSON
+//!   `error_code` / `ok` fields, NOT the HTTP status. The runtime is
+//!   inconsistent about which status it pairs with structured errors —
+//!   some endpoints return 200 + `{ok:false, error_code:...}`, some 4xx +
+//!   `error_code`, some 5xx + `error_code`. All three map to
+//!   `CliError::ResponseErrorCode` so the agent's exit-code mapper can make
+//!   a single decision off `error_code`. The fallback to `HttpStatus` only
+//!   fires when the body has no usable structure (no `error_code`, no
+//!   `ok: false`) — see `process_response_inner`.
 //!
 //! The verb helpers (`get`/`post`/`patch`) are async because reqwest in this
 //! crate is built without the blocking feature — keeps a single runtime model
@@ -169,38 +172,53 @@ impl Client {
     }
 }
 
-/// Centralize the response → CliError mapping in one place so all three verbs
-/// share identical semantics. The order matters: 5xx without body inspection
-/// is always transient (runtime is broken, not the request), then we try to
-/// parse the body to pick out a structured `error_code`, and only fall back
-/// to raw 4xx if there's no JSON or no `error_code`.
+/// Thin async wrapper: read the response status + body, then hand off to the
+/// pure classification function. Keeping the IO boundary minimal makes the
+/// real logic in `process_response_inner` unit-testable without spinning up
+/// a mock HTTP server (reqwest::Response isn't constructible directly).
 async fn process_response(resp: reqwest::Response) -> Result<serde_json::Value, CliError> {
     let status = resp.status();
-    let status_code = status.as_u16();
-
-    // 5xx is unconditionally transport-class transient. Don't bother parsing
-    // — the response is likely not even JSON (could be a proxy error page).
-    if status.is_server_error() {
-        let body = read_body_excerpt(resp).await;
-        return Err(CliError::HttpStatus(status_code, body));
-    }
-
-    // 2xx and 4xx: read body fully, then try to parse as JSON. Both flavors
-    // can carry `error_code` (Architecture §1), so we treat parsing as the
-    // canonical demux step regardless of status.
     let bytes = resp
         .bytes()
         .await
         .map_err(|e| CliError::Transport(e.to_string()))?;
+    process_response_inner(status, &bytes)
+}
 
-    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+/// Body-first response classification. The HTTP status is only consulted as
+/// a fallback when the body lacks structured fields — the runtime is
+/// inconsistent about pairing structured errors with status codes, so we
+/// privilege the body.
+///
+/// Decision order:
+/// 1. Try parse body as JSON.
+/// 2. If parsed: `error_code` present → ResponseErrorCode (regardless of
+///    HTTP status — handles 200/4xx/5xx + structured error uniformly).
+/// 3. If parsed: `ok: false` (without `error_code`) → ResponseErrorCode with
+///    `code = "unspecified"`, message from `error` field. Catches the case
+///    where the runtime returns 200 with a failure body but forgot to set
+///    a structured code — without this, the CLI would treat the response
+///    as success.
+/// 4. If parsed and 2xx → Ok(value).
+/// 5. If parsed and 4xx/5xx without structured fields → HttpStatus with body
+///    excerpt.
+/// 6. If parse failed and 4xx/5xx → HttpStatus with body excerpt.
+/// 7. If parse failed and 2xx → Parse error (the runtime should always
+///    return JSON; a 200 with non-JSON is a protocol bug).
+fn process_response_inner(
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> Result<serde_json::Value, CliError> {
+    let status_code = status.as_u16();
+
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => {
-            // No JSON. If status was 4xx, surface as HttpStatus with body
-            // excerpt — that's the most useful failure mode for the caller.
-            // If status was 2xx but body wasn't JSON, that's a parse bug.
-            let excerpt = bytes_to_excerpt(&bytes);
-            return if status.is_client_error() {
+            // No JSON. If status indicates a problem, surface that with a
+            // body excerpt — most useful failure mode for callers. If
+            // status was 2xx but body wasn't JSON, that's a protocol bug.
+            let excerpt = bytes_to_excerpt(bytes);
+            return if status.is_client_error() || status.is_server_error() {
                 Err(CliError::HttpStatus(status_code, excerpt))
             } else {
                 Err(CliError::Parse(format!("{e}: body excerpt: {excerpt}")))
@@ -208,9 +226,8 @@ async fn process_response(resp: reqwest::Response) -> Result<serde_json::Value, 
         }
     };
 
-    // Body parsed. Look for `error_code` — present in either 200-with-error
-    // pattern or 4xx-with-error pattern. Pull message from `message` first,
-    // fall back to `error`, fall back to empty string.
+    // Body parsed. Structured `error_code` wins regardless of HTTP status —
+    // see decision order in the doc comment above.
     if let Some(code) = value.get("error_code").and_then(|v| v.as_str()) {
         let message = value
             .get("message")
@@ -225,20 +242,31 @@ async fn process_response(resp: reqwest::Response) -> Result<serde_json::Value, 
         });
     }
 
-    // 4xx body that parsed but had no error_code — still a failure, but no
-    // structured code to act on. Map to HttpStatus so exit code = 2 (permanent).
-    if status.is_client_error() {
-        return Err(CliError::HttpStatus(status_code, bytes_to_excerpt(&bytes)));
+    // No structured `error_code`, but body explicitly signals failure via
+    // `ok: false`. Don't let this fall through as success. Synthesize a
+    // generic code so the agent still hits the exit-2 (permanent) path,
+    // matching how a code-bearing failure would have classified.
+    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let message = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        return Err(CliError::ResponseErrorCode {
+            code: "unspecified".to_string(),
+            message,
+            http_status: status_code,
+        });
+    }
+
+    // Body parsed but has neither `error_code` nor `ok: false`. Status
+    // decides: 4xx/5xx → HttpStatus, 2xx → Ok.
+    if status.is_client_error() || status.is_server_error() {
+        return Err(CliError::HttpStatus(status_code, bytes_to_excerpt(bytes)));
     }
 
     Ok(value)
-}
-
-async fn read_body_excerpt(resp: reqwest::Response) -> String {
-    match resp.bytes().await {
-        Ok(b) => bytes_to_excerpt(&b),
-        Err(e) => format!("<body read failed: {e}>"),
-    }
 }
 
 fn bytes_to_excerpt(bytes: &[u8]) -> String {
@@ -413,6 +441,166 @@ mod tests {
         let s = bytes_to_excerpt(small);
         assert_eq!(s, "hello");
     }
+
+    // ── process_response_inner: body-first classification ───────────────────
+
+    use reqwest::StatusCode;
+
+    #[test]
+    fn ok_response_returns_value() {
+        let bytes = br#"{"ok":true,"data":42}"#;
+        let v = process_response_inner(StatusCode::OK, bytes).expect("2xx + valid JSON → Ok");
+        assert_eq!(v.get("data").and_then(|n| n.as_i64()), Some(42));
+    }
+
+    #[test]
+    fn error_code_in_200_classified_as_response_error() {
+        // 200 + `error_code` — the runtime sometimes returns this shape for
+        // permanent failures it considers "expected" (e.g. handler_conflict).
+        let bytes = br#"{"ok":false,"error":"name taken","error_code":"handler_conflict"}"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode { code, message, http_status } => {
+                assert_eq!(code, "handler_conflict");
+                assert_eq!(message, "name taken");
+                assert_eq!(http_status, 200);
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_code_in_4xx_classified_as_response_error() {
+        // 4xx + `error_code` — common pattern for input validation
+        // failures (provider validation, missing fields, etc).
+        let bytes = br#"{"ok":false,"error":"bad input","error_code":"validation_failed"}"#;
+        let err =
+            process_response_inner(StatusCode::BAD_REQUEST, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode { code, http_status, .. } => {
+                assert_eq!(code, "validation_failed");
+                assert_eq!(http_status, 400);
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_code_in_5xx_parsed_not_swallowed_by_status() {
+        // Regression: previous behavior short-circuited 5xx without parsing
+        // the body, so a structured `error_code` would never surface. Burn
+        // / preflight / sync error codes ship in 5xx bodies and the agent
+        // needs them to decide permanent (don't retry) vs transient (retry).
+        let bytes = br#"{"ok":false,"error":"daemon RPC failed","error_code":"daemon_unreachable"}"#;
+        let err = process_response_inner(StatusCode::INTERNAL_SERVER_ERROR, bytes)
+            .expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode { code, http_status, .. } => {
+                assert_eq!(code, "daemon_unreachable");
+                assert_eq!(http_status, 500);
+            }
+            other => panic!(
+                "expected ResponseErrorCode (5xx body parsed), got: {other:?}",
+            ),
+        }
+    }
+
+    #[test]
+    fn ok_false_without_error_code_classified_as_response_error() {
+        // Regression: previous behavior fell through to `Ok(value)` for
+        // 200 + `{ok:false}` without `error_code`. That made the caller
+        // treat a failure as success. We now synthesize a generic code so
+        // the exit-code mapper hits the permanent path.
+        let bytes = br#"{"ok":false,"error":"something broke"}"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode { code, message, http_status } => {
+                assert_eq!(code, "unspecified");
+                assert_eq!(message, "something broke");
+                assert_eq!(http_status, 200);
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ok_false_without_error_uses_message_field() {
+        // Edge case for `ok_false_without_error_code...`: when neither
+        // `error` nor `error_code` is set, fall back to `message`.
+        let bytes = br#"{"ok":false,"message":"db connection lost"}"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode { code, message, .. } => {
+                assert_eq!(code, "unspecified");
+                assert_eq!(message, "db connection lost");
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn five_xx_without_parseable_body_falls_to_http_status() {
+        // Common case for upstream proxy errors — body is HTML or
+        // plaintext, not JSON. Must still classify as HttpStatus(5xx)
+        // so the exit-code mapper hits the transient path.
+        let bytes = b"<html><body>Bad Gateway</body></html>";
+        let err =
+            process_response_inner(StatusCode::BAD_GATEWAY, bytes).expect_err("must error");
+        match err {
+            CliError::HttpStatus(status, body) => {
+                assert_eq!(status, 502);
+                assert!(body.contains("Bad Gateway"), "body must include excerpt: {body}");
+            }
+            other => panic!("expected HttpStatus, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn four_xx_without_json_falls_to_http_status() {
+        // No JSON, no error_code → HttpStatus with body excerpt.
+        let bytes = b"not found";
+        let err =
+            process_response_inner(StatusCode::NOT_FOUND, bytes).expect_err("must error");
+        match err {
+            CliError::HttpStatus(status, body) => {
+                assert_eq!(status, 404);
+                assert!(body.contains("not found"));
+            }
+            other => panic!("expected HttpStatus, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn four_xx_with_json_no_error_code_falls_to_http_status() {
+        // Edge case: 4xx with valid JSON but no `error_code` and no
+        // `ok: false` — fall through to HttpStatus so exit code = 2.
+        let bytes = br#"{"detail":"some plain rejection"}"#;
+        let err =
+            process_response_inner(StatusCode::UNPROCESSABLE_ENTITY, bytes).expect_err("must error");
+        match err {
+            CliError::HttpStatus(status, body) => {
+                assert_eq!(status, 422);
+                assert!(body.contains("plain rejection"));
+            }
+            other => panic!("expected HttpStatus, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_xx_without_json_is_parse_error() {
+        // 2xx with non-JSON body is a protocol bug — the runtime always
+        // returns JSON. Surface as Parse so the agent sees the bug.
+        let bytes = b"surprise plaintext";
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::Parse(msg) => {
+                assert!(msg.contains("surprise plaintext"));
+            }
+            other => panic!("expected Parse, got: {other:?}"),
+        }
+    }
+
+    // ── Timeout: connect to a non-listening port → fails fast, doesn't hang ─
 
     /// Build a Client and try a request against a port nothing's listening
     /// on. The connect must fail within the configured connect_timeout (5s)

@@ -72,28 +72,33 @@ async fn test_preflight_claude_returns_status() {
 #[tokio::test]
 async fn test_preflight_unknown_provider_errors() {
     // Server returns 400 + `{"ok": false, "error": "unknown provider"}` —
-    // crucially WITHOUT an `error_code` field. The CLI HTTP layer maps this
-    // to `CliError::HttpStatus(400, body)`, which exit_code::from_cli_error
-    // classifies as PERMANENT (2). The test asserts the variant and lets the
-    // unit tests in `cli::exit_code` carry the mapping contract.
+    // crucially WITHOUT an `error_code` field. The CLI HTTP layer's
+    // body-first classification treats `ok: false` (no error_code) as a
+    // structured rejection and synthesizes `code = "unspecified"` so the
+    // response doesn't fall through as success. The downstream contract
+    // we care about is exit code = 2 (permanent), preserved either way.
     let (addr, server) = spawn_server().await;
     let client = client_for(addr);
 
     let result = cmd_preflight::run(&client, "invalid-provider".to_string(), None, None).await;
     let err = result.expect_err("unknown provider must surface as CliError");
     match &err {
-        CliError::HttpStatus(status, body) => {
-            assert_eq!(*status, 400, "unknown provider must be 400");
+        CliError::ResponseErrorCode { code, message, http_status } => {
+            assert_eq!(*http_status, 400, "unknown provider must be 400");
+            assert_eq!(
+                code, "unspecified",
+                "no error_code in body → synthesized 'unspecified'",
+            );
             assert!(
-                body.contains("unknown provider"),
-                "body excerpt must include server's error message: {body}",
+                message.contains("unknown provider"),
+                "message must include server's error text: {message}",
             );
         }
-        other => panic!("expected HttpStatus(400, _), got: {other:?}"),
+        other => panic!("expected ResponseErrorCode (ok:false body), got: {other:?}"),
     }
 
     // Exit-code mapping is unit-tested in `cli::exit_code::from_cli_error`
-    // but a sanity-check here pins the integration: 400 → exit 2 today.
+    // but a sanity-check here pins the integration: structured rejection → exit 2.
     assert_eq!(
         gitim_runtime::cli::from_cli_error(&err),
         2,
