@@ -97,12 +97,15 @@ UX：1 click → 1 wait（10-60s 含 clone）。
 ### P5 — `/preflight/{provider}` HTTP endpoint 不动
 保留 generic preflight（系统级，无 agent config）—— CLI `gitim-runtime preflight <provider>` 仍可用，agent operator 还能手动 sanity check。新增的 add-time preflight 走 agents_add 内部，**不**暴露独立 endpoint。
 
-### P6 — 协议层 + 现有 HTTP 表面 99% 不动
+### P6 — 协议层不动 + 现有 HTTP 表面纯加性扩展
 - `users/<handler>.meta.yaml` schema 不动
 - `.gitim/me.json` schema 不动
 - `.thread` 不动
 - `/preflight/{provider}` 行为不变
-- **唯一扩**：`ErrorBody` 加可选 `preflight_detail: Option<PreflightResult>` 字段（per finding #7 - 见下方"Architecture decisions"）
+- **加性扩**（不删不改任何现有字段）：
+  - `ErrorBody` 加可选 `preflight_detail: Option<PreflightResult>` 字段（per finding #7）
+  - 新 error_code 加入（不影响已有 codes）
+  - `CliError::ResponseErrorCode` + `dto::ErrorResponse` 同步加 `preflight_detail` 字段
 
 ### P7 — Provider scope = v1 已支持全部
 claude / codex / opencode / pi / hermes 全部纳入。mock provider 走 always-pass short-circuit。
@@ -116,26 +119,40 @@ claude / codex / opencode / pi / hermes 全部纳入。mock provider 走 always-
 
 ## Architecture decisions（解 plan-eng-review v1 的 6 个 still-relevant finding）
 
-### §1 — Hermes 无 llm_provider/llm_model 时 preflight 行为（finding #2）
-**决定**：require llm_provider + llm_model **同时存在** for hermes provider；任一缺失 → preflight 直接 fail with error_code `hermes_llm_unspecified`（不调 hermes）。
+### §1 — Hermes 无 llm_provider/llm_model 时 preflight 行为（finding #2，v2 review 修正）
+**决定（v2 review 后修正）**：保持向后兼容。如果 add request 不指定 llm_provider/llm_model，preflight 验证 **user default profile 现有的 LLM 配置**。
 
 理由：
-- "validate agent 真能跑 LLM" 的语义要求知道 agent 将用什么 LLM
-- 当前 runtime 在 llm_provider/llm_model 缺失时让 hermes profile 继承 default profile 的 LLM —— 这是 implicit behavior，preflight 阶段做"猜你想用什么"很别扭
-- 强制显式：UI 已经选 LLM 才能添加 hermes agent；CLI 用 `--llm-provider`/`--llm-model` 标注
-- 任一缺失或两个都缺失 → 拒绝 add，不 preflight
+- 当前 WebUI / CLI / HTTP API 三处都允许 hermes add 不指定 LLM（继承 default profile）—— 这是 deliberately 支持的 user workflow，不该 break
+- "Validate agent 真能跑 LLM" 的语义在此意味着"agent 将会用的 LLM 真能跑" —— agent 不指定 LLM 时实际用 default profile 的 LLM，preflight 就该测它
+- v1 doc 错误声明 "WebUI / CLI 已 enforce"，code review v2 verified false（WebUI hermes-llm.ts default "Default profile"；cli/cmd_add_agent.rs:185 只 warn）
 
-WebUI 早已 enforce hermes LLM selection。CLI add-agent (runtime-cli feature) 已 validate 这个 (cmd_add_agent.rs)。Server 加一道兜底。
+实施：
+- `preflight_for_add_request` for hermes：
+  - 如 add request 含 `llm_provider` + `llm_model` 双值 → `preflight_hermes_with(hermes_home: None, llm_provider: Some(X), llm_model: Some(Y))` 走 chat-mode hello with overrides
+  - 如 **两个都缺失** → 读 `~/.hermes/profiles/<default>/config.yaml` 的 `model.default` + provider，回填到 `preflight_hermes_with(llm_provider: Some(resolved), llm_model: Some(resolved))` → chat-mode hello
+  - 如 **只缺一个** → preflight 直接 fail（已是现有 runtime contract：`missing_llm_provider` error_code，see http.rs:2136）
+  - 如 default profile 没装（无 `~/.hermes/profiles/<default>/`）→ 已有 `hermes_not_setup` error_code 处理
 
-### §2 — Non-hermes model override policy（finding #6）
-**决定**：用 **agent 的 actual model**（而非 hardcoded cheap）。
+Hermes invariant 文档化：`hermes profile create --clone` 是 hermes CLI 的契约 —— clone 会带 `.env` + `auth.json` + LLM config。所以 preflight against `hermes_home: None` (= user default profile) 验证的是"agent clone 后会继承的 LLM 配置"。这是 deliberate，不是 sloppy。
+
+### §2 — Non-hermes model override policy（finding #6 + v2 finding "opencode/pi 不对称"）
+**决定**：claude / codex 用 **agent 的 actual model**；**opencode / pi 不支持 model override**（writing-plans 调研 + 文档化 asymmetry）。
 
 理由：
-- User reframe 原话："并不一定加上这个模型配置之后还是可用的" —— 显式要验真实 model
-- preflight cost 是 once per add，不是 per turn，可接受
-- model 名拼错 / 该 model 无 access 是 add 失败的主要原因，cheap-model preflight 不发现这些
+- claude/codex CLI 都接 `--model X` flag，可注入 agent 配置的 model
+- opencode CLI 当前 `preflight_opencode_with` 不带 `--model`（per preflight.rs:567）；其 model 是 user `opencode auth login` 时 wired 的，不是 per-invocation arg
+- pi CLI 把 provider/model 分开（crates/gitim-agent-provider/src/pi/mod.rs:333），preflight 当前也不带 model
+- 强制 opencode/pi 改 invocation shape 超出本 plan scope，可后续 PR 单独做
+- v1 接受：opencode/pi preflight 只验**连通性 + auth**，不验 model 名（agent 在第一 turn 时如果 model 名错才暴露）
 
-代价承认：preflight 烧 agent 配置的 model（如 opus）一个 token。User 接受。
+代价承认：
+- claude/codex preflight 烧 agent 配置 model 一个 hello token（opus 烧 opus）
+- opencode/pi 仍有 "model 名拼错 在第一 turn 才暴露" 的小风险（pre-existing gap，没改变）
+
+文档：`docs/specs/runtime-cli.md` add-agent section 加 known limitation 标注 opencode/pi preflight 不验 model。
+
+CLAUDE_PREFLIGHT_MODEL 等 const 仍保留（旧 `/preflight/{provider}` generic path 走它），新 path 用 override。
 
 ### §3 — `ErrorBody` 扩展加 `preflight_detail`（finding #7）
 **决定**：扩展 `ErrorBody`。
@@ -164,20 +181,71 @@ if provider == "mock" { return PreflightResult::success(...) }
 不 shell out（mock provider 实际跑通过 `gitim send`，跟 hello 语义没关系）。
 
 ### §5 — 并发 add race（finding #11）
-**决定**：不引入新保护。
+**决定**：不引入新保护，只加文档化 note。
 
-理由：preflight **没有 side effect**，并发两个相同 handler 的 add → 两个都 preflight pass → 都进 provision_agent → 第二个被 daemon onboard 的 handler_conflict 拦下（已有保护）。第一个赢，第二个返 `handler_conflict`。没有新 corruption 模式。
+理由：preflight **没有 agent/provision side effect**（handler_conflict 检查跑的 `git fetch origin` 是 pre-existing 副作用，不算新增），并发两个相同 handler 的 add → 两个都 preflight pass → 都进 provision_agent → 第二个被 daemon onboard 的 handler_conflict 拦下（已有保护）。第一个赢，第二个返 `handler_conflict`。没有新 corruption 模式。
 
-### §6 — 测试策略（finding #12）
+Cost note：并发 2 个失败的 add 烧 2 个 preflight hello token（agent 配置 model 上的一次）—— acceptable，user 重复 click 自负。
+
+### §6 — CLI plumbing 扩展（v2 finding #2）
+**决定**：CLI 端跟 server 端**同步扩**保留 preflight_detail。
+
+实施：
+- `crates/gitim-runtime/src/cli/http.rs::CliError::ResponseErrorCode` 加 `preflight_detail: Option<PreflightResult>` 字段
+- `crates/gitim-runtime/src/cli/dto.rs::ErrorResponse` 加 `preflight_detail: Option<PreflightResult>` 字段
+- `process_response_inner` 在 `ResponseErrorCode` 分类时把 body 里的 preflight_detail 一起 deserialize 进 CliError
+- 主 binary error envelope (在 `bin/runtime.rs` Drop / exit path) 在 `error_code == "provision_preflight_failed"` 时把 preflight_detail 的关键字段（error_kind / output_preview / version）一起 print to stderr，否则只 print error message
+
+测试：cmd_add_agent integration test 加一条 "preflight failure 时 stderr 含 output_preview"。
+
+### §7 — Post-preflight failures unchanged scope
+**显式 acknowledge**：reframe 后 preflight gate 只解决"**preflight 失败造成的** GitHub remote orphan handler"。
+
+**仍存在的 orphan**（不在本 PR scope）：preflight pass 但**之后**的步骤 fail：
+- `provision_agent` 内部 daemon onboard 失败（rare）
+- `hermes_profile::ensure_profile` 失败 → 已有 `hermes_profile_create_failed` cleanup（local 删 dir 但 remote 已 push）
+- `apply_model_config_with` 失败 → 已有 cleanup_agent_dir + delete_profile rollback chain
+- state.insert 之间死
+
+这些路径**沿用现状**，本 PR 不修。如有需要后续单做 "post-provision cleanup hardening" feature。
+
+### §8 — Preflight semantics 范围声明（v2 finding "overclaim"）
+**显式 acknowledge**：preflight 不是"first turn 必然成功的保证"。
+
+Preflight catch 的（high-confidence）：
+- Provider CLI not installed → `not_installed`
+- LLM auth 错（PAT 过期 / API key 错）→ provider-specific error
+- Model 名拼错 / 该 model 无 access → provider returns model error
+- Hermes default profile 没装 → `hermes_not_setup`
+- Network 不通 / DNS 失败 → timeout 或 transport error
+
+Preflight **不** catch（运行时才暴露）：
+- Rate limit 在 preflight 后才达到
+- Prompt-specific 行为差异（preflight 用 minimal prompt + tempdir cwd）
+- Tool / MCP server config 错（preflight 跑 `--tools ""` 隔离）
+- Agent 跑长任务时的 context window 超限
+- Provider 服务在 add 后宕机
+- opencode / pi 的 model 名拼错（per §2，不验 model）
+
+文档化在 `docs/specs/runtime-cli.md` add-agent section + Known limitations。
+
+### §9 — 测试策略（finding #12 + v2 expansion）
 - **Happy path positive**：每个 provider × valid config → preflight pass → agent 进 state.workspaces + agent_loop spawn
 - **Failure paths per provider**：
-  - claude/codex/opencode/pi: bogus model name → fail with error
+  - claude/codex: bogus model name → fail with provider error
   - claude/codex/opencode/pi: invalid env (e.g. wrong API key) → fail with auth error
-  - hermes: missing llm_provider → fail with `hermes_llm_unspecified`
-  - hermes: valid hermes setup + bogus llm_model → fail with LLM-side error
+  - hermes 有 llm 双值 + 错 model → fail with LLM-side error
+  - hermes 不给 llm + default profile 没 LLM → fail with default-profile-no-llm error_code
+  - hermes 不给 llm + default profile 有 LLM → preflight 验 default profile 的 LLM
+  - hermes 只给一个 llm 字段 → 已有 `missing_llm_provider` 路径 fire（pre-existing）
+  - opencode / pi: 不验 model，只验 connectivity + auth
 - **Mock provider**：always-pass short-circuit verified
-- **Rollback**: N/A（gate 模式无 side effect 要 rollback）
+- **CLI plumbing**：失败时 CLI stderr 含 preflight_detail.output_preview
+- **Post-preflight failure path**（确认未 regress）：mock-fail 在 hermes profile clone 阶段 → 仍走现有 cleanup_agent_dir + delete_profile（不应破现有 path）
+- **Top-level timeout**：mock provider 超时 → ErrorBody with `provision_preflight_failed` + timeout-flavored preflight_detail（不是 hung connection）
+- **Rollback**: N/A for preflight path（gate 无 side effect）
 - **Concurrent add**: 已有 handler_conflict 测试覆盖
+- **Test seam**：`preflight_for_add_request` 的 binary resolver 接受测试 hook（让 fake binary 注入），避免要求 CI 装真 Claude/Codex
 - **WebUI**: 删 detect 后 add 流程正常工作（仍能成功也能展示 preflight 失败信息）
 
 ---
@@ -185,15 +253,23 @@ if provider == "mock" { return PreflightResult::success(...) }
 ## Implementation surface
 
 ### `crates/gitim-runtime/src/preflight.rs`
-- 新增 `preflight_claude_with_overrides(bin, timeout, env_override, model_override) -> PreflightResult`
-  - 老 `preflight_claude_with` 改写为 delegating wrapper：`preflight_claude_with_overrides(bin, timeout, None, None)`
-- 同样模板：codex / opencode / pi
+- 引入 `PreflightOverrides { env_override: Option<HashMap<String,String>>, model_override: Option<String> }` typed struct（避免参数列爆炸，per v2 reviewer 建议）
+- 新增 `preflight_claude_with_config(bin, timeout, overrides: PreflightOverrides) -> PreflightResult`
+  - 老 `preflight_claude_with` 改写为 delegating wrapper：`preflight_claude_with_config(bin, timeout, PreflightOverrides::default())`
+- 同样模板：codex (`preflight_codex_with_config`)
+- **opencode/pi**：本 PR 只加 `env_override` 不加 `model_override`（writing-plans 时调研 CLI 是否支持 model arg；目前 preflight 不验 model 名）
 - `preflight_hermes_with` 已有 llm_provider / llm_model / hermes_home → 加 `env_override` 参数
 - 新增 `preflight_for_add_request(provider: &str, env: Option<&HashMap>, model: Option<&str>, llm_provider: Option<&str>, llm_model: Option<&str>) -> PreflightResult`：
-  - `provider == "mock"` → short-circuit success
-  - `provider == "hermes"`：require llm_provider + llm_model（任一缺失返 failure with code `hermes_llm_unspecified`）→ 调 `preflight_hermes_with(...)` with `hermes_home: None`（用 user 默认 profile）
-  - 其它 provider：调 `preflight_X_with_overrides`
-  - 外层 `tokio::time::timeout(LONG_REQUEST_TIMEOUT, ...)` 兜底
+  - `provider == "mock"` → short-circuit `PreflightResult::success("mock", ...)`，不 shell out
+  - `provider == "hermes"`：
+    - 如 `llm_provider` + `llm_model` 双值 → `preflight_hermes_with(hermes_home: None, llm_provider: Some(X), llm_model: Some(Y), env_override)` chat-mode
+    - 如**两个都缺失** → 读 `~/.hermes/profiles/<default>/config.yaml` 的 `model.default` + provider → 回填 chat-mode preflight
+    - 如**只缺一个** → 已有 runtime 路径返 `missing_llm_provider`（per http.rs:2136）—— preflight 不重复 validate
+    - 如 default profile 没装 → 已有 `hermes_not_setup` 路径处理
+    - 如 default profile 有 profile 但无 LLM 配置 → 返 `PreflightResult::failure(error_code: "hermes_default_profile_no_llm")`
+  - claude/codex：调 `preflight_X_with_config(bin, timeout, PreflightOverrides { env, model })`
+  - opencode/pi：调对应 `_with_config(bin, timeout, env)` 不带 model
+  - 外层 `tokio::time::timeout(PROVIDER_PREFLIGHT_TIMEOUT, ...)` 兜底（默认 60s，比 LONG_REQUEST_TIMEOUT 紧）
 
 ### `crates/gitim-runtime/src/http.rs`
 - `ErrorBody` 加 `preflight_detail: Option<PreflightResult>`
@@ -217,17 +293,26 @@ if provider == "mock" { return PreflightResult::success(...) }
   // ... existing provision_agent + me.json + hermes profile + state.insert + spawn
   ```
 
-### `products/gitim/frontend/src/components/management/add-agent-dialog.tsx`
-- 删 `PreflightResult` import / `detecting` / `detectResult` / `detectSeq` state
-- 删 `handleDetect` / `detectErrorMessage` 函数
-- 删 "Detect" 按钮 + 状态显示
-- 删 `!detectResult?.available` 等 Submit guards
-- Loading state 复用现有 `submitting`
-- 错误处理：当 response 含 `error_code === "provision_preflight_failed"` 且 `preflight_detail` 存在时，展示：
-  - `error` 文字
-  - `error_kind`（not_installed / timeout / other）翻译成 user-friendly 文字
-  - `output_preview`（如有）放 collapsible "Details" 块
-- Net diff: ~−60 lines, +20 lines（per Claude reviewer 估算）
+### Frontend changes（修正 v1 估算）
+- `products/gitim/frontend/src/lib/types.ts`：扩展 `ApiResponse<T>` 加 `preflight_detail?: PreflightResult`（typed parse path）
+- `products/gitim/frontend/src/lib/client.ts::addAgent`：返回类型改为 typed response（拿到 preflight_detail）
+- `products/gitim/frontend/src/components/management/add-agent-dialog.tsx`:
+  - 删 `PreflightResult` import 用法相关 / `detecting` / `detectResult` / `detectSeq` state
+  - 删 `handleDetect` / `detectErrorMessage` 函数
+  - 删 "Detect" 按钮 + 状态显示
+  - 删 `!detectResult?.available` 等 Submit guards
+  - Loading state 复用现有 `submitting`
+  - 错误处理：当 response 含 `error_code === "provision_preflight_failed"` 且 `preflight_detail` 存在时，展示：
+    - `error` 文字
+    - `error_kind`（not_installed / timeout / other）翻译成 user-friendly 文字
+    - `output_preview`（如有）放 collapsible "Details" 块
+- Net diff: client.ts/types.ts ~+10 lines；add-agent-dialog.tsx ~−60 / +20 lines
+
+### CLI plumbing extension
+- `crates/gitim-runtime/src/cli/http.rs::CliError::ResponseErrorCode` enum variant 加 `preflight_detail: Option<PreflightResult>` 字段
+- `crates/gitim-runtime/src/cli/http.rs::process_response_inner`：在 `error_code` 存在分类时把 body 的 preflight_detail field 一起 deserialize
+- `crates/gitim-runtime/src/cli/dto.rs::ErrorResponse` 加 `preflight_detail: Option<PreflightResult>` 字段（PreflightResult 需要在 cli 端也有 typed mirror，或者 import runtime::preflight::PreflightResult 直接复用）
+- `crates/gitim-runtime/src/bin/runtime.rs` error envelope print path：在 `error_code == "provision_preflight_failed"` 时把 preflight_detail.error_kind / output_preview / version / model_used / error 一起 print to stderr
 
 ### 测试 `crates/gitim-runtime/tests/provision_preflight.rs`（新）
 - 见 §6 测试列表
@@ -238,17 +323,22 @@ if provider == "mock" { return PreflightResult::success(...) }
 
 ## v1 success criteria
 
-1. **真实 LLM 配置错误立刻暴露 with debugging info**：
+1. **真实 LLM 配置错误在 add 阶段立刻暴露 with debugging info**：
    - claude PAT 拼错 → add 失败 + `error_code: "provision_preflight_failed"` + `preflight_detail` 含 auth error excerpt
    - claude model 名拼错 → 同
-   - hermes 漏 llm_provider/llm_model → `error_code: "hermes_llm_unspecified"`
-   - hermes LLM 配错 → `error_code: "provision_preflight_failed"` + detail
-2. **失败时 nothing was created**：no agent_dir，no hermes profile，no me.json，no remote commit，no state entry
-3. **Preflight 通过后 agent 必然能跑首 turn**（barring 极端 race / network blip）
-4. **WebUI**：1 click flow，loading 显示，失败时 detail 可见
-5. **CLI `gitim-runtime add-agent`** 收到 `provision_preflight_failed` → exit 2（per runtime-cli §4）；失败时 stderr 展示 preflight_detail 的关键字段
-6. **零回归**：`/preflight/{provider}` 行为不变；`hermes_profile_create_failed` 等现有 error_code 不变；CI 不变
-7. **测试覆盖**：每 provider happy + 1+ fail path + mock short-circuit + concurrent add
+   - hermes 给 llm 双值 + 错 model → `error_code: "provision_preflight_failed"` + detail
+   - hermes 不给 llm + default profile 没 LLM 配置 → `error_code: "hermes_default_profile_no_llm"` + detail
+   - hermes 不给 llm + default profile 有 LLM → preflight 验 default profile 的 LLM
+2. **Preflight 失败时 nothing was created**：no agent_dir / no hermes profile / no me.json / no remote commit / no state entry（per gate semantic）
+3. **Preflight 通过 ≠ first turn 必然成功**（per §8）—— 但 catch common failures：auth、model 不可用、网络不通、hermes default profile broken
+4. **WebUI**：1 click flow，loading 显示完整 provision 过程，失败时 preflight_detail.output_preview 可见
+5. **CLI `gitim-runtime add-agent`** 收到 `provision_preflight_failed` → exit 2（per runtime-cli §4）；stderr 展示 preflight_detail 的 error_kind + output_preview
+6. **零回归**：
+   - `/preflight/{provider}` 行为不变（CLI subcommand `gitim-runtime preflight` 也不变）
+   - `hermes_profile_create_failed` 等现有 error_code 不变
+   - Post-preflight 失败路径（profile clone / apply_model_config）行为不变（仍走现有 cleanup_agent_dir + delete_profile + 留 remote orphan，per §7 unchanged scope）
+   - CI 不变
+7. **测试覆盖**：见 §9
 
 ---
 
@@ -266,15 +356,13 @@ if provider == "mock" { return PreflightResult::success(...) }
 
 ---
 
-## Open Questions（留给 writing-plans）
+## Open Questions（留给 writing-plans，剩下都是小细节）
 
-1. **PreflightResult JSON serialization shape**：现有 `PreflightResult` 含 `output_preview`、`error_kind` enum 等。frontend `ApiResponse<T>` 类型要扩 typed parse → 看 `products/gitim/frontend/src/lib/client.ts` 现有 shape，决定如何 add typed field
-2. **Hermes 缺 llm_provider/llm_model 时 error_code 名**：`hermes_llm_unspecified` vs `missing_llm_config` vs 复用 `hermes_not_setup`？建议新名（语义不同：not_setup = user 没装 hermes default profile；llm_unspecified = 这个 agent 添加请求没指明 LLM）
-3. **Timeout 值**：`preflight_for_add_request` 外层 timeout 用 LONG_REQUEST_TIMEOUT (300s) 还是更紧（如 60s）？claude preflight 默认 60s，加 git clone 时间在 provision_agent 阶段，preflight 自己单独 60s 即可
-4. **`preflight_X_with_overrides` 命名一致性**：5 个 provider 都要加新签名？或者一个 unified 入口 + 内部 dispatch？倾向后者
-5. **mock provider 短路位置**：写在 `preflight_for_add_request` 顶部？还是单独 `if let "mock" = provider` 在 agents_add 跳过整个 preflight 块？前者 cleaner（mock 也走 ProviderResult 通道）
-6. **CLI 文档更新**：`docs/specs/runtime-cli.md` add-agent section 加 `provision_preflight_failed` 和 `hermes_llm_unspecified` 进 error_code 表
-7. **Rollback 章节文档化**：runtime-cli.md "Known gap" section 描述的 v2 work 现在落地了，更新该段 / 删除
+1. **`PreflightResult` typed mirror in cli/dto.rs**：CLI 端是直接 `pub use gitim_runtime::preflight::PreflightResult`（lib 直引）还是镜像一个 `cli::dto::PreflightResult`（typed wire DTO 风格）？后者跟 cli T5 的 DTO 风格一致，可能略好。Writing-plans 决定
+2. **opencode / pi env_override 实际能不能注入 auth**：opencode 走 `opencode auth login` 写盘 token，env var 不是 primary auth path。env_override 对它意义有限 —— 但仍可注入 `OPENCODE_TOKEN_*` 之类，writing-plans 调研
+3. **Frontend `PreflightResult` typed import**：`products/gitim/frontend/src/lib/types.ts` 已有 PreflightResult import (per existing dialog usage at line 18) —— 路径复用即可
+4. **default profile config.yaml parsing**：preflight hermes 路径在缺 llm 时要读 `~/.hermes/profiles/<default>/config.yaml`。Hermes config.yaml schema 由 hermes 控，我们 parse 哪些字段？建议只 read `model.default` + `model.provider`，缺失则报 `hermes_default_profile_no_llm`
+
 
 ---
 
@@ -286,8 +374,10 @@ if provider == "mock" { return PreflightResult::success(...) }
 
 ## Next Steps（sop-dev-mode pipeline）
 
-1. **plan-eng-review v2** —— 双轨 reviewer 再过 reframe 后的设计
-2. **writing-plans** —— 产 `01-plan.md`
-3. **subagent-driven impl**
-4. **code review × 2**
-5. **finishing-a-development-branch**
+- ✅ **plan-eng-review v1** —— 双轨找到 reframe 需要
+- ✅ **office-hours reframe** —— user 一句"preflight 没通过不应该创建任何 commit"摆正
+- ✅ **plan-eng-review v2** —— 双轨 reviewer 10 个 finding 全 integrate
+- → **writing-plans** —— 产 `01-plan.md`
+- subagent-driven impl
+- code review × 2 (Claude reviewer + codex)
+- finishing-a-development-branch
