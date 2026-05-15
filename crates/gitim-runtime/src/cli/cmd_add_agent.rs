@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::cli::dto::AddAgentResponse;
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{Client, CliError, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
 
 /// Soft cap for `--system-prompt-file` reads. Real system prompts are at most
@@ -92,8 +92,17 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         llm_model: args.llm_model.as_deref(),
     });
 
+    // `add-agent` opts into the long-form timeout: the runtime handler
+    // `git clone`s the workspace remote inline before responding, and a
+    // realistic GitHub repo over a slow uplink can take minutes. The
+    // 30s default would abort mid-clone and leave a half-provisioned
+    // state on the runtime side. See `LONG_REQUEST_TIMEOUT` doc.
     let response = client
-        .post(&format!("/workspaces/{slug}/agents/add"), &body)
+        .post_with_timeout(
+            &format!("/workspaces/{slug}/agents/add"),
+            &body,
+            LONG_REQUEST_TIMEOUT,
+        )
         .await?;
 
     // ── Phase 3: response handling ──────────────────────────────────────

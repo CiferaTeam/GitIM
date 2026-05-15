@@ -22,6 +22,8 @@
 //! Subcommand handlers in tasks 6-12 build on this surface; this module is the
 //! shared seam, no per-command knowledge lives here.
 
+use std::time::Duration;
+
 use crate::http::DEFAULT_PORT;
 use crate::user_config;
 
@@ -29,6 +31,31 @@ use crate::user_config;
 /// blow stderr up to multi-megabyte log lines. 512 bytes is enough to keep a
 /// JSON error payload mostly intact for debugging.
 const BODY_EXCERPT_BYTES: usize = 512;
+
+/// Default per-request timeout, applied via the reqwest client builder. Sized
+/// for the fast verbs (`status`, `runtime-id`, `workspaces`, `list-agents`,
+/// `burn-agent`, `preflight`) that hit synchronous in-memory state on the
+/// runtime side. 30s is generous compared to the millisecond-scale handlers
+/// they call but tight enough that an accepted-but-stuck listener fails fast
+/// instead of hanging the agent's Bash tool call for minutes.
+///
+/// Provisioning verbs (`add-agent`, `update-agent`) opt out of this default
+/// via `Client::post_with_timeout` / `Client::patch_with_timeout` — see those
+/// methods for the long-running regime.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Long-running per-request timeout for handlers that block on filesystem or
+/// network IO the runtime can't bound (`add-agent` `git clone`s the workspace
+/// remote inline; `update-agent` writes potentially-large dotenv content to
+/// disk). 5 minutes is wide enough for a realistic GitHub repo over a slow
+/// uplink, narrow enough to surface a hung server without burning the
+/// whole agent turn. Callers thread this through `Client::post_with_timeout`
+/// or `Client::patch_with_timeout`.
+pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Connect timeout — small because we only ever talk to loopback. Anything
+/// slower than 5s is a stuck listener, not a slow link.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors the CLI HTTP layer surfaces to the dispatch / exit-code mapper.
 ///
@@ -109,29 +136,35 @@ pub struct Client {
 
 impl Client {
     pub fn new(base_url: String) -> Self {
-        // Default reqwest builder has NO timeout — a wedged runtime would
-        // block the CLI process indefinitely, hanging an agent's Bash tool
-        // call. Connect timeout is small because we only ever talk to
-        // loopback; anything slower than a second is a stuck listener.
+        // Two timeout regimes (see DEFAULT_REQUEST_TIMEOUT / LONG_REQUEST_TIMEOUT
+        // module-level constants):
         //
-        // Request timeout has to cover the slowest synchronous handler we
-        // call. `add-agent` is the bound: the runtime awaits
-        // `provision_agent` inline, which `git clone`s the workspace remote
-        // before responding. Large monorepos over slow uplinks can take
-        // minutes — 60s aborts the client mid-clone, leaving an
-        // orphaned half-provisioned state on the runtime side. 5 minutes is
-        // an empirical envelope wide enough for realistic GitHub repos but
-        // narrow enough to surface a hung server. Status / list-agents are
-        // bounded by reqwest's TCP read timeout, not this 300s wall.
+        // - Builder-level `timeout` = 30s default, applied to every request
+        //   the client sends. Sized for fast verbs that hit in-memory runtime
+        //   state — they should fail fast on a stuck listener, not hang the
+        //   agent's Bash tool call for minutes.
+        // - Per-request override = 300s, used by `post_with_timeout` for the
+        //   provisioning verbs (`add-agent`, `update-agent`) whose runtime
+        //   handlers block on `git clone` or large file writes that we can't
+        //   meaningfully bound below the wall clock.
+        //
+        // Without the per-verb split, a generous 300s default would penalize
+        // every fast verb on an accepted-but-not-responding runtime. Without
+        // the per-request override, a tight 30s default would abort `add-agent`
+        // mid-clone and leave an orphaned half-provisioned state.
+        //
+        // Default reqwest builder has NO timeout, so leaving `.timeout(...)`
+        // off would let the CLI hang indefinitely — both regimes are explicit.
         let inner = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .expect("reqwest client builds with default settings");
         Self { base_url, inner }
     }
 
-    /// GET `<base>/<path>`. See module docs for error classification.
+    /// GET `<base>/<path>`. Inherits the 30s `DEFAULT_REQUEST_TIMEOUT` from
+    /// the client builder. See module docs for error classification.
     pub async fn get(&self, path: &str) -> Result<serde_json::Value, CliError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
@@ -143,7 +176,11 @@ impl Client {
         process_response(resp).await
     }
 
-    /// POST `<base>/<path>` with JSON body. See module docs for error
+    /// POST `<base>/<path>` with JSON body. Inherits the 30s
+    /// `DEFAULT_REQUEST_TIMEOUT` from the client builder — appropriate for
+    /// the fast POST verbs (`burn-agent`). For provisioning POSTs that may
+    /// take minutes (`add-agent`), use [`Client::post_with_timeout`] with
+    /// `LONG_REQUEST_TIMEOUT` instead. See module docs for error
     /// classification.
     pub async fn post(
         &self,
@@ -161,7 +198,39 @@ impl Client {
         process_response(resp).await
     }
 
-    /// PATCH `<base>/<path>` with JSON body. See module docs for error
+    /// POST `<base>/<path>` with JSON body and an explicit per-request
+    /// timeout that overrides the builder default. Use for provisioning
+    /// handlers that legitimately block for minutes — currently `add-agent`
+    /// (runtime `git clone`s inline) and `update-agent` (runtime can write
+    /// up to 64KB dotenv content to disk).
+    ///
+    /// Picking the timeout: pass [`LONG_REQUEST_TIMEOUT`] (`Duration::from_secs(300)`)
+    /// for those two verbs; the constant is the canonical envelope. We accept
+    /// a `Duration` parameter rather than a hardcoded value here so that
+    /// future verbs with different bounds (e.g. a `migrate-agent` with a
+    /// longer envelope) can opt into their own value without another helper.
+    pub async fn post_with_timeout(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .post(&url)
+            .json(body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| CliError::Transport(e.to_string()))?;
+        process_response(resp).await
+    }
+
+    /// PATCH `<base>/<path>` with JSON body. Inherits the 30s
+    /// `DEFAULT_REQUEST_TIMEOUT` from the client builder. For PATCHes that
+    /// can block on disk writes (e.g. `update-agent` with `--dotenv-file`),
+    /// use [`Client::patch_with_timeout`] instead. See module docs for error
     /// classification.
     pub async fn patch(
         &self,
@@ -173,6 +242,29 @@ impl Client {
             .inner
             .patch(&url)
             .json(body)
+            .send()
+            .await
+            .map_err(|e| CliError::Transport(e.to_string()))?;
+        process_response(resp).await
+    }
+
+    /// PATCH `<base>/<path>` with JSON body and an explicit per-request
+    /// timeout that overrides the builder default. Mirror of
+    /// [`Client::post_with_timeout`] for the PATCH verb — `update-agent`
+    /// uses this so a 64KB dotenv write under a slow disk doesn't hit the
+    /// fast-verb 30s cap.
+    pub async fn patch_with_timeout(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .patch(&url)
+            .json(body)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|e| CliError::Transport(e.to_string()))?;
@@ -722,9 +814,11 @@ mod tests {
     /// fails loudly instead of stalling the test runner.
     ///
     /// In short: this test guarantees the dead-port path → Transport. The
-    /// 300s request timeout and 5s connect timeout configured in
-    /// `Client::new` are locked in by the build itself (any code path that
-    /// drops them is a static change reviewers will catch).
+    /// 30s default request timeout, 300s long-form request timeout, and 5s
+    /// connect timeout configured in `Client::new` are locked in by the build
+    /// itself (any code path that drops them is a static change reviewers
+    /// will catch). Their values are pinned by
+    /// `timeout_constants_have_expected_values` below.
     #[tokio::test]
     async fn client_request_does_not_hang_against_dead_port() {
         // Pick a likely-dead port. Bind+drop a TCP listener to grab a free
@@ -748,6 +842,88 @@ mod tests {
         assert!(
             matches!(inner, Err(CliError::Transport(_))),
             "expected Transport error from dead port, got: {inner:?}",
+        );
+    }
+
+    /// Pin the two timeout regimes against accidental drift.
+    ///
+    /// Reqwest doesn't expose a getter for the configured timeout on a built
+    /// `Client`, so we can't introspect the live builder. We do the next best
+    /// thing: hold the constants steady against deliberate edits — anyone
+    /// changing the values has to update this test, which forces them to
+    /// notice they're shifting the regime.
+    ///
+    /// Why pin: the whole point of the split is "fast verbs fail in seconds,
+    /// provisioning verbs survive minutes". Quiet drift to e.g.
+    /// `DEFAULT_REQUEST_TIMEOUT = 300s` would silently re-introduce the bug
+    /// the split was created to fix.
+    #[test]
+    fn timeout_constants_have_expected_values() {
+        assert_eq!(
+            DEFAULT_REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+            "fast-verb default timeout drifted; review whether the new value still fails fast against a stuck listener",
+        );
+        assert_eq!(
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_secs(300),
+            "provisioning-verb long timeout drifted; review whether the new value still covers a worst-case GitHub clone",
+        );
+        assert_eq!(
+            CONNECT_TIMEOUT,
+            Duration::from_secs(5),
+            "loopback connect timeout drifted; should stay tight because we only ever talk to 127.0.0.1",
+        );
+        // Cross-check the regime invariant — defensive against a future
+        // refactor that swaps the values without renaming.
+        assert!(
+            LONG_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT,
+            "long timeout must exceed default timeout, otherwise the split is meaningless",
+        );
+    }
+
+    /// Sanity-check that `post_with_timeout` and `patch_with_timeout` accept
+    /// `LONG_REQUEST_TIMEOUT` and reach the dead-port Transport path. We
+    /// can't directly assert which timeout value the request used (reqwest
+    /// hides it), but we can confirm the methods exist, are async, accept a
+    /// `Duration`, and surface failures through the same classification path
+    /// as the default verbs.
+    ///
+    /// This complements `timeout_constants_have_expected_values`: that test
+    /// pins the values, this one pins the wiring.
+    #[tokio::test]
+    async fn long_form_helpers_route_through_classification() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let client = Client::new(format!("http://127.0.0.1:{port}"));
+        let body = serde_json::json!({"probe": true});
+
+        // post_with_timeout: dead port → Transport. Outer guard at 15s
+        // because connect-refused is instant on loopback; if the call
+        // genuinely hangs that's a regression worth surfacing loudly.
+        let post_outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.post_with_timeout("/agents/add", &body, LONG_REQUEST_TIMEOUT),
+        )
+        .await
+        .expect("post_with_timeout must error within 15s, not hang");
+        assert!(
+            matches!(post_outcome, Err(CliError::Transport(_))),
+            "expected Transport from dead port via post_with_timeout, got: {post_outcome:?}",
+        );
+
+        // patch_with_timeout: same shape, mirror the assertion.
+        let patch_outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.patch_with_timeout("/agents/x", &body, LONG_REQUEST_TIMEOUT),
+        )
+        .await
+        .expect("patch_with_timeout must error within 15s, not hang");
+        assert!(
+            matches!(patch_outcome, Err(CliError::Transport(_))),
+            "expected Transport from dead port via patch_with_timeout, got: {patch_outcome:?}",
         );
     }
 }

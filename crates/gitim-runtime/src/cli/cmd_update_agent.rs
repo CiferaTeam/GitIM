@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{Client, CliError, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
 
 /// Soft cap for `--system-prompt-file` and `--dotenv-file` reads. The
@@ -105,8 +105,19 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         dotenv: dotenv.as_deref(),
     });
 
+    // `update-agent` opts into the long-form timeout: the runtime handler
+    // can write up to 64KB dotenv content to disk plus do the me.json
+    // merge + commit, neither of which we can bound below the wall clock.
+    // System-prompt-only updates would fit the fast-verb 30s default, but
+    // routing all `update-agent` calls through the same envelope keeps the
+    // CLI surface consistent with `add-agent` and avoids a per-flag branch
+    // here. See `LONG_REQUEST_TIMEOUT` doc.
     let response = client
-        .patch(&format!("/workspaces/{slug}/agents/{}", args.id), &body)
+        .patch_with_timeout(
+            &format!("/workspaces/{slug}/agents/{}", args.id),
+            &body,
+            LONG_REQUEST_TIMEOUT,
+        )
         .await?;
 
     // ── Phase 3: response handling ──────────────────────────────────────
