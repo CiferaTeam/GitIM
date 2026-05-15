@@ -87,6 +87,7 @@ async fn recover_multiple_workspaces_from_user_config() {
     let cfg = UserConfig {
         runtime_id: String::new(),
         listen_port: None,
+        fleet_nodes: Vec::new(),
         workspaces: vec![
             entry("ws-a", "A", &ws_a),
             entry("ws-b", "B", &ws_b),
@@ -133,6 +134,7 @@ async fn recover_skips_missing_workspace_path() {
     let cfg = UserConfig {
         runtime_id: String::new(),
         listen_port: None,
+        fleet_nodes: Vec::new(),
         workspaces: vec![
             entry("real", "Real", &ws_real),
             entry("ghost", "Ghost", &ws_missing),
@@ -169,6 +171,7 @@ async fn recover_skips_duplicate_workspace_path_entries() {
     let cfg = UserConfig {
         runtime_id: String::new(),
         listen_port: None,
+        fleet_nodes: Vec::new(),
         workspaces: vec![
             entry("shared-a", "Shared A", &shared),
             entry("shared-b", "Shared B", &shared),
@@ -210,6 +213,7 @@ async fn recover_populates_all_workspaces_even_without_human_dir() {
     let cfg = UserConfig {
         runtime_id: String::new(),
         listen_port: None,
+        fleet_nodes: Vec::new(),
         workspaces: vec![entry("alpha", "Alpha", &a), entry("beta", "Beta", &b)],
     };
     write_runtime_json(home, &cfg);

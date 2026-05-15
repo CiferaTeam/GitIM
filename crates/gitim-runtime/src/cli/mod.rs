@@ -11,6 +11,7 @@
 
 pub mod cmd_add_agent;
 pub mod cmd_burn_agent;
+pub mod cmd_fleet;
 pub mod cmd_list_agents;
 pub mod cmd_preflight;
 pub mod cmd_runtime_id;
@@ -27,5 +28,5 @@ pub use dto::{
     ErrorResponse, RuntimeStatus,
 };
 pub use exit_code::from_cli_error;
-pub use http::{resolve_base_url, Client, CliError};
+pub use http::{resolve_base_url, CliError, Client};
 pub use workspace::{resolve_workspace, select_workspace};

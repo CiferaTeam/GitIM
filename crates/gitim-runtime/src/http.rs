@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::{
     extract::State,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use futures::stream::{Stream, StreamExt};
@@ -153,6 +153,18 @@ struct OkAckResponse {
     ok: bool,
 }
 
+#[derive(Serialize)]
+struct FleetNodesListResponse {
+    ok: bool,
+    nodes: Vec<crate::user_config::FleetNodeEntry>,
+}
+
+#[derive(Serialize)]
+struct FleetNodeUpsertResponse {
+    ok: bool,
+    node: crate::user_config::FleetNodeEntry,
+}
+
 /// `POST /workspaces` success body. Wire keeps `ok: true` inline because
 /// pre-typed callers parse `obj.get("slug")` from the same dict.
 #[derive(Serialize)]
@@ -214,7 +226,7 @@ struct AgentAddResponse {
 /// `workspace_id` always carries the originating workspace's slug so SSE
 /// subscribers can route or filter events. Events are published on the
 /// workspace-scoped `broadcast::Sender` held in `WorkspaceContext`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentActivityEvent {
     pub agent_id: String,
     pub workspace_id: String,
@@ -280,6 +292,8 @@ pub struct RuntimeState {
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+    pub fleet_tx: tokio::sync::broadcast::Sender<crate::fleet::FleetEventEnvelope>,
+    pub fleet_nodes: HashMap<String, crate::fleet::FleetNodeRuntime>,
     /// Canonicalized path to the runtime binary captured at startup. The
     /// update endpoint (self-replace) uses this to (a) validate the install
     /// dir in strict mode, and (b) fork-exec a new runtime after the binary
@@ -346,6 +360,7 @@ impl Default for RuntimeState {
         let canonical_exe_path = std::env::current_exe()
             .and_then(|p| p.canonicalize())
             .unwrap_or_else(|_| PathBuf::from("/nonexistent/gitim-runtime"));
+        let (fleet_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             last_activity: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
@@ -356,6 +371,8 @@ impl Default for RuntimeState {
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
             workspaces: HashMap::new(),
+            fleet_tx,
+            fleet_nodes: HashMap::new(),
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
@@ -3899,6 +3916,113 @@ async fn agents_events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+// -- /fleet/* --
+
+async fn fleet_events(
+    State(state): State<SharedRuntimeState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let rx = {
+        let s = state.lock().unwrap();
+        s.fleet_tx.subscribe()
+    };
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
+        futures::future::ready(match result {
+            Ok(event) => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(SseEvent::default().data(data)))
+            }
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => None,
+        })
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn fleet_nodes_list(State(state): State<SharedRuntimeState>) -> Json<FleetNodesListResponse> {
+    let nodes = {
+        let s = state.lock().unwrap();
+        s.fleet_nodes
+            .values()
+            .map(|node| node.entry.clone())
+            .collect()
+    };
+    Json(FleetNodesListResponse { ok: true, nodes })
+}
+
+async fn fleet_nodes_upsert(
+    State(state): State<SharedRuntimeState>,
+    Json(req): Json<crate::user_config::FleetNodeEntry>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let entry = crate::fleet::normalize_node(req);
+    if let Err(err) = crate::fleet::validate_node(&entry) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(err, "invalid_fleet_node")),
+        )
+            .into_response();
+    }
+
+    let mut cfg = crate::user_config::read();
+    cfg.upsert_fleet_node(entry.clone());
+    if let Err(err) = crate::user_config::write(&cfg) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::with_code(
+                format!("failed to persist fleet node: {err}"),
+                "fleet_config_write_failed",
+            )),
+        )
+            .into_response();
+    }
+
+    crate::fleet::activate_node(state, entry.clone());
+    Json(FleetNodeUpsertResponse {
+        ok: true,
+        node: entry,
+    })
+    .into_response()
+}
+
+async fn fleet_nodes_delete(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let mut cfg = crate::user_config::read();
+    let config_existed = cfg.remove_fleet_node(&node_id);
+    let runtime_existed = {
+        let s = state.lock().unwrap();
+        s.fleet_nodes.contains_key(&node_id)
+    };
+    if !config_existed && !runtime_existed {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody::with_code("fleet node not found", "not_found")),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = crate::user_config::write(&cfg) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::with_code(
+                format!("failed to persist fleet node removal: {err}"),
+                "fleet_config_write_failed",
+            )),
+        )
+            .into_response();
+    }
+
+    crate::fleet::remove_node(&state, &node_id);
+    Json(OkAckResponse { ok: true }).into_response()
+}
+
 /// Recover all workspaces listed in `~/.gitim/runtime.json` on startup. Each
 /// workspace is recovered in its own task so one slow daemon doesn't stall
 /// the rest.
@@ -5069,6 +5193,12 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
             get(workspaces_get).delete(workspaces_delete),
         )
         .nest("/workspaces/{slug}", ws_router)
+        .route("/fleet/events", get(fleet_events))
+        .route(
+            "/fleet/nodes",
+            get(fleet_nodes_list).post(fleet_nodes_upsert),
+        )
+        .route("/fleet/nodes/{node_id}", delete(fleet_nodes_delete))
         .route("/preflight/{provider}", get(preflight_handler))
         .route("/hermes/llm/providers", get(list_hermes_llm_providers))
         .route(

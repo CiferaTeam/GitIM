@@ -110,6 +110,7 @@ fn test_help_flag_lists_subcommands() {
         "burn-agent",
         "update-agent",
         "preflight",
+        "fleet",
     ] {
         assert!(
             stdout.contains(sub),
@@ -324,8 +325,7 @@ fn test_server_mode_starts_then_status_succeeds() {
     );
 
     let stdout = String::from_utf8_lossy(&status_out.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("status stdout is JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("status stdout is JSON");
     assert!(
         parsed.get("runtime_id").is_some(),
         "status JSON must carry runtime_id, got: {parsed}",

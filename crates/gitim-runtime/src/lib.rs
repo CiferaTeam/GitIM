@@ -8,6 +8,7 @@ pub mod context_window;
 pub mod daemon_log;
 pub mod email_propagation;
 pub mod error;
+pub mod fleet;
 pub mod git_config;
 pub mod github;
 pub mod gitignore;

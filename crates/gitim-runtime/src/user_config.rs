@@ -8,6 +8,18 @@ pub struct WorkspaceEntry {
     pub path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetNodeEntry {
+    pub node_id: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub workspaces: Vec<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
     /// Stable device-bound UUID for this runtime install. Empty when
@@ -26,6 +38,11 @@ pub struct UserConfig {
     /// `DEFAULT_PORT` if the persisted port refuses connections.
     #[serde(default)]
     pub listen_port: Option<u16>,
+    /// Optional remote runtime subscriptions for the local runtime's fleet
+    /// collector. These are persisted here so hot-added subscriptions can be
+    /// restored on the next runtime boot.
+    #[serde(default)]
+    pub fleet_nodes: Vec<FleetNodeEntry>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -143,6 +160,24 @@ impl UserConfig {
         let before = self.workspaces.len();
         self.workspaces.retain(|e| e.slug != slug);
         self.workspaces.len() != before
+    }
+
+    pub fn upsert_fleet_node(&mut self, entry: FleetNodeEntry) {
+        if let Some(existing) = self
+            .fleet_nodes
+            .iter_mut()
+            .find(|e| e.node_id == entry.node_id)
+        {
+            *existing = entry;
+        } else {
+            self.fleet_nodes.push(entry);
+        }
+    }
+
+    pub fn remove_fleet_node(&mut self, node_id: &str) -> bool {
+        let before = self.fleet_nodes.len();
+        self.fleet_nodes.retain(|e| e.node_id != node_id);
+        self.fleet_nodes.len() != before
     }
 }
 
@@ -367,6 +402,68 @@ mod tests {
         let cfg = read_from(Some(&path));
         assert_eq!(cfg.listen_port, None);
         assert_eq!(cfg.runtime_id, "xxx");
+    }
+
+    fn fleet_node(
+        node_id: &str,
+        base_url: &str,
+        workspaces: impl IntoIterator<Item = &'static str>,
+    ) -> FleetNodeEntry {
+        FleetNodeEntry {
+            node_id: node_id.to_string(),
+            base_url: base_url.to_string(),
+            node_ip: Some("100.64.0.10".to_string()),
+            node_name: Some("mac-mini".to_string()),
+            workspaces: workspaces.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn fleet_nodes_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let mut cfg = UserConfig::default();
+        cfg.upsert_fleet_node(fleet_node(
+            "node-a",
+            "http://100.64.0.10:16868",
+            ["room", "lab"],
+        ));
+
+        write_to(&cfg, &path).unwrap();
+        let loaded = read_from(Some(&path));
+
+        assert_eq!(loaded.fleet_nodes.len(), 1);
+        assert_eq!(loaded.fleet_nodes[0].node_id, "node-a");
+        assert_eq!(loaded.fleet_nodes[0].base_url, "http://100.64.0.10:16868");
+        assert_eq!(
+            loaded.fleet_nodes[0].node_ip.as_deref(),
+            Some("100.64.0.10")
+        );
+        assert_eq!(loaded.fleet_nodes[0].node_name.as_deref(), Some("mac-mini"));
+        assert_eq!(loaded.fleet_nodes[0].workspaces, vec!["room", "lab"]);
+    }
+
+    #[test]
+    fn fleet_node_upsert_updates_by_node_id() {
+        let mut cfg = UserConfig::default();
+        cfg.upsert_fleet_node(fleet_node("node-a", "http://old:16868", ["room"]));
+        cfg.upsert_fleet_node(fleet_node("node-a", "http://new:16868", ["room", "lab"]));
+
+        assert_eq!(cfg.fleet_nodes.len(), 1);
+        assert_eq!(cfg.fleet_nodes[0].base_url, "http://new:16868");
+        assert_eq!(cfg.fleet_nodes[0].workspaces, vec!["room", "lab"]);
+    }
+
+    #[test]
+    fn remove_fleet_node_by_node_id() {
+        let mut cfg = UserConfig::default();
+        cfg.upsert_fleet_node(fleet_node("node-a", "http://a:16868", ["room"]));
+        cfg.upsert_fleet_node(fleet_node("node-b", "http://b:16868", ["room"]));
+
+        assert!(cfg.remove_fleet_node("node-a"));
+        assert_eq!(cfg.fleet_nodes.len(), 1);
+        assert_eq!(cfg.fleet_nodes[0].node_id, "node-b");
+        assert!(!cfg.remove_fleet_node("node-a"));
     }
 
     #[test]

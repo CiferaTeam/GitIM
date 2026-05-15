@@ -202,6 +202,41 @@ enum Command {
         #[arg(long = "llm-model")]
         llm_model: Option<String>,
     },
+    /// Manage optional remote runtime subscriptions for the fleet observer.
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FleetCommand {
+    /// List configured remote runtime subscriptions.
+    List,
+    /// Add or replace a remote runtime subscription and start it immediately.
+    Add {
+        /// Stable node/runtime UUID. Used as the source identity in fleet events.
+        #[arg(long = "node-id")]
+        node_id: String,
+        /// Base URL for the remote runtime, e.g. http://100.64.0.10:16868.
+        #[arg(long = "base-url")]
+        base_url: String,
+        /// Current Tailscale IP or diagnostic address for the node.
+        #[arg(long = "node-ip")]
+        node_ip: Option<String>,
+        /// Human-readable node label.
+        #[arg(long = "node-name")]
+        node_name: Option<String>,
+        /// Workspace slug to subscribe on the remote node. Repeatable.
+        #[arg(long = "workspace", required = true)]
+        workspaces: Vec<String>,
+    },
+    /// Remove a remote runtime subscription and stop its active tasks.
+    Remove {
+        /// Stable node/runtime UUID to remove.
+        #[arg(long = "node-id")]
+        node_id: String,
+    },
 }
 
 #[tokio::main]
@@ -283,9 +318,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_burn_agent, cmd_list_agents, cmd_preflight, cmd_runtime_id, cmd_status,
-        cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url, Client, CliError,
-        ErrorResponse,
+        cmd_add_agent, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight, cmd_runtime_id,
+        cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url, CliError,
+        Client, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -367,6 +402,26 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             llm_provider,
             llm_model,
         } => cmd_preflight::run(&client, provider, llm_provider, llm_model).await,
+        Command::Fleet { command } => match command {
+            FleetCommand::List => cmd_fleet::list(&client).await,
+            FleetCommand::Add {
+                node_id,
+                base_url,
+                node_ip,
+                node_name,
+                workspaces,
+            } => {
+                let args = cmd_fleet::AddArgs {
+                    node_id,
+                    base_url,
+                    node_ip,
+                    node_name,
+                    workspaces,
+                };
+                cmd_fleet::add(&client, args).await
+            }
+            FleetCommand::Remove { node_id } => cmd_fleet::remove(&client, node_id).await,
+        },
     };
 
     match result {
@@ -530,6 +585,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     gitim_runtime::http::recover_from_config(state.clone()).await;
+    gitim_runtime::fleet::recover_from_config(state.clone());
 
     // Idle watchdog: exit if no activity for 24 hours
     let idle_state = state.clone();
@@ -1371,5 +1427,87 @@ mod argv_subcommand_tests {
     fn preflight_missing_positional_provider_fails() {
         let result = Args::try_parse_from(["gitim-runtime", "preflight"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fleet_list_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "fleet", "list"]).expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command: FleetCommand::List,
+            }) => {}
+            other => panic!("expected Fleet::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_add_parses_repeatable_workspaces() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "fleet",
+            "add",
+            "--node-id",
+            "remote-a",
+            "--base-url",
+            "http://100.64.0.10:16868",
+            "--node-ip",
+            "100.64.0.10",
+            "--node-name",
+            "mac-mini",
+            "--workspace",
+            "room",
+            "--workspace",
+            "lab",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command:
+                    FleetCommand::Add {
+                        node_id,
+                        base_url,
+                        node_ip,
+                        node_name,
+                        workspaces,
+                    },
+            }) => {
+                assert_eq!(node_id, "remote-a");
+                assert_eq!(base_url, "http://100.64.0.10:16868");
+                assert_eq!(node_ip.as_deref(), Some("100.64.0.10"));
+                assert_eq!(node_name.as_deref(), Some("mac-mini"));
+                assert_eq!(workspaces, vec!["room", "lab"]);
+            }
+            other => panic!("expected Fleet::Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_add_requires_workspace() {
+        let result = Args::try_parse_from([
+            "gitim-runtime",
+            "fleet",
+            "add",
+            "--node-id",
+            "remote-a",
+            "--base-url",
+            "http://100.64.0.10:16868",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fleet_remove_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "fleet", "remove", "--node-id", "remote-a"])
+                .expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command: FleetCommand::Remove { node_id },
+            }) => {
+                assert_eq!(node_id, "remote-a");
+            }
+            other => panic!("expected Fleet::Remove, got {other:?}"),
+        }
     }
 }

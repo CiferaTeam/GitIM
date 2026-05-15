@@ -270,6 +270,18 @@ impl Client {
             .map_err(|e| CliError::Transport(e.to_string()))?;
         process_response(resp).await
     }
+
+    /// DELETE `<base>/<path>`. Inherits the 30s `DEFAULT_REQUEST_TIMEOUT`.
+    pub async fn delete(&self, path: &str) -> Result<serde_json::Value, CliError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| CliError::Transport(e.to_string()))?;
+        process_response(resp).await
+    }
 }
 
 /// Thin async wrapper: read the response status + body, then hand off to the
