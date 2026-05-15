@@ -161,11 +161,22 @@ async fn reconcile_moves_orphan_card_dir_to_archive() {
         "card should be stamped archived_via=Channel"
     );
 
-    // Orphan directory should be gone.
+    // Orphan card directory should be gone.
     let orphan_card = root.join(format!("channels/general/cards/{}", card_id));
     assert!(
         !orphan_card.exists(),
         "orphan card dir should have been removed"
+    );
+
+    // The now-empty channels/general/cards/ and channels/general/ dirs should
+    // also have been cleaned up from disk (reconcile removes empty dirs).
+    assert!(
+        std::fs::metadata(root.join("channels/general/cards")).is_err(),
+        "channels/general/cards/ should have been removed after all cards moved"
+    );
+    assert!(
+        std::fs::metadata(root.join("channels/general")).is_err(),
+        "channels/general/ should have been removed after all cards moved"
     );
 
     // Working tree must be clean after reconcile.

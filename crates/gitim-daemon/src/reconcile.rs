@@ -1,6 +1,7 @@
 use crate::state::SharedState;
 use gitim_core::types::card::ArchivedVia;
 use gitim_core::types::CardMeta;
+use std::collections::HashSet;
 use tracing::{info, warn};
 
 /// Scan `channels/<ch>/` directories whose corresponding channel meta has
@@ -13,7 +14,17 @@ use tracing::{info, warn};
 /// All moves are committed as a single commit authored by `system@gitim`.
 /// Returns the number of cards migrated. When 0, no commit is produced.
 /// This function is idempotent: running it on a clean repo is a no-op.
+///
+/// **Locking**: holds `state.commit_lock` for the entire function body.  Any
+/// operation that mutates the git commit tree must hold this lock first (see
+/// project invariant `project_commit_tree_lock.md`).  The HTTP server may
+/// already be live when this runs at boot, so concurrent handlers could race
+/// without the lock.
 pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String> {
+    // Acquire commit_lock before touching the git tree.  Hold for the full
+    // function so no concurrent handler can interleave git operations.
+    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
     let repo_root = &state.repo_root;
     let channels_dir = repo_root.join("channels");
     if !channels_dir.exists() {
@@ -22,6 +33,7 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
 
     let mut card_moves: Vec<(String, String)> = Vec::new();
     let mut commit_paths: Vec<String> = Vec::new();
+    let mut processed_channels: HashSet<String> = HashSet::new();
 
     let entries = std::fs::read_dir(&channels_dir)
         .map_err(|e| format!("read channels/: {}", e))?;
@@ -83,6 +95,7 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
             commit_paths.push(format!("{}/card.meta.yaml", to_rel));
             commit_paths.push(format!("{}/discussion.thread", to_rel));
             card_moves.push((from_rel, to_rel));
+            processed_channels.insert(channel_name.clone());
         }
     }
 
@@ -107,6 +120,33 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
             .git_storage
             .mv(from_rel, to_rel)
             .map_err(|e| format!("git mv {} -> {}: {}", from_rel, to_rel, e))?;
+    }
+
+    // Best-effort removal of empty channel directories left on disk.
+    // Git doesn't track empty dirs so they don't affect the index, but they
+    // are debris that confuses future directory scans.  If a dir is not yet
+    // empty (shouldn't happen, but be defensive), we just warn and move on.
+    for ch in &processed_channels {
+        let cards_dir = channels_dir.join(ch).join("cards");
+        if let Err(e) = std::fs::remove_dir(&cards_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "reconcile: could not remove empty dir {}: {}",
+                    cards_dir.display(),
+                    e
+                );
+            }
+        }
+        let ch_dir = channels_dir.join(ch);
+        if let Err(e) = std::fs::remove_dir(&ch_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "reconcile: could not remove empty dir {}: {}",
+                    ch_dir.display(),
+                    e
+                );
+            }
+        }
     }
 
     // Single commit, system author.

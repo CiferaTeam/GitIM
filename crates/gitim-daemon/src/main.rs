@@ -133,6 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // implementations that only moved channel meta+thread, leaving
     // channels/<ch>/cards/ behind. This is a one-shot boot-time migration;
     // when there is nothing to do (the common case) it exits immediately.
+    //
+    // NOTE: the HTTP server is already live at this point (spawned above).
+    // reconcile_orphan_cards holds state.commit_lock for its full execution
+    // to prevent concurrent incoming handlers from racing on git tree writes.
     if let Err(e) = gitim_daemon::reconcile::reconcile_orphan_cards(app_state.clone()).await {
         tracing::error!("reconcile_orphan_cards failed at boot: {}", e);
         // Non-fatal — proceed to handler loop; sync_loop will pick up on next cycle.
