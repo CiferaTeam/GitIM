@@ -8,7 +8,7 @@ use gitim_core::types::{ChannelMeta, ChannelName, Handler};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
 use gitim_sync::git::GitError;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub async fn handle_join_channel(
     state: SharedState,
@@ -204,6 +204,13 @@ pub async fn handle_archive_channel(
         }
     }
 
+    // Hold commit_lock for the rest of this handler — archive_channel mutates
+    // the tree in many steps (yaml stamps + N card mvs + channel meta+thread mvs
+    // + single commit). Without the lock a concurrent writer could interleave
+    // commits between our mvs and our commit, leaving the working tree in a
+    // half-archived state that the push-rebase would not cleanly resolve.
+    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
     // 3. Read channel meta, confirm channel exists
     let meta_path = state
         .repo_root
@@ -230,28 +237,240 @@ pub async fn handle_archive_channel(
         return Response::error(format!("failed to create archive dir: {}", e));
     }
 
-    // 6. git mv both files to archive/channels/
+    // 5b. Discover active cards in channels/<ch>/cards/ — they must follow the channel.
+    let active_cards_dir = state
+        .repo_root
+        .join("channels")
+        .join(channel_name.to_string())
+        .join("cards");
+    let mut card_moves: Vec<(String, String)> = Vec::new(); // (from_rel, to_rel)
+    let mut card_files_to_commit: Vec<String> = Vec::new();
+    let mut stamped_yamls: Vec<String> = Vec::new(); // meta_rel paths for rollback
+
+    if active_cards_dir.exists() {
+        let entries = match std::fs::read_dir(&active_cards_dir) {
+            Ok(e) => e,
+            Err(e) => return Response::error(format!("failed to read cards dir: {}", e)),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "archive_channel",
+                        );
+                    }
+                    return Response::error(format!("failed to read dir entry: {}", e));
+                }
+            };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let card_id = entry.file_name().to_string_lossy().to_string();
+            let card_dir = entry.path();
+            let meta_file = card_dir.join("card.meta.yaml");
+            if !meta_file.exists() {
+                continue;
+            }
+            // Read + stamp archived_via = Channel
+            let yaml = match std::fs::read_to_string(&meta_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "archive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to read card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            let mut meta: gitim_core::types::CardMeta = match serde_yaml::from_str(&yaml) {
+                Ok(m) => m,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "archive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to parse card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            meta.archived_via = Some(gitim_core::types::card::ArchivedVia::Channel);
+            let new_yaml = match serde_yaml::to_string(&meta) {
+                Ok(s) => s,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "archive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to serialize card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            // fs::write is atomic for small files — if it fails, disk is unmodified.
+            if let Err(e) = std::fs::write(&meta_file, new_yaml) {
+                for prev_meta_rel in &stamped_yamls {
+                    crate::card_handlers::restore_card_yaml(
+                        &state,
+                        prev_meta_rel,
+                        "archive_channel",
+                    );
+                }
+                return Response::error(format!(
+                    "failed to write card meta {}: {}",
+                    card_id, e
+                ));
+            }
+            let from_rel = format!("channels/{}/cards/{}", channel_name, card_id);
+            let to_rel = format!("archive/channels/{}/cards/{}", channel_name, card_id);
+            let meta_rel = format!("{}/card.meta.yaml", from_rel);
+            card_moves.push((from_rel, to_rel.clone()));
+            card_files_to_commit.push(format!("{}/card.meta.yaml", to_rel));
+            card_files_to_commit.push(format!("{}/discussion.thread", to_rel));
+            stamped_yamls.push(meta_rel);
+        }
+    }
+
+    // Ensure archive/channels/<ch>/cards/ parent exists before any mv.
+    if !card_moves.is_empty() {
+        let archive_cards_dir = state
+            .repo_root
+            .join("archive")
+            .join("channels")
+            .join(channel_name.to_string())
+            .join("cards");
+        if let Err(e) = std::fs::create_dir_all(&archive_cards_dir) {
+            for prev_meta_rel in &stamped_yamls {
+                crate::card_handlers::restore_card_yaml(
+                    &state,
+                    prev_meta_rel,
+                    "archive_channel",
+                );
+            }
+            return Response::error(format!("failed to create archive cards dir: {}", e));
+        }
+    }
+
+    // Move each active card to archive.
+    let mut successful_card_mvs: Vec<(String, String)> = Vec::new();
+    for (from_rel, to_rel) in &card_moves {
+        if let Err(e) = state.git_storage.mv(from_rel, to_rel) {
+            // Reverse mvs already completed, then restore all stamped yamls.
+            for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+                if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                    error!(
+                        "archive_channel: rollback card mv {} -> {} failed: {}",
+                        rb_to, rb_from, rb_err
+                    );
+                }
+            }
+            for prev_meta_rel in &stamped_yamls {
+                crate::card_handlers::restore_card_yaml(
+                    &state,
+                    prev_meta_rel,
+                    "archive_channel",
+                );
+            }
+            return Response::error(format!("git mv card {} failed: {}", from_rel, e));
+        }
+        successful_card_mvs.push((from_rel.clone(), to_rel.clone()));
+    }
+
+    // 6. git mv both channel files to archive/channels/
     let thread_from = format!("channels/{}.thread", channel_name);
     let thread_to = format!("archive/channels/{}.thread", channel_name);
     let meta_from = format!("channels/{}.meta.yaml", channel_name);
     let meta_to = format!("archive/channels/{}.meta.yaml", channel_name);
 
     if let Err(e) = state.git_storage.mv(&thread_from, &thread_to) {
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "archive_channel: rollback card mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
+        }
         return Response::error(format!("git mv thread failed: {}", e));
     }
     if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
-        let _ = state.git_storage.mv(&thread_to, &thread_from);
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "archive_channel: rollback mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "archive_channel: rollback card mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
+        }
         return Response::error(format!("git mv meta failed: {}", e));
     }
 
-    // 7. git add + commit
+    // 7. git add + commit (single commit covers channel meta+thread AND all card files)
+    let mut commit_paths: Vec<&str> = vec![&thread_to, &meta_to];
+    for f in &card_files_to_commit {
+        commit_paths.push(f.as_str());
+    }
     let commit_msg = format!("archive: #{} by @{}", channel, author);
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
-        &[&thread_to, &meta_to],
+        &commit_paths,
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
+        // Roll back ALL mvs (channel + cards) and ALL stamped yamls.
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "archive_channel: card rollback mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
+        }
+        if let Err(rb_err) = state.git_storage.mv(&meta_to, &meta_from) {
+            error!(
+                "archive_channel: rollback meta mv {} -> {} also failed: {}",
+                meta_to, meta_from, rb_err
+            );
+        }
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "archive_channel: rollback thread mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
+        }
         return Response::error(format!("archive commit failed: {}", e));
     }
 
@@ -289,6 +508,10 @@ pub async fn handle_archive_channel(
         }
     }
 
+    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
+    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
+    drop(_write_guard);
+
     // 9. Remove channel from thread_cache
     state.thread_cache.write().await.remove(&channel);
 
@@ -313,13 +536,25 @@ pub async fn handle_unarchive_channel(
         Err(e) => return Response::error(format!("invalid channel name: {}", e)),
     };
 
-    // 2. Validate author is registered
+    // 2. Validate author is registered.
+    // Note: handle_archive_channel calls ensure_author_not_departed here;
+    // unarchive intentionally does not — a departed user's collaborators
+    // may need to recover the channel, and only the creator can unarchive
+    // (permission check below), so blocking departed users would leave
+    // their channels permanently stuck in archive. Preserve this asymmetry
+    // unless a product decision changes it.
     {
         let users = state.users.read().await;
         if !users.contains(&author) {
             return Response::error(format!("unknown user: {}", author));
         }
     }
+
+    // Hold commit_lock for the rest of this handler — unarchive_channel mutates
+    // the tree in many steps (yaml clears + filtered card mvs + channel meta+thread
+    // mvs + single commit). Concurrent writers would otherwise interleave commits
+    // mid-operation.
+    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // 3. Read archive meta; fail if source not present
     let archive_meta_path = state
@@ -361,6 +596,169 @@ pub async fn handle_unarchive_channel(
         return Response::error(format!("failed to create channels dir: {}", e));
     }
 
+    // 6b. Discover cards in archive/channels/<ch>/cards/ — only restore those
+    //     whose archived_via == Channel. Cards archived manually stay in archive.
+    let archive_cards_dir = state
+        .repo_root
+        .join("archive")
+        .join("channels")
+        .join(channel_name.to_string())
+        .join("cards");
+    let mut card_moves: Vec<(String, String)> = Vec::new(); // (from_rel, to_rel)
+    let mut card_files_to_commit: Vec<String> = Vec::new();
+    let mut stamped_yamls: Vec<String> = Vec::new(); // archive meta_rel paths for rollback
+
+    if archive_cards_dir.exists() {
+        let entries = match std::fs::read_dir(&archive_cards_dir) {
+            Ok(e) => e,
+            Err(e) => return Response::error(format!("failed to read archive cards dir: {}", e)),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "unarchive_channel",
+                        );
+                    }
+                    return Response::error(format!("failed to read dir entry: {}", e));
+                }
+            };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let card_id = entry.file_name().to_string_lossy().to_string();
+            let card_dir = entry.path();
+            let meta_file = card_dir.join("card.meta.yaml");
+            if !meta_file.exists() {
+                continue;
+            }
+            // Read + parse yaml
+            let yaml = match std::fs::read_to_string(&meta_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "unarchive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to read card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            let mut card_meta: gitim_core::types::CardMeta = match serde_yaml::from_str(&yaml) {
+                Ok(m) => m,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "unarchive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to parse card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            // Filter: only restore cards that were archived by this channel operation.
+            if card_meta.archived_via != Some(gitim_core::types::card::ArchivedVia::Channel) {
+                continue;
+            }
+            // Clear archived_via and re-serialize.
+            card_meta.archived_via = None;
+            let new_yaml = match serde_yaml::to_string(&card_meta) {
+                Ok(s) => s,
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "unarchive_channel",
+                        );
+                    }
+                    return Response::error(format!(
+                        "failed to serialize card meta {}: {}",
+                        card_id, e
+                    ));
+                }
+            };
+            if let Err(e) = std::fs::write(&meta_file, new_yaml) {
+                for prev_meta_rel in &stamped_yamls {
+                    crate::card_handlers::restore_card_yaml(
+                        &state,
+                        prev_meta_rel,
+                        "unarchive_channel",
+                    );
+                }
+                return Response::error(format!(
+                    "failed to write card meta {}: {}",
+                    card_id, e
+                ));
+            }
+            let from_rel = format!("archive/channels/{}/cards/{}", channel_name, card_id);
+            let to_rel = format!("channels/{}/cards/{}", channel_name, card_id);
+            // meta_rel is the archive path where the yaml now lives (post-mutation, pre-mv)
+            let meta_rel = format!("{}/card.meta.yaml", from_rel);
+            card_moves.push((from_rel, to_rel.clone()));
+            card_files_to_commit.push(format!("{}/card.meta.yaml", to_rel));
+            card_files_to_commit.push(format!("{}/discussion.thread", to_rel));
+            stamped_yamls.push(meta_rel);
+        }
+    }
+
+    // Ensure channels/<ch>/cards/ parent exists before any mv.
+    if !card_moves.is_empty() {
+        let active_cards_dir = state
+            .repo_root
+            .join("channels")
+            .join(channel_name.to_string())
+            .join("cards");
+        if let Err(e) = std::fs::create_dir_all(&active_cards_dir) {
+            for prev_meta_rel in &stamped_yamls {
+                crate::card_handlers::restore_card_yaml(
+                    &state,
+                    prev_meta_rel,
+                    "unarchive_channel",
+                );
+            }
+            return Response::error(format!("failed to create active cards dir: {}", e));
+        }
+    }
+
+    // Move each filtered card from archive to active.
+    let mut successful_card_mvs: Vec<(String, String)> = Vec::new();
+    for (from_rel, to_rel) in &card_moves {
+        if let Err(e) = state.git_storage.mv(from_rel, to_rel) {
+            // Reverse mvs already completed, then restore all stamped yamls.
+            for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+                if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                    error!(
+                        "unarchive_channel: rollback card mv {} -> {} failed: {}",
+                        rb_to, rb_from, rb_err
+                    );
+                }
+            }
+            for prev_meta_rel in &stamped_yamls {
+                crate::card_handlers::restore_card_yaml(
+                    &state,
+                    prev_meta_rel,
+                    "unarchive_channel",
+                );
+            }
+            return Response::error(format!("git mv card {} failed: {}", from_rel, e));
+        }
+        successful_card_mvs.push((from_rel.clone(), to_rel.clone()));
+    }
+
     // 7. git mv archive → active for both thread and meta.
     //    Move thread first; on meta-mv failure, reverse the thread mv.
     let thread_from = format!("archive/channels/{}.thread", channel_name);
@@ -369,30 +767,87 @@ pub async fn handle_unarchive_channel(
     let meta_to = format!("channels/{}.meta.yaml", channel_name);
 
     if let Err(e) = state.git_storage.mv(&thread_from, &thread_to) {
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "unarchive_channel: rollback card mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(
+                &state,
+                prev_meta_rel,
+                "unarchive_channel",
+            );
+        }
         return Response::error(format!("git mv thread failed: {}", e));
     }
     if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
-        // Reverse thread mv to leave tree clean.
-        if let Err(rb) = state.git_storage.mv(&thread_to, &thread_from) {
-            warn!("unarchive_channel: rollback thread mv also failed: {}", rb);
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "unarchive_channel: rollback mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "unarchive_channel: rollback card mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(
+                &state,
+                prev_meta_rel,
+                "unarchive_channel",
+            );
         }
         return Response::error(format!("git mv meta failed: {}", e));
     }
 
-    // 8. add + commit as author. On failure, reverse BOTH mvs so archive is intact.
+    // 8. add + commit as author (single commit covers channel meta+thread AND all card files).
     let commit_msg = format!("unarchive: #{} by @{}", channel, author);
     let (author_name, author_email) = state.author_for(&author);
+    let mut commit_paths: Vec<&str> = vec![&thread_to, &meta_to];
+    for f in &card_files_to_commit {
+        commit_paths.push(f.as_str());
+    }
     if let Err(e) = state.git_storage.add_and_commit_as(
-        &[&thread_to, &meta_to],
+        &commit_paths,
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
-        // Reverse meta mv first, then thread mv — mirror archive direction.
-        if let Err(rb) = state.git_storage.mv(&meta_to, &meta_from) {
-            warn!("unarchive_channel: rollback meta mv also failed: {}", rb);
+        // Roll back ALL mvs (cards first in reverse, then meta, then thread) and restore yamls.
+        for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
+            if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
+                error!(
+                    "unarchive_channel: card rollback mv {} -> {} failed: {}",
+                    rb_to, rb_from, rb_err
+                );
+            }
         }
-        if let Err(rb) = state.git_storage.mv(&thread_to, &thread_from) {
-            warn!("unarchive_channel: rollback thread mv also failed: {}", rb);
+        if let Err(rb_err) = state.git_storage.mv(&meta_to, &meta_from) {
+            error!(
+                "unarchive_channel: rollback meta mv {} -> {} also failed: {}",
+                meta_to, meta_from, rb_err
+            );
+        }
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "unarchive_channel: rollback thread mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
+        for prev_meta_rel in &stamped_yamls {
+            crate::card_handlers::restore_card_yaml(
+                &state,
+                prev_meta_rel,
+                "unarchive_channel",
+            );
         }
         return Response::error(format!(
             "unarchive_channel commit failed: {}; rolled back git mv",
@@ -433,6 +888,10 @@ pub async fn handle_unarchive_channel(
             ));
         }
     }
+
+    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
+    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
+    drop(_write_guard);
 
     // 10. Remove channel from thread_cache (symmetry with archive_channel)
     state.thread_cache.write().await.remove(&channel);

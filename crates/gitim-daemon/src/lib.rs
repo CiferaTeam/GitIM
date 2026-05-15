@@ -9,6 +9,7 @@ pub mod http;
 pub mod identity;
 pub mod lifecycle;
 pub mod onboard;
+pub mod reconcile;
 pub mod server;
 pub mod state;
 pub mod thread_io;
