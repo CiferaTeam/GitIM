@@ -332,3 +332,47 @@ async fn test_read_card_roundtrip() {
     assert_eq!(entries[0]["body"].as_str().unwrap(), "progress line");
     assert_eq!(entries[0]["author"].as_str().unwrap(), "bob");
 }
+
+#[tokio::test]
+async fn archive_card_sets_archived_via_manual_in_yaml() {
+    let (_t, state) = setup_test_repo().await;
+    let (_, card_id) = create_card(state.clone(), "dev", "task").await;
+    let id = card_id.unwrap();
+
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "archive_card",
+        "channel": "dev",
+        "card_id": id,
+        "author": "alice",
+    }))
+    .unwrap();
+    let resp = handle_request(req, state.clone()).await;
+    assert!(resp.ok, "archive_card should succeed: {:?}", resp.error);
+
+    // After archive, meta file lives at archive/channels/dev/cards/<id>/card.meta.yaml
+    let path = state
+        .repo_root
+        .join(format!("archive/channels/dev/cards/{}/card.meta.yaml", id));
+    let yaml = std::fs::read_to_string(&path).expect("archived card.meta.yaml must exist");
+    let meta: gitim_core::types::CardMeta = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(
+        meta.archived_via,
+        Some(gitim_core::types::card::ArchivedVia::Manual),
+        "archived_via should be Manual after archive_card"
+    );
+}
+
+/// Manual test: simulate commit failure by chmod 0444 on .git/, then archive.
+/// Verify that card.meta.yaml archived_via reverts to None after rollback.
+#[tokio::test]
+#[ignore]
+async fn archive_card_rolls_back_yaml_when_commit_fails() {
+    // No way to inject commit failure deterministically via the current test fixture.
+    // Manual verification steps:
+    //   1. Create a card in a test repo.
+    //   2. chmod 0444 .git/objects to make commit fail.
+    //   3. Call archive_card — expect Response::error containing "rolled back git mv".
+    //   4. Read channels/<ch>/cards/<id>/card.meta.yaml — archived_via must be absent.
+    //   5. chmod 0755 .git/objects to restore.
+}
+

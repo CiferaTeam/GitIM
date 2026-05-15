@@ -291,7 +291,7 @@ pub async fn handle_archive_card(
         .repo_root
         .join(&located.rel_path)
         .join("card.meta.yaml");
-    let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
+    let mut meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
             Ok(m) => m,
             Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
@@ -309,6 +309,16 @@ pub async fn handle_archive_card(
     let is_assignee = meta.assignee.as_deref() == Some(author.as_str());
     if !is_creator && !is_assignee {
         return Response::error("only creator or assignee can archive");
+    }
+
+    // 6b. Stamp archived_via: manual, write back BEFORE git mv so the mv carries the new yaml.
+    meta.archived_via = Some(gitim_core::types::card::ArchivedVia::Manual);
+    let stamped_yaml = match serde_yaml::to_string(&meta) {
+        Ok(s) => s,
+        Err(e) => return Response::error(format!("failed to serialize card meta: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&meta_path, &stamped_yaml) {
+        return Response::error(format!("failed to write card meta: {}", e));
     }
 
     // 7. Create archive target parent directory
@@ -343,6 +353,17 @@ pub async fn handle_archive_card(
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("archive_card: rollback mv also failed: {}", rb_err);
         }
+        // Restore the yaml file to its committed state: unstage then restore
+        // working tree (undoes both the yaml stamp and any staged changes from git mv).
+        let meta_rel = format!("{}/card.meta.yaml", from_rel);
+        let _ = std::process::Command::new("git")
+            .args(["reset", "HEAD", "--", &meta_rel])
+            .current_dir(&state.repo_root)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "--", &meta_rel])
+            .current_dir(&state.repo_root)
+            .output();
         return Response::error(format!(
             "archive_card commit failed: {}; rolled back git mv",
             e
