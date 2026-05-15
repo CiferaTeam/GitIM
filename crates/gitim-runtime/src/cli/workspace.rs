@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use super::http::{Client, CliError};
+use super::http::{CliError, Client};
 
 /// Minimal projection of a workspace entry from `GET /workspaces`. We only
 /// need `slug` for selection logic; full DTOs live in task 5's output module.
@@ -102,8 +102,7 @@ mod tests {
     #[test]
     fn auto_error_multiple_lists_slugs() {
         let candidates = vec!["frontend".to_string(), "backend".to_string()];
-        let err =
-            select_workspace(None, &candidates).expect_err("multiple workspaces must error");
+        let err = select_workspace(None, &candidates).expect_err("multiple workspaces must error");
         // Both slugs must appear in the message so the user can copy one
         // into --workspace without re-running anything to list them.
         let msg = err.to_string();

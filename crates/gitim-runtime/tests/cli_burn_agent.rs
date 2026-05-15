@@ -33,15 +33,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use common::{ensure_daemon_in_path, short_tempdir, stop_daemon};
-use gitim_runtime::cli::{cmd_burn_agent, from_cli_error, Client, CliError};
+use gitim_runtime::cli::{cmd_burn_agent, from_cli_error, CliError, Client};
 use gitim_runtime::http::{create_router, AgentInfo, SharedRuntimeState};
 use gitim_runtime::workspace::WorkspaceContext;
 
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -158,7 +154,9 @@ async fn test_burn_default_calls_burn_endpoint() {
     .expect_err("agent without provisioned user.meta.yaml must surface an error");
 
     match &err {
-        CliError::ResponseErrorCode { code, http_status, .. } => {
+        CliError::ResponseErrorCode {
+            code, http_status, ..
+        } => {
             assert_eq!(*http_status, 500, "burn daemon failure must be 5xx");
             // `daemon_depart_failed` and `daemon_unreachable` are both
             // exclusive to the burn handler — either one proves we hit
@@ -168,9 +166,7 @@ async fn test_burn_default_calls_burn_endpoint() {
                 "expected /burn-exclusive error_code, got: {code}",
             );
         }
-        other => panic!(
-            "expected ResponseErrorCode from /burn daemon RPC, got: {other:?}",
-        ),
+        other => panic!("expected ResponseErrorCode from /burn daemon RPC, got: {other:?}",),
     }
     // Structured `error_code` → permanent (exit 2) per
     // `exit_code::from_cli_error`. The daemon was reachable and gave a
@@ -265,14 +261,9 @@ async fn test_burn_nonexistent_agent_returns_exit_2() {
     inject_workspace(&state, "ws", &ws);
     // No agents injected — workspace is empty.
 
-    let err = cmd_burn_agent::run(
-        &client,
-        Some("ws".to_string()),
-        "ghost".to_string(),
-        false,
-    )
-    .await
-    .expect_err("burn of nonexistent agent must error");
+    let err = cmd_burn_agent::run(&client, Some("ws".to_string()), "ghost".to_string(), false)
+        .await
+        .expect_err("burn of nonexistent agent must error");
 
     match &err {
         CliError::ResponseErrorCode { code, .. } => {

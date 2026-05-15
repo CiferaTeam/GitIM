@@ -26,15 +26,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use common::short_tempdir;
-use gitim_runtime::cli::{cmd_update_agent, from_cli_error, Client, CliError};
+use gitim_runtime::cli::{cmd_update_agent, from_cli_error, CliError, Client};
 use gitim_runtime::http::{create_router, AgentInfo, SharedRuntimeState};
 use gitim_runtime::workspace::WorkspaceContext;
 
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -145,11 +141,20 @@ async fn test_update_no_fields_errors() {
         "msg should explain the failure: {msg}"
     );
     // Hint the user toward the available flags.
-    assert!(msg.contains("--system-prompt"), "msg should list flags: {msg}");
+    assert!(
+        msg.contains("--system-prompt"),
+        "msg should list flags: {msg}"
+    );
     assert!(msg.contains("--model"), "msg should list flags: {msg}");
-    assert!(msg.contains("--introduction"), "msg should list flags: {msg}");
+    assert!(
+        msg.contains("--introduction"),
+        "msg should list flags: {msg}"
+    );
     assert!(msg.contains("--env"), "msg should list flags: {msg}");
-    assert!(msg.contains("--dotenv-file"), "msg should list flags: {msg}");
+    assert!(
+        msg.contains("--dotenv-file"),
+        "msg should list flags: {msg}"
+    );
 
     server.abort();
 }

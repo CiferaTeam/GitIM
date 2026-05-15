@@ -101,12 +101,9 @@ async fn opencode_with_config_env_override_reaches_subprocess() {
         env_override: Some(env),
         model_override: None,
     };
-    let result = preflight_opencode_with_config(
-        script.to_str().unwrap(),
-        Duration::from_secs(5),
-        overrides,
-    )
-    .await;
+    let result =
+        preflight_opencode_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
+            .await;
 
     assert!(!result.available);
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
@@ -126,12 +123,9 @@ async fn opencode_with_config_model_override_is_ignored() {
         env_override: None,
         model_override: Some("should-not-appear".to_string()),
     };
-    let result = preflight_opencode_with_config(
-        script.to_str().unwrap(),
-        Duration::from_secs(5),
-        overrides,
-    )
-    .await;
+    let result =
+        preflight_opencode_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
+            .await;
 
     assert!(!result.available);
     assert_eq!(result.error_kind, Some(ErrorKind::Other));

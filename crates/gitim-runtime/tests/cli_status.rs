@@ -8,7 +8,7 @@
 
 use std::net::SocketAddr;
 
-use gitim_runtime::cli::{cmd_runtime_id, cmd_status, Client, CliError};
+use gitim_runtime::cli::{cmd_runtime_id, cmd_status, CliError, Client};
 use gitim_runtime::http::create_router;
 
 /// Spin up the runtime router on `127.0.0.1:0` and return the bound address

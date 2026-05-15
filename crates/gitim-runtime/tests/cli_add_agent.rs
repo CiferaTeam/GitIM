@@ -24,16 +24,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use common::short_tempdir;
-use gitim_runtime::cli::{cmd_add_agent, from_cli_error, Client, CliError};
+use gitim_runtime::cli::{cmd_add_agent, from_cli_error, CliError, Client};
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::workspace::WorkspaceContext;
 
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -78,10 +74,12 @@ fn seed_human_clone_with_handler(workspace: &Path, handler: &str) {
     let human_dir = runtime_dir.join("human");
     std::fs::create_dir_all(human_dir.join("users")).unwrap();
     std::fs::create_dir_all(human_dir.join(".git")).unwrap();
-    let path = human_dir
-        .join("users")
-        .join(format!("{handler}.meta.yaml"));
-    std::fs::write(&path, format!("handler: {handler}\ndisplay_name: {handler}\n")).unwrap();
+    let path = human_dir.join("users").join(format!("{handler}.meta.yaml"));
+    std::fs::write(
+        &path,
+        format!("handler: {handler}\ndisplay_name: {handler}\n"),
+    )
+    .unwrap();
 }
 
 /// Builder for `cmd_add_agent::Args` — every test only sets the few fields
@@ -150,8 +148,14 @@ async fn test_add_agent_env_parse_error() {
     assert!(matches!(err, CliError::InvalidConfig(_)));
     assert_eq!(from_cli_error(&err), 1);
     let msg = err.to_string();
-    assert!(msg.contains("MALFORMED"), "msg should include offending entry: {msg}");
-    assert!(msg.contains("KEY=VALUE"), "msg should hint the expected shape: {msg}");
+    assert!(
+        msg.contains("MALFORMED"),
+        "msg should include offending entry: {msg}"
+    );
+    assert!(
+        msg.contains("KEY=VALUE"),
+        "msg should hint the expected shape: {msg}"
+    );
 
     server.abort();
 }
@@ -220,7 +224,10 @@ async fn test_add_agent_ambiguous_workspace_errors() {
     let msg = err.to_string();
     assert!(msg.contains("alpha"), "message must list alpha: {msg}");
     assert!(msg.contains("beta"), "message must list beta: {msg}");
-    assert!(msg.contains("--workspace"), "message must mention --workspace flag: {msg}");
+    assert!(
+        msg.contains("--workspace"),
+        "message must mention --workspace flag: {msg}"
+    );
 
     server.abort();
 }
@@ -272,9 +279,9 @@ async fn test_add_agent_hermes_with_llm_flags_reaches_runtime() {
             // first), this'll catch the drift.
             assert_eq!(code, "handler_conflict");
         }
-        other => panic!(
-            "hermes+llm body should reach runtime structured-error path; got: {other:?}"
-        ),
+        other => {
+            panic!("hermes+llm body should reach runtime structured-error path; got: {other:?}")
+        }
     }
 
     server.abort();
@@ -348,10 +355,7 @@ async fn test_add_agent_preserves_preflight_detail_from_server() {
         }))
     }
 
-    let app = Router::new().route(
-        "/workspaces/{slug}/agents/add",
-        post(mock_handler),
-    );
+    let app = Router::new().route("/workspaces/{slug}/agents/add", post(mock_handler));
     // Also need the workspaces list endpoint because `resolve_workspace`
     // calls it when `--workspace` is set to disambiguate. Return a single
     // workspace match so the resolver passes through.
@@ -399,9 +403,7 @@ async fn test_add_agent_preserves_preflight_detail_from_server() {
                 Some(gitim_runtime::preflight::ErrorKind::Other)
             );
         }
-        other => panic!(
-            "expected ResponseErrorCode with preflight_detail, got: {other:?}",
-        ),
+        other => panic!("expected ResponseErrorCode with preflight_detail, got: {other:?}",),
     }
     assert_eq!(from_cli_error(&err), 2);
 

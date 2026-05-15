@@ -28,7 +28,7 @@
 
 use serde_json::json;
 
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 use crate::cli::workspace::resolve_workspace;
 
 /// Entry point. Sequence:
@@ -63,11 +63,7 @@ pub async fn run(
 /// router. The mapping is the entire CLI-side contract of this subcommand
 /// — keeping it in one inspectable function makes drift between the two
 /// endpoints visible at review time.
-pub(crate) fn build_burn_request(
-    slug: &str,
-    id: &str,
-    hard: bool,
-) -> (String, serde_json::Value) {
+pub(crate) fn build_burn_request(slug: &str, id: &str, hard: bool) -> (String, serde_json::Value) {
     if hard {
         (
             format!("/workspaces/{slug}/agents/remove"),

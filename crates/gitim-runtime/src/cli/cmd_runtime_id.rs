@@ -5,7 +5,7 @@
 //! different shapes (one for `status`, one for `runtime-id`). Stdout-only on
 //! success; errors surface as `CliError` for the caller's exit-code mapping.
 
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 
 /// Fetch `/health`, extract `runtime_id`, print `{"runtime_id": "..."}` to
 /// stdout. Returns `Ok(0)` on success.

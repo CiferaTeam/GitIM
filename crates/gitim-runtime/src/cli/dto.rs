@@ -223,8 +223,7 @@ mod tests {
             "env": {"API_KEY": "secret-value"},
         });
 
-        let view: AgentView =
-            serde_json::from_value(raw).expect("AgentView ignores extra fields");
+        let view: AgentView = serde_json::from_value(raw).expect("AgentView ignores extra fields");
         assert_eq!(view.id, "agent-1");
         assert_eq!(view.handler, "alice");
         assert_eq!(view.messages_processed, 7);
@@ -468,7 +467,10 @@ mod tests {
 
         assert!(!parsed.ok);
         assert_eq!(parsed.error, "model not found");
-        assert_eq!(parsed.error_code.as_deref(), Some("provision_preflight_failed"));
+        assert_eq!(
+            parsed.error_code.as_deref(),
+            Some("provision_preflight_failed")
+        );
         let pf = parsed
             .preflight_detail
             .as_ref()

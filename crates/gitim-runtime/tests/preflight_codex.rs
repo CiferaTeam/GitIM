@@ -148,8 +148,7 @@ async fn codex_with_config_default_behavior_matches_old_function() {
     let timeout = Duration::from_secs(5);
 
     let via_wrapper = preflight_codex_with(bin, timeout).await;
-    let via_config =
-        preflight_codex_with_config(bin, timeout, PreflightOverrides::default()).await;
+    let via_config = preflight_codex_with_config(bin, timeout, PreflightOverrides::default()).await;
 
     assert_eq!(via_wrapper.available, via_config.available);
     assert_eq!(via_wrapper.provider, via_config.provider);

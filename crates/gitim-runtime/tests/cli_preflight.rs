@@ -13,7 +13,7 @@
 
 use std::net::SocketAddr;
 
-use gitim_runtime::cli::{cmd_preflight, Client, CliError};
+use gitim_runtime::cli::{cmd_preflight, CliError, Client};
 use gitim_runtime::http::create_router;
 
 /// Spin up the runtime router on an ephemeral loopback port. We don't need to
@@ -138,9 +138,9 @@ async fn test_preflight_llm_params_without_hermes_errors() {
                     "error must mention hermes for clarity: {msg}",
                 );
             }
-            other => panic!(
-                "expected InvalidConfig for provider=claude with llm flags, got: {other:?}",
-            ),
+            other => {
+                panic!("expected InvalidConfig for provider=claude with llm flags, got: {other:?}",)
+            }
         }
         // Validation failures are CLI-side → exit 1, not server-side → exit 2.
         assert_eq!(

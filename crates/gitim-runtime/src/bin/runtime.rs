@@ -852,8 +852,8 @@ mod argv_dispatch_tests {
 
     #[test]
     fn port_flag_at_top_level() {
-        let args = Args::try_parse_from(["gitim-runtime", "--port", "5000"])
-            .expect("parse must succeed");
+        let args =
+            Args::try_parse_from(["gitim-runtime", "--port", "5000"]).expect("parse must succeed");
         assert!(args.command.is_none());
         assert_eq!(args.port, Some(5000));
     }
@@ -891,7 +891,10 @@ mod argv_dispatch_tests {
         assert_eq!(args.port, Some(8080));
         assert!(matches!(args.command, Some(Command::Status)));
         let err = validate_args(&args).expect_err("validate_args must reject this combination");
-        assert!(err.contains("--port"), "error message must mention --port: {err}");
+        assert!(
+            err.contains("--port"),
+            "error message must mention --port: {err}"
+        );
         assert!(
             err.contains("GITIM_RUNTIME_PORT"),
             "error message must point users to the env var: {err}",
@@ -907,7 +910,10 @@ mod argv_dispatch_tests {
         assert!(args.daemon);
         assert!(matches!(args.command, Some(Command::Status)));
         let err = validate_args(&args).expect_err("validate_args must reject this combination");
-        assert!(err.contains("--daemon"), "error message must mention --daemon: {err}");
+        assert!(
+            err.contains("--daemon"),
+            "error message must mention --daemon: {err}"
+        );
     }
 
     #[test]
@@ -921,8 +927,8 @@ mod argv_dispatch_tests {
     #[test]
     fn subcommand_alone_ok() {
         // Plain subcommand invocation must pass validation.
-        let args =
-            Args::try_parse_from(["gitim-runtime", "status"]).expect("clap accepts bare subcommand");
+        let args = Args::try_parse_from(["gitim-runtime", "status"])
+            .expect("clap accepts bare subcommand");
         assert!(validate_args(&args).is_ok());
     }
 
@@ -936,8 +942,8 @@ mod argv_dispatch_tests {
     #[test]
     fn daemon_alone_no_subcommand_validates_ok() {
         // Server-mode `-d` (daemonize) is supported on its own.
-        let args = Args::try_parse_from(["gitim-runtime", "-d"])
-            .expect("clap accepts -d in server mode");
+        let args =
+            Args::try_parse_from(["gitim-runtime", "-d"]).expect("clap accepts -d in server mode");
         assert!(args.daemon);
         assert!(args.command.is_none());
         assert!(validate_args(&args).is_ok());
@@ -982,12 +988,8 @@ mod argv_dispatch_tests {
     fn legacy_positional_rejected() {
         // The pre-CLI positional form (`gitim-runtime <url> <handler> <name>`)
         // must not parse as a subcommand or as bare server-mode args.
-        let result = Args::try_parse_from([
-            "gitim-runtime",
-            "https://github.com/o/r",
-            "handler",
-            "name",
-        ]);
+        let result =
+            Args::try_parse_from(["gitim-runtime", "https://github.com/o/r", "handler", "name"]);
         assert!(result.is_err());
     }
 
@@ -1299,9 +1301,8 @@ mod argv_subcommand_tests {
 
     #[test]
     fn burn_agent_minimal_required_args() {
-        let args =
-            Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "agent-1"])
-                .expect("parse must succeed");
+        let args = Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "agent-1"])
+            .expect("parse must succeed");
         match args.command {
             Some(Command::BurnAgent {
                 workspace,
@@ -1318,9 +1319,8 @@ mod argv_subcommand_tests {
 
     #[test]
     fn burn_agent_with_hard() {
-        let args =
-            Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "x", "--hard"])
-                .expect("parse must succeed");
+        let args = Args::try_parse_from(["gitim-runtime", "burn-agent", "--id", "x", "--hard"])
+            .expect("parse must succeed");
         match args.command {
             Some(Command::BurnAgent {
                 workspace,
@@ -1374,9 +1374,8 @@ mod argv_subcommand_tests {
     fn update_agent_minimal_required_args() {
         // --id is the only parse-time required arg. An empty patch is the
         // CLI/runtime's job to reject, not clap's.
-        let args =
-            Args::try_parse_from(["gitim-runtime", "update-agent", "--id", "agent-1"])
-                .expect("parse must succeed");
+        let args = Args::try_parse_from(["gitim-runtime", "update-agent", "--id", "agent-1"])
+            .expect("parse must succeed");
         match args.command {
             Some(Command::UpdateAgent {
                 workspace,
@@ -1712,7 +1711,10 @@ mod preflight_stderr_format_tests {
             .lines()
             .find(|l| l.starts_with("  Output preview:"))
             .expect("preview line present");
-        assert!(preview_line.ends_with('…'), "truncation marker missing: {preview_line}");
+        assert!(
+            preview_line.ends_with('…'),
+            "truncation marker missing: {preview_line}"
+        );
         // The line is "  Output preview: " (18 chars) + 200 a's + '…'
         // (1 char). Count chars not bytes since '…' is multibyte.
         assert_eq!(

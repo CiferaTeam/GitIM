@@ -40,11 +40,7 @@ use tempfile::TempDir;
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -302,7 +298,10 @@ async fn test_claude_with_failing_binary_returns_preflight_failed() {
     )
     .await;
 
-    assert_eq!(resp["ok"], false, "preflight failure should set ok=false: {resp}");
+    assert_eq!(
+        resp["ok"], false,
+        "preflight failure should set ok=false: {resp}"
+    );
     assert_eq!(
         resp["error_code"], "provision_preflight_failed",
         "expected provision_preflight_failed error_code, got: {resp}"
@@ -310,7 +309,10 @@ async fn test_claude_with_failing_binary_returns_preflight_failed() {
     let detail = resp
         .get("preflight_detail")
         .expect("preflight_detail must be present");
-    assert!(detail.is_object(), "preflight_detail must be an object: {detail}");
+    assert!(
+        detail.is_object(),
+        "preflight_detail must be an object: {detail}"
+    );
     assert_eq!(detail["provider"], "claude");
     assert_eq!(detail["available"], false);
     // Provider was invoked and failed → error_kind populated.

@@ -11,7 +11,7 @@
 //! Output convention: success → compact JSON array to stdout, exit 0; errors
 //! bubble up as `CliError` for the caller's exit-code mapping.
 
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 
 /// Fetch `/workspaces`, unwrap the `{workspaces: [...]}` envelope, print the
 /// inner array as compact JSON to stdout. Returns `Ok(0)` on success.

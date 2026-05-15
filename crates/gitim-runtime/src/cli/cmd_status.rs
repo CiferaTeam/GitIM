@@ -10,7 +10,7 @@
 //! `CliError` and the caller in `bin/runtime.rs` maps to a non-zero exit code.
 
 use crate::cli::dto::RuntimeStatus;
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 
 /// Build a `RuntimeStatus` snapshot and print it as JSON to stdout.
 ///

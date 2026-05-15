@@ -476,4 +476,3 @@ async fn unarchive_card_rolls_back_yaml_when_git_mv_fails() {
     //      (yaml cleared then restored by restore_card_yaml).
     //   5. chmod 0755 archive/channels/dev/cards/<id> to restore.
 }
-

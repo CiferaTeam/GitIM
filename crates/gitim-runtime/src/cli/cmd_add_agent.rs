@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::cli::dto::AddAgentResponse;
-use crate::cli::http::{Client, CliError, LONG_REQUEST_TIMEOUT};
+use crate::cli::http::{CliError, Client, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
 
 /// Soft cap for `--system-prompt-file` reads. Real system prompts are at most
@@ -470,8 +470,7 @@ mod tests {
 
     #[test]
     fn resolve_system_prompt_inline_wins() {
-        let prompt =
-            resolve_system_prompt(&Some("inline content".to_string()), &None).expect("ok");
+        let prompt = resolve_system_prompt(&Some("inline content".to_string()), &None).expect("ok");
         assert_eq!(prompt.as_deref(), Some("inline content"));
     }
 

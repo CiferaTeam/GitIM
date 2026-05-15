@@ -26,7 +26,7 @@
 //!   bubbles up; mapping to exit 2 happens in `exit_code::from_cli_error`.
 //! - Transport / parse errors → exit 1 / exit 1 respectively.
 
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 use percent_encoding::{AsciiSet, CONTROLS};
 
 /// Provider identifier that gates hermes-only flags. Centralized so the check
@@ -121,9 +121,7 @@ pub fn build_preflight_path(
         }
         path.push_str(k);
         path.push('=');
-        path.push_str(
-            &percent_encoding::utf8_percent_encode(v, QUERY_VALUE_ESCAPE).to_string(),
-        );
+        path.push_str(&percent_encoding::utf8_percent_encode(v, QUERY_VALUE_ESCAPE).to_string());
     }
     path
 }

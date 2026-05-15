@@ -133,8 +133,7 @@ async fn pi_with_config_env_override_reaches_subprocess() {
         model_override: None,
     };
     let result =
-        preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
-            .await;
+        preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides).await;
 
     assert!(result.available, "expected available, got {result:?}");
     let preview = result.output_preview.expect("output_preview should be set");
@@ -157,8 +156,7 @@ async fn pi_with_config_model_override_is_ignored() {
         model_override: Some("should-not-appear-GITIM_OK".to_string()),
     };
     let result =
-        preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
-            .await;
+        preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides).await;
 
     // Success branch: fixture writes ARGV=... wrapped around GITIM_OK so the
     // parent treats it as a valid response and we get `output_preview` back.
@@ -188,8 +186,7 @@ async fn pi_with_config_default_behavior_matches_old_function() {
     let timeout = Duration::from_secs(5);
 
     let via_wrapper = preflight_pi_with(bin, timeout).await;
-    let via_config =
-        preflight_pi_with_config(bin, timeout, PreflightOverrides::default()).await;
+    let via_config = preflight_pi_with_config(bin, timeout, PreflightOverrides::default()).await;
 
     assert_eq!(via_wrapper.available, via_config.available);
     assert_eq!(via_wrapper.provider, via_config.provider);

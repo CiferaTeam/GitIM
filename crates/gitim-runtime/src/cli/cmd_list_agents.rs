@@ -17,7 +17,7 @@
 //! the bin-level dispatcher maps them to exit codes.
 
 use crate::cli::dto::{agent_detail_from_value, AgentView};
-use crate::cli::http::{Client, CliError};
+use crate::cli::http::{CliError, Client};
 use crate::cli::workspace::resolve_workspace;
 
 /// Fetch agents for the selected workspace and print as a JSON array.
@@ -67,9 +67,7 @@ fn extract_agents_array(body: &serde_json::Value) -> Result<&Vec<serde_json::Val
 /// Default projection: every agent → `AgentView`. The serde shape of
 /// `AgentView` drops the sensitive fields outright; no `redact_env_secrets`
 /// needed because `env` isn't in the struct.
-fn project_redacted(
-    raw_agents: &[serde_json::Value],
-) -> Result<Vec<AgentView>, CliError> {
+fn project_redacted(raw_agents: &[serde_json::Value]) -> Result<Vec<AgentView>, CliError> {
     raw_agents
         .iter()
         .map(|v| {
@@ -82,9 +80,7 @@ fn project_redacted(
 /// `--detailed`: every agent → `AgentDetail` with env redacted via
 /// `agent_detail_from_value` (the canonical constructor that bakes the
 /// redaction step into the type's only blessed entry point).
-fn project_detailed(
-    raw_agents: &[serde_json::Value],
-) -> Result<Vec<serde_json::Value>, CliError> {
+fn project_detailed(raw_agents: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, CliError> {
     raw_agents
         .iter()
         .map(|v| {

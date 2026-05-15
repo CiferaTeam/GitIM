@@ -20,18 +20,14 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use gitim_runtime::cli::{cmd_list_agents, Client, CliError};
+use gitim_runtime::cli::{cmd_list_agents, CliError, Client};
 use gitim_runtime::http::{create_router, AgentInfo, SharedRuntimeState};
 use gitim_runtime::workspace::WorkspaceContext;
 
 /// Spin up the runtime router on `127.0.0.1:0` and return the bound address,
 /// the shared state (for direct workspace / agent injection), and the join
 /// handle so callers can abort at test end.
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -229,8 +225,8 @@ async fn test_list_agents_detailed_redacts_secrets() {
 
     // Run the same projection the handler used and confirm the output of
     // that step swaps secret-shaped values to "<redacted>".
-    let detail = gitim_runtime::cli::agent_detail_from_value(raw_agent)
-        .expect("agent_detail_from_value");
+    let detail =
+        gitim_runtime::cli::agent_detail_from_value(raw_agent).expect("agent_detail_from_value");
 
     // Sensitive fields surface in --detailed mode.
     assert_eq!(detail.repo_path, "/abs/repo/alice");

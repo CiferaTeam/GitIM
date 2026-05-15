@@ -82,10 +82,7 @@ async fn create_card(state: Arc<AppState>, channel: &str, title: &str) -> String
     .unwrap();
     let resp = handle_request(req, state).await;
     assert!(resp.ok, "create_card failed: {:?}", resp.error);
-    resp.data.unwrap()["card_id"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    resp.data.unwrap()["card_id"].as_str().unwrap().to_string()
 }
 
 /// Archives a card as alice.
@@ -155,11 +152,7 @@ async fn archive_channel_moves_active_cards_with_archived_via_channel() {
     // Original active paths must be gone.
     let active_cards_dir = state.repo_root.join("channels/general/cards");
     assert!(
-        !active_cards_dir.exists()
-            || active_cards_dir
-                .read_dir()
-                .unwrap()
-                .count() == 0,
+        !active_cards_dir.exists() || active_cards_dir.read_dir().unwrap().count() == 0,
         "channels/general/cards should be empty or absent after archive"
     );
 
@@ -261,7 +254,10 @@ async fn unarchive_channel_restores_only_channel_archived_cards() {
     let auto_yaml =
         std::fs::read_to_string(&active_meta).expect("auto card should be back in active location");
     let auto: gitim_core::types::CardMeta = serde_yaml::from_str(&auto_yaml).unwrap();
-    assert_eq!(auto.archived_via, None, "auto card archived_via should be None after unarchive");
+    assert_eq!(
+        auto.archived_via, None,
+        "auto card archived_via should be None after unarchive"
+    );
     assert!(
         !auto_yaml.contains("archived_via"),
         "archived_via field should be absent from yaml (skipped_serializing_if)"

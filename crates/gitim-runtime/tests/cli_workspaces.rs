@@ -9,17 +9,13 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use gitim_runtime::cli::{cmd_workspaces, Client, CliError};
+use gitim_runtime::cli::{cmd_workspaces, CliError, Client};
 use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::workspace::WorkspaceContext;
 
 /// Spin up the runtime router on `127.0.0.1:0` and return the bound address,
 /// the shared state (for direct workspace injection), and the join handle.
-async fn spawn_server() -> (
-    SocketAddr,
-    SharedRuntimeState,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_server() -> (SocketAddr, SharedRuntimeState, tokio::task::JoinHandle<()>) {
     let (router, state) = create_router();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -58,7 +54,10 @@ async fn test_workspaces_empty_returns_empty_array() {
     assert_eq!(exit_code, 0);
 
     // Validate the underlying response shape the handler printed.
-    let body = client.get("/workspaces").await.expect("workspaces responds");
+    let body = client
+        .get("/workspaces")
+        .await
+        .expect("workspaces responds");
     let arr = body
         .get("workspaces")
         .and_then(|v| v.as_array())
@@ -85,7 +84,10 @@ async fn test_workspaces_lists_known_workspace() {
         .expect("workspaces returns Ok");
     assert_eq!(exit_code, 0);
 
-    let body = client.get("/workspaces").await.expect("workspaces responds");
+    let body = client
+        .get("/workspaces")
+        .await
+        .expect("workspaces responds");
     let arr = body
         .get("workspaces")
         .and_then(|v| v.as_array())

@@ -87,10 +87,7 @@ async fn create_card(state: Arc<AppState>, channel: &str, title: &str) -> String
     .unwrap();
     let resp = handle_request(req, state).await;
     assert!(resp.ok, "create_card failed: {:?}", resp.error);
-    resp.data.unwrap()["card_id"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    resp.data.unwrap()["card_id"].as_str().unwrap().to_string()
 }
 
 // ─── Test 1: orphan cards get migrated ───────────────────────────────────────
@@ -228,10 +225,7 @@ async fn reconcile_skips_active_channels_with_cards() {
     assert!(
         state
             .repo_root
-            .join(format!(
-                "channels/general/cards/{}/card.meta.yaml",
-                card_id
-            ))
+            .join(format!("channels/general/cards/{}/card.meta.yaml", card_id))
             .exists(),
         "active card must not be moved"
     );

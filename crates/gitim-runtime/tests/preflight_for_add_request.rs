@@ -72,7 +72,10 @@ async fn mock_provider_short_circuits_success() {
     // provider="mock". If it did, the call would fail (no `mock` on PATH).
     let result = preflight_for_add_request("mock", None, None, None, None).await;
 
-    assert!(result.available, "mock should short-circuit success, got {result:?}");
+    assert!(
+        result.available,
+        "mock should short-circuit success, got {result:?}"
+    );
     assert_eq!(result.provider, "mock");
     assert!(result.failure_code.is_none());
     assert!(result.error.is_none());
@@ -101,8 +104,7 @@ async fn mock_provider_passes_classify_to_provision_preflight_failed_default() {
 
 #[tokio::test]
 async fn unknown_provider_returns_unknown_failure_code() {
-    let result =
-        preflight_for_add_request("madeup-provider-xyz", None, None, None, None).await;
+    let result = preflight_for_add_request("madeup-provider-xyz", None, None, None, None).await;
 
     assert!(!result.available);
     assert_eq!(result.provider, "madeup-provider-xyz");
@@ -202,7 +204,10 @@ async fn hermes_dual_llm_calls_preflight_hermes_with() {
     )
     .await;
 
-    assert!(result.available, "hermes chat should succeed, got {result:?}");
+    assert!(
+        result.available,
+        "hermes chat should succeed, got {result:?}"
+    );
     assert_eq!(result.provider, "hermes");
 
     let captured = std::fs::read_to_string(&capture).unwrap();
@@ -227,8 +232,7 @@ async fn hermes_dual_llm_calls_preflight_hermes_with() {
 #[tokio::test]
 async fn hermes_missing_one_llm_returns_missing_llm_provider_code() {
     // Only llm_provider supplied → setup-level failure, no spawn.
-    let result =
-        preflight_for_add_request("hermes", None, None, Some("anthropic"), None).await;
+    let result = preflight_for_add_request("hermes", None, None, Some("anthropic"), None).await;
 
     assert!(!result.available);
     assert_eq!(result.provider, "hermes");
@@ -242,14 +246,8 @@ async fn hermes_missing_one_llm_returns_missing_llm_provider_code() {
     );
 
     // And the mirror case: only llm_model supplied.
-    let result2 = preflight_for_add_request(
-        "hermes",
-        None,
-        None,
-        None,
-        Some("claude-opus-4-7"),
-    )
-    .await;
+    let result2 =
+        preflight_for_add_request("hermes", None, None, None, Some("claude-opus-4-7")).await;
     assert_eq!(
         result2.failure_code.as_deref(),
         Some(FAILURE_CODE_MISSING_LLM_PROVIDER)
@@ -281,10 +279,8 @@ async fn hermes_no_llm_default_profile_present_uses_resolved_llm() {
         ..Default::default()
     };
 
-    let result = preflight_for_add_request_with_overrides(
-        "hermes", None, None, None, None, overrides,
-    )
-    .await;
+    let result =
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
 
     assert!(
         result.available,
@@ -326,10 +322,8 @@ async fn hermes_no_llm_default_profile_missing_llm_returns_default_profile_no_ll
         ..Default::default()
     };
 
-    let result = preflight_for_add_request_with_overrides(
-        "hermes", None, None, None, None, overrides,
-    )
-    .await;
+    let result =
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
 
     assert!(!result.available, "expected failure, got {result:?}");
     assert_eq!(result.provider, "hermes");
@@ -365,10 +359,8 @@ async fn hermes_no_llm_default_profile_yaml_without_model_returns_default_profil
         ..Default::default()
     };
 
-    let result = preflight_for_add_request_with_overrides(
-        "hermes", None, None, None, None, overrides,
-    )
-    .await;
+    let result =
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
 
     assert_eq!(
         result.failure_code.as_deref(),
@@ -435,13 +427,8 @@ async fn classify_recognizes_each_setup_level_code() {
     );
 
     // Unknown failure_code value (e.g. a typo) — fall through to generic.
-    let pf_garbage = PreflightResult::failure_with_code(
-        "x",
-        ErrorKind::Other,
-        "x",
-        0,
-        "not-a-known-tag",
-    );
+    let pf_garbage =
+        PreflightResult::failure_with_code("x", ErrorKind::Other, "x", 0, "not-a-known-tag");
     assert_eq!(
         classify_preflight_error_code(&pf_garbage),
         ERROR_CODE_PROVISION_PREFLIGHT_FAILED
@@ -467,10 +454,8 @@ async fn outer_timeout_fires_with_slow_binary() {
     };
 
     let started = std::time::Instant::now();
-    let result = preflight_for_add_request_with_overrides(
-        "claude", None, None, None, None, overrides,
-    )
-    .await;
+    let result =
+        preflight_for_add_request_with_overrides("claude", None, None, None, None, overrides).await;
     let elapsed = started.elapsed();
 
     assert!(!result.available);

@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::cli::http::{Client, CliError, LONG_REQUEST_TIMEOUT};
+use crate::cli::http::{CliError, Client, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
 
 /// Soft cap for `--system-prompt-file` and `--dotenv-file` reads. The
@@ -160,9 +160,7 @@ fn read_capped_file(
     let metadata = std::fs::metadata(path)
         .map_err(|e| CliError::InvalidConfig(format!("{label} stat: {e}")))?;
     if metadata.len() > FILE_MAX_BYTES {
-        return Err(CliError::InvalidConfig(format!(
-            "{label} exceeds 64KB"
-        )));
+        return Err(CliError::InvalidConfig(format!("{label} exceeds 64KB")));
     }
     let content = std::fs::read_to_string(path)
         .map_err(|e| CliError::InvalidConfig(format!("{label} read: {e}")))?;
@@ -395,12 +393,8 @@ mod tests {
 
     #[test]
     fn resolve_optional_file_inline_wins() {
-        let v = resolve_optional_file(
-            &Some("inline".to_string()),
-            &None,
-            "system_prompt_file",
-        )
-        .expect("ok");
+        let v = resolve_optional_file(&Some("inline".to_string()), &None, "system_prompt_file")
+            .expect("ok");
         assert_eq!(v.as_deref(), Some("inline"));
     }
 

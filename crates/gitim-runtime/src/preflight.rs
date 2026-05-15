@@ -1583,15 +1583,7 @@ async fn dispatch_hermes(
             };
             match resolved {
                 Some((p, m)) => {
-                    preflight_hermes_with(
-                        bin,
-                        timeout,
-                        hermes_home,
-                        Some(&p),
-                        Some(&m),
-                        env,
-                    )
-                    .await
+                    preflight_hermes_with(bin, timeout, hermes_home, Some(&p), Some(&m), env).await
                 }
                 None => PreflightResult::failure_with_code(
                     "hermes",
@@ -1830,12 +1822,7 @@ not json
         // appear in the JSON output. This is the legacy shape — older
         // clients (frontend, CLI DTO) read the body before the field
         // existed and must keep working unchanged.
-        let pf = PreflightResult::failure(
-            "claude",
-            ErrorKind::NotInstalled,
-            "not found",
-            0,
-        );
+        let pf = PreflightResult::failure("claude", ErrorKind::NotInstalled, "not found", 0);
         let v: serde_json::Value = serde_json::to_value(&pf).unwrap();
         assert!(
             !v.as_object().unwrap().contains_key("failure_code"),

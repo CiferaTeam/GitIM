@@ -193,8 +193,10 @@ mod archived_via_tests {
             archived_via: None,
         };
         let yaml = serde_yaml::to_string(&meta).unwrap();
-        assert!(!yaml.contains("archived_via"),
-            "expected omitted field, got:\n{yaml}");
+        assert!(
+            !yaml.contains("archived_via"),
+            "expected omitted field, got:\n{yaml}"
+        );
     }
 
     #[test]
@@ -211,8 +213,10 @@ mod archived_via_tests {
             archived_via: Some(ArchivedVia::Channel),
         };
         let yaml = serde_yaml::to_string(&meta).unwrap();
-        assert!(yaml.contains("archived_via: channel"),
-            "expected field present, got:\n{yaml}");
+        assert!(
+            yaml.contains("archived_via: channel"),
+            "expected field present, got:\n{yaml}"
+        );
     }
 
     #[test]

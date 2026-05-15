@@ -35,8 +35,7 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
     let mut commit_paths: Vec<String> = Vec::new();
     let mut processed_channels: HashSet<String> = HashSet::new();
 
-    let entries = std::fs::read_dir(&channels_dir)
-        .map_err(|e| format!("read channels/: {}", e))?;
+    let entries = std::fs::read_dir(&channels_dir).map_err(|e| format!("read channels/: {}", e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("read dir entry: {}", e))?;
@@ -66,11 +65,7 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
 
         for card_entry in card_entries {
             let card_entry = card_entry.map_err(|e| format!("read card entry: {}", e))?;
-            if !card_entry
-                .file_type()
-                .map(|t| t.is_dir())
-                .unwrap_or(false)
-            {
+            if !card_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
             let card_id = card_entry.file_name().to_string_lossy().to_string();
@@ -160,10 +155,7 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
     // Best-effort push; failure is non-fatal — sync_loop will retry.
     if state.git_storage.has_remote() {
         if let Err(e) = state.git_storage.push() {
-            warn!(
-                "reconcile push failed (will retry via sync_loop): {}",
-                e
-            );
+            warn!("reconcile push failed (will retry via sync_loop): {}", e);
         }
     }
 

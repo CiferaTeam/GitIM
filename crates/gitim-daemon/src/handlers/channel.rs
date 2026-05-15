@@ -286,10 +286,7 @@ pub async fn handle_archive_channel(
                             "archive_channel",
                         );
                     }
-                    return Response::error(format!(
-                        "failed to read card meta {}: {}",
-                        card_id, e
-                    ));
+                    return Response::error(format!("failed to read card meta {}: {}", card_id, e));
                 }
             };
             let mut meta: gitim_core::types::CardMeta = match serde_yaml::from_str(&yaml) {
@@ -334,10 +331,7 @@ pub async fn handle_archive_channel(
                         "archive_channel",
                     );
                 }
-                return Response::error(format!(
-                    "failed to write card meta {}: {}",
-                    card_id, e
-                ));
+                return Response::error(format!("failed to write card meta {}: {}", card_id, e));
             }
             let from_rel = format!("channels/{}/cards/{}", channel_name, card_id);
             let to_rel = format!("archive/channels/{}/cards/{}", channel_name, card_id);
@@ -359,11 +353,7 @@ pub async fn handle_archive_channel(
             .join("cards");
         if let Err(e) = std::fs::create_dir_all(&archive_cards_dir) {
             for prev_meta_rel in &stamped_yamls {
-                crate::card_handlers::restore_card_yaml(
-                    &state,
-                    prev_meta_rel,
-                    "archive_channel",
-                );
+                crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
             }
             return Response::error(format!("failed to create archive cards dir: {}", e));
         }
@@ -383,11 +373,7 @@ pub async fn handle_archive_channel(
                 }
             }
             for prev_meta_rel in &stamped_yamls {
-                crate::card_handlers::restore_card_yaml(
-                    &state,
-                    prev_meta_rel,
-                    "archive_channel",
-                );
+                crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
             }
             return Response::error(format!("git mv card {} failed: {}", from_rel, e));
         }
@@ -647,10 +633,7 @@ pub async fn handle_unarchive_channel(
                             "unarchive_channel",
                         );
                     }
-                    return Response::error(format!(
-                        "failed to read card meta {}: {}",
-                        card_id, e
-                    ));
+                    return Response::error(format!("failed to read card meta {}: {}", card_id, e));
                 }
             };
             let mut card_meta: gitim_core::types::CardMeta = match serde_yaml::from_str(&yaml) {
@@ -699,10 +682,7 @@ pub async fn handle_unarchive_channel(
                         "unarchive_channel",
                     );
                 }
-                return Response::error(format!(
-                    "failed to write card meta {}: {}",
-                    card_id, e
-                ));
+                return Response::error(format!("failed to write card meta {}: {}", card_id, e));
             }
             let from_rel = format!("archive/channels/{}/cards/{}", channel_name, card_id);
             let to_rel = format!("channels/{}/cards/{}", channel_name, card_id);
@@ -724,11 +704,7 @@ pub async fn handle_unarchive_channel(
             .join("cards");
         if let Err(e) = std::fs::create_dir_all(&active_cards_dir) {
             for prev_meta_rel in &stamped_yamls {
-                crate::card_handlers::restore_card_yaml(
-                    &state,
-                    prev_meta_rel,
-                    "unarchive_channel",
-                );
+                crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "unarchive_channel");
             }
             return Response::error(format!("failed to create active cards dir: {}", e));
         }
@@ -748,11 +724,7 @@ pub async fn handle_unarchive_channel(
                 }
             }
             for prev_meta_rel in &stamped_yamls {
-                crate::card_handlers::restore_card_yaml(
-                    &state,
-                    prev_meta_rel,
-                    "unarchive_channel",
-                );
+                crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "unarchive_channel");
             }
             return Response::error(format!("git mv card {} failed: {}", from_rel, e));
         }
@@ -776,11 +748,7 @@ pub async fn handle_unarchive_channel(
             }
         }
         for prev_meta_rel in &stamped_yamls {
-            crate::card_handlers::restore_card_yaml(
-                &state,
-                prev_meta_rel,
-                "unarchive_channel",
-            );
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "unarchive_channel");
         }
         return Response::error(format!("git mv thread failed: {}", e));
     }
@@ -800,11 +768,7 @@ pub async fn handle_unarchive_channel(
             }
         }
         for prev_meta_rel in &stamped_yamls {
-            crate::card_handlers::restore_card_yaml(
-                &state,
-                prev_meta_rel,
-                "unarchive_channel",
-            );
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "unarchive_channel");
         }
         return Response::error(format!("git mv meta failed: {}", e));
     }
@@ -843,11 +807,7 @@ pub async fn handle_unarchive_channel(
             );
         }
         for prev_meta_rel in &stamped_yamls {
-            crate::card_handlers::restore_card_yaml(
-                &state,
-                prev_meta_rel,
-                "unarchive_channel",
-            );
+            crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "unarchive_channel");
         }
         return Response::error(format!(
             "unarchive_channel commit failed: {}; rolled back git mv",

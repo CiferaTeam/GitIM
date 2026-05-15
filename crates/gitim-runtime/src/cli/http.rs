@@ -634,10 +634,11 @@ mod tests {
         // 4xx + `error_code` — common pattern for input validation
         // failures (provider validation, missing fields, etc).
         let bytes = br#"{"ok":false,"error":"bad input","error_code":"validation_failed"}"#;
-        let err =
-            process_response_inner(StatusCode::BAD_REQUEST, bytes).expect_err("must error");
+        let err = process_response_inner(StatusCode::BAD_REQUEST, bytes).expect_err("must error");
         match err {
-            CliError::ResponseErrorCode { code, http_status, .. } => {
+            CliError::ResponseErrorCode {
+                code, http_status, ..
+            } => {
                 assert_eq!(code, "validation_failed");
                 assert_eq!(http_status, 400);
             }
@@ -651,17 +652,18 @@ mod tests {
         // the body, so a structured `error_code` would never surface. Burn
         // / preflight / sync error codes ship in 5xx bodies and the agent
         // needs them to decide permanent (don't retry) vs transient (retry).
-        let bytes = br#"{"ok":false,"error":"daemon RPC failed","error_code":"daemon_unreachable"}"#;
+        let bytes =
+            br#"{"ok":false,"error":"daemon RPC failed","error_code":"daemon_unreachable"}"#;
         let err = process_response_inner(StatusCode::INTERNAL_SERVER_ERROR, bytes)
             .expect_err("must error");
         match err {
-            CliError::ResponseErrorCode { code, http_status, .. } => {
+            CliError::ResponseErrorCode {
+                code, http_status, ..
+            } => {
                 assert_eq!(code, "daemon_unreachable");
                 assert_eq!(http_status, 500);
             }
-            other => panic!(
-                "expected ResponseErrorCode (5xx body parsed), got: {other:?}",
-            ),
+            other => panic!("expected ResponseErrorCode (5xx body parsed), got: {other:?}",),
         }
     }
 
@@ -793,12 +795,14 @@ mod tests {
         // plaintext, not JSON. Must still classify as HttpStatus(5xx)
         // so the exit-code mapper hits the transient path.
         let bytes = b"<html><body>Bad Gateway</body></html>";
-        let err =
-            process_response_inner(StatusCode::BAD_GATEWAY, bytes).expect_err("must error");
+        let err = process_response_inner(StatusCode::BAD_GATEWAY, bytes).expect_err("must error");
         match err {
             CliError::HttpStatus(status, body) => {
                 assert_eq!(status, 502);
-                assert!(body.contains("Bad Gateway"), "body must include excerpt: {body}");
+                assert!(
+                    body.contains("Bad Gateway"),
+                    "body must include excerpt: {body}"
+                );
             }
             other => panic!("expected HttpStatus, got: {other:?}"),
         }
@@ -808,8 +812,7 @@ mod tests {
     fn four_xx_without_json_falls_to_http_status() {
         // No JSON, no error_code → HttpStatus with body excerpt.
         let bytes = b"not found";
-        let err =
-            process_response_inner(StatusCode::NOT_FOUND, bytes).expect_err("must error");
+        let err = process_response_inner(StatusCode::NOT_FOUND, bytes).expect_err("must error");
         match err {
             CliError::HttpStatus(status, body) => {
                 assert_eq!(status, 404);
@@ -824,8 +827,8 @@ mod tests {
         // Edge case: 4xx with valid JSON but no `error_code` and no
         // `ok: false` — fall through to HttpStatus so exit code = 2.
         let bytes = br#"{"detail":"some plain rejection"}"#;
-        let err =
-            process_response_inner(StatusCode::UNPROCESSABLE_ENTITY, bytes).expect_err("must error");
+        let err = process_response_inner(StatusCode::UNPROCESSABLE_ENTITY, bytes)
+            .expect_err("must error");
         match err {
             CliError::HttpStatus(status, body) => {
                 assert_eq!(status, 422);
@@ -980,11 +983,8 @@ mod tests {
         drop(listener);
 
         let client = Client::new(format!("http://127.0.0.1:{port}"));
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            client.get("/status"),
-        )
-        .await;
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(15), client.get("/status")).await;
 
         // The outer timeout must NOT fire — that would mean the inner
         // request hung. The inner result must be a Transport error.

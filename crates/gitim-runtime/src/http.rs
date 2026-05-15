@@ -5953,11 +5953,8 @@ mod tests {
             7,
             "provider_cli_not_found",
         );
-        let body = ErrorBody::with_preflight(
-            "preflight failed",
-            "provision_preflight_failed",
-            detail,
-        );
+        let body =
+            ErrorBody::with_preflight("preflight failed", "provision_preflight_failed", detail);
         let v = serde_json::to_value(&body).expect("serialize");
 
         // Parse the nested branch back into a PreflightResult — this proves
