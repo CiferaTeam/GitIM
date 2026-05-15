@@ -834,6 +834,8 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
       for (const m of cardMoves) {
         await mvCardDirectory(`${s.repoDir}/${m.fromRel}`, `${s.repoDir}/${m.toRel}`);
       }
+    } else {
+      await mkdirp(`${s.repoDir}/channels`);
     }
 
     // Read channel meta + thread for the mv back.

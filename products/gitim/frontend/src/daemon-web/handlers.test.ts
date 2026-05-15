@@ -863,6 +863,49 @@ describe("daemon-web handlers", () => {
     expect(manualYaml).toContain("archived_via: manual");
   });
 
+  it("unarchiveChannel with only manual-archived cards moves channel without restoring any cards", async () => {
+    // Override channel meta + put it in the archive location (simulating a channel that was
+    // archived but had only manual-archived cards beneath it — filter discards them all,
+    // so cardMoves stays empty and the no-cards mkdirp branch must run).
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+    await archiveChannel("general");
+
+    // Replace the channel-stamped auto card with a manual-stamped one (simulating that
+    // the user manually archived it before the channel archive happened).
+    const archivedAutoYaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+    )!;
+    files.set(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+      archivedAutoYaml.replace("archived_via: channel", "archived_via: manual"),
+    );
+
+    await unarchiveChannel("general");
+
+    // Channel itself should be back in active
+    expect(files.has("/repo/channels/general.meta.yaml")).toBe(true);
+    expect(files.has("/repo/channels/general.thread")).toBe(true);
+    // The manual-stamped card should stay in archive (no restore)
+    expect(
+      files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(false);
+    expect(
+      files.has("/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(true);
+  });
+
   it("rejects invalid channel names before writing files", async () => {
     const res = await send("../evil", "bad");
 
