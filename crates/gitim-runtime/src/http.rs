@@ -2311,6 +2311,18 @@ async fn agents_add(
             .error
             .clone()
             .unwrap_or_else(|| "provisioning preflight failed".to_string());
+        // Operator observability: failures here are user-facing AND infrequent,
+        // so log them so `tail -f ~/.gitim/logs/*.log` surfaces patterns
+        // (e.g. spike in `hermes_default_profile_no_llm` after a hermes
+        // upgrade). Doesn't replace the structured response — that still
+        // carries the full preflight_detail.
+        tracing::warn!(
+            handler = %req.handler,
+            provider = %req.provider,
+            error_code = %code,
+            error_kind = ?preflight.error_kind,
+            "agents_add aborted at provisioning preflight gate"
+        );
         return Json(ErrorBody::with_preflight(message, code, preflight)).into_response();
     }
 

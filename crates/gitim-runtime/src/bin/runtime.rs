@@ -464,6 +464,13 @@ fn format_preflight_detail(
         let snake = raw.trim_matches('"');
         let _ = writeln!(out, "  Error kind: {snake}");
     }
+    if let Some(failure_code) = &pf.failure_code {
+        // Setup-level tag (e.g. `hermes_default_profile_no_llm`,
+        // `missing_llm_provider`). Distinct from the top-level
+        // `error_code` already present in the JSON envelope — surfacing
+        // it inline gives the agent a stable tag without parsing JSON.
+        let _ = writeln!(out, "  Failure code: {failure_code}");
+    }
     if let Some(version) = &pf.version {
         let _ = writeln!(out, "  Provider version: {version}");
     }
@@ -1612,6 +1619,32 @@ mod preflight_stderr_format_tests {
         assert_eq!(lines[5], "  Detail: model not found body");
         // Six fields, no trailing extras.
         assert_eq!(lines.len(), 6, "unexpected extra lines: {lines:?}");
+    }
+
+    #[test]
+    fn failure_code_line_renders_between_error_kind_and_version() {
+        // Locks the position so agent regex can grab `Failure code:` after
+        // `Error kind:` deterministically.
+        let pf = PreflightResult {
+            available: false,
+            provider: "hermes".to_string(),
+            version: Some("0.9.0".to_string()),
+            model_used: None,
+            duration_ms: 12,
+            output_preview: None,
+            error: Some("no LLM configured".to_string()),
+            error_kind: Some(ErrorKind::Other),
+            failure_code: Some("hermes_default_profile_no_llm".to_string()),
+        };
+        let out = format_preflight_detail(&pf, "no LLM configured");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Preflight (hermes):");
+        assert_eq!(lines[1], "  Error kind: other");
+        assert_eq!(lines[2], "  Failure code: hermes_default_profile_no_llm");
+        assert_eq!(lines[3], "  Provider version: 0.9.0");
+        // No Model line because model_used is None.
+        // Detail suppressed because matches main_message.
+        assert_eq!(lines.len(), 4, "unexpected extra lines: {lines:?}");
     }
 
     #[test]

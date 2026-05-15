@@ -437,7 +437,7 @@ esac
 - LLM auth 错（PAT 过期 / API key 错）→ provider 返 auth error
 - Model 名拼错 / 该 model 无 access → provider 返 model error
 - Hermes default profile 没装 → `hermes_not_setup`
-- Hermes default profile 装了但无 `model.default` / `model.provider` 配置 → `hermes_default_profile_no_llm`
+- Hermes default profile 装了但无 `model.default` / `model.provider` 配置 → `hermes_default_profile_no_llm`（注意：这是相对旧 detect-only preflight 的**deliberate 收紧** —— 旧 detect 只验 ACP 连通，没 LLM 也算通过；新 gate 要求 default profile 真有 LLM 配置才放行，因为没 LLM 时 agent first turn 必败，preflight 提前暴露是 feature 核心）
 - Network 不通 / DNS 失败 → timeout / transport error
 - Provider 服务在 add 瞬间宕机
 
