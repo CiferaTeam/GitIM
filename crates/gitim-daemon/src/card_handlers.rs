@@ -203,6 +203,7 @@ pub async fn handle_create_card(
         created_by: author.clone(),
         created_at: now.clone(),
         updated_at: now,
+        archived_via: None,
     };
     let meta_str = serde_yaml::to_string(&meta).unwrap();
     let meta_rel = format!("channels/{}/cards/{}/card.meta.yaml", ch_name, card_id);

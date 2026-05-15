@@ -44,6 +44,13 @@ pub enum CardStatus {
     Done,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchivedVia {
+    Channel,
+    Manual,
+}
+
 impl CardStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -75,6 +82,8 @@ pub struct CardMeta {
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_via: Option<ArchivedVia>,
 }
 
 pub(crate) const MAX_LABELS: usize = 10;
@@ -159,6 +168,69 @@ pub fn stringify_card_meta_yaml(meta: &CardMeta) -> Result<String, CardMetaYamlE
 }
 
 #[cfg(test)]
+mod archived_via_tests {
+    use super::*;
+
+    #[test]
+    fn archived_via_serializes_lowercase() {
+        let yaml = serde_yaml::to_string(&ArchivedVia::Channel).unwrap();
+        assert_eq!(yaml.trim(), "channel");
+        let yaml = serde_yaml::to_string(&ArchivedVia::Manual).unwrap();
+        assert_eq!(yaml.trim(), "manual");
+    }
+
+    #[test]
+    fn card_meta_omits_archived_via_when_none() {
+        let meta = CardMeta {
+            title: "t".into(),
+            channel: "c".into(),
+            status: CardStatus::Todo,
+            labels: vec![],
+            assignee: None,
+            created_by: "u".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            archived_via: None,
+        };
+        let yaml = serde_yaml::to_string(&meta).unwrap();
+        assert!(!yaml.contains("archived_via"),
+            "expected omitted field, got:\n{yaml}");
+    }
+
+    #[test]
+    fn card_meta_writes_archived_via_when_some() {
+        let meta = CardMeta {
+            title: "t".into(),
+            channel: "c".into(),
+            status: CardStatus::Todo,
+            labels: vec![],
+            assignee: None,
+            created_by: "u".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            archived_via: Some(ArchivedVia::Channel),
+        };
+        let yaml = serde_yaml::to_string(&meta).unwrap();
+        assert!(yaml.contains("archived_via: channel"),
+            "expected field present, got:\n{yaml}");
+    }
+
+    #[test]
+    fn card_meta_reads_legacy_yaml_without_field() {
+        let yaml = "title: t\nchannel: c\nstatus: todo\nlabels: []\nassignee: null\ncreated_by: u\ncreated_at: '2026-01-01T00:00:00Z'\nupdated_at: '2026-01-01T00:00:00Z'\n";
+        let meta: CardMeta = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(meta.archived_via, None);
+    }
+
+    #[test]
+    fn card_meta_reads_archived_via_channel() {
+        let yaml = "title: t\nchannel: c\nstatus: todo\nlabels: []\nassignee: null\ncreated_by: u\ncreated_at: '2026-01-01T00:00:00Z'\nupdated_at: '2026-01-01T00:00:00Z'\narchived_via: channel\n";
+        let meta: CardMeta = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(meta.archived_via, Some(ArchivedVia::Channel));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -181,6 +253,7 @@ mod tests {
             created_by: "lewis".to_string(),
             created_at: "20260417T120000Z".to_string(),
             updated_at: "20260417T120000Z".to_string(),
+            archived_via: None,
         };
         let yaml = serde_yaml::to_string(&meta).unwrap();
         let parsed: CardMeta = serde_yaml::from_str(&yaml).unwrap();
@@ -248,6 +321,7 @@ mod tests {
             created_by: "lewis".to_string(),
             created_at: "20260317T120000Z".to_string(),
             updated_at: "20260317T120000Z".to_string(),
+            archived_via: None,
         };
         assert!(stringify_card_meta_yaml(&meta).is_err());
     }
