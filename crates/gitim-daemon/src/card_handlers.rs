@@ -479,11 +479,10 @@ pub async fn handle_unarchive_card(
     }
 
     // 5. Read card.meta.yaml
-    let meta_path = state
-        .repo_root
-        .join(&located.rel_path)
-        .join("card.meta.yaml");
-    let meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
+    // meta_rel is relative to repo_root — used by restore_card_yaml on early-exit failures.
+    let meta_rel = format!("{}/card.meta.yaml", located.rel_path);
+    let meta_path = state.repo_root.join(&meta_rel);
+    let mut meta: gitim_core::types::CardMeta = match std::fs::read_to_string(&meta_path) {
         Ok(c) => match serde_yaml::from_str(&c) {
             Ok(m) => m,
             Err(e) => return Response::error(format!("failed to parse card meta: {}", e)),
@@ -503,6 +502,16 @@ pub async fn handle_unarchive_card(
         return Response::error("only creator or assignee can unarchive");
     }
 
+    // 6b. Clear archived_via and write back before the mv.
+    meta.archived_via = None;
+    let updated_yaml = match serde_yaml::to_string(&meta) {
+        Ok(y) => y,
+        Err(e) => return Response::error(format!("failed to serialize card meta: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&meta_path, &updated_yaml) {
+        return Response::error(format!("failed to write card meta: {}", e));
+    }
+
     // 7. Ensure target parent directory exists (defensive — likely already there)
     let active_cards_dir = state
         .repo_root
@@ -510,6 +519,7 @@ pub async fn handle_unarchive_card(
         .join(ch_name.to_string())
         .join("cards");
     if let Err(e) = std::fs::create_dir_all(&active_cards_dir) {
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!("failed to create cards dir: {}", e));
     }
 
@@ -517,6 +527,7 @@ pub async fn handle_unarchive_card(
     let from_rel = &located.rel_path; // archive/channels/<ch>/cards/<id>
     let to_rel = format!("channels/{}/cards/{}", ch_name, card_id);
     if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!("git mv failed: {}", e));
     }
 
@@ -530,10 +541,11 @@ pub async fn handle_unarchive_card(
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
-        // Rollback the git mv to leave the working tree clean.
+        // Rollback the git mv to leave the working tree clean, then restore yaml.
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("unarchive_card: rollback mv also failed: {}", rb_err);
         }
+        restore_card_yaml(&state, &meta_rel);
         return Response::error(format!(
             "unarchive_card commit failed: {}; rolled back git mv",
             e
