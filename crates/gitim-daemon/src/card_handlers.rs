@@ -252,7 +252,7 @@ pub async fn handle_create_card(
 /// `git checkout -- <meta_rel>`.  Failures are logged but do not change
 /// the caller's return value — the original error is still what gets
 /// reported.
-fn restore_card_yaml(state: &SharedState, meta_rel: &str, context: &str) {
+pub(crate) fn restore_card_yaml(state: &SharedState, meta_rel: &str, context: &str) {
     match std::process::Command::new("git")
         .args(["reset", "HEAD", "--", meta_rel])
         .current_dir(&state.repo_root)
