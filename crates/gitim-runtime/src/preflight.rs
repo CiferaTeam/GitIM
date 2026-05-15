@@ -40,6 +40,15 @@ pub enum ErrorKind {
 ///
 /// Fields are kept explicit (never skipped) so the JSON shape is stable
 /// for the frontend: missing data is `null`, not an absent key.
+///
+/// `failure_code` is an additive optional field used by
+/// [`preflight_for_add_request`] to tag *setup-level* failures (e.g. caller
+/// gave only one of `llm_provider`/`llm_model`, default hermes profile has no
+/// LLM, unknown provider name) before the dispatcher ever shells out. Plain
+/// `_with_config` calls leave it `None`; [`classify_preflight_error_code`]
+/// consumes the tag to map to the HTTP top-level `error_code`. Skipped from
+/// serialization when `None` so existing JSON consumers (frontend, CLI DTO)
+/// don't see a new always-null field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightResult {
     pub available: bool,
@@ -50,6 +59,8 @@ pub struct PreflightResult {
     pub output_preview: Option<String>,
     pub error: Option<String>,
     pub error_kind: Option<ErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
 }
 
 impl PreflightResult {
@@ -71,6 +82,7 @@ impl PreflightResult {
             output_preview,
             error: None,
             error_kind: None,
+            failure_code: None,
         }
     }
 
@@ -91,7 +103,27 @@ impl PreflightResult {
             output_preview: None,
             error: Some(error.into()),
             error_kind: Some(kind),
+            failure_code: None,
         }
+    }
+
+    /// Build a failure result tagged with a setup-level failure code.
+    ///
+    /// Used by [`preflight_for_add_request`] for failures it detects before
+    /// dispatching to a provider-specific preflight (unknown provider name,
+    /// missing-LLM-pair, no LLM in default hermes profile). The tag is
+    /// consumed by [`classify_preflight_error_code`] to map to the HTTP
+    /// top-level `error_code`.
+    pub fn failure_with_code(
+        provider: impl Into<String>,
+        kind: ErrorKind,
+        error: impl Into<String>,
+        duration_ms: u64,
+        code: impl Into<String>,
+    ) -> Self {
+        let mut r = Self::failure(provider, kind, error, duration_ms);
+        r.failure_code = Some(code.into());
+        r
     }
 }
 
@@ -1310,6 +1342,300 @@ pub fn read_default_profile_llm_from(hermes_home: &Path) -> Option<(String, Stri
     Some((provider, default_model))
 }
 
+// ─── Entry point: add-time preflight dispatch ────────────────────────────────
+//
+// `preflight_for_add_request` is the single entry the add-agent path calls
+// after `handler_conflict` clears and before `provision_agent` commits any
+// artifacts. It dispatches on `provider` to the appropriate `_with_config`
+// helper, threading the agent's own env/model into the spawned CLI so the
+// verification matches the configuration the agent will actually run under.
+//
+// Setup-level failures (unknown provider, hermes missing one LLM half,
+// hermes no LLM in default profile) are tagged via `PreflightResult.failure_code`
+// so the caller can pick a more specific HTTP `error_code` than the generic
+// `provision_preflight_failed`.
+
+/// Hard ceiling on a single preflight call. Tighter than runtime's
+/// LONG_REQUEST_TIMEOUT (300s) because the add-agent request needs to feel
+/// responsive — but loose enough that a real Claude/Codex hello with a slow
+/// upstream still completes. Per requirements §4.
+pub const PROVIDER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Default binary paths (PATH-resolved at spawn time). Tests use the
+/// `_test` entry seam below to inject fake binaries without mutating PATH.
+const DEFAULT_BIN_CLAUDE: &str = "claude";
+const DEFAULT_BIN_CODEX: &str = "codex";
+const DEFAULT_BIN_OPENCODE: &str = "opencode";
+const DEFAULT_BIN_PI: &str = "pi";
+const DEFAULT_BIN_HERMES: &str = "hermes";
+
+/// Setup-level failure tags, attached to `PreflightResult.failure_code` by
+/// [`preflight_for_add_request`] and consumed by
+/// [`classify_preflight_error_code`]. Kept as `pub const`s so callers in
+/// http.rs / CLI can match against the same string instead of typing it
+/// inline at each site.
+pub const FAILURE_CODE_UNKNOWN_PROVIDER: &str = "unknown_provider";
+pub const FAILURE_CODE_MISSING_LLM_PROVIDER: &str = "missing_llm_provider";
+pub const FAILURE_CODE_HERMES_NO_LLM: &str = "hermes_default_profile_no_llm";
+
+/// Default HTTP top-level error_code for any preflight failure that didn't
+/// arrive pre-tagged with a more specific [`failure_code`](PreflightResult::failure_code).
+pub const ERROR_CODE_PROVISION_PREFLIGHT_FAILED: &str = "provision_preflight_failed";
+
+/// Test-only seam for [`preflight_for_add_request`]. Lets tests inject:
+/// - alternative binary paths (fake shell scripts) without mutating PATH, and
+/// - a tighter outer timeout so timeout-classification can be exercised in
+///   under a second without sleeping `PROVIDER_PREFLIGHT_TIMEOUT` (90s) live.
+/// - an explicit `hermes_home` so the default-profile YAML resolution exercises
+///   a test-controlled directory rather than reading `$HOME/.hermes`.
+///
+/// Production callers should use [`preflight_for_add_request`] which wires
+/// `PreflightDispatchOverrides::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct PreflightDispatchOverrides {
+    pub claude_bin: Option<String>,
+    pub codex_bin: Option<String>,
+    pub opencode_bin: Option<String>,
+    pub pi_bin: Option<String>,
+    pub hermes_bin: Option<String>,
+    pub outer_timeout: Option<Duration>,
+    pub hermes_home: Option<PathBuf>,
+}
+
+/// Add-time preflight entry point: dispatch on provider, thread the agent's
+/// env/model into the spawned CLI, and classify setup-level failures with
+/// stable tags.
+///
+/// Behavior summary:
+/// - `mock` → short-circuit `success` (no spawn). Used by tests and the mock
+///   provider that has no CLI binary at all.
+/// - `claude` / `codex` → spawn the CLI with `env` and `model` overrides.
+/// - `opencode` / `pi` → spawn the CLI with `env` only (model is configured
+///   externally — opencode at `auth login`, pi in `~/.pi/config.json`).
+/// - `hermes` → branch on `(llm_provider, llm_model)`:
+///   - both `Some` → chat-mode preflight with the explicit pair.
+///   - both `None` → read default profile's `config.yaml`; if it has a
+///     `(provider, model)`, dispatch to chat-mode with that pair; otherwise
+///     return `failure_code = "hermes_default_profile_no_llm"`.
+///   - exactly one `Some` → `failure_code = "missing_llm_provider"` (no spawn).
+/// - anything else → `failure_code = "unknown_provider"` (no spawn).
+///
+/// The whole dispatch is wrapped in `tokio::time::timeout` at
+/// [`PROVIDER_PREFLIGHT_TIMEOUT`]. A trip there produces
+/// `error_kind = Timeout` with no `failure_code` (a generic provision failure,
+/// not a setup-level one).
+pub async fn preflight_for_add_request(
+    provider: &str,
+    env: Option<&HashMap<String, String>>,
+    model: Option<&str>,
+    llm_provider: Option<&str>,
+    llm_model: Option<&str>,
+) -> PreflightResult {
+    preflight_for_add_request_with_overrides(
+        provider,
+        env,
+        model,
+        llm_provider,
+        llm_model,
+        PreflightDispatchOverrides::default(),
+    )
+    .await
+}
+
+/// Same as [`preflight_for_add_request`] but accepts the test seam struct so
+/// tests can inject fake binaries and tighter timeouts without touching PATH.
+pub async fn preflight_for_add_request_with_overrides(
+    provider: &str,
+    env: Option<&HashMap<String, String>>,
+    model: Option<&str>,
+    llm_provider: Option<&str>,
+    llm_model: Option<&str>,
+    overrides: PreflightDispatchOverrides,
+) -> PreflightResult {
+    let outer_timeout = overrides
+        .outer_timeout
+        .unwrap_or(PROVIDER_PREFLIGHT_TIMEOUT);
+
+    // We let the inner provider helpers manage their own per-call timeout
+    // (they all use Duration::from_secs(60) when called via _with), but the
+    // outer wrap is the hard cap that guarantees the add-agent request never
+    // hangs past PROVIDER_PREFLIGHT_TIMEOUT regardless of inner behavior.
+    let started_outer = Instant::now();
+    let inner = dispatch_preflight(provider, env, model, llm_provider, llm_model, &overrides);
+
+    match tokio::time::timeout(outer_timeout, inner).await {
+        Ok(result) => result,
+        Err(_) => PreflightResult::failure(
+            provider,
+            ErrorKind::Timeout,
+            format!(
+                "provisioning preflight exceeded {}ms",
+                outer_timeout.as_millis()
+            ),
+            started_outer.elapsed().as_millis() as u64,
+        ),
+    }
+}
+
+/// Internal dispatcher. Kept separate so the outer
+/// `preflight_for_add_request_with_overrides` can wrap the whole call in a
+/// single `tokio::time::timeout` regardless of which provider branch fires.
+async fn dispatch_preflight(
+    provider: &str,
+    env: Option<&HashMap<String, String>>,
+    model: Option<&str>,
+    llm_provider: Option<&str>,
+    llm_model: Option<&str>,
+    overrides: &PreflightDispatchOverrides,
+) -> PreflightResult {
+    // Standard env/model overrides bundle used by claude/codex/opencode/pi.
+    // (opencode/pi ignore model_override by design — see their docs.)
+    let prov_overrides = PreflightOverrides {
+        env_override: env.cloned(),
+        model_override: model.map(String::from),
+    };
+
+    // Inner per-provider timeout — same 60s the zero-arg variants use. The
+    // outer 90s wrap is the hard cap.
+    let inner_timeout = Duration::from_secs(60);
+
+    match provider {
+        "mock" => {
+            // The mock provider has no CLI to verify; short-circuit so the
+            // add-agent path is testable end-to-end without any binaries.
+            PreflightResult::success(
+                "mock",
+                None,
+                model.map(String::from),
+                0,
+                Some("mock provider — preflight skipped".to_string()),
+            )
+        }
+        "claude" => {
+            let bin = overrides
+                .claude_bin
+                .as_deref()
+                .unwrap_or(DEFAULT_BIN_CLAUDE);
+            preflight_claude_with_config(bin, inner_timeout, prov_overrides).await
+        }
+        "codex" => {
+            let bin = overrides.codex_bin.as_deref().unwrap_or(DEFAULT_BIN_CODEX);
+            preflight_codex_with_config(bin, inner_timeout, prov_overrides).await
+        }
+        "opencode" => {
+            let bin = overrides
+                .opencode_bin
+                .as_deref()
+                .unwrap_or(DEFAULT_BIN_OPENCODE);
+            preflight_opencode_with_config(bin, inner_timeout, prov_overrides).await
+        }
+        "pi" => {
+            let bin = overrides.pi_bin.as_deref().unwrap_or(DEFAULT_BIN_PI);
+            preflight_pi_with_config(bin, inner_timeout, prov_overrides).await
+        }
+        "hermes" => {
+            let bin = overrides
+                .hermes_bin
+                .as_deref()
+                .unwrap_or(DEFAULT_BIN_HERMES);
+            dispatch_hermes(
+                bin,
+                inner_timeout,
+                env.cloned(),
+                llm_provider,
+                llm_model,
+                overrides.hermes_home.as_deref(),
+            )
+            .await
+        }
+        other => PreflightResult::failure_with_code(
+            other,
+            ErrorKind::Other,
+            format!("unknown provider: {other}"),
+            0,
+            FAILURE_CODE_UNKNOWN_PROVIDER,
+        ),
+    }
+}
+
+/// Hermes-specific dispatch logic, separated for readability.
+/// Resolves the `(llm_provider, llm_model)` pair (explicit > default profile)
+/// or returns a tagged failure when the pair can't be satisfied.
+async fn dispatch_hermes(
+    bin: &str,
+    timeout: Duration,
+    env: Option<HashMap<String, String>>,
+    llm_provider: Option<&str>,
+    llm_model: Option<&str>,
+    hermes_home: Option<&Path>,
+) -> PreflightResult {
+    match (llm_provider, llm_model) {
+        (Some(p), Some(m)) => {
+            preflight_hermes_with(bin, timeout, hermes_home, Some(p), Some(m), env).await
+        }
+        (None, None) => {
+            // Both omitted — fall back to default-profile config.yaml.
+            // When tests pass an explicit hermes_home use that; otherwise
+            // resolve from HERMES_HOME / ~/.hermes.
+            let resolved = match hermes_home {
+                Some(p) => read_default_profile_llm_from(p),
+                None => read_default_profile_llm(),
+            };
+            match resolved {
+                Some((p, m)) => {
+                    preflight_hermes_with(
+                        bin,
+                        timeout,
+                        hermes_home,
+                        Some(&p),
+                        Some(&m),
+                        env,
+                    )
+                    .await
+                }
+                None => PreflightResult::failure_with_code(
+                    "hermes",
+                    ErrorKind::Other,
+                    "no LLM configured in default hermes profile (model.default + \
+                     model.provider both required in <hermes_home>/config.yaml)",
+                    0,
+                    FAILURE_CODE_HERMES_NO_LLM,
+                ),
+            }
+        }
+        // Exactly one of llm_provider / llm_model supplied — runtime contract
+        // requires both or neither.
+        _ => PreflightResult::failure_with_code(
+            "hermes",
+            ErrorKind::Other,
+            "llm_provider and llm_model must be specified together",
+            0,
+            FAILURE_CODE_MISSING_LLM_PROVIDER,
+        ),
+    }
+}
+
+/// Map a [`PreflightResult`] into the stable HTTP top-level `error_code`
+/// the add-agent error envelope should carry.
+///
+/// Returns:
+/// - the value of `pf.failure_code` if it's one of the known setup-level tags
+///   (currently: `unknown_provider`, `missing_llm_provider`,
+///   `hermes_default_profile_no_llm`).
+/// - [`ERROR_CODE_PROVISION_PREFLIGHT_FAILED`] otherwise — covers spawn
+///   failures, exit-1 from the CLI, timeouts, malformed JSON output, etc.
+///
+/// Returning `&'static str` keeps the value cheap to embed in `ErrorBody`
+/// and forces the closed-set discipline: any new tag must be added here.
+pub fn classify_preflight_error_code(pf: &PreflightResult) -> &'static str {
+    match pf.failure_code.as_deref() {
+        Some(FAILURE_CODE_UNKNOWN_PROVIDER) => FAILURE_CODE_UNKNOWN_PROVIDER,
+        Some(FAILURE_CODE_MISSING_LLM_PROVIDER) => FAILURE_CODE_MISSING_LLM_PROVIDER,
+        Some(FAILURE_CODE_HERMES_NO_LLM) => FAILURE_CODE_HERMES_NO_LLM,
+        _ => ERROR_CODE_PROVISION_PREFLIGHT_FAILED,
+    }
+}
+
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.
 fn extract_opencode_text(stdout: &str) -> String {
     let mut out = String::new();
@@ -1494,5 +1820,79 @@ not json
 {"type":"text","part":{"text":"hello"}}
 "#;
         assert_eq!(extract_opencode_text(stdout), "hello");
+    }
+
+    // ── failure_code field + classify mapping ───────────────────────────────
+
+    #[test]
+    fn failure_code_field_is_skipped_when_none() {
+        // Default constructors leave failure_code None; the field must NOT
+        // appear in the JSON output. This is the legacy shape — older
+        // clients (frontend, CLI DTO) read the body before the field
+        // existed and must keep working unchanged.
+        let pf = PreflightResult::failure(
+            "claude",
+            ErrorKind::NotInstalled,
+            "not found",
+            0,
+        );
+        let v: serde_json::Value = serde_json::to_value(&pf).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("failure_code"),
+            "failure_code should be omitted when None, got: {v}"
+        );
+    }
+
+    #[test]
+    fn failure_with_code_serializes_failure_code() {
+        let pf = PreflightResult::failure_with_code(
+            "hermes",
+            ErrorKind::Other,
+            "no LLM in default profile",
+            0,
+            FAILURE_CODE_HERMES_NO_LLM,
+        );
+        let v: serde_json::Value = serde_json::to_value(&pf).unwrap();
+        assert_eq!(
+            v["failure_code"],
+            serde_json::Value::String(FAILURE_CODE_HERMES_NO_LLM.into())
+        );
+    }
+
+    #[test]
+    fn classify_returns_known_tags_unchanged() {
+        let pf = PreflightResult::failure_with_code(
+            "x",
+            ErrorKind::Other,
+            "",
+            0,
+            FAILURE_CODE_UNKNOWN_PROVIDER,
+        );
+        assert_eq!(
+            classify_preflight_error_code(&pf),
+            FAILURE_CODE_UNKNOWN_PROVIDER
+        );
+    }
+
+    #[test]
+    fn classify_falls_through_to_provision_preflight_failed() {
+        // No failure_code → generic.
+        let pf = PreflightResult::failure("claude", ErrorKind::Timeout, "slow", 1000);
+        assert_eq!(
+            classify_preflight_error_code(&pf),
+            ERROR_CODE_PROVISION_PREFLIGHT_FAILED
+        );
+        // Unknown failure_code value → still falls through (defensive).
+        let pf2 = PreflightResult::failure_with_code(
+            "x",
+            ErrorKind::Other,
+            "",
+            0,
+            "novel-tag-not-yet-mapped",
+        );
+        assert_eq!(
+            classify_preflight_error_code(&pf2),
+            ERROR_CODE_PROVISION_PREFLIGHT_FAILED
+        );
     }
 }
