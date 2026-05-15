@@ -273,6 +273,7 @@ import {
   joinChannel,
   listArchivedDms,
   unarchiveCard,
+  reconcileOrphanCards,
 } from "./handlers";
 import { getState, initState, setState } from "./state";
 import { getActiveFsName } from "./storage";
@@ -1640,5 +1641,88 @@ describe("daemon-web listArchivedDms pagination", () => {
     expect(res.ok).toBe(true);
     expect(res.data?.dms).toEqual([]);
     expect(res.data?.has_more).toBe(false);
+  });
+});
+
+describe("reconcileOrphanCards", () => {
+  beforeEach(seedState);
+
+  it("migrates orphan card dirs under archived channels and stamps archived_via=channel", async () => {
+    // Setup: channel meta in archive/ but cards subtree still in channels/
+    files.set("/repo/archive/channels/general.meta.yaml", "display_name: General\n");
+    files.set("/repo/archive/channels/general.thread", "");
+    registerDir("/repo/archive/channels");
+    dirs.set("/repo/archive/channels", ["general.meta.yaml", "general.thread"]);
+
+    // Remove the active channel meta to mark it as orphaned (no active meta)
+    files.delete("/repo/channels/general.meta.yaml");
+    // channels/ listing: no .meta.yaml for general, but the subdirectory "general" exists
+    dirs.set("/repo/channels", ["general.thread", "general"]);
+
+    // Leave the cards subtree under channels/ (the orphan state)
+    // channels/general/cards/ORPHAN already seeded by seedState as 20260317-120000-abc
+    // but seedState uses a different card id; let's use a fresh setup
+    const orphanId = "20260317-110000-orphan";
+    dirs.set("/repo/channels/general", ["cards"]);
+    dirs.set("/repo/channels/general/cards", [orphanId]);
+    dirs.set(`/repo/channels/general/cards/${orphanId}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/channels/general/cards/${orphanId}/card.meta.yaml`,
+      [
+        "title: t",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: null",
+        "created_by: alice",
+        "created_at: '2026-01-01T00:00:00Z'",
+        "updated_at: '2026-01-01T00:00:00Z'",
+        "",
+      ].join("\n"),
+    );
+    files.set(`/repo/channels/general/cards/${orphanId}/discussion.thread`, "");
+
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(1);
+
+    // Source should be gone
+    expect(
+      files.has(`/repo/channels/general/cards/${orphanId}/card.meta.yaml`),
+    ).toBe(false);
+    // Destination should exist with archived_via stamped
+    const yaml = files.get(
+      `/repo/archive/channels/general/cards/${orphanId}/card.meta.yaml`,
+    )!;
+    expect(yaml).toContain("archived_via: channel");
+    // A commit should have been made
+    expect(commits.at(-1)?.message).toBe(
+      "chore: reconcile orphan cards under archived channels",
+    );
+  });
+
+  it("is no-op when no orphans (no commit)", async () => {
+    // Default seed: general channel has active meta — not an orphan
+    const commitsBefore = commits.length;
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(0);
+    expect(commits.length).toBe(commitsBefore);
+  });
+
+  it("does not touch active channels even when archive meta also exists", async () => {
+    // Both active and archive meta exist — should NOT be treated as orphan
+    files.set("/repo/archive/channels/general.meta.yaml", "display_name: General\n");
+    dirs.set("/repo/archive/channels", ["general.meta.yaml"]);
+
+    const commitsBefore = commits.length;
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(0);
+    expect(commits.length).toBe(commitsBefore);
+    // Active card untouched
+    expect(
+      files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(true);
   });
 });

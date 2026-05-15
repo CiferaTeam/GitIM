@@ -1978,6 +1978,81 @@ function parseYaml(yaml: string): Record<string, unknown> {
   return result;
 }
 
+/**
+ * Boot-time idempotent migration of legacy orphan card dirs.
+ *
+ * Pre-2026-05 archiveChannel only moved channel meta+thread, leaving
+ * channels/<ch>/cards/ as orphans. This scans for that pattern and
+ * brings the cards subtree under archive/, stamping archived_via=channel.
+ *
+ * Returns the number of cards migrated. 0 => no commit, no push.
+ */
+export async function reconcileOrphanCards(): Promise<number> {
+  await ensureWasmReady();
+  const s = getState();
+  const channelsDir = `${s.repoDir}/channels`;
+  if (!(await exists(channelsDir))) return 0;
+
+  type Move = { fromRel: string; toRel: string };
+  const moves: Move[] = [];
+  const adds: string[] = [];
+  const removes: string[] = [];
+
+  const items = await readdir(channelsDir);
+  for (const item of items) {
+    if (item.endsWith(".meta.yaml") || item.endsWith(".thread")) continue;
+    const channelName = item;
+    const activeMeta = `${channelsDir}/${channelName}.meta.yaml`;
+    const archiveMeta = `${s.repoDir}/archive/channels/${channelName}.meta.yaml`;
+    // Only process orphan channels: active meta gone AND archive meta present.
+    if (await exists(activeMeta)) continue;
+    if (!(await exists(archiveMeta))) continue;
+
+    const cardsDir = `${channelsDir}/${channelName}/cards`;
+    if (!(await exists(cardsDir))) continue;
+
+    const cardIds = await readdir(cardsDir);
+    for (const cardId of cardIds) {
+      const metaPath = `${cardsDir}/${cardId}/card.meta.yaml`;
+      if (!(await exists(metaPath))) continue;
+      const yaml = await readFile(metaPath);
+      const card = parseYaml(yaml) as unknown as Card;
+      const stamped = { ...card, archived_via: "channel" as const };
+      await writeFile(metaPath, stringifyCardMeta(stamped) as string);
+
+      const fromRel = `channels/${channelName}/cards/${cardId}`;
+      const toRel = `archive/channels/${channelName}/cards/${cardId}`;
+      moves.push({ fromRel, toRel });
+      adds.push(`${toRel}/card.meta.yaml`, `${toRel}/discussion.thread`);
+      removes.push(`${fromRel}/card.meta.yaml`, `${fromRel}/discussion.thread`);
+    }
+  }
+
+  if (moves.length === 0) return 0;
+
+  // Move all orphan card directories
+  for (const m of moves) {
+    await mkdirp(`${s.repoDir}/${m.toRel}`);
+    await mvCardDirectory(`${s.repoDir}/${m.fromRel}`, `${s.repoDir}/${m.toRel}`);
+  }
+
+  await gitOps.addRemoveAndCommit(
+    s.repoDir,
+    adds,
+    removes,
+    "chore: reconcile orphan cards under archived channels",
+    "system",
+  );
+
+  // Clean up source files post-commit
+  for (const m of moves) {
+    await removeTrackedFile(`${s.repoDir}/${m.fromRel}/card.meta.yaml`);
+    await removeTrackedFile(`${s.repoDir}/${m.fromRel}/discussion.thread`);
+  }
+
+  return moves.length;
+}
+
 // Minimal YAML stringifier for ChannelMeta
 function stringifyYaml(obj: object): string {
   let yaml = "";
