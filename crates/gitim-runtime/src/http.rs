@@ -140,16 +140,11 @@ impl ErrorBody {
     }
 
     /// Error body carrying a nested `PreflightResult`. Used by `agents_add`
-    /// (T6) when provisioning aborts because the per-agent preflight came
-    /// back `available: false` — the caller maps `result.failure_code`
-    /// through `classify_preflight_error_code` for the top-level
-    /// `error_code`, and threads the raw result through so the UI can show
-    /// e.g. which binary was missing or which model failed.
-    ///
-    /// `#[allow(dead_code)]` because the wiring lives in T6; this task (T5)
-    /// only lands the constructor + tests so T6's diff stays focused on the
-    /// agents_add handler change.
-    #[allow(dead_code)]
+    /// when provisioning aborts because the per-agent preflight came back
+    /// `available: false` — the caller maps `result.failure_code` through
+    /// `classify_preflight_error_code` for the top-level `error_code`, and
+    /// threads the raw result through so the UI can show e.g. which binary
+    /// was missing or which model failed.
     fn with_preflight(
         error: impl Into<String>,
         code: impl Into<String>,
@@ -2293,6 +2288,30 @@ async fn agents_add(
             "handler_reserved",
         ))
         .into_response();
+    }
+
+    // Provisioning preflight gate. All conflict checks have passed; before we
+    // touch disk (create agent dir, clone remote, spawn daemon, write me.json),
+    // verify that the agent's chosen provider can actually be invoked with the
+    // env/model/llm config the request specifies. A `false` result tags the
+    // failure with a stable error_code and carries the full `PreflightResult`
+    // back so the WebUI / CLI can render structured detail (which binary, what
+    // error_kind, stdout preview) without a second roundtrip.
+    let preflight = crate::preflight::preflight_for_add_request(
+        &req.provider,
+        Some(&req.env),
+        req.model.as_deref(),
+        req.llm_provider.as_deref(),
+        req.llm_model.as_deref(),
+    )
+    .await;
+    if !preflight.available {
+        let code = crate::preflight::classify_preflight_error_code(&preflight);
+        let message = preflight
+            .error
+            .clone()
+            .unwrap_or_else(|| "provisioning preflight failed".to_string());
+        return Json(ErrorBody::with_preflight(message, code, preflight)).into_response();
     }
 
     let agents_dir = workspace.clone();
