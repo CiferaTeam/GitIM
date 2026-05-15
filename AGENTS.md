@@ -2,25 +2,70 @@
 
 面向 Agent 团队的 AI 原生 IM 协议。纯文本文件 + Git。
 
-## 关键文件
-
-- `docs/superpowers/specs/2026-03-16-gitim-v1-design.md` — v1 协议设计文档
-- `legacy/` — 废案参考文档（design.md, message-format.md, directory-config.md）
-
 ## 架构
 
 - 消息是 `.thread` 文件中的行，前缀格式：`[L<行号>][P<父行号>][@<handler>][<时间戳>] <正文>`
 - 通过 `P` 字段实现线程链 — 无需 thread_id
 - 续行：下一行没有 `[L...]` 开头即为当前消息的续行
 - 用户：`users/<handler>.meta.yaml`，handler = GitHub handle（小写）
-- 技术栈：Rust daemon（核心引擎）+ TypeScript CLI（薄客户端）
-- 通信：Unix socket（默认）+ HTTP（调试模式）
+- 技术栈：Rust daemon（核心引擎）+ Rust CLI + React WebUI
+- 通信：Unix socket（默认）+ HTTP（调试模式 & WebUI）
 - Git 负责持久化、同步和审计追踪
 - 合规性：daemon 写入验证（主防线）+ 读取检测（第二防线）
 
+## Crate 地图
+
+```
+gitim-cli ──→ gitim-client ──→ [Unix socket IPC] ──→ gitim-daemon
+                                                        ├── gitim-core（类型 + 解析）
+                                                        ├── gitim-sync（git 同步）
+                                                        └── gitim-index（全文搜索）
+
+gitim-runtime ──→ gitim-client
+               ──→ gitim-agent-provider
+                     ├── claude（Claude CLI 集成）
+                     ├── codex（Codex CLI 集成）
+                     └── mock（测试用）
+```
+
+### 核心 crate
+
+| Crate | 职责 | 关键模块 |
+|-------|------|----------|
+| `gitim-core` | 数据类型、消息解析、格式化、校验 | `types`, `parser`, `formatter`, `validator`, `dm`, `mention`, `link` |
+| `gitim-daemon` | 主服务进程，处理所有 IM 操作 | `handlers`（消息/频道）, `board_handlers`（看板）, `onboard`（用户注册）, `identity`（身份推断）, `http`（SSE 推送）, `state`（共享状态） |
+| `gitim-sync` | Git 同步循环、冲突解决、行号重编 | `git`（GitStorage 封装）, `sync_loop`, `conflict`, `renumber`, `watcher` |
+| `gitim-index` | SQLite FTS5 全文搜索 | 单文件 `lib.rs`，支持按 author/channel/query 搜索 |
+| `gitim-client` | IPC 客户端库，封装 daemon 通信 | `GitimClient`（所有 API 方法）, `daemon`（进程管理）|
+| `gitim-cli` | 命令行工具（clap） | `send`, `read`, `channels`, `create-channel`, `join-channel`, `status` 等 |
+
+### Agent 运行时
+
+| Crate | 职责 | 关键模块 |
+|-------|------|----------|
+| `gitim-runtime` | Agent 生命周期管理、polling、HTTP API | `agent`（provision）, `agent_loop`（消息检测 → AI 处理 → 回复）, `poller`, `preflight`, `http`（WebUI API）|
+| `gitim-agent-provider` | AI 提供商抽象层 | `claude`（Claude CLI）, `codex`（Codex CLI，部分 stub）, `mock` |
+
+### 产品
+
+| 目录 | 状态 | 说明 |
+|------|------|------|
+| `products/gitim/frontend/` | **当前主线** | gitim Web 前端（gitim.io）— React 19 + Vite + Radix UI + Tailwind + Zustand |
+| `products/gitim/backend/` | **当前主线** | gitim API 后端 — Cloudflare Worker + D1/KV |
+
+### 遗留 / 不要修改
+
+| 目录 | 说明 |
+|------|------|
+| `webui/` | 早期 React 原型 |
+| `webui/legacy_client/` | 旧版 Node.js bridge server |
+| `legacy/cli/` | 旧版 TypeScript CLI（`@gitim-runtime/cli`），已被 Rust `gitim-cli` 取代 |
+| `legacy/packages/` | 旧版 npm 包 |
+| `demo/` | 演示用 |
+
 ## Onboard 流程
 
-CLI 现已完全委托 daemon 处理身份推断和仓库初始化：
+CLI 完全委托 daemon 处理身份推断和仓库初始化：
 
 1. **CLI 阶段**：收集用户参数（git 类型、token 等）
 2. **仓库克隆/初始化**（CLI）：克隆或创建 git 仓库，创建 `.gitim/` 目录（git 忽略）
@@ -35,16 +80,163 @@ CLI 现已完全委托 daemon 处理身份推断和仓库初始化：
 - **GitHub**：通过 token 调用 API 获取用户信息
 - **Gitea/GitLab**：通过 token + 自定义 URL 调用对应 API
 
-## v1 范围
+### Runtime / WebUI 路径（workspace 级）
 
-- 三个模块：用户（users）、频道（channels）、私信（dm）
-- 消息格式：普通消息 + 回复，无特殊消息类型
-- 行号：最少 6 位零填充，可无限增长
-- 并发：乐观锁 + 冲突时 git pull --rebase
-- 延后：特殊消息类型、MCP Server、归档、GUI、桥接
+WebUI 走 Runtime 的 `/git/init` HTTP 端点。两种 provider：
+
+1. **local 模式**：创建 `$workspace/repo.git` bare repo → clone 到 `$workspace/.gitim-runtime/human/` → 本地 git config 推断身份。
+2. **github 模式**：
+   - `validate_workspace_path` 拒绝云同步路径（iCloud Drive / Dropbox / Google Drive / OneDrive）
+   - Windows 不支持（v1 scope 外）
+   - Runtime pre-flight：`github::verify_token` → `github::check_repo_access`（区分 404 / 403，分别映射 `invalid_token`、`token_lacks_repo_access`、`insufficient_scope` 等 `error_code`）
+   - Clone token URL `https://x-access-token:TOK@github.com/owner/repo.git` 到 `.gitim-runtime/human/`（**不创建本地 bare**）
+   - Daemon 走 `AuthData::GitHub` 分支自己推断身份（curl `/user`）
+   - macOS 加 Time Machine exclusion xattr 到 `.gitim-runtime/`
+   - 失败清理：kill daemon pid + rm human dir + 不写 config
+
+### WorkspaceConfig Schema
+
+`$workspace/.gitim-runtime/config.json`（chmod 0600，unix 唯一权限模型）：
+
+```json
+{
+  "workspace": "/abs/path",
+  "created_at": "2026-04-17T10:20:30Z",
+  "git": {
+    "provider": "local" | "github",
+    "remote_url": "https://github.com/org/repo" | null,
+    "token": "ghp_..." | null,
+    "github_email": "owner@example.com" | null
+  }
+}
+```
+
+**Token source of truth = 这份文件**。各 clone 的 `.git/config` URL 里嵌的 token 是派生值。
+
+**`github_email` source of truth** 也是这份文件(github 模式下 `/git/init` 时从 GitHub `/user` 自动拉取,best-effort)。`provision_agent` 读它,注入新 agent onboard 的 `git` 变体 auth payload (`github_email` 字段),走 daemon `InferredIdentity.email` → `write_me_json` → agent `.gitim/me.json` → `AppState.github_email` → commit author。所有 daemon commit 因此 author email 归 workspace owner,计入 contribution graph。
+
+- Runtime 启动（recover workspace 后）+ `add_agent` 成功后 → 调 `token_propagation::propagate_token` 扫所有 clone 并覆盖 `remote.origin.url`
+- 未来 "Update token" UI（v2）→ 改 config.json → propagate → 所有 clone 同步
+- Daemon `write_me_json` 采用 **merge 语义**:re-onboard 不传 `github_email` 时保留旧值,防抹掉已配置的字段
+
+### Handler 冲突防护（github 模式）
+
+`add_agent` 在 provision 前：
+1. `git fetch origin` human clone（best-effort，失败降级到本地检查）
+2. 检查 `users/<handler>.meta.yaml` 存在性 → 存在 → 拒绝（`error_code: "handler_conflict"`）
+
+防止多机 workspace 同名 agent 两处跑 daemon 造成 split-brain。
+
+### sync_loop auth 熔断
+
+daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` Arc<AtomicBool> 置位 → 后续 sync cycle 直接跳过 git 操作，只保持 cadence。
+
+避免 PAT 过期 / revoke 后死循环烧 GitHub rate limit（5000 req/h）。v1 **无 UI 恢复路径**：用户要么重启 daemon（清标志），要么等 v2 加"更新 token"入口。
+
+### Non-goals (v1)
+
+- **local → github 迁移**：需 rm -rf workspace 重建
+- **换 remote URL**：需 rm -rf 重建
+- **Token rotate UI**：v1 无，手工改 config.json + 重启 runtime
+- **Windows 支持**：`chmod 0600` + xattr + `dirs::home_dir` 的 OneDrive 检测不适配
+- **Agent 独立 GitHub 身份**：共用 workspace PAT 和 workspace owner email。commit author name = agent handler；author email = `WorkspaceConfig.git.github_email`(github mode /git/init 时从 `/user` API 自动拉取),fallback `<handler>@gitim`。GitHub committer = PAT owner。审计归因通过 author **name** 字段(handler),email 统一到 workspace owner 后所有 daemon commit 都能算进该账户的 contribution graph。sync_loop 的 rebase-resolution commit 也 stamp daemon owner(而非本地 git config fallback),维持每个 clone 的"一人一 commit"归属
+- **OAuth Device Flow**：不做。PAT 手动粘贴
 
 ## 约定
-
-- 所有文档使用中文
 - Handler：小写 a-z 0-9 连字符，1-39 字符，`system` 为保留字
 - DM 文件名：两个 handler 按字典序排列，`--` 连接
+- Plan / 需求 / 设计文档统一放 `docs/plans/<feature-slug>/`，不要散落在仓库根或新建 `plans/`
+
+## Rust toolchain policy
+
+仓库根 `rust-toolchain.toml` 把 channel 锁到 **stable**。这是硬线,因为:
+
+1. **Release reproducibility**: release.sh 跑 4 target 交叉编译,nightly 每日飘,rustc commit 不稳 → 用户装的 binary 行为不可复现
+2. **Cross-compile 兼容性**: `cross-rs/cross` + rustup 1.28 在 nightly-host 下无法 provision matching nightly Linux-host toolchain 到容器里
+3. **Library 代码可移植**: 未来走 WASM / 新贡献者进来,stable 能编是基本假设
+
+### 规则
+
+- **禁止 library code 依赖 nightly-only feature**。典型坑:
+  - `str::floor_char_boundary` (unstable `round_char_boundary`)
+  - `build-std` / `panic_immediate_abort`
+  - async closures / async fn in trait 的 nightly 语义
+  - 任何需要 `#![feature(...)]` 的东西
+
+  想用类似功能 → 写 stable 等价实现(如 `floor_char_boundary` 其实 4 行 loop + `is_char_boundary()` 就能做)。
+
+- **Maintainer dev 自由用 nightly**:`cargo +nightly <cmd>` 显式 override。`rust-toolchain.toml` 只 pin repo 默认,不绑死 CLI override
+
+- **`release.sh` 保留 `+stable` 作为第二道锁**,即使 `rust-toolchain.toml` 被误改,release pipeline 仍然 pinned
+
+- **WASM 路线不受影响**: `wasm32-unknown-unknown` / `wasm32-wasip{1,2}` 全部 stable 支持,`wasm-bindgen` / `wasm-pack` / `Leptos` / `gix` 等生态都 stable。切 WASM 的工作在 IPC / storage / git 层,不在 toolchain
+
+### 为什么记这条(历史背景)
+
+2026-04 首次跑 4-target cross-compile dry-run 时,发现 `agent_loop.rs` 用了 `floor_char_boundary` (nightly-only),maintainer 的 nightly dev 环境下编得过,切 stable 秒挂。这类"无意 leak"只有在项目强制 stable 时才能早发现。
+
+## 测试
+
+```bash
+cargo test                                    # 全量（700+ tests，数分钟级别，贵）
+cargo test -p gitim-core                      # 核心类型/解析
+cargo test -p gitim-daemon                    # daemon handler 集成测试
+cargo test -p gitim-sync                      # git 同步逻辑
+cargo test -p gitim-runtime --test poller     # poller 集成测试（需编译 daemon）
+```
+
+### 跑测试的节奏（重要）
+
+**全量 `cargo test` 是一个昂贵操作**（700+ 测试、含启动真实 daemon 的集成测试，耗时以分钟计）。在多 agent / subagent / 长任务流程里频繁触发会把总时长拖得非常夸张，不要无脑跑。
+
+节奏约定：
+- **任务开头**：跑一次全量，建立 baseline（确认当前 main 是绿的，排除祖传红测试干扰判断）
+- **任务末尾 / 交付前**：跑一次全量，确认没有 regression
+- **开发中间**：**只跑相关 crate / 相关 `--test` 目标 / 相关 `#[test]` 过滤**（`cargo test -p <crate>`、`cargo test <name_substring>`、`cargo test --test <file>`），不要每改一次就全量
+- Subagent / 并行任务里：同样原则，subagent 自己干活时只跑相关测试，汇总到主线再考虑全量
+
+如果某次改动跨 crate、涉及共享类型 / 协议、或改了 workspace 级依赖，才需要中途加跑一次全量。否则相信 scoped 测试。
+
+注意事项：
+- `gitim-runtime` 的 poller 测试启动真实 daemon 进程，用 `serial_test` 串行执行
+- `claude.rs` 和 `agent_loop.rs` 的测试标记 `#[ignore]`，需要真实 Claude CLI，手动运行
+- 测试惯例：外部 `tests/` 目录优先，内联 `#[cfg(test)]` 用于纯 unit test
+
+## Design System
+Always read DESIGN.md before making any visual or UI decisions.
+All font choices, colors, spacing, and aesthetic direction are defined there.
+Do not deviate without explicit user approval.
+In QA mode, flag any code that doesn't match DESIGN.md.
+
+## Current Orientation
+**Where we are**: 核心 IM 功能稳定（消息、频道、DM、看板、搜索）。Agent runtime 可用（provision → poll → AI 处理 → 回复）。WebUI v2 活跃开发中。Workspace **github 模式**已落地：PAT 粘贴 → `/git/init` → clone github remote → daemon 推断身份。sync_loop 有 auth 熔断。WebUI **自升级**已落地：右上角黄色 ⚠ 检测新版本,点击一键触发 `POST /runtime/update-and-restart` → runtime fork-exec 自己换三个 binary。**Agent 配置可编辑**已落地：detail 页 Edit 模式可改 `system_prompt` / `env` / `.env` 文件（via `PATCH /workspaces/{slug}/agents/{id}`）；`.env` 文件落 `<agent-clone>/.env`（chmod 0600、64KB 上限），workspace `/git/init` 自动把 `.env` 加到仓库 `.gitignore`（幂等，用 `system@gitim` 作者 commit）；provider/model 仍 immutable。**Hermes provider per-agent profile 隔离**已落地：每个 hermes agent 自动获得独立的 `~/.hermes/profiles/gitim-<handler>/` 目录,LLM 配置 / auth.json / sessions / cron / gateway PID 完全隔离;user 一次性跑 `hermes setup` 配 default profile,新 agent 通过 `hermes profile create --clone --no-alias` 自动继承,WebUI 零额外步骤。**Hermes 多 LLM 选择**已落地：WebUI 加 hermes agent 时可选具体 LLM provider × model;后端 introspect `~/.hermes/.env` + `config.yaml.custom_providers` 列出已配 provider,live-fetch `/models` 拉模型列表,创建 profile 后顺序 `hermes config set model.{provider,default,base_url}` 写入。回滚保证：任一 config-set 步骤失败 → delete_profile + cleanup_agent_dir,无半残状态。**Per-agent token usage 统计**已落地:Provider trait 加 `reports_usage()` / `usage_is_cumulative()` 让各 provider 声明语义;agent_loop 在 `update_session_usage` 末尾 normalize(cumulative provider 走 saturating_sub baseline 在 `AgentState.last_session_usage`)+ accumulate 到 `<workspace>/.gitim-runtime/usage/<handler>.json`(每日聚合 + 全历史 totals,90 天滚动,chmod 0600,跟 session reset 物理解耦);reset path 也走 accumulator 不丢 turn;HTTP `AgentInfo.usage_summary` 暴露 30 天 by_day 窗口,SSE `usage` event 保 SessionUsageSnapshot 字段 inline + 加 `usage_summary` sibling(老 frontend 兼容);hard delete 同步删 usage 文件;`/runtime/health` 暴露 `usage_save_failures` AtomicU64;WebUI 在 detail 页加 `AgentUsageCard`、list 行加 `AgentUsageTag`、agents 顶部加 `WorkspaceUsageHeader`(客户端 reduce 跨 agent,按 provider 分组),所有 sparkline 复用 `lib/sparkline.ts`。**gitim-index 改为 opt-in**：per-clone 配置 `indexer.enabled`（默认 false），agent daemon 停掉后台 FTS5 索引；CLI/Runtime human onboard 路径显式写 `true` 保留搜索能力；旧 `.gitim/index.db` 文件不动；`gitim search`/`reindex` 在 disabled clone 上返回带 actionable 指引的 error。**Daemon log 测试隔离**已落地：production 仍把所有 per-daemon log 集中在 `~/.gitim/logs/<workspace>-<handler>.log`(`tail -f *.log` 一眼看全部 agent)。`daemon_log::logs_dir()` 加了 `GITIM_LOG_DIR` env override，**production 不设这个 env，测试 infra 设**：`tests/common/mod.rs::ensure_daemon_in_path` 用 `Once::call_once` 一次性把 GITIM_LOG_DIR 指到 process-wide TempDir，所有 spawn-daemon 的测试只要 call 它就自动 isolated。之前 41 个集成测试只有 6 个 install HomeGuard，其余直接污染真实 `~/.gitim/logs/`(2000+ test log)，且 `std::env::set_var("HOME")` 在 cargo test 多线程下本来就 race，单 env override + `Once` 保护比 per-test HomeGuard 干净。同时修了一个长期 bug：旧 workspace 推导走 `parent().parent()` 在 agent 平铺 layout (`<ws>/<handler>/`) 下越界，新版本按 `.gitim-runtime/` 中间层显式区分 human 和 agent。
+**Where we're going**: Agent 自治能力（steering、coordinator prompt）、多 provider 支持（GitLab/Gitea）、Token rotate UI、WebUI 完善、update 失败 fallback 机制、provider/model 修改（需 session 迁移方案）
+**Learnings**: AI 辅助开发时，模型倾向于保留旧测试不破坏，导致僵尸函数和空壳测试存活。需要定期审计测试有效性。Serde 的 `Option<Option<T>>` + `#[serde(default)]` 不能天然区分"字段缺省"和"字段 = null"—— 两者都解析成 `None`，三态语义需要自定义 deserializer 用 `Value` 中转（见 http.rs `deser_triple_option`）。`dirs::home_dir()` 推导用户 artifact 路径是 anti-pattern：cargo test 多线程下 `std::env::set_var("HOME")` RAII guard 有 race，再加上很多测试根本没 install guard，整个 home 会被测试持续污染。根治方法是让 path 从 caller 已经持有的根（workspace / repo_root）派生，不去碰 home。
+**Tensions**: poller 集成测试依赖真实 daemon，环境敏感；codex provider 仍有 stub 代码；daemon 用 curl 调 GitHub `/user`（runtime 用 reqwest），两套 HTTP stack 是已知不一致，未来统一；update-and-restart endpoint 继承 permissive CORS,整站 CSRF 是 known risk；PATCH agent 的 me.json 写 + `.env` 写是**顺序而非事务**（无 WAL），`.env` 写失败时 me.json 已更新，客户端收到 500，靠幂等重试恢复。Hermes profile 集成依赖 shell out `hermes profile create/delete`,如果 hermes major 版本改了 profile 内部结构,我们的 `--clone` 会自动跟进(它是 hermes 的承诺),但 `default_profile_ready` 的 `.env`/`auth.json` 探测路径假设可能 drift,每个 hermes 大版本回归一次。
+
+## Hermes profile 隔离机制
+
+每个 gitim agent 1:1 对应一个 hermes profile,profile 名为 `gitim-<handler>`,放 `~/.hermes/profiles/gitim-<handler>/`。
+
+**Provision 路径**(`http.rs` add_agent flow):
+1. 写 `me.json` 后,如果 `provider == "hermes"` 才走下面
+2. `hermes_profile::default_profile_ready()` — 检查 `HERMES_HOME` 或 `~/.hermes/` 下 `.env` 或 `auth.json` 是否存在;不存在则拒绝 add(`error_code: hermes_not_setup`)
+3. `hermes_profile::ensure_profile(handler)` — shell out `hermes profile create gitim-<handler> --clone --no-alias`,从 user 的 active profile 拷 `config.yaml` + `.env` + `SOUL.md` + `memories/`,自带 70 bundled skills sync(几秒钟);失败 → `cleanup_agent_dir` + `error_code: hermes_profile_create_failed`
+4. agent_loop 启动时 `build_provider_config` 自动注入 `HERMES_HOME=<profile_dir>` 到 `ProviderConfig.env`(me.json 显式 env 优先)
+
+**Hard delete 路径**:`hard_delete_agent_dir` 后,如果 `provider == "hermes"`,best-effort `delete_profile`(失败仅 warn,不阻塞 user 响应)。soft delete 不动 profile。
+
+**User 切换某个 agent 的 LLM**:用 hermes 原生 CLI,如 `hermes -p gitim-alice setup model` / `hermes -p gitim-alice login`。WebUI v1 不暴露,user 直接终端操作。
+
+**已知 non-goals(v1)**:
+- WebUI 暴露 hermes profile 概念(profile 名由后端推导,前端零感知)
+- 多 source profile 选择(永远从 active profile clone)
+- profile 重命名 / 跨 agent 迁移(handler immutable,profile 跟随 handler)
+- soft delete 时清理 profile(soft delete 保留所有 agent 数据)
+- 已有 agent 的 retroactive profile 创建(只对新加 agent 生效,迁移见 `docs/plans/hermes-profile-isolation/migration.md`)
+- **OAuth 类 LLM provider**（Nous / openai-codex）—— v2 处理,涉及 auth.json clone 和 active_provider 切换
+- **已有 agent 的 retroactive LLM 配置** —— 用户手动 `hermes -p gitim-<h> config set` 迁移
+- **创建后编辑 LLM** —— 涉及 hot-reload + session-migration 语义,单独立 plan
+- **`BUILTIN_PROVIDERS` 表跟 hermes 源码 CI 同步校验** —— 半年人工 PR
+
+**实现位置**:`crates/gitim-runtime/src/hermes_profile.rs`(模块) + `agent_loop.rs::build_provider_config`(env 注入) + `http.rs` add_agent / agents_remove(provision / cleanup wiring) + `preflight.rs::preflight_hermes_with`(可选 `hermes_home` 参数)。
