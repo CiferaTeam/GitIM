@@ -213,6 +213,8 @@ enum Command {
 enum FleetCommand {
     /// List configured remote runtime subscriptions.
     List,
+    /// Show live health/status for remote runtime subscriptions.
+    Status,
     /// Add or replace a remote runtime subscription and start it immediately.
     Add {
         /// Stable node/runtime UUID. Used as the source identity in fleet events.
@@ -404,6 +406,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
         } => cmd_preflight::run(&client, provider, llm_provider, llm_model).await,
         Command::Fleet { command } => match command {
             FleetCommand::List => cmd_fleet::list(&client).await,
+            FleetCommand::Status => cmd_fleet::status(&client).await,
             FleetCommand::Add {
                 node_id,
                 base_url,
@@ -1438,6 +1441,18 @@ mod argv_subcommand_tests {
                 command: FleetCommand::List,
             }) => {}
             other => panic!("expected Fleet::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_status_parses() {
+        let args =
+            Args::try_parse_from(["gitim-runtime", "fleet", "status"]).expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command: FleetCommand::Status,
+            }) => {}
+            other => panic!("expected Fleet::Status, got {other:?}"),
         }
     }
 

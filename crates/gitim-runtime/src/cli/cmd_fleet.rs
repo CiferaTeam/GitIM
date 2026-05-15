@@ -20,6 +20,15 @@ pub async fn list(client: &Client) -> Result<i32, CliError> {
     Ok(0)
 }
 
+pub async fn status(client: &Client) -> Result<i32, CliError> {
+    let body = client.get("/fleet/status").await?;
+    let nodes = extract_status_array(&body)?;
+    let out = serde_json::to_string(&nodes)
+        .map_err(|e| CliError::Parse(format!("serialize fleet status array: {e}")))?;
+    println!("{out}");
+    Ok(0)
+}
+
 pub async fn add(client: &Client, args: AddArgs) -> Result<i32, CliError> {
     let body = build_add_body(args)?;
     let res = client.post("/fleet/nodes", &body).await?;
@@ -80,6 +89,18 @@ pub fn extract_nodes_array(body: &serde_json::Value) -> Result<serde_json::Value
     if !nodes.is_array() {
         return Err(CliError::Parse(
             "/fleet/nodes 'nodes' field is not an array".to_string(),
+        ));
+    }
+    Ok(nodes.clone())
+}
+
+pub fn extract_status_array(body: &serde_json::Value) -> Result<serde_json::Value, CliError> {
+    let nodes = body
+        .get("nodes")
+        .ok_or_else(|| CliError::Parse("/fleet/status missing 'nodes' key".to_string()))?;
+    if !nodes.is_array() {
+        return Err(CliError::Parse(
+            "/fleet/status 'nodes' field is not an array".to_string(),
         ));
     }
     Ok(nodes.clone())

@@ -14,6 +14,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::get;
 use axum::Router;
 use futures::{Stream, StreamExt};
+use http_body_util::BodyExt;
 use serde_json::json;
 use serial_test::serial;
 use tokio::sync::broadcast;
@@ -84,6 +85,93 @@ fn fleet_events_request() -> Request<Body> {
         .unwrap()
 }
 
+fn fleet_status_request() -> Request<Body> {
+    Request::builder()
+        .uri("/fleet/status")
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).expect("response body is JSON")
+}
+
+async fn wait_for_status(
+    router: Router,
+    node_id: &str,
+    workspace: &str,
+    status: &str,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let resp = router
+            .clone()
+            .oneshot(fleet_status_request())
+            .await
+            .expect("fleet status response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        if let Some(entry) = body["nodes"].as_array().and_then(|nodes| {
+            nodes.iter().find(|entry| {
+                entry["node_id"] == node_id
+                    && entry["workspace_id"] == workspace
+                    && entry["status"] == status
+            })
+        }) {
+            return entry.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "status {status} for {node_id}/{workspace} did not appear; last body: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_status_with_last_event(
+    router: Router,
+    node_id: &str,
+    workspace: &str,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let entry = wait_for_status(router.clone(), node_id, workspace, "connected").await;
+        if entry["last_event_at"].as_str().is_some() {
+            return entry;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connected status for {node_id}/{workspace} did not record last_event_at; last entry: {entry}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_frame_containing(
+    body: &mut (impl Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    needle: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let frame = tokio::time::timeout(Duration::from_millis(500), body.next())
+            .await
+            .expect("fleet stream should produce frames")
+            .expect("fleet stream should not end")
+            .expect("fleet frame should be ok");
+        let text = std::str::from_utf8(&frame)
+            .expect("fleet frame utf8")
+            .to_string();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "frame containing {needle:?} did not arrive; last frame: {text}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial(home_env)]
 async fn add_fleet_node_hot_subscribes_remote_sse() {
@@ -123,12 +211,7 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
         }
     });
 
-    let frame = tokio::time::timeout(Duration::from_secs(3), events_body.next())
-        .await
-        .expect("fleet event should arrive without restarting runtime")
-        .expect("fleet stream should yield a frame")
-        .expect("fleet frame should be ok");
-    let text = std::str::from_utf8(&frame).expect("fleet frame utf8");
+    let text = wait_for_frame_containing(&mut events_body, "remote event arrived").await;
     assert!(text.contains("\"node_id\":\"remote-runtime-a\""), "{text}");
     assert!(text.contains("\"node_ip\":\"100.64.0.10\""), "{text}");
     assert!(text.contains("\"workspace_id\":\"room\""), "{text}");
@@ -137,4 +220,88 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
 
     sender.abort();
     remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_status_tracks_connected_and_last_event() {
+    let _home_guard = HomeGuard::install();
+    let (remote_base_url, remote_tx, remote_server) = spawn_remote_runtime().await;
+    let (router, _state) = create_router();
+
+    let events_resp = router
+        .clone()
+        .oneshot(fleet_events_request())
+        .await
+        .expect("fleet events response");
+    assert_eq!(events_resp.status(), StatusCode::OK);
+    let mut events_body = events_resp.into_body().into_data_stream();
+
+    let add_resp = router
+        .clone()
+        .oneshot(post_fleet_node(&remote_base_url))
+        .await
+        .expect("add fleet node response");
+    assert_eq!(add_resp.status(), StatusCode::OK);
+
+    let sender = tokio::spawn(async move {
+        for _ in 0..20 {
+            let _ = remote_tx.send(AgentActivityEvent {
+                agent_id: "cfo".to_string(),
+                workspace_id: "room".to_string(),
+                event_type: "tool_use".to_string(),
+                detail: "updates status".to_string(),
+                timestamp: "2026-05-15T00:00:00Z".to_string(),
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let status_event =
+        wait_for_frame_containing(&mut events_body, "\"status\":\"connected\"").await;
+    assert!(
+        status_event.contains("\"kind\":\"node_status\""),
+        "{status_event}"
+    );
+
+    let entry = wait_for_status_with_last_event(router, "remote-runtime-a", "room").await;
+    assert_eq!(entry["node_ip"], "100.64.0.10");
+    assert_eq!(entry["node_name"], "mac-mini");
+    assert!(
+        entry["last_connected_at"].as_str().is_some(),
+        "connected node should record last_connected_at: {entry}"
+    );
+    assert!(entry["last_event_at"].as_str().is_some());
+
+    sender.abort();
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_status_marks_unreachable_node_down() {
+    let _home_guard = HomeGuard::install();
+    let (router, _state) = create_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unused port");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    let add_resp = router
+        .clone()
+        .oneshot(post_fleet_node(&base_url))
+        .await
+        .expect("add fleet node response");
+    assert_eq!(add_resp.status(), StatusCode::OK);
+
+    let entry = wait_for_status(router, "remote-runtime-a", "room", "down").await;
+    assert!(
+        entry["retry_count"].as_u64().unwrap_or_default() >= 1,
+        "down node should increment retry_count: {entry}"
+    );
+    assert!(
+        entry["last_error"].as_str().is_some(),
+        "down node should retain last_error: {entry}"
+    );
 }

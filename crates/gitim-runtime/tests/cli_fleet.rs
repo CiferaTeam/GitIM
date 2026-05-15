@@ -1,4 +1,6 @@
-use gitim_runtime::cli::cmd_fleet::{build_add_body, extract_nodes_array, AddArgs};
+use gitim_runtime::cli::cmd_fleet::{
+    build_add_body, extract_nodes_array, extract_status_array, AddArgs,
+};
 use serde_json::json;
 
 #[test]
@@ -45,4 +47,24 @@ fn extract_nodes_array_unwraps_runtime_response() {
     let nodes = extract_nodes_array(&body).expect("nodes");
     assert_eq!(nodes.as_array().unwrap().len(), 1);
     assert_eq!(nodes[0]["node_id"], "remote-a");
+}
+
+#[test]
+fn extract_status_array_unwraps_runtime_response() {
+    let body = json!({
+        "ok": true,
+        "nodes": [
+            {
+                "node_id": "remote-a",
+                "workspace_id": "room",
+                "status": "down",
+                "retry_count": 3,
+            },
+        ],
+    });
+
+    let nodes = extract_status_array(&body).expect("status nodes");
+    assert_eq!(nodes.as_array().unwrap().len(), 1);
+    assert_eq!(nodes[0]["status"], "down");
+    assert_eq!(nodes[0]["retry_count"], 3);
 }

@@ -160,6 +160,12 @@ struct FleetNodesListResponse {
 }
 
 #[derive(Serialize)]
+struct FleetStatusResponse {
+    ok: bool,
+    nodes: Vec<crate::fleet::FleetNodeStatus>,
+}
+
+#[derive(Serialize)]
 struct FleetNodeUpsertResponse {
     ok: bool,
     node: crate::user_config::FleetNodeEntry,
@@ -294,6 +300,7 @@ pub struct RuntimeState {
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
     pub fleet_tx: tokio::sync::broadcast::Sender<crate::fleet::FleetEventEnvelope>,
     pub fleet_nodes: HashMap<String, crate::fleet::FleetNodeRuntime>,
+    pub fleet_status: HashMap<String, crate::fleet::FleetNodeStatus>,
     /// Canonicalized path to the runtime binary captured at startup. The
     /// update endpoint (self-replace) uses this to (a) validate the install
     /// dir in strict mode, and (b) fork-exec a new runtime after the binary
@@ -373,6 +380,7 @@ impl Default for RuntimeState {
             workspaces: HashMap::new(),
             fleet_tx,
             fleet_nodes: HashMap::new(),
+            fleet_status: HashMap::new(),
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
@@ -3950,6 +3958,19 @@ async fn fleet_nodes_list(State(state): State<SharedRuntimeState>) -> Json<Fleet
     Json(FleetNodesListResponse { ok: true, nodes })
 }
 
+async fn fleet_status(State(state): State<SharedRuntimeState>) -> Json<FleetStatusResponse> {
+    let mut nodes: Vec<_> = {
+        let s = state.lock().unwrap();
+        s.fleet_status.values().cloned().collect()
+    };
+    nodes.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.workspace_id.cmp(&b.workspace_id))
+    });
+    Json(FleetStatusResponse { ok: true, nodes })
+}
+
 async fn fleet_nodes_upsert(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<crate::user_config::FleetNodeEntry>,
@@ -5194,6 +5215,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         )
         .nest("/workspaces/{slug}", ws_router)
         .route("/fleet/events", get(fleet_events))
+        .route("/fleet/status", get(fleet_status))
         .route(
             "/fleet/nodes",
             get(fleet_nodes_list).post(fleet_nodes_upsert),
