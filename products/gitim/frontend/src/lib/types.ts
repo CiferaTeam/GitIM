@@ -1,4 +1,4 @@
-import type { ProviderId } from "./providers";
+import type { PreflightResult, ProviderId } from "./providers";
 
 export type AgentStatus = "running" | "idle" | "error" | "offline";
 
@@ -137,6 +137,14 @@ export interface ApiResponse<T = Record<string, unknown>> {
   data?: T;
   error?: string;
   error_code?: string;
+  /**
+   * Nested preflight diagnostic from the runtime, present on
+   * `POST /agents/add` failures whose `error_code` is preflight-class
+   * (`provision_preflight_failed`, `hermes_default_profile_no_llm`,
+   * `unknown_provider`, `missing_llm_provider`). Mirrors the on-the-wire
+   * field name (snake_case) of the runtime's `ErrorBody.preflight_detail`.
+   */
+  preflight_detail?: PreflightResult;
 }
 
 export type WorkspaceProvider = "local" | "github";

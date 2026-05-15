@@ -27,7 +27,7 @@ import {
   type HermesLlmProvider,
 } from "@/lib/hermes-llm";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
-import { CheckCircle2, Loader2, Plus, XCircle } from "lucide-react";
+import { Loader2, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EnvVarsEditor } from "./env-vars-editor";
@@ -44,11 +44,15 @@ export function AddAgentDialog() {
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [joinGeneral, setJoinGeneral] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [detecting, setDetecting] = useState(false);
-  const [detectResult, setDetectResult] = useState<PreflightResult | null>(null);
-  // Generation counter guards against stale preflight responses when the user
-  // switches provider mid-flight or fires Detect multiple times in succession.
-  const detectSeq = useRef(0);
+  // Sticky preflight diagnostic: server returns `preflight_detail` on
+  // provisioning failures (per Task 5/6 of the provisioning-preflight plan).
+  // We surface it inline so the user can see which binary was missing or
+  // what stdout the CLI produced, without a separate Detect roundtrip.
+  const [submitError, setSubmitError] = useState<{
+    error: string;
+    preflight: PreflightResult | null;
+  } | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const modelFetchSeq = useRef(0);
 
   // Hermes-specific LLM selection state
@@ -131,9 +135,8 @@ export function AddAgentDialog() {
     setEnvVars([]);
     setJoinGeneral(true);
     setSubmitting(false);
-    setDetecting(false);
-    setDetectResult(null);
-    detectSeq.current += 1;
+    setSubmitError(null);
+    setDetailsOpen(false);
     // Reset hermes LLM state
     setLlmProvider("");
     setLlmModel("");
@@ -145,43 +148,14 @@ export function AddAgentDialog() {
     setCustomModelInput("");
   }
 
-  async function handleDetect() {
-    if (!provider || detecting) return;
-    const seq = ++detectSeq.current;
-    setDetecting(true);
-    setDetectResult(null);
-    const res = await client.preflightProvider(
-      provider as ProviderId,
-      provider === "hermes" ? hermesLlmOverride : undefined,
-    );
-    // Bail out if the user switched provider (or fired another detect) while
-    // the request was in flight — a stale response must not overwrite state.
-    if (seq !== detectSeq.current) return;
-    if (res.ok && res.data) {
-      setDetectResult(res.data);
-    } else {
-      setDetectResult({
-        available: false,
-        provider: provider as string,
-        version: null,
-        model_used: null,
-        duration_ms: 0,
-        output_preview: null,
-        error: res.error ?? "Request failed",
-        error_kind: "other",
-      });
-    }
-    setDetecting(false);
-  }
-
-  function detectErrorMessage(result: PreflightResult): string {
-    switch (result.error_kind) {
+  function preflightKindLabel(kind: PreflightResult["error_kind"]): string {
+    switch (kind) {
       case "not_installed":
-        return "CLI not found. Install claude/codex and retry.";
+        return "Provider not installed";
       case "timeout":
-        return "Timed out.";
+        return "Timed out";
       default:
-        return result.error ?? "Unknown error";
+        return "Other error";
     }
   }
 
@@ -206,8 +180,7 @@ export function AddAgentDialog() {
       submitting ||
       !provider ||
       (modelRequired && !model) ||
-      hermesLlmIncomplete ||
-      !detectResult?.available
+      hermesLlmIncomplete
     )
       return;
     if (!activeSlug) {
@@ -221,6 +194,8 @@ export function AddAgentDialog() {
     }
 
     setSubmitting(true);
+    setSubmitError(null);
+    setDetailsOpen(false);
     try {
       const res = await client.addAgent(
         activeSlug,
@@ -239,7 +214,15 @@ export function AddAgentDialog() {
         resetForm();
         setOpen(false);
       } else {
-        toast.error(res.error ?? "Failed to add agent");
+        const errorMsg = res.error ?? "Failed to add agent";
+        // Preflight failures get sticky inline rendering; everything else
+        // falls back to a toast so transient errors don't pollute the form.
+        if (res.preflight_detail) {
+          setSubmitError({ error: errorMsg, preflight: res.preflight_detail });
+        } else {
+          setSubmitError({ error: errorMsg, preflight: null });
+          toast.error(errorMsg);
+        }
       }
     } finally {
       setSubmitting(false);
@@ -270,10 +253,10 @@ export function AddAgentDialog() {
                 onChange={(e) => {
                   setProvider(e.target.value as ProviderId | "");
                   setModel("");
-                  // Invalidate any in-flight detect so its late-arriving
-                  // response can't clobber the cleared state.
-                  detectSeq.current += 1;
-                  setDetectResult(null);
+                  // Clear any prior provisioning failure — the previous
+                  // diagnostic is no longer relevant once the provider changes.
+                  setSubmitError(null);
+                  setDetailsOpen(false);
                 }}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
@@ -284,50 +267,49 @@ export function AddAgentDialog() {
                   </option>
                 ))}
               </select>
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDetect}
-                  disabled={
-                    !provider ||
-                    detecting ||
-                    isHermesLlmSelectionIncomplete(
-                      provider,
-                      llmProvider,
-                      effectiveModel,
-                    )
-                  }
-                >
-                  {detecting ? (
-                    <>
-                      <Loader2 className="size-4 mr-1 animate-spin" />
-                      Detecting...
-                    </>
-                  ) : (
-                    "Detect"
+            </div>
+
+            {submitError?.preflight && (
+              <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+                <div className="flex flex-col gap-1">
+                  <p className="font-medium text-destructive">
+                    {preflightKindLabel(submitError.preflight.error_kind)}
+                  </p>
+                  <p className="text-destructive/90">{submitError.error}</p>
+                </div>
+                <div className="flex flex-wrap gap-1.5 text-xs">
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                    provider: {submitError.preflight.provider}
+                  </span>
+                  {submitError.preflight.model_used && (
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                      model: {submitError.preflight.model_used}
+                    </span>
                   )}
-                </Button>
-                {detecting && (
-                  <span className="text-sm text-muted-foreground">
-                    Detecting...
-                  </span>
-                )}
-                {!detecting && detectResult?.available === true && (
-                  <span className="flex items-center gap-1 text-sm text-green-600">
-                    <CheckCircle2 className="size-4" />
-                    OK — {detectResult.duration_ms} ms
-                  </span>
-                )}
-                {!detecting && detectResult?.available === false && (
-                  <span className="flex items-center gap-1 text-sm text-red-600">
-                    <XCircle className="size-4" />
-                    {detectErrorMessage(detectResult)}
-                  </span>
+                  {submitError.preflight.version && (
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                      version: {submitError.preflight.version}
+                    </span>
+                  )}
+                </div>
+                {submitError.preflight.output_preview && (
+                  <div className="space-y-1">
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground hover:underline"
+                      onClick={() => setDetailsOpen((v) => !v)}
+                    >
+                      {detailsOpen ? "Hide details" : "Show details"}
+                    </button>
+                    {detailsOpen && (
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-2 font-mono text-xs text-muted-foreground">
+                        {submitError.preflight.output_preview}
+                      </pre>
+                    )}
+                  </div>
                 )}
               </div>
-            </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="agent-name">
@@ -564,11 +546,17 @@ export function AddAgentDialog() {
                     provider,
                     llmProvider,
                     effectiveModel,
-                  ) ||
-                  !detectResult?.available
+                  )
                 }
               >
-                Add
+                {submitting ? (
+                  <>
+                    <Loader2 className="size-4 mr-1 animate-spin" />
+                    Adding…
+                  </>
+                ) : (
+                  "Add agent"
+                )}
               </Button>
             </DialogFooter>
           </form>
