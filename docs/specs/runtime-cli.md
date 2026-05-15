@@ -358,6 +358,9 @@ $ gitim-runtime preflight hermes --llm-provider gemini --llm-model gemini-2.0-fl
 | `token_lacks_repo_access` | PAT 有效但无该 repo access | 重新发 token，授予对应 scope |
 | `insufficient_scope` | PAT scope 不够（没 `repo` / `read:user`） | 重发 token 加 scope |
 | `workspace_path_exists` | `/git/init` 时 workspace 目录已存在且非空 | 换 path 或清理目录 |
+| `provision_preflight_failed` | `add-agent` 时 server preflight 失败（含 LLM auth 失败 / model 不存在 / 网络不通 / timeout / 真 LLM 拒绝） | 看 `preflight_detail` 字段：`error_kind` (not_installed / timeout / other) + `output_preview` (CLI 实际输出片段) + `error` (具体消息) 帮 debug；改 config 再试 |
+| `hermes_default_profile_no_llm` | `add-agent --provider hermes` 不指定 llm 但 default profile 也无 LLM 配置 | 在 `$HERMES_HOME/config.yaml` 配 `model.default` + `model.provider`，或 add 时显式 `--llm-provider X --llm-model Y` |
+| `missing_llm_provider` | `add-agent --provider hermes` 只指定 `--llm-provider` 或 `--llm-model` 一个（runtime contract: 双值或双缺，不允许半残） | 同时指定 `--llm-provider` 和 `--llm-model`，或两个都省（走 default profile 继承） |
 
 更多 error_code 可能在 runtime `crates/gitim-runtime/src/http.rs` 里搜 `error_code: "..."` 找全。
 
@@ -420,22 +423,55 @@ esac
 
 ---
 
-## Known gap：Provisioning preflight（v2 跟进）
+## Provisioning preflight（已落地）
 
-**现状**：`gitim-runtime add-agent` 直接 POST `/agents/add`。Server 端 `provision_agent` 跑 `git clone` + 写 `me.json` + 写 `.env` + 装 hermes profile（如适用），**不** 用真实 agent config 跑 hello round-trip。
+> 历史：`runtime-cli` v1 ship 时**没带** add-time preflight；下一 PR `provisioning-preflight` feature 补齐了。本节描述当前实际行为，旧 v1 doc 的 "Known gap" 段已过时。
 
-**后果**：env / model 配置出错（PAT 失效、model 名拼错、hermes LLM 没配等），不会在 add-agent 阶段暴露 —— agent 会被成功加进 workspace，第一个 turn 才在 agent_loop 里报错。
+**现状**：`POST /workspaces/{slug}/agents/add` 在 `handler_conflict` 检查后、`provision_agent` 调用前，调一道 server-side preflight gate。Gate 用 add request body 的 `env` / `model` / `llm_provider` / `llm_model` 调对应 provider 的 `preflight_X_with_config`（claude/codex 支持 model override；opencode/pi 只验 connectivity；hermes 双模式 ACP / chat）。
 
-**WebUI 现状**：`add-agent-dialog.tsx` 在 add 前点 "detect" 跑 `GET /preflight/{provider}` 做客户端预检。但这只验"机器上 provider CLI 装了没"，**不** 验"这个 agent 的 specific config（model + env + system prompt）真能跑"。所以即便 preflight 通过，加完 agent 仍可能在 first turn 挂掉。
+**通过** → 走原 provision_agent 流程（git clone + daemon onboard + push + me.json + hermes profile）。
+**失败** → 返 `ErrorBody { ok: false, error, error_code, preflight_detail: PreflightResult }`，**零 durable agent artifact** —— 没 commit / 没 push / 没 agent_dir / 没 state entry。
 
-**Workaround for v1 CLI users / agents**：
-1. 先跑 `gitim-runtime preflight <provider> [--llm-provider X --llm-model Y]` 验环境层
-2. 看 exit code 0 + JSON `ok:true` 才 `gitim-runtime add-agent ...`
-3. add-agent 后建议在频道里 @ 新 agent 一句简短任务验真实 round-trip，失败立刻 `burn-agent --hard`
+### Preflight 能 catch 的（high-confidence）
+- Provider CLI 没装（→ `error_kind: not_installed`）
+- LLM auth 错（PAT 过期 / API key 错）→ provider 返 auth error
+- Model 名拼错 / 该 model 无 access → provider 返 model error
+- Hermes default profile 没装 → `hermes_not_setup`
+- Hermes default profile 装了但无 `model.default` / `model.provider` 配置 → `hermes_default_profile_no_llm`
+- Network 不通 / DNS 失败 → timeout / transport error
+- Provider 服务在 add 瞬间宕机
 
-**v2 follow-up**：`provisioning-preflight` feature — 让 server `agents_add` 在 `provision_agent` 成功后、`spawn_agent_loop` 之前，**用 agent 真实落盘的 config**（me.json + .env + hermes profile）跑一次同步 hello round-trip。失败 → cleanup_agent_dir + delete_profile + 返回 `error_code: "provision_preflight_failed"`。所有 caller（CLI / WebUI / 未来 SDK）都自动受益，WebUI 可同步删掉客户端 detect 步骤。设计起在 `docs/plans/provisioning-preflight/`（v1 land 后开新 worktree）。
+### Preflight **不**能 catch（运行时才暴露，known limitation）
+- Rate limit 在 preflight 后才达到
+- Prompt-specific 行为差异（preflight 用 minimal hello prompt + tempdir cwd，agent_loop 用 repo cwd + 完整 system_prompt）
+- Tool / MCP server config 错（preflight 跑 `--tools ""` 隔离工具）
+- Agent 跑长任务时 context window 超限
+- **opencode / pi 的 model 名拼错** —— 这两个 CLI 无 per-invocation `--model` flag，preflight 只验 connectivity + auth，不验 model 名（agent 第一 turn 才暴露）
+- Post-preflight 失败路径（hermes profile clone fail / apply_model_config fail）—— 仍走现有 cleanup_agent_dir + delete_profile，**remote orphan 行为不变**（已是 hermes_profile_create_failed 的现状）
 
-涉及 cross-cutting 改动（provider trait 加 `hello(config)` method、`agents_add` 调用顺序、WebUI 删 client-side preflight + 改 add 体感），所以 v1 不带，单开一 PR。
+### Cost note
+- claude / codex preflight 烧 **agent 配置 model** 的一个 hello token（agent 配 opus 就烧 opus 一次）
+- 单次 add 一次，不是 per-turn，acceptable
+- 总 add 延迟 ~10-60s（preflight ~3-15s + provision ~5-45s clone-dominated for github mode）
+
+### Agent shell-out 时如何用 `preflight_detail`
+CLI 在 `provision_preflight_failed` / `hermes_default_profile_no_llm` 等 preflight-class 错误时，stderr 会 emit 结构化 block：
+```
+{ JSON envelope with error_code + preflight_detail }
+Preflight (claude):
+  Error kind: not_installed
+  Provider version: 1.2.3
+  Model: claude-opus-4-7
+  Output preview: <≤200 chars + … if truncated>
+  Detail: <only when ≠ top-level message>
+```
+
+Agent 用 stderr regex grab "Error kind:" / "Output preview:" / "Detail:" 拿 actionable 信息；exit code 仍 2（permanent，不该 retry，改 config）。
+
+### v2 后续
+- opencode / pi 支持 model override（需调研 CLI flag 支持情况）
+- Provisioning preflight cache（避免同 user 同 LLM 一次 add session 多次烧 token）
+- `--skip-preflight` flag for debug
 
 ---
 
