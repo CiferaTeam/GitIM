@@ -248,7 +248,16 @@ pub async fn handle_archive_channel(
         for entry in entries {
             let entry = match entry {
                 Ok(e) => e,
-                Err(e) => return Response::error(format!("failed to read dir entry: {}", e)),
+                Err(e) => {
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "archive_channel",
+                        );
+                    }
+                    return Response::error(format!("failed to read dir entry: {}", e));
+                }
             };
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
@@ -588,7 +597,14 @@ pub async fn handle_unarchive_channel(
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    return Response::error(format!("failed to read dir entry: {}", e))
+                    for prev_meta_rel in &stamped_yamls {
+                        crate::card_handlers::restore_card_yaml(
+                            &state,
+                            prev_meta_rel,
+                            "unarchive_channel",
+                        );
+                    }
+                    return Response::error(format!("failed to read dir entry: {}", e));
                 }
             };
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
