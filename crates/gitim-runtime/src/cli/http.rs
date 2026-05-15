@@ -86,6 +86,15 @@ pub enum CliError {
     /// is a human-readable description (from `message` or `error` field if
     /// present), `http_status` is the underlying HTTP status for telemetry.
     ///
+    /// `preflight_detail` carries the nested [`crate::preflight::PreflightResult`]
+    /// when the runtime emits a provisioning-preflight failure via
+    /// `ErrorBody::with_preflight` (currently only the `agents_add` handler).
+    /// Non-preflight error paths leave it `None`. The CLI's stderr error
+    /// envelope reads this field and renders extra lines (`Preflight: <provider>`,
+    /// `Error kind: <snake_case>`, `Output preview: <truncated>`, …) so an
+    /// agent shell-out can grep the specific failure mode without a second
+    /// roundtrip.
+    ///
     /// Per Architecture §1, this is the canonical signal for permanent
     /// failures and the agent should NOT retry — see `exit_code` mapping.
     #[error("runtime error [{code}]: {message}")]
@@ -93,6 +102,7 @@ pub enum CliError {
         code: String,
         message: String,
         http_status: u16,
+        preflight_detail: Option<crate::preflight::PreflightResult>,
     },
 
     /// CLI-side configuration problem — no workspace configured, ambiguous
@@ -341,10 +351,22 @@ fn process_response_inner(
             .or_else(|| value.get("error").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
+        // `preflight_detail` is an optional nested struct the server sets
+        // only on provisioning-preflight failures (see
+        // `ErrorBody::with_preflight` in server `http.rs`). Best-effort
+        // parse: a missing or malformed nested struct must not turn a
+        // permanent structured error into a Parse/Transport error — the
+        // canonical signal is still `error_code`. If `from_value` fails
+        // here, we just drop the detail and continue with `None`.
+        let preflight_detail = value
+            .get("preflight_detail")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         return Err(CliError::ResponseErrorCode {
             code: code.to_string(),
             message,
             http_status: status_code,
+            preflight_detail,
         });
     }
 
@@ -372,6 +394,7 @@ fn process_response_inner(
             code: "!cli:missing_error_code".to_string(),
             message,
             http_status: status_code,
+            preflight_detail: None,
         });
     }
 
@@ -576,10 +599,19 @@ mod tests {
         let bytes = br#"{"ok":false,"error":"name taken","error_code":"handler_conflict"}"#;
         let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
         match err {
-            CliError::ResponseErrorCode { code, message, http_status } => {
+            CliError::ResponseErrorCode {
+                code,
+                message,
+                http_status,
+                preflight_detail,
+            } => {
                 assert_eq!(code, "handler_conflict");
                 assert_eq!(message, "name taken");
                 assert_eq!(http_status, 200);
+                assert!(
+                    preflight_detail.is_none(),
+                    "no preflight_detail on plain structured error: {preflight_detail:?}"
+                );
             }
             other => panic!("expected ResponseErrorCode, got: {other:?}"),
         }
@@ -633,10 +665,16 @@ mod tests {
         let bytes = br#"{"ok":false,"error":"something broke"}"#;
         let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
         match err {
-            CliError::ResponseErrorCode { code, message, http_status } => {
+            CliError::ResponseErrorCode {
+                code,
+                message,
+                http_status,
+                preflight_detail,
+            } => {
                 assert_eq!(code, "!cli:missing_error_code");
                 assert_eq!(message, "something broke");
                 assert_eq!(http_status, 200);
+                assert!(preflight_detail.is_none());
             }
             other => panic!("expected ResponseErrorCode, got: {other:?}"),
         }
@@ -726,10 +764,12 @@ mod tests {
                 code,
                 message,
                 http_status,
+                preflight_detail,
             } => {
                 assert_eq!(code, "!cli:missing_error_code");
                 assert_eq!(message, "foo");
                 assert_eq!(http_status, 200);
+                assert!(preflight_detail.is_none());
             }
             other => panic!("expected ResponseErrorCode, got: {other:?}"),
         }
@@ -780,6 +820,104 @@ mod tests {
                 assert!(body.contains("plain rejection"));
             }
             other => panic!("expected HttpStatus, got: {other:?}"),
+        }
+    }
+
+    // ── preflight_detail propagation (T7) ───────────────────────────────────
+
+    #[test]
+    fn error_code_with_preflight_detail_is_parsed_through() {
+        // Server emits `ErrorBody::with_preflight` on a provisioning preflight
+        // failure: top-level `error_code` plus a nested `preflight_detail`
+        // object. The CLI must surface the nested struct so the stderr
+        // envelope (and any downstream JSON consumer) can render the specific
+        // failure mode (which binary, what error_kind, stdout preview) without
+        // a second HTTP roundtrip.
+        let bytes = br#"{
+            "ok": false,
+            "error": "claude CLI missing",
+            "error_code": "provision_preflight_failed",
+            "preflight_detail": {
+                "available": false,
+                "provider": "claude",
+                "version": null,
+                "model_used": null,
+                "duration_ms": 12,
+                "output_preview": null,
+                "error": "claude CLI missing",
+                "error_kind": "not_installed"
+            }
+        }"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode {
+                code,
+                preflight_detail,
+                ..
+            } => {
+                assert_eq!(code, "provision_preflight_failed");
+                let pf = preflight_detail.expect("preflight_detail must be parsed through");
+                assert_eq!(pf.provider, "claude");
+                assert!(!pf.available);
+                assert_eq!(
+                    pf.error_kind,
+                    Some(crate::preflight::ErrorKind::NotInstalled)
+                );
+                assert_eq!(pf.error.as_deref(), Some("claude CLI missing"));
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_code_without_preflight_detail_keeps_field_none() {
+        // The common case: a structured error_code with NO nested preflight
+        // detail (handler_conflict, daemon_unreachable, validation, …). The
+        // new field must default to None and not corrupt the existing
+        // matching behavior. Combined with `error_code_in_200_classified_...`
+        // this pins the default-None shape against accidental serde drift.
+        let bytes = br#"{"ok":false,"error":"name taken","error_code":"handler_conflict"}"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode {
+                preflight_detail, ..
+            } => {
+                assert!(
+                    preflight_detail.is_none(),
+                    "no preflight_detail expected, got: {preflight_detail:?}",
+                );
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_code_with_malformed_preflight_detail_does_not_kill_error_path() {
+        // Defensive: if a future server (or buggy proxy) emits a
+        // `preflight_detail` we can't deserialize, the canonical
+        // `error_code` must still win. Better to drop the nested detail
+        // than to flip the failure into a Parse error and lose the
+        // structured rejection.
+        let bytes = br#"{
+            "ok": false,
+            "error": "boom",
+            "error_code": "provision_preflight_failed",
+            "preflight_detail": "this is not an object"
+        }"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode {
+                code,
+                preflight_detail,
+                ..
+            } => {
+                assert_eq!(code, "provision_preflight_failed");
+                assert!(
+                    preflight_detail.is_none(),
+                    "malformed nested detail must be dropped, not parsed: {preflight_detail:?}",
+                );
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
         }
     }
 
