@@ -402,7 +402,12 @@ pub async fn handle_archive_channel(
         return Response::error(format!("git mv thread failed: {}", e));
     }
     if let Err(e) = state.git_storage.mv(&meta_from, &meta_to) {
-        let _ = state.git_storage.mv(&thread_to, &thread_from);
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "archive_channel: rollback mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
         for (rb_from, rb_to) in successful_card_mvs.iter().rev() {
             if let Err(rb_err) = state.git_storage.mv(rb_to, rb_from) {
                 error!(
@@ -438,8 +443,18 @@ pub async fn handle_archive_channel(
                 );
             }
         }
-        let _ = state.git_storage.mv(&meta_to, &meta_from);
-        let _ = state.git_storage.mv(&thread_to, &thread_from);
+        if let Err(rb_err) = state.git_storage.mv(&meta_to, &meta_from) {
+            error!(
+                "archive_channel: rollback meta mv {} -> {} also failed: {}",
+                meta_to, meta_from, rb_err
+            );
+        }
+        if let Err(rb_err) = state.git_storage.mv(&thread_to, &thread_from) {
+            error!(
+                "archive_channel: rollback thread mv {} -> {} also failed: {}",
+                thread_to, thread_from, rb_err
+            );
+        }
         for prev_meta_rel in &stamped_yamls {
             crate::card_handlers::restore_card_yaml(&state, prev_meta_rel, "archive_channel");
         }
