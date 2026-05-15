@@ -84,9 +84,13 @@ const handler: Record<
     );
     // Best-effort: migrate legacy orphan card dirs left by old archiveChannel.
     // Non-blocking — a failure here must not prevent the worker from serving.
-    reconcileOrphanCards().catch((e: unknown) => {
-      console.warn("[daemon-web] reconcileOrphanCards failed at boot:", e);
-    });
+    // Only fires on successful init; on failure init has cleared state, so
+    // reconcileOrphanCards's getState() would throw spurious warnings.
+    if (result.ok) {
+      reconcileOrphanCards().catch((e: unknown) => {
+        console.warn("[daemon-web] reconcileOrphanCards failed at boot:", e);
+      });
+    }
     return result;
   },
   health: () => handlers.health(),
