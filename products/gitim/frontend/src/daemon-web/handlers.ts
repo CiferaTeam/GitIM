@@ -803,18 +803,85 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
       return err(`channel '${channel}' already exists in active location; unarchive aborted`);
     }
 
-    await moveChannelFiles(
-      channel,
-      {
-        metaRelPath: archiveMetaRelPath,
-        threadRelPath: `archive/channels/${channel}.thread`,
-      },
-      {
-        metaRelPath: activeMetaRelPath,
-        threadRelPath: `channels/${channel}.thread`,
-      },
+    // Discover cards under archive/channels/<ch>/cards/, filter for via-channel only.
+    const archiveCardsDir = `${s.repoDir}/archive/channels/${channel}/cards`;
+    type CardMove = { cardId: string; fromRel: string; toRel: string };
+    const cardMoves: CardMove[] = [];
+    if (await exists(archiveCardsDir)) {
+      const cardIds = await readdir(archiveCardsDir);
+      for (const cardId of cardIds) {
+        const cardMetaPath = `${archiveCardsDir}/${cardId}/card.meta.yaml`;
+        if (!(await exists(cardMetaPath))) continue;
+        const cardYaml = await readFile(cardMetaPath);
+        const card = parseYaml(cardYaml) as unknown as Card;
+        if (card.archived_via !== "channel") continue;
+        // Clear the archived_via field before mv.
+        const cleaned = { ...card } as Partial<typeof card>;
+        delete cleaned.archived_via;
+        await writeFile(cardMetaPath, stringifyCardMeta(cleaned as typeof card) as string);
+        cardMoves.push({
+          cardId,
+          fromRel: `archive/channels/${channel}/cards/${cardId}`,
+          toRel: `channels/${channel}/cards/${cardId}`,
+        });
+      }
+    }
+
+    // Copy cards back to active. mkdirp is recursive so the cards parent
+    // covers channels/<ch> too.
+    if (cardMoves.length > 0) {
+      await mkdirp(`${s.repoDir}/channels/${channel}/cards`);
+      for (const m of cardMoves) {
+        await mvCardDirectory(`${s.repoDir}/${m.fromRel}`, `${s.repoDir}/${m.toRel}`);
+      }
+    }
+
+    // Read channel meta + thread for the mv back.
+    const channelFromMeta = archiveMetaRelPath;
+    const channelFromThread = `archive/channels/${channel}.thread`;
+    const channelToMeta = activeMetaRelPath;
+    const channelToThread = `channels/${channel}.thread`;
+    const metaContent = await readFile(`${s.repoDir}/${channelFromMeta}`);
+    if (!(await exists(`${s.repoDir}/${channelFromThread}`))) {
+      throw new Error(`thread file for channel '${channel}' does not exist`);
+    }
+    const threadContent = await readFile(`${s.repoDir}/${channelFromThread}`);
+    await writeFile(`${s.repoDir}/${channelToMeta}`, metaContent);
+    await writeFile(`${s.repoDir}/${channelToThread}`, threadContent);
+
+    // Single commit covering channel files + all restored card files.
+    const adds = [
+      channelToMeta,
+      channelToThread,
+      ...cardMoves.flatMap((m) => [
+        `${m.toRel}/card.meta.yaml`,
+        `${m.toRel}/discussion.thread`,
+      ]),
+    ];
+    const removes = [
+      channelFromMeta,
+      channelFromThread,
+      ...cardMoves.flatMap((m) => [
+        `${m.fromRel}/card.meta.yaml`,
+        `${m.fromRel}/discussion.thread`,
+      ]),
+    ];
+
+    await gitOps.addRemoveAndCommit(
+      s.repoDir,
+      adds,
+      removes,
       `unarchive: #${channel} by @${s.me.handler}`,
+      s.me.handler,
     );
+
+    // Remove source files from working tree (post-commit).
+    for (const m of cardMoves) {
+      await removeTrackedFile(`${s.repoDir}/${m.fromRel}/card.meta.yaml`);
+      await removeTrackedFile(`${s.repoDir}/${m.fromRel}/discussion.thread`);
+    }
+    await removeTrackedFile(`${s.repoDir}/${channelFromMeta}`);
+    await removeTrackedFile(`${s.repoDir}/${channelFromThread}`);
 
     await refreshChannelsCache();
     const sync = await syncAfterCommit();
@@ -1711,40 +1778,6 @@ async function moveCardDirectory(
   } catch {
     // Empty directory cleanup is best-effort; git tracks files, not directories.
   }
-}
-
-async function moveChannelFiles(
-  channel: string,
-  from: { metaRelPath: string; threadRelPath: string },
-  to: { metaRelPath: string; threadRelPath: string },
-  message: string,
-): Promise<void> {
-  const s = getState();
-  const fromMetaAbsPath = `${s.repoDir}/${from.metaRelPath}`;
-  const fromThreadAbsPath = `${s.repoDir}/${from.threadRelPath}`;
-  const toMetaAbsPath = `${s.repoDir}/${to.metaRelPath}`;
-  const toThreadAbsPath = `${s.repoDir}/${to.threadRelPath}`;
-
-  const meta = await readFile(fromMetaAbsPath);
-  if (!(await exists(fromThreadAbsPath))) {
-    throw new Error(`thread file for channel '${channel}' does not exist`);
-  }
-  const thread = await readFile(fromThreadAbsPath);
-
-  await mkdirp(parentPath(toMetaAbsPath));
-  await writeFile(toMetaAbsPath, meta);
-  await writeFile(toThreadAbsPath, thread);
-
-  await gitOps.addRemoveAndCommit(
-    s.repoDir,
-    [to.metaRelPath, to.threadRelPath],
-    [from.metaRelPath, from.threadRelPath],
-    message,
-    s.me.handler,
-  );
-
-  await removeTrackedFile(fromMetaAbsPath);
-  await removeTrackedFile(fromThreadAbsPath);
 }
 
 // Copy a card directory's tracked files (card.meta.yaml + discussion.thread) to a new
