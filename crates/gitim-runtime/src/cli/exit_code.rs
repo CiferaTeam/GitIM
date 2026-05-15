@@ -75,6 +75,7 @@ mod tests {
             code: "handler_conflict".to_string(),
             message: "already exists".to_string(),
             http_status: 200,
+            preflight_detail: None,
         };
         assert_eq!(from_cli_error(&err), 2);
     }
@@ -88,6 +89,7 @@ mod tests {
             code: "internal_bug".to_string(),
             message: "".to_string(),
             http_status: 500,
+            preflight_detail: None,
         };
         assert_eq!(from_cli_error(&err), 2);
     }

@@ -3,6 +3,7 @@
 
 import "./browser-polyfills";
 import * as handlers from "./handlers";
+import { reconcileOrphanCards } from "./handlers";
 import { startSyncLoop, stopSyncLoop } from "./sync";
 
 export interface WorkerRequest {
@@ -70,8 +71,8 @@ const handler: Record<
   (...args: unknown[]) => Promise<unknown>
 > = {
   preflight: () => handlers.preflight(),
-  init: (config: unknown) =>
-    handlers.init(
+  init: async (config: unknown) => {
+    const result = await handlers.init(
       config as {
         workspaceId: string;
         remoteUrl: string;
@@ -80,7 +81,18 @@ const handler: Record<
         handler: string;
         storage: { fsName: string; repoDir: "/repo" };
       },
-    ),
+    );
+    // Best-effort: migrate legacy orphan card dirs left by old archiveChannel.
+    // Non-blocking — a failure here must not prevent the worker from serving.
+    // Only fires on successful init; on failure init has cleared state, so
+    // reconcileOrphanCards's getState() would throw spurious warnings.
+    if (result.ok) {
+      reconcileOrphanCards().catch((e: unknown) => {
+        console.warn("[daemon-web] reconcileOrphanCards failed at boot:", e);
+      });
+    }
+    return result;
+  },
   health: () => handlers.health(),
   me: () => handlers.me(),
   poll: (since?: unknown) => handlers.poll(since as string | undefined),

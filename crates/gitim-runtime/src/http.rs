@@ -103,12 +103,21 @@ struct HealthResponse {
 
 /// Shared error response body. `ok` is always `false` — Serialize via a
 /// const associated function so callers can't construct an `ok: true` mistake.
+///
+/// `preflight_detail` is set only by [`Self::with_preflight`] — used by
+/// `agents_add` (T6) to nest the full [`crate::preflight::PreflightResult`]
+/// under a provisioning failure so the WebUI / CLI can render structured
+/// detail (which binary, what error_kind, stdout preview) without a second
+/// roundtrip. Skipped from serialization when `None` so every other error
+/// path keeps its existing two-field shape.
 #[derive(Serialize)]
 struct ErrorBody {
     ok: bool,
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preflight_detail: Option<crate::preflight::PreflightResult>,
 }
 
 impl ErrorBody {
@@ -117,6 +126,7 @@ impl ErrorBody {
             ok: false,
             error: error.into(),
             error_code: None,
+            preflight_detail: None,
         }
     }
 
@@ -125,6 +135,26 @@ impl ErrorBody {
             ok: false,
             error: error.into(),
             error_code: Some(code.into()),
+            preflight_detail: None,
+        }
+    }
+
+    /// Error body carrying a nested `PreflightResult`. Used by `agents_add`
+    /// when provisioning aborts because the per-agent preflight came back
+    /// `available: false` — the caller maps `result.failure_code` through
+    /// `classify_preflight_error_code` for the top-level `error_code`, and
+    /// threads the raw result through so the UI can show e.g. which binary
+    /// was missing or which model failed.
+    fn with_preflight(
+        error: impl Into<String>,
+        code: impl Into<String>,
+        detail: crate::preflight::PreflightResult,
+    ) -> Self {
+        Self {
+            ok: false,
+            error: error.into(),
+            error_code: Some(code.into()),
+            preflight_detail: Some(detail),
         }
     }
 }
@@ -2285,6 +2315,42 @@ async fn agents_add(
         .into_response();
     }
 
+    // Provisioning preflight gate. All conflict checks have passed; before we
+    // touch disk (create agent dir, clone remote, spawn daemon, write me.json),
+    // verify that the agent's chosen provider can actually be invoked with the
+    // env/model/llm config the request specifies. A `false` result tags the
+    // failure with a stable error_code and carries the full `PreflightResult`
+    // back so the WebUI / CLI can render structured detail (which binary, what
+    // error_kind, stdout preview) without a second roundtrip.
+    let preflight = crate::preflight::preflight_for_add_request(
+        &req.provider,
+        Some(&req.env),
+        req.model.as_deref(),
+        req.llm_provider.as_deref(),
+        req.llm_model.as_deref(),
+    )
+    .await;
+    if !preflight.available {
+        let code = crate::preflight::classify_preflight_error_code(&preflight);
+        let message = preflight
+            .error
+            .clone()
+            .unwrap_or_else(|| "provisioning preflight failed".to_string());
+        // Operator observability: failures here are user-facing AND infrequent,
+        // so log them so `tail -f ~/.gitim/logs/*.log` surfaces patterns
+        // (e.g. spike in `hermes_default_profile_no_llm` after a hermes
+        // upgrade). Doesn't replace the structured response — that still
+        // carries the full preflight_detail.
+        tracing::warn!(
+            handler = %req.handler,
+            provider = %req.provider,
+            error_code = %code,
+            error_kind = ?preflight.error_kind,
+            "agents_add aborted at provisioning preflight gate"
+        );
+        return Json(ErrorBody::with_preflight(message, code, preflight)).into_response();
+    }
+
     let agents_dir = workspace.clone();
     if let Err(e) = std::fs::create_dir_all(&agents_dir) {
         return Json(ErrorBody::new(format!("failed to create agents dir: {e}"))).into_response();
@@ -4406,6 +4472,7 @@ async fn preflight_handler(
                 None,
                 params.llm_provider.as_deref(),
                 params.llm_model.as_deref(),
+                None,
             )
             .await;
             (StatusCode::OK, Json(result)).into_response()
@@ -5807,6 +5874,110 @@ mod tests {
         assert_eq!(
             next, expected,
             "synthesized spec must drive next_fire_after the same way a parsed spec.yaml would"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // ErrorBody — preflight_detail (T5)
+    //
+    // Every other ErrorBody path must keep its old two-key shape (ok, error
+    // [+ error_code]) — frontend / CLI consumers branch on absence of keys,
+    // so `skip_serializing_if` must actually elide the field for `None`.
+    // Only `with_preflight` carries the nested PreflightResult.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn error_body_new_serializes_without_preflight_detail() {
+        let body = ErrorBody::new("plain failure");
+        let v = serde_json::to_value(&body).expect("serialize ErrorBody::new");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "plain failure");
+        assert!(
+            v.get("error_code").is_none(),
+            "error_code must be elided when None: {v:?}"
+        );
+        assert!(
+            v.get("preflight_detail").is_none(),
+            "preflight_detail must be elided when None: {v:?}"
+        );
+    }
+
+    #[test]
+    fn error_body_with_code_serializes_without_preflight_detail() {
+        let body = ErrorBody::with_code("oops", "handler_conflict");
+        let v = serde_json::to_value(&body).expect("serialize ErrorBody::with_code");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "oops");
+        assert_eq!(v["error_code"], "handler_conflict");
+        assert!(
+            v.get("preflight_detail").is_none(),
+            "preflight_detail must be elided when None: {v:?}"
+        );
+    }
+
+    #[test]
+    fn error_body_with_preflight_serializes_with_nested_detail() {
+        let detail = crate::preflight::PreflightResult::failure(
+            "claude",
+            crate::preflight::ErrorKind::Other,
+            "fake",
+            123,
+        );
+        let body = ErrorBody::with_preflight("oops", "provision_preflight_failed", detail);
+        let v = serde_json::to_value(&body).expect("serialize ErrorBody::with_preflight");
+
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "oops");
+        assert_eq!(v["error_code"], "provision_preflight_failed");
+
+        let pd = v
+            .get("preflight_detail")
+            .expect("preflight_detail key present");
+        assert_eq!(pd["available"], false);
+        assert_eq!(pd["provider"], "claude");
+        assert_eq!(pd["error_kind"], "other");
+        assert_eq!(pd["error"], "fake");
+        assert_eq!(pd["duration_ms"], 123);
+    }
+
+    #[test]
+    fn error_body_round_trip_via_serde_json_value() {
+        // Round-trip: ErrorBody -> JSON Value -> parse back as PreflightResult
+        // on the nested branch. Confirms the nested struct survives JSON
+        // serialization with all its fields preserved (esp. error_kind
+        // snake_case rename and skip_serializing_if behavior).
+        let detail = crate::preflight::PreflightResult::failure_with_code(
+            "hermes",
+            crate::preflight::ErrorKind::NotInstalled,
+            "binary missing",
+            7,
+            "provider_cli_not_found",
+        );
+        let body = ErrorBody::with_preflight(
+            "preflight failed",
+            "provision_preflight_failed",
+            detail,
+        );
+        let v = serde_json::to_value(&body).expect("serialize");
+
+        // Parse the nested branch back into a PreflightResult — this proves
+        // wire compat for downstream consumers (CLI typed DTO) that may
+        // deserialize the nested object directly.
+        let pd_value = v.get("preflight_detail").cloned().expect("nested present");
+        let parsed: crate::preflight::PreflightResult =
+            serde_json::from_value(pd_value).expect("nested deserializes as PreflightResult");
+        assert!(!parsed.available);
+        assert_eq!(parsed.provider, "hermes");
+        assert_eq!(
+            parsed.error_kind,
+            Some(crate::preflight::ErrorKind::NotInstalled)
+        );
+        assert_eq!(parsed.error.as_deref(), Some("binary missing"));
+        assert_eq!(parsed.duration_ms, 7);
+        assert_eq!(
+            parsed.failure_code.as_deref(),
+            Some("provider_cli_not_found"),
+            "failure_code survives JSON round-trip"
         );
     }
 }

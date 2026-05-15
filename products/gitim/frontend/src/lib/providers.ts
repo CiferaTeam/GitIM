@@ -17,6 +17,12 @@ export interface PreflightResult {
   output_preview: string | null;
   error: string | null;
   error_kind: PreflightErrorKind | null;
+  /** Setup-level failure tag set by `failure_with_code` (e.g.
+   *  `hermes_default_profile_no_llm`, `missing_llm_provider`,
+   *  `unknown_provider`). Server omits via `skip_serializing_if`
+   *  when None; absent for normal preflight failures whose top-level
+   *  `error_code` is `provision_preflight_failed`. */
+  failure_code?: string;
 }
 
 export interface ProviderModel {

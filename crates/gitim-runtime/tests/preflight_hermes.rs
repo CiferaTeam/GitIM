@@ -1,5 +1,6 @@
 //! Integration tests for `preflight_hermes_with`.
 
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ async fn test_preflight_hermes_not_installed() {
     let result = preflight_hermes_with(
         "/usr/bin/definitely-not-hermes-xyz",
         Duration::from_secs(5),
+        None,
         None,
         None,
         None,
@@ -35,6 +37,7 @@ async fn test_preflight_hermes_exit_nonzero() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -49,6 +52,7 @@ async fn test_preflight_hermes_empty_output() {
     let result = preflight_hermes_with(
         &resolve_stdbin("true"),
         Duration::from_secs(5),
+        None,
         None,
         None,
         None,
@@ -70,6 +74,7 @@ async fn test_preflight_hermes_timeout() {
     let result = preflight_hermes_with(
         script.to_str().unwrap(),
         Duration::from_millis(300),
+        None,
         None,
         None,
         None,
@@ -130,6 +135,7 @@ async fn preflight_hermes_with_llm_overrides_passes_args() {
         None,
         Some("minimax-cn"),
         Some("MiniMax-M2.7-highspeed"),
+        None,
     )
     .await;
 
@@ -183,6 +189,7 @@ async fn preflight_hermes_with_no_llm_overrides_omits_args() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -198,6 +205,58 @@ async fn preflight_hermes_with_no_llm_overrides_omits_args() {
     // If capture file doesn't exist, the script was never called with args we
     // care about (e.g. --version failed before reaching acp) — that's still OK
     // for this assertion.
+}
+
+/// Test: env_override values are threaded into the spawned child process.
+///
+/// Strategy: write a fake hermes script that dumps its env to a file (only the
+/// keys we set, to avoid massive output) and prints GITIM_OK so the chat path
+/// returns a clean success. Then assert the dumped file contains our override
+/// key/value. We use chat-mode (`Some(provider), Some(model)`) because that's
+/// where `preflight_for_add_request` plugs env_override in — the ACP path
+/// receives the same env but routing chat-mode keeps the spawned process
+/// short-lived (no JSON-RPC handshake to drive).
+#[tokio::test]
+async fn preflight_hermes_env_override_passes_env_to_subprocess() {
+    let tmp = TempDir::new().unwrap();
+    let script_path = tmp.path().join("fake_hermes.sh");
+    let env_dump = tmp.path().join("env.txt");
+
+    // Script: dump GITIM_PREFLIGHT_PROBE from env, print GITIM_OK so the chat
+    // path's success branch fires. Quoting via single quotes prevents the
+    // surrounding shell from expanding the $... at script-write time.
+    let script_content = format!(
+        "#!/bin/sh\nprintf 'GITIM_PREFLIGHT_PROBE=%s\\n' \"$GITIM_PREFLIGHT_PROBE\" > '{dump}'\necho 'GITIM_OK'\nexit 0\n",
+        dump = env_dump.display(),
+    );
+    std::fs::write(&script_path, &script_content).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut env = HashMap::new();
+    env.insert(
+        "GITIM_PREFLIGHT_PROBE".to_string(),
+        "threaded-through".to_string(),
+    );
+
+    let _result = preflight_hermes_with(
+        script_path.to_str().unwrap(),
+        Duration::from_secs(5),
+        None,
+        Some("anthropic"),
+        Some("claude-opus-4-7"),
+        Some(env),
+    )
+    .await;
+
+    assert!(
+        env_dump.exists(),
+        "env dump file not written — fake binary was not called"
+    );
+    let dumped = std::fs::read_to_string(&env_dump).unwrap();
+    assert!(
+        dumped.contains("GITIM_PREFLIGHT_PROBE=threaded-through"),
+        "expected env_override value to reach child process, got: {dumped}"
+    );
 }
 
 /// Test 3 (ignored): real hermes + minimax-cn key → preflight succeeds.
@@ -217,6 +276,7 @@ async fn preflight_hermes_with_real_minimax_succeeds() {
         None,
         Some("minimax-cn"),
         Some("MiniMax-M2.7-highspeed"),
+        None,
     )
     .await;
 

@@ -146,7 +146,7 @@ vi.mock("gitim-wasm", () => ({
   }),
   stringifyCardMeta: vi.fn((meta: Record<string, unknown>) => {
     const labels = Array.isArray(meta.labels) ? meta.labels : [];
-    return [
+    const lines = [
       `title: ${meta.title}`,
       `channel: ${meta.channel}`,
       `status: ${meta.status}`,
@@ -156,8 +156,12 @@ vi.mock("gitim-wasm", () => ({
       `created_by: ${meta.created_by}`,
       `created_at: ${meta.created_at}`,
       `updated_at: ${meta.updated_at}`,
-      "",
-    ].join("\n");
+    ];
+    if (meta.archived_via !== undefined) {
+      lines.push(`archived_via: ${meta.archived_via}`);
+    }
+    lines.push("");
+    return lines.join("\n");
   }),
   validateCardId: vi.fn((cardId: string) => {
     if (!/^[0-9a-f-]{1,20}$/.test(cardId)) throw new Error("invalid card_id");
@@ -269,6 +273,7 @@ import {
   joinChannel,
   listArchivedDms,
   unarchiveCard,
+  reconcileOrphanCards,
 } from "./handlers";
 import { getState, initState, setState } from "./state";
 import { getActiveFsName } from "./storage";
@@ -683,8 +688,12 @@ describe("daemon-web handlers", () => {
       filepaths: [
         "archive/channels/general.meta.yaml",
         "archive/channels/general.thread",
+        "archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "archive/channels/general/cards/20260317-120000-abc/discussion.thread",
         "channels/general.meta.yaml",
         "channels/general.thread",
+        "channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "channels/general/cards/20260317-120000-abc/discussion.thread",
       ],
       message: "archive: #general by @lewis",
     });
@@ -755,8 +764,12 @@ describe("daemon-web handlers", () => {
       filepaths: [
         "channels/general.meta.yaml",
         "channels/general.thread",
+        "channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "channels/general/cards/20260317-120000-abc/discussion.thread",
         "archive/channels/general.meta.yaml",
         "archive/channels/general.thread",
+        "archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "archive/channels/general/cards/20260317-120000-abc/discussion.thread",
       ],
       message: "unarchive: #general by @lewis",
     });
@@ -785,6 +798,113 @@ describe("daemon-web handlers", () => {
 
     const archived = await listArchivedChannels();
     expect(archived.data?.channels).toEqual([]);
+  });
+
+  it("only restores cards with archived_via=channel on unarchiveChannel", async () => {
+    // Override channel meta to make lewis the creator (required for archiveChannel/unarchiveChannel)
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    // MANUAL_CARD: already archived via archiveCard (lives in archive/channels/general/cards/)
+    const manualId = "20260317-110000-man";
+    dirs.set("/repo/archive/channels/general/cards", [manualId]);
+    dirs.set(`/repo/archive/channels/general/cards/${manualId}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`,
+      [
+        "title: Manual card",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: lewis",
+        "created_by: lewis",
+        "created_at: 20260317T110000Z",
+        "updated_at: 20260317T110000Z",
+        "archived_via: manual",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260317T110000Z] manual note\n",
+    );
+
+    // archiveChannel stamps the default active card (20260317-120000-abc) with archived_via=channel
+    await archiveChannel("general");
+    // Now unarchive: should only restore the auto (channel) card, leave manual in archive
+    await unarchiveChannel("general");
+
+    // AUTO_CARD (20260317-120000-abc) should be back in active, no archived_via field
+    const autoYaml = files.get(
+      "/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+    )!;
+    expect(autoYaml).not.toContain("archived_via");
+
+    // MANUAL_CARD should still be in archive with archived_via: manual
+    expect(
+      files.has("/repo/channels/general/cards/20260317-110000-man/card.meta.yaml"),
+    ).toBe(false);
+    const manualYaml = files.get(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`,
+    )!;
+    expect(manualYaml).toContain("archived_via: manual");
+  });
+
+  it("unarchiveChannel with only manual-archived cards moves channel without restoring any cards", async () => {
+    // Override channel meta + put it in the archive location (simulating a channel that was
+    // archived but had only manual-archived cards beneath it — filter discards them all,
+    // so cardMoves stays empty and the no-cards mkdirp branch must run).
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+    await archiveChannel("general");
+
+    // Replace the channel-stamped auto card with a manual-stamped one (simulating that
+    // the user manually archived it before the channel archive happened).
+    const archivedAutoYaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+    )!;
+    files.set(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+      archivedAutoYaml.replace("archived_via: channel", "archived_via: manual"),
+    );
+
+    await unarchiveChannel("general");
+
+    // Channel itself should be back in active
+    expect(files.has("/repo/channels/general.meta.yaml")).toBe(true);
+    expect(files.has("/repo/channels/general.thread")).toBe(true);
+    // The manual-stamped card should stay in archive (no restore)
+    expect(
+      files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(false);
+    expect(
+      files.has("/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(true);
   });
 
   it("rejects invalid channel names before writing files", async () => {
@@ -1214,6 +1334,145 @@ describe("daemon-web handlers", () => {
     expect(commits.at(-1)?.message)
       .toBe("card: unarchive 20260317-120000-abc in general by @lewis");
   });
+
+  it("stamps archived_via=manual in yaml on archiveCard", async () => {
+    await archiveCard("general", "20260317-120000-abc");
+    const yaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(yaml).toContain("archived_via: manual");
+  });
+
+  it("clears archived_via in yaml on unarchiveCard", async () => {
+    await archiveCard("general", "20260317-120000-abc");
+    await unarchiveCard("general", "20260317-120000-abc");
+    const yaml = files.get(
+      "/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(yaml).not.toContain("archived_via");
+  });
+
+  it("archiveChannel moves cards subtree and stamps archived_via=channel", async () => {
+    // Override channel meta to make lewis the creator (required for archiveChannel)
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    // Seed a second active card (CARD2) alongside the existing CARD1
+    const card2Id = "20260317-130000-def";
+    dirs.set("/repo/channels/general/cards", ["20260317-120000-abc", card2Id]);
+    dirs.set(`/repo/channels/general/cards/${card2Id}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/channels/general/cards/${card2Id}/card.meta.yaml`,
+      [
+        "title: Second card",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: lewis",
+        "created_by: lewis",
+        "created_at: 20260317T130000Z",
+        "updated_at: 20260317T130000Z",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/channels/general/cards/${card2Id}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260317T130000Z] card2 note\n",
+    );
+
+    await archiveChannel("general");
+
+    // Active card paths should be gone
+    expect(files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toBe(false);
+    expect(files.has(`/repo/channels/general/cards/${card2Id}/card.meta.yaml`))
+      .toBe(false);
+
+    // Archive card paths should exist with archived_via: channel
+    const yaml1 = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    const yaml2 = files.get(
+      `/repo/archive/channels/general/cards/${card2Id}/card.meta.yaml`
+    )!;
+    expect(yaml1).toContain("archived_via: channel");
+    expect(yaml2).toContain("archived_via: channel");
+  });
+
+  it("archiveChannel does not overwrite archived_via=manual for already-archived cards", async () => {
+    // Override channel meta to make lewis the creator
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    // MANUAL_CARD: already archived via archiveCard (lives in archive/channels/general/cards/)
+    const manualId = "20260317-110000-man";
+    dirs.set("/repo/archive/channels/general/cards", [manualId]);
+    dirs.set(`/repo/archive/channels/general/cards/${manualId}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`,
+      [
+        "title: Manual card",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: lewis",
+        "created_by: lewis",
+        "created_at: 20260317T110000Z",
+        "updated_at: 20260317T110000Z",
+        "archived_via: manual",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260317T110000Z] manual note\n",
+    );
+
+    // Only the default active card (from seedState) remains under channels/general/cards/
+    await archiveChannel("general");
+
+    // Manual-archived card should be untouched (archived_via still "manual")
+    const manualYaml = files.get(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`
+    )!;
+    expect(manualYaml).toContain("archived_via: manual");
+    expect(manualYaml).not.toContain("archived_via: channel");
+
+    // The default active card from seedState should be moved to archive and
+    // stamped archived_via: channel (mixed-scenario isolation).
+    const autoYaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(autoYaml).toContain("archived_via: channel");
+  });
 });
 
 describe("daemon-web read with since + limit semantics", () => {
@@ -1382,5 +1641,88 @@ describe("daemon-web listArchivedDms pagination", () => {
     expect(res.ok).toBe(true);
     expect(res.data?.dms).toEqual([]);
     expect(res.data?.has_more).toBe(false);
+  });
+});
+
+describe("reconcileOrphanCards", () => {
+  beforeEach(seedState);
+
+  it("migrates orphan card dirs under archived channels and stamps archived_via=channel", async () => {
+    // Setup: channel meta in archive/ but cards subtree still in channels/
+    files.set("/repo/archive/channels/general.meta.yaml", "display_name: General\n");
+    files.set("/repo/archive/channels/general.thread", "");
+    registerDir("/repo/archive/channels");
+    dirs.set("/repo/archive/channels", ["general.meta.yaml", "general.thread"]);
+
+    // Remove the active channel meta to mark it as orphaned (no active meta)
+    files.delete("/repo/channels/general.meta.yaml");
+    // channels/ listing: no .meta.yaml for general, but the subdirectory "general" exists
+    dirs.set("/repo/channels", ["general.thread", "general"]);
+
+    // Leave the cards subtree under channels/ (the orphan state)
+    // channels/general/cards/ORPHAN already seeded by seedState as 20260317-120000-abc
+    // but seedState uses a different card id; let's use a fresh setup
+    const orphanId = "20260317-110000-orphan";
+    dirs.set("/repo/channels/general", ["cards"]);
+    dirs.set("/repo/channels/general/cards", [orphanId]);
+    dirs.set(`/repo/channels/general/cards/${orphanId}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/channels/general/cards/${orphanId}/card.meta.yaml`,
+      [
+        "title: t",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: null",
+        "created_by: alice",
+        "created_at: '2026-01-01T00:00:00Z'",
+        "updated_at: '2026-01-01T00:00:00Z'",
+        "",
+      ].join("\n"),
+    );
+    files.set(`/repo/channels/general/cards/${orphanId}/discussion.thread`, "");
+
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(1);
+
+    // Source should be gone
+    expect(
+      files.has(`/repo/channels/general/cards/${orphanId}/card.meta.yaml`),
+    ).toBe(false);
+    // Destination should exist with archived_via stamped
+    const yaml = files.get(
+      `/repo/archive/channels/general/cards/${orphanId}/card.meta.yaml`,
+    )!;
+    expect(yaml).toContain("archived_via: channel");
+    // A commit should have been made
+    expect(commits.at(-1)?.message).toBe(
+      "chore: reconcile orphan cards under archived channels",
+    );
+  });
+
+  it("is no-op when no orphans (no commit)", async () => {
+    // Default seed: general channel has active meta — not an orphan
+    const commitsBefore = commits.length;
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(0);
+    expect(commits.length).toBe(commitsBefore);
+  });
+
+  it("does not touch active channels even when archive meta also exists", async () => {
+    // Both active and archive meta exist — should NOT be treated as orphan
+    files.set("/repo/archive/channels/general.meta.yaml", "display_name: General\n");
+    dirs.set("/repo/archive/channels", ["general.meta.yaml"]);
+
+    const commitsBefore = commits.length;
+    const n = await reconcileOrphanCards();
+    expect(n).toBe(0);
+    expect(commits.length).toBe(commitsBefore);
+    // Active card untouched
+    expect(
+      files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"),
+    ).toBe(true);
   });
 });

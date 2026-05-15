@@ -431,14 +431,20 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
         Ok(code) => std::process::exit(code),
         Err(err) => {
             // Stderr carries an ErrorResponse-shaped envelope so scripts can
-            // parse a uniform `{ok, error, error_code?}` from either runtime
-            // 4xx bodies or CLI-side failures. Mirroring the wire shape
-            // keeps downstream tooling simple.
+            // parse a uniform `{ok, error, error_code?, preflight_detail?}`
+            // from either runtime 4xx bodies or CLI-side failures. Mirroring
+            // the wire shape keeps downstream tooling simple.
             let envelope = ErrorResponse {
                 ok: false,
                 error: err.to_string(),
                 error_code: match &err {
                     CliError::ResponseErrorCode { code, .. } => Some(code.clone()),
+                    _ => None,
+                },
+                preflight_detail: match &err {
+                    CliError::ResponseErrorCode {
+                        preflight_detail, ..
+                    } => preflight_detail.clone(),
                     _ => None,
                 },
             };
@@ -448,9 +454,114 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(s) => eprintln!("{s}"),
                 Err(_) => eprintln!("{err}"),
             }
+            // Companion to the JSON envelope: emit human-greppable preflight
+            // lines after the JSON when the error carries a `PreflightResult`.
+            // Agents shell-out to the CLI and parse stderr with regex; pulling
+            // the nested struct out as flat `Key: value` lines lets a one-line
+            // grep grab the failure mode without a second JSON parser.
+            //
+            // Format intentionally indented so it visually groups under the
+            // JSON envelope and stays distinguishable from a CLI-side error.
+            if let CliError::ResponseErrorCode {
+                preflight_detail: Some(pf),
+                message,
+                ..
+            } = &err
+            {
+                print_preflight_detail_to_stderr(pf, message);
+            }
             std::process::exit(from_cli_error(&err));
         }
     }
+}
+
+/// Render the nested [`PreflightResult`] as `Key: value` lines on stderr.
+///
+/// Wraps [`format_preflight_detail`] in `eprintln!` — split so the formatter
+/// is unit-testable without stderr capture. See that function for the field
+/// order, truncation, and `Detail:` suppression rules.
+fn print_preflight_detail_to_stderr(
+    pf: &gitim_runtime::preflight::PreflightResult,
+    main_message: &str,
+) {
+    eprint!("{}", format_preflight_detail(pf, main_message));
+}
+
+/// Cap for the inlined provider CLI output. 200 chars is plenty for a stderr
+/// glance; longer text lives in the JSON envelope above where a parser can
+/// still grab it untruncated. Sized in chars not bytes because we operate on
+/// `&str` and UTF-8 codepoints — see [`truncate_chars`].
+const PREFLIGHT_PREVIEW_CHAR_CAP: usize = 200;
+
+/// Pure formatter for the preflight stderr block.
+///
+/// Returns a multi-line string the caller writes to stderr (or captures in
+/// tests). Field ordering is fixed so an agent regex parser
+/// (e.g. `^Error kind: (\w+)$`) sees the same lines in the same positions
+/// every time. Output preview is truncated to [`PREFLIGHT_PREVIEW_CHAR_CAP`]
+/// chars to keep the stderr block scannable — the raw stdout/stderr from
+/// the provider CLI can be megabytes (HTTP body of a rate-limit error, …).
+///
+/// `main_message` is the top-level `CliError::ResponseErrorCode.message`
+/// (already printed inside the JSON envelope as `error`). We suppress
+/// `Detail:` when `pf.error` equals that — repeating the same string twice
+/// is noise. Different strings get both lines so the agent sees the
+/// provider-specific detail in addition to the top-level summary.
+fn format_preflight_detail(
+    pf: &gitim_runtime::preflight::PreflightResult,
+    main_message: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "Preflight ({}):", pf.provider);
+    if let Some(kind) = pf.error_kind {
+        // serde rename = snake_case; serialize as a single value and strip
+        // the surrounding quotes so the line reads `Error kind: not_installed`
+        // instead of `Error kind: "not_installed"`.
+        let raw = serde_json::to_string(&kind).unwrap_or_else(|_| String::from("\"other\""));
+        let snake = raw.trim_matches('"');
+        let _ = writeln!(out, "  Error kind: {snake}");
+    }
+    if let Some(failure_code) = &pf.failure_code {
+        // Setup-level tag (e.g. `hermes_default_profile_no_llm`,
+        // `missing_llm_provider`). Distinct from the top-level
+        // `error_code` already present in the JSON envelope — surfacing
+        // it inline gives the agent a stable tag without parsing JSON.
+        let _ = writeln!(out, "  Failure code: {failure_code}");
+    }
+    if let Some(version) = &pf.version {
+        let _ = writeln!(out, "  Provider version: {version}");
+    }
+    if let Some(model) = &pf.model_used {
+        let _ = writeln!(out, "  Model: {model}");
+    }
+    if let Some(preview) = &pf.output_preview {
+        let truncated = truncate_chars(preview, PREFLIGHT_PREVIEW_CHAR_CAP);
+        let _ = writeln!(out, "  Output preview: {truncated}");
+    }
+    if let Some(detail) = &pf.error {
+        // Suppress repetition: server `ErrorBody::with_preflight` typically
+        // sets the top-level `error` to `pf.error.clone()`, so most paths
+        // would print the same string twice. Only re-print when the strings
+        // actually differ — that's the case where the provider supplied
+        // extra context the agent should see (e.g. a model-not-found body).
+        if detail != main_message {
+            let _ = writeln!(out, "  Detail: {detail}");
+        }
+    }
+    out
+}
+
+/// Truncate `s` to at most `max_chars` characters, appending `…` when cut.
+/// Operates on chars (not bytes) so multibyte UTF-8 doesn't slice mid-codepoint
+/// — provider error bodies often quote API payloads that include non-ASCII.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
 }
 
 /// Server mode: same boot path as before the CLI split. Initializes tracing,
@@ -1524,5 +1635,193 @@ mod argv_subcommand_tests {
             }
             other => panic!("expected Fleet::Remove, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod preflight_stderr_format_tests {
+    //! Format tests for the stderr block we render under the JSON envelope
+    //! when the runtime ships a `preflight_detail`. The line ordering and
+    //! field names are part of the agent contract — an agent shell-out
+    //! greps these to branch on the failure mode. Drift here breaks
+    //! callers, so every output field gets a positive and negative test.
+    use super::{format_preflight_detail, truncate_chars, PREFLIGHT_PREVIEW_CHAR_CAP};
+    use gitim_runtime::preflight::{ErrorKind, PreflightResult};
+
+    fn baseline_failure() -> PreflightResult {
+        PreflightResult {
+            available: false,
+            provider: "claude".to_string(),
+            version: None,
+            model_used: None,
+            duration_ms: 12,
+            output_preview: None,
+            error: Some("boom".to_string()),
+            error_kind: Some(ErrorKind::Other),
+            failure_code: None,
+        }
+    }
+
+    #[test]
+    fn header_lists_provider() {
+        let pf = baseline_failure();
+        let out = format_preflight_detail(&pf, "");
+        // First line is the section header — colon is intentional for
+        // visual grouping under the JSON envelope.
+        let first = out.lines().next().expect("at least one line");
+        assert_eq!(first, "Preflight (claude):");
+        assert!(out.starts_with("Preflight (claude):\n"));
+    }
+
+    #[test]
+    fn error_kind_renders_as_snake_case_without_quotes() {
+        let mut pf = baseline_failure();
+        pf.error_kind = Some(ErrorKind::NotInstalled);
+        let out = format_preflight_detail(&pf, "");
+        assert!(
+            out.contains("\n  Error kind: not_installed\n"),
+            "expected `Error kind: not_installed` line, got:\n{out}",
+        );
+        // Negative: no surrounding quotes.
+        assert!(!out.contains("\"not_installed\""), "stray quotes: {out:?}");
+    }
+
+    #[test]
+    fn version_and_model_only_render_when_set() {
+        let mut pf = baseline_failure();
+        // Both absent in baseline.
+        let out = format_preflight_detail(&pf, "");
+        assert!(!out.contains("Provider version:"));
+        assert!(!out.contains("Model:"));
+
+        // Both present.
+        pf.version = Some("1.2.3".to_string());
+        pf.model_used = Some("claude-opus-4-7".to_string());
+        let out = format_preflight_detail(&pf, "");
+        assert!(out.contains("\n  Provider version: 1.2.3\n"));
+        assert!(out.contains("\n  Model: claude-opus-4-7\n"));
+    }
+
+    #[test]
+    fn output_preview_truncated_at_cap() {
+        let mut pf = baseline_failure();
+        // 300 ASCII chars — cap is 200 → truncate + ellipsis.
+        pf.output_preview = Some("a".repeat(300));
+        let out = format_preflight_detail(&pf, "");
+        let preview_line = out
+            .lines()
+            .find(|l| l.starts_with("  Output preview:"))
+            .expect("preview line present");
+        assert!(preview_line.ends_with('…'), "truncation marker missing: {preview_line}");
+        // The line is "  Output preview: " (18 chars) + 200 a's + '…'
+        // (1 char). Count chars not bytes since '…' is multibyte.
+        assert_eq!(
+            preview_line.chars().count(),
+            18 + PREFLIGHT_PREVIEW_CHAR_CAP + 1,
+            "unexpected length on truncated preview: {preview_line:?}",
+        );
+    }
+
+    #[test]
+    fn detail_suppressed_when_equal_to_main_message() {
+        let mut pf = baseline_failure();
+        pf.error = Some("boom".to_string());
+        // main_message == pf.error → no duplicate Detail: line.
+        let out = format_preflight_detail(&pf, "boom");
+        assert!(
+            !out.contains("Detail:"),
+            "Detail must be suppressed when equal to main message: {out:?}",
+        );
+    }
+
+    #[test]
+    fn detail_emitted_when_different_from_main_message() {
+        let mut pf = baseline_failure();
+        pf.error = Some("provider-specific extra context".to_string());
+        let out = format_preflight_detail(&pf, "top-level summary");
+        assert!(
+            out.contains("\n  Detail: provider-specific extra context\n"),
+            "Detail line missing when distinct from main message: {out:?}",
+        );
+    }
+
+    #[test]
+    fn fully_populated_preflight_renders_all_expected_lines() {
+        // End-to-end ordering sanity. If we ever reshuffle the field order
+        // an agent regex pinned to "Error kind:" position would still
+        // pass — but anything reading lines in order would break. Pin the
+        // order explicitly.
+        let pf = PreflightResult {
+            available: false,
+            provider: "claude".to_string(),
+            version: Some("1.2.3".to_string()),
+            model_used: Some("bogus-model".to_string()),
+            duration_ms: 245,
+            output_preview: Some("API returned: model not found".to_string()),
+            error: Some("model not found body".to_string()),
+            error_kind: Some(ErrorKind::Other),
+            failure_code: None,
+        };
+        let out = format_preflight_detail(&pf, "model not found");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Preflight (claude):");
+        assert_eq!(lines[1], "  Error kind: other");
+        assert_eq!(lines[2], "  Provider version: 1.2.3");
+        assert_eq!(lines[3], "  Model: bogus-model");
+        assert_eq!(lines[4], "  Output preview: API returned: model not found");
+        assert_eq!(lines[5], "  Detail: model not found body");
+        // Six fields, no trailing extras.
+        assert_eq!(lines.len(), 6, "unexpected extra lines: {lines:?}");
+    }
+
+    #[test]
+    fn failure_code_line_renders_between_error_kind_and_version() {
+        // Locks the position so agent regex can grab `Failure code:` after
+        // `Error kind:` deterministically.
+        let pf = PreflightResult {
+            available: false,
+            provider: "hermes".to_string(),
+            version: Some("0.9.0".to_string()),
+            model_used: None,
+            duration_ms: 12,
+            output_preview: None,
+            error: Some("no LLM configured".to_string()),
+            error_kind: Some(ErrorKind::Other),
+            failure_code: Some("hermes_default_profile_no_llm".to_string()),
+        };
+        let out = format_preflight_detail(&pf, "no LLM configured");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Preflight (hermes):");
+        assert_eq!(lines[1], "  Error kind: other");
+        assert_eq!(lines[2], "  Failure code: hermes_default_profile_no_llm");
+        assert_eq!(lines[3], "  Provider version: 0.9.0");
+        // No Model line because model_used is None.
+        // Detail suppressed because matches main_message.
+        assert_eq!(lines.len(), 4, "unexpected extra lines: {lines:?}");
+    }
+
+    #[test]
+    fn truncate_chars_passes_short_through() {
+        assert_eq!(truncate_chars("hello", 200), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_cuts_long_with_ellipsis() {
+        let s = "a".repeat(50);
+        let out = truncate_chars(&s, 10);
+        assert!(out.ends_with('…'));
+        // 10 a's + '…' = 11 chars
+        assert_eq!(out.chars().count(), 11);
+    }
+
+    #[test]
+    fn truncate_chars_handles_multibyte_codepoints() {
+        // Each '中' is 3 bytes but 1 char; truncation must count chars,
+        // not bytes, or we'd slice mid-codepoint.
+        let s: String = "中".repeat(20);
+        let out = truncate_chars(&s, 5);
+        // 5 chars + '…' = 6 chars total
+        assert_eq!(out.chars().count(), 6);
+        assert!(out.ends_with('…'));
     }
 }

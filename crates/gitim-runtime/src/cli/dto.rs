@@ -122,18 +122,30 @@ pub struct RuntimeStatus {
 }
 
 /// JSON error envelope the CLI emits to stdout when a command fails. Mirrors
-/// the runtime's `ErrorBody` shape (`{ok: false, error, error_code?}`) so
-/// scripts can write one parser for both server and CLI errors.
+/// the runtime's `ErrorBody` shape (`{ok: false, error, error_code?,
+/// preflight_detail?}`) so scripts can write one parser for both server and
+/// CLI errors.
 ///
 /// `ok` is always `false` here by convention — keeping the field explicit
 /// (rather than synthesizing it during serialize) lets callers `match` on
 /// the deserialized form without a parallel "success?" branch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `preflight_detail` is populated only when the underlying `CliError` carried
+/// a nested [`crate::preflight::PreflightResult`] — currently emitted by the
+/// server's `agents_add` handler on a per-agent preflight failure. The field
+/// keeps the same name and shape the server uses (`ErrorBody::with_preflight`),
+/// so a single JSON parser sees the same structure in either error origin.
+/// `PartialEq` is dropped here because `serde_json::Value` doesn't implement
+/// `Eq` and `PreflightResult` doesn't either; tests round-trip via
+/// serialize/deserialize comparison instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub ok: bool,
     pub error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_detail: Option<crate::preflight::PreflightResult>,
 }
 
 /// Response payload from `POST /agents/add`. The runtime returns just
@@ -405,14 +417,10 @@ mod tests {
             "error_code": "handler_conflict",
         });
         let parsed: ErrorResponse = serde_json::from_value(raw).expect("deserialize");
-        assert_eq!(
-            parsed,
-            ErrorResponse {
-                ok: false,
-                error: "foo".into(),
-                error_code: Some("handler_conflict".into()),
-            }
-        );
+        assert!(!parsed.ok);
+        assert_eq!(parsed.error, "foo");
+        assert_eq!(parsed.error_code.as_deref(), Some("handler_conflict"));
+        assert!(parsed.preflight_detail.is_none());
     }
 
     /// Some runtime error paths omit `error_code` (HTTP 4xx with no
@@ -426,8 +434,74 @@ mod tests {
         });
         let parsed: ErrorResponse = serde_json::from_value(raw).expect("deserialize");
         assert!(parsed.error_code.is_none());
+        assert!(parsed.preflight_detail.is_none());
         assert_eq!(parsed.error, "foo");
         assert!(!parsed.ok);
+    }
+
+    /// T7: ErrorResponse must round-trip a nested `preflight_detail` so the
+    /// runtime's provisioning-preflight failure surface stays parseable on
+    /// both directions of the wire (server emit, CLI re-emit).
+    ///
+    /// The shape mirrors `ErrorBody::with_preflight` in server `http.rs` —
+    /// keys at the top level (`ok` / `error` / `error_code`) plus the nested
+    /// `preflight_detail` object with the `PreflightResult` field set.
+    #[test]
+    fn error_response_with_preflight_detail_roundtrip() {
+        let raw = serde_json::json!({
+            "ok": false,
+            "error": "model not found",
+            "error_code": "provision_preflight_failed",
+            "preflight_detail": {
+                "available": false,
+                "provider": "claude",
+                "version": "1.2.3",
+                "model_used": "bogus-model",
+                "duration_ms": 245,
+                "output_preview": "API returned: model 'bogus-model' not found",
+                "error": "model not found",
+                "error_kind": "other"
+            }
+        });
+        let parsed: ErrorResponse =
+            serde_json::from_value(raw.clone()).expect("deserialize ErrorResponse");
+
+        assert!(!parsed.ok);
+        assert_eq!(parsed.error, "model not found");
+        assert_eq!(parsed.error_code.as_deref(), Some("provision_preflight_failed"));
+        let pf = parsed
+            .preflight_detail
+            .as_ref()
+            .expect("preflight_detail must be parsed");
+        assert_eq!(pf.provider, "claude");
+        assert!(!pf.available);
+        assert_eq!(pf.version.as_deref(), Some("1.2.3"));
+        assert_eq!(pf.model_used.as_deref(), Some("bogus-model"));
+        assert_eq!(pf.duration_ms, 245);
+        assert_eq!(
+            pf.output_preview.as_deref(),
+            Some("API returned: model 'bogus-model' not found")
+        );
+        assert_eq!(pf.error.as_deref(), Some("model not found"));
+        assert_eq!(pf.error_kind, Some(crate::preflight::ErrorKind::Other));
+
+        // Round-trip: re-serialize and confirm the shape is stable
+        // (`skip_serializing_if = Option::is_none` must not drop the present
+        // detail; field name must stay `preflight_detail` to match server).
+        let reserialized =
+            serde_json::to_value(&parsed).expect("serialize ErrorResponse with detail");
+        let obj = reserialized
+            .as_object()
+            .expect("serialized ErrorResponse is an object");
+        assert!(
+            obj.contains_key("preflight_detail"),
+            "preflight_detail must survive re-serialize: {obj:?}",
+        );
+        let nested = obj["preflight_detail"]
+            .as_object()
+            .expect("preflight_detail is an object after re-serialize");
+        assert_eq!(nested["provider"], serde_json::json!("claude"));
+        assert_eq!(nested["error_kind"], serde_json::json!("other"));
     }
 
     /// `add-agent` response is the smallest typed DTO we ship; round-trip

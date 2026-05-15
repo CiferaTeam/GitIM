@@ -611,6 +611,11 @@ export default function App() {
           // there instead of just vanishing from the UI.
           if (change.kind === "channel_meta" || !knownChannel) {
             needArchivedRefresh = true;
+            // Channel archive/unarchive flips which channels listCards
+            // scans (s.channels = active only). Without this refresh the
+            // kanban keeps showing cards from a now-archived channel
+            // until some other card_meta change triggers a refetch.
+            needCardRefresh = true;
           }
           if (!knownChannel) continue;
         }

@@ -309,6 +309,105 @@ async fn test_add_agent_system_prompt_file_too_large() {
     server.abort();
 }
 
+// ── preflight_detail propagation (T7) ───────────────────────────────────────
+
+/// Spin up a minimal mock axum router that always responds to the add-agent
+/// route with an `ErrorBody::with_preflight`-shaped body, then assert
+/// `cmd_add_agent::run` surfaces the nested `PreflightResult`.
+///
+/// The real `agents_add` handler also emits this shape (T6) but reaching it
+/// requires a fully-provisioned workspace + the agent's chosen provider CLI
+/// being absent on the runner. The mock here lets the CLI half of the
+/// contract — "preserve nested detail end-to-end" — be tested without that
+/// dependency. The wire shape mirrors what `ErrorBody::with_preflight` emits
+/// (see server `http.rs`); if those drift, the runtime-level test in
+/// `provision_preflight.rs` catches it, and this test pins the CLI side.
+#[tokio::test]
+async fn test_add_agent_preserves_preflight_detail_from_server() {
+    use axum::routing::post;
+    use axum::Json;
+    use axum::Router;
+
+    // Hand-rolled JSON because the server-side `ErrorBody::with_preflight`
+    // type is private to the http module. Shape mirrors that struct exactly.
+    async fn mock_handler() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "ok": false,
+            "error": "model not found",
+            "error_code": "provision_preflight_failed",
+            "preflight_detail": {
+                "available": false,
+                "provider": "claude",
+                "version": "1.2.3",
+                "model_used": "bogus-model",
+                "duration_ms": 245,
+                "output_preview": "API returned: model 'bogus-model' not found",
+                "error": "model not found",
+                "error_kind": "other"
+            }
+        }))
+    }
+
+    let app = Router::new().route(
+        "/workspaces/{slug}/agents/add",
+        post(mock_handler),
+    );
+    // Also need the workspaces list endpoint because `resolve_workspace`
+    // calls it when `--workspace` is set to disambiguate. Return a single
+    // workspace match so the resolver passes through.
+    async fn mock_workspaces() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "workspaces": [
+                {
+                    "slug": "ws",
+                    "workspace_name": "ws",
+                    "path": "/tmp/mock"
+                }
+            ]
+        }))
+    }
+    let app = app.route("/workspaces", axum::routing::get(mock_workspaces));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = client_for(addr);
+
+    let args = baseline_args(Some("ws".to_string()), "alice", "claude");
+    let err = cmd_add_agent::run(&client, args)
+        .await
+        .expect_err("mock responds with structured failure");
+
+    match &err {
+        CliError::ResponseErrorCode {
+            code,
+            preflight_detail,
+            ..
+        } => {
+            assert_eq!(code, "provision_preflight_failed");
+            let pf = preflight_detail
+                .as_ref()
+                .expect("preflight_detail must propagate from mock server through CLI HTTP layer");
+            assert_eq!(pf.provider, "claude");
+            assert!(!pf.available);
+            assert_eq!(pf.model_used.as_deref(), Some("bogus-model"));
+            assert_eq!(pf.version.as_deref(), Some("1.2.3"));
+            assert_eq!(
+                pf.error_kind,
+                Some(gitim_runtime::preflight::ErrorKind::Other)
+            );
+        }
+        other => panic!(
+            "expected ResponseErrorCode with preflight_detail, got: {other:?}",
+        ),
+    }
+    assert_eq!(from_cli_error(&err), 2);
+
+    server.abort();
+}
+
 // ── Sanity-check the args wrapper isn't unreachable ──────────────────────────
 
 /// Confirms `cmd_add_agent::Args` exposes the field set the runtime needs
