@@ -62,12 +62,6 @@ pub fn build_add_body(args: AddArgs) -> Result<serde_json::Value, CliError> {
             "--base-url is required".to_string(),
         ));
     }
-    if args.workspaces.is_empty() {
-        return Err(CliError::InvalidConfig(
-            "at least one --workspace is required".to_string(),
-        ));
-    }
-
     let mut body = serde_json::json!({
         "node_id": args.node_id,
         "base_url": args.base_url,

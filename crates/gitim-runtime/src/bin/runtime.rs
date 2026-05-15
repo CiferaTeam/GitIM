@@ -229,8 +229,8 @@ enum FleetCommand {
         /// Human-readable node label.
         #[arg(long = "node-name")]
         node_name: Option<String>,
-        /// Workspace slug to subscribe on the remote node. Repeatable.
-        #[arg(long = "workspace", required = true)]
+        /// Remote workspace slug filter. Repeatable; omitted means auto-map all matching git remotes.
+        #[arg(long = "workspace")]
         workspaces: Vec<String>,
     },
     /// Remove a remote runtime subscription and stop its active tasks.
@@ -1608,8 +1608,8 @@ mod argv_subcommand_tests {
     }
 
     #[test]
-    fn fleet_add_requires_workspace() {
-        let result = Args::try_parse_from([
+    fn fleet_add_without_workspace_parses_for_auto_mapping() {
+        let args = Args::try_parse_from([
             "gitim-runtime",
             "fleet",
             "add",
@@ -1617,8 +1617,24 @@ mod argv_subcommand_tests {
             "remote-a",
             "--base-url",
             "http://100.64.0.10:16868",
-        ]);
-        assert!(result.is_err());
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command:
+                    FleetCommand::Add {
+                        node_id,
+                        base_url,
+                        workspaces,
+                        ..
+                    },
+            }) => {
+                assert_eq!(node_id, "remote-a");
+                assert_eq!(base_url, "http://100.64.0.10:16868");
+                assert!(workspaces.is_empty());
+            }
+            other => panic!("expected Fleet::Add, got {other:?}"),
+        }
     }
 
     #[test]

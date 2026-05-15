@@ -20,8 +20,10 @@ use serial_test::serial;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 
+use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, AgentActivityEvent};
 use gitim_runtime::user_config;
+use gitim_runtime::workspace::WorkspaceContext;
 
 mod common;
 use common::HomeGuard;
@@ -42,6 +44,28 @@ async fn remote_agent_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+async fn remote_workspaces() -> axum::Json<serde_json::Value> {
+    axum::Json(json!({
+        "workspaces": [
+            {
+                "slug": "remote-room",
+                "workspace_name": "Remote Room",
+                "path": "/remote/room",
+                "provider": "github",
+                "initialized": true,
+                "remote_identity": "github.com/org/repo",
+            },
+            {
+                "slug": "local-only",
+                "workspace_name": "Local Only",
+                "path": "/remote/local-only",
+                "provider": "local",
+                "initialized": true,
+            }
+        ]
+    }))
+}
+
 async fn spawn_remote_runtime() -> (
     String,
     broadcast::Sender<AgentActivityEvent>,
@@ -49,7 +73,8 @@ async fn spawn_remote_runtime() -> (
 ) {
     let (tx, _) = broadcast::channel(16);
     let app = Router::new()
-        .route("/workspaces/room/agents/events", get(remote_agent_events))
+        .route("/workspaces", get(remote_workspaces))
+        .route("/workspaces/{slug}/agents/events", get(remote_agent_events))
         .with_state(tx.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -61,13 +86,61 @@ async fn spawn_remote_runtime() -> (
     (format!("http://{addr}"), tx, handle)
 }
 
+async fn remote_agent_events_unavailable() -> StatusCode {
+    StatusCode::SERVICE_UNAVAILABLE
+}
+
+async fn spawn_remote_runtime_unavailable() -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new()
+        .route("/workspaces", get(remote_workspaces))
+        .route(
+            "/workspaces/{slug}/agents/events",
+            get(remote_agent_events_unavailable),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind remote test runtime");
+    let addr = listener.local_addr().expect("remote addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("remote server");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn inject_github_workspace(
+    state: &gitim_runtime::http::SharedRuntimeState,
+    slug: &str,
+    remote_url: &str,
+) {
+    let mut ctx = WorkspaceContext::new(
+        slug.to_string(),
+        format!("{slug} workspace"),
+        std::path::PathBuf::from(format!("/tmp/{slug}")),
+    );
+    ctx.git_config = Some(WorkspaceConfig {
+        workspace: format!("/tmp/{slug}"),
+        created_at: "2026-05-15T00:00:00Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Github,
+            remote_url: Some(remote_url.to_string()),
+            token: Some("tok".to_string()),
+            github_email: None,
+        },
+    });
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert(slug.to_string(), ctx);
+}
+
 fn post_fleet_node(base_url: &str) -> Request<Body> {
     let body = json!({
         "node_id": "remote-runtime-a",
         "base_url": base_url,
         "node_ip": "100.64.0.10",
         "node_name": "mac-mini",
-        "workspaces": ["room"],
+        "workspaces": [],
     });
 
     Request::builder()
@@ -177,7 +250,8 @@ async fn wait_for_frame_containing(
 async fn add_fleet_node_hot_subscribes_remote_sse() {
     let home_guard = HomeGuard::install();
     let (remote_base_url, remote_tx, remote_server) = spawn_remote_runtime().await;
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
 
     let events_resp = router
         .clone()
@@ -197,12 +271,28 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
     let cfg = user_config::read_from(Some(&home_guard.path().join(".gitim/runtime.json")));
     assert_eq!(cfg.fleet_nodes.len(), 1);
     assert_eq!(cfg.fleet_nodes[0].node_id, "remote-runtime-a");
+    let cfg_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home_guard.path().join(".gitim/runtime.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg_json["fleet_nodes"][0]["workspace_mappings"][0]["remote_workspace_id"],
+        "remote-room"
+    );
+    assert_eq!(
+        cfg_json["fleet_nodes"][0]["workspace_mappings"][0]["local_workspace_id"],
+        "room"
+    );
+    assert_eq!(
+        cfg_json["fleet_nodes"][0]["workspace_mappings"][0]["workspace_identity"],
+        "github.com/org/repo"
+    );
 
     let sender = tokio::spawn(async move {
         for _ in 0..20 {
             let _ = remote_tx.send(AgentActivityEvent {
                 agent_id: "cfo".to_string(),
-                workspace_id: "room".to_string(),
+                workspace_id: "remote-room".to_string(),
                 event_type: "tool_use".to_string(),
                 detail: "remote event arrived".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
@@ -215,6 +305,14 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
     assert!(text.contains("\"node_id\":\"remote-runtime-a\""), "{text}");
     assert!(text.contains("\"node_ip\":\"100.64.0.10\""), "{text}");
     assert!(text.contains("\"workspace_id\":\"room\""), "{text}");
+    assert!(
+        text.contains("\"remote_workspace_id\":\"remote-room\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"workspace_identity\":\"github.com/org/repo\""),
+        "{text}"
+    );
     assert!(text.contains("\"agent_id\":\"cfo\""), "{text}");
     assert!(text.contains("remote event arrived"), "{text}");
 
@@ -227,7 +325,8 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
 async fn fleet_status_tracks_connected_and_last_event() {
     let _home_guard = HomeGuard::install();
     let (remote_base_url, remote_tx, remote_server) = spawn_remote_runtime().await;
-    let (router, _state) = create_router();
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
 
     let events_resp = router
         .clone()
@@ -248,7 +347,7 @@ async fn fleet_status_tracks_connected_and_last_event() {
         for _ in 0..20 {
             let _ = remote_tx.send(AgentActivityEvent {
                 agent_id: "cfo".to_string(),
-                workspace_id: "room".to_string(),
+                workspace_id: "remote-room".to_string(),
                 event_type: "tool_use".to_string(),
                 detail: "updates status".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
@@ -267,6 +366,8 @@ async fn fleet_status_tracks_connected_and_last_event() {
     let entry = wait_for_status_with_last_event(router, "remote-runtime-a", "room").await;
     assert_eq!(entry["node_ip"], "100.64.0.10");
     assert_eq!(entry["node_name"], "mac-mini");
+    assert_eq!(entry["remote_workspace_id"], "remote-room");
+    assert_eq!(entry["workspace_identity"], "github.com/org/repo");
     assert!(
         entry["last_connected_at"].as_str().is_some(),
         "connected node should record last_connected_at: {entry}"
@@ -281,16 +382,13 @@ async fn fleet_status_tracks_connected_and_last_event() {
 #[serial(home_env)]
 async fn fleet_status_marks_unreachable_node_down() {
     let _home_guard = HomeGuard::install();
-    let (router, _state) = create_router();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind unused port");
-    let base_url = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let (remote_base_url, remote_server) = spawn_remote_runtime_unavailable().await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
 
     let add_resp = router
         .clone()
-        .oneshot(post_fleet_node(&base_url))
+        .oneshot(post_fleet_node(&remote_base_url))
         .await
         .expect("add fleet node response");
     assert_eq!(add_resp.status(), StatusCode::OK);
@@ -304,4 +402,26 @@ async fn fleet_status_marks_unreachable_node_down() {
         entry["last_error"].as_str().is_some(),
         "down node should retain last_error: {entry}"
     );
+
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_add_rejects_when_no_remote_identity_matches_local_workspaces() {
+    let _home_guard = HomeGuard::install();
+    let (remote_base_url, _remote_tx, remote_server) = spawn_remote_runtime().await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "different", "https://github.com/other/repo.git");
+
+    let add_resp = router
+        .clone()
+        .oneshot(post_fleet_node(&remote_base_url))
+        .await
+        .expect("add fleet node response");
+    assert_eq!(add_resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(add_resp).await;
+    assert_eq!(body["error_code"], "no_matching_fleet_workspace");
+
+    remote_server.abort();
 }

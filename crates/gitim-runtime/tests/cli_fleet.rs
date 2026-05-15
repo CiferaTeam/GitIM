@@ -22,17 +22,18 @@ fn build_add_body_includes_node_identity_and_workspaces() {
 }
 
 #[test]
-fn build_add_body_rejects_missing_workspace() {
-    let err = build_add_body(AddArgs {
+fn build_add_body_allows_missing_workspace_for_auto_mapping() {
+    let body = build_add_body(AddArgs {
         node_id: "remote-runtime-a".to_string(),
         base_url: "http://100.64.0.10:16868".to_string(),
         node_ip: None,
         node_name: None,
         workspaces: Vec::new(),
     })
-    .expect_err("must reject empty workspace list");
+    .expect("body");
 
-    assert!(err.to_string().contains("--workspace"));
+    assert_eq!(body["node_id"], "remote-runtime-a");
+    assert!(body["workspaces"].as_array().unwrap().is_empty());
 }
 
 #[test]

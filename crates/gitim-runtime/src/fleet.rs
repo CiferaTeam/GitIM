@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::AbortHandle;
 
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
-use crate::user_config::FleetNodeEntry;
+use crate::user_config::{FleetNodeEntry, FleetWorkspaceMapping};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
@@ -24,6 +24,10 @@ pub struct FleetAgentActivityEvent {
     pub node_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<String>,
     pub workspace_id: String,
     pub agent_id: String,
     pub received_at: String,
@@ -37,6 +41,10 @@ pub struct FleetNodeStatus {
     pub node_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<String>,
     pub workspace_id: String,
     pub status: FleetNodeConnectionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,12 +72,11 @@ pub struct FleetNodeRuntime {
 impl FleetNodeRuntime {
     fn new(state: SharedRuntimeState, entry: FleetNodeEntry) -> Self {
         let mut handles = Vec::new();
-        for workspace in &entry.workspaces {
+        for subscription in workspace_subscriptions(&entry) {
             let state = state.clone();
             let entry = entry.clone();
-            let workspace = workspace.clone();
             let handle = tokio::spawn(async move {
-                subscribe_workspace_loop(state, entry, workspace).await;
+                subscribe_workspace_loop(state, entry, subscription).await;
             });
             handles.push(handle.abort_handle());
         }
@@ -91,20 +98,28 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
     {
         let mut s = state.lock().unwrap();
         s.fleet_nodes.insert(entry.node_id.clone(), runtime);
-        for workspace in &entry.workspaces {
+        for subscription in workspace_subscriptions(&entry) {
             let status = FleetNodeStatus {
                 node_id: entry.node_id.clone(),
                 node_ip: entry.node_ip.clone(),
                 node_name: entry.node_name.clone(),
-                workspace_id: workspace.clone(),
+                remote_workspace_id: subscription.remote_workspace_id(),
+                workspace_identity: subscription.workspace_identity.clone(),
+                workspace_id: subscription.local_workspace_id.clone(),
                 status: FleetNodeConnectionStatus::Connecting,
                 last_connected_at: None,
                 last_event_at: None,
                 last_error: None,
                 retry_count: 0,
             };
-            s.fleet_status
-                .insert(status_key(&entry.node_id, workspace), status.clone());
+            s.fleet_status.insert(
+                status_key(
+                    &entry.node_id,
+                    &subscription.local_workspace_id,
+                    &subscription.remote_workspace_id,
+                ),
+                status.clone(),
+            );
             initial_statuses.push(status);
         }
     }
@@ -135,11 +150,16 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
     if entry.node_id.trim().is_empty() {
         return Err("node_id is required".to_string());
     }
-    if entry.workspaces.is_empty() {
-        return Err("at least one workspace is required".to_string());
-    }
     if entry.workspaces.iter().any(|w| w.trim().is_empty()) {
         return Err("workspace names must not be empty".to_string());
+    }
+    for mapping in &entry.workspace_mappings {
+        if mapping.remote_workspace_id.trim().is_empty()
+            || mapping.local_workspace_id.trim().is_empty()
+            || mapping.workspace_identity.trim().is_empty()
+        {
+            return Err("workspace mappings must be complete".to_string());
+        }
     }
     let url =
         reqwest::Url::parse(entry.base_url.trim()).map_err(|e| format!("invalid base_url: {e}"))?;
@@ -167,13 +187,139 @@ pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
         .map(|w| w.trim().to_string())
         .filter(|w| !w.is_empty())
         .collect();
+    entry.workspace_mappings = entry
+        .workspace_mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            let remote_workspace_id = mapping.remote_workspace_id.trim().to_string();
+            let local_workspace_id = mapping.local_workspace_id.trim().to_string();
+            let workspace_identity = mapping.workspace_identity.trim().to_string();
+            (!remote_workspace_id.is_empty()
+                && !local_workspace_id.is_empty()
+                && !workspace_identity.is_empty())
+            .then_some(FleetWorkspaceMapping {
+                remote_workspace_id,
+                local_workspace_id,
+                workspace_identity,
+            })
+        })
+        .collect();
     entry
+}
+
+pub async fn resolve_workspace_mappings(
+    state: &SharedRuntimeState,
+    mut entry: FleetNodeEntry,
+) -> Result<FleetNodeEntry, String> {
+    if !entry.workspace_mappings.is_empty() {
+        if entry.workspaces.is_empty() {
+            entry.workspaces = entry
+                .workspace_mappings
+                .iter()
+                .map(|mapping| mapping.remote_workspace_id.clone())
+                .collect();
+        }
+        return Ok(entry);
+    }
+
+    let local_workspaces = local_remote_identities(state);
+    if local_workspaces.is_empty() {
+        return Err("no local github workspaces with remote identity are available".to_string());
+    }
+
+    let remote = fetch_remote_workspaces(&entry.base_url).await?;
+    let requested: std::collections::HashSet<_> = entry.workspaces.iter().cloned().collect();
+    let mut mappings = Vec::new();
+    for remote_workspace in remote.workspaces {
+        if !requested.is_empty() && !requested.contains(&remote_workspace.slug) {
+            continue;
+        }
+        let Some(identity) = remote_workspace.remote_identity else {
+            continue;
+        };
+        if let Some((local_slug, _)) = local_workspaces
+            .iter()
+            .find(|(_, local_identity)| *local_identity == identity)
+        {
+            mappings.push(FleetWorkspaceMapping {
+                remote_workspace_id: remote_workspace.slug,
+                local_workspace_id: local_slug.clone(),
+                workspace_identity: identity,
+            });
+        }
+    }
+    mappings.sort_by(|a, b| {
+        a.local_workspace_id
+            .cmp(&b.local_workspace_id)
+            .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+    });
+    mappings.dedup_by(|a, b| {
+        a.local_workspace_id == b.local_workspace_id
+            && a.remote_workspace_id == b.remote_workspace_id
+            && a.workspace_identity == b.workspace_identity
+    });
+    if mappings.is_empty() {
+        return Err(
+            "no remote workspace has a git remote identity matching a local workspace".to_string(),
+        );
+    }
+    entry.workspaces = mappings
+        .iter()
+        .map(|mapping| mapping.remote_workspace_id.clone())
+        .collect();
+    entry.workspace_mappings = mappings;
+    Ok(entry)
+}
+
+fn local_remote_identities(state: &SharedRuntimeState) -> Vec<(String, String)> {
+    let mut identities: Vec<_> = {
+        let s = state.lock().unwrap();
+        s.workspaces
+            .values()
+            .filter_map(|ctx| {
+                let identity = ctx.git_config.as_ref()?.git.remote_identity()?;
+                Some((ctx.slug.clone(), identity))
+            })
+            .collect()
+    };
+    identities.sort_by(|a, b| a.0.cmp(&b.0));
+    identities
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteWorkspacesResponse {
+    #[serde(default)]
+    workspaces: Vec<RemoteWorkspaceSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteWorkspaceSummary {
+    slug: String,
+    #[serde(default)]
+    remote_identity: Option<String>,
+}
+
+async fn fetch_remote_workspaces(base_url: &str) -> Result<RemoteWorkspacesResponse, String> {
+    let url = format!("{}/workspaces", base_url.trim_end_matches('/'));
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("failed to build fleet client: {e}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to fetch remote workspaces: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("remote workspaces returned error: {e}"))?
+        .json::<RemoteWorkspacesResponse>()
+        .await
+        .map_err(|e| format!("failed to parse remote workspaces: {e}"))
 }
 
 async fn subscribe_workspace_loop(
     state: SharedRuntimeState,
     entry: FleetNodeEntry,
-    workspace: String,
+    subscription: FleetWorkspaceSubscription,
 ) {
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
@@ -185,32 +331,37 @@ async fn subscribe_workspace_loop(
             return;
         }
     };
-    let url = workspace_events_url(&entry.base_url, &workspace);
+    let url = workspace_events_url(&entry.base_url, &subscription.remote_workspace_id);
 
     loop {
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                mark_connected(&state, &entry, &workspace);
-                if let Err(err) = consume_sse_response(&state, &entry, resp).await {
-                    tracing::warn!(node_id = %entry.node_id, workspace = %workspace, error = %err, "fleet SSE stream ended");
-                    mark_down(&state, &entry, &workspace, err);
+                mark_connected(&state, &entry, &subscription);
+                if let Err(err) = consume_sse_response(&state, &entry, &subscription, resp).await {
+                    tracing::warn!(node_id = %entry.node_id, workspace = %subscription.remote_workspace_id, error = %err, "fleet SSE stream ended");
+                    mark_down(&state, &entry, &subscription, err);
                 } else {
-                    mark_down(&state, &entry, &workspace, "SSE stream ended".to_string());
+                    mark_down(
+                        &state,
+                        &entry,
+                        &subscription,
+                        "SSE stream ended".to_string(),
+                    );
                 }
             }
             Ok(resp) => {
                 let error = format!("remote returned {}", resp.status());
                 tracing::warn!(
                     node_id = %entry.node_id,
-                    workspace = %workspace,
+                    workspace = %subscription.remote_workspace_id,
                     status = %resp.status(),
                     "fleet SSE request returned non-success status",
                 );
-                mark_down(&state, &entry, &workspace, error);
+                mark_down(&state, &entry, &subscription, error);
             }
             Err(err) => {
-                tracing::warn!(node_id = %entry.node_id, workspace = %workspace, error = %err, "fleet SSE request failed");
-                mark_down(&state, &entry, &workspace, err.to_string());
+                tracing::warn!(node_id = %entry.node_id, workspace = %subscription.remote_workspace_id, error = %err, "fleet SSE request failed");
+                mark_down(&state, &entry, &subscription, err.to_string());
             }
         }
         tokio::time::sleep(RECONNECT_DELAY).await;
@@ -225,6 +376,7 @@ fn workspace_events_url(base_url: &str, workspace: &str) -> String {
 async fn consume_sse_response(
     state: &SharedRuntimeState,
     entry: &FleetNodeEntry,
+    subscription: &FleetWorkspaceSubscription,
     resp: reqwest::Response,
 ) -> Result<(), String> {
     let mut parser = SseDataParser::default();
@@ -234,7 +386,7 @@ async fn consume_sse_response(
         let text = String::from_utf8_lossy(&chunk);
         for data in parser.push_str(&text) {
             match serde_json::from_str::<AgentActivityEvent>(&data) {
-                Ok(event) => publish_event(state, entry, event),
+                Ok(event) => publish_event(state, entry, subscription, event),
                 Err(err) => {
                     tracing::warn!(node_id = %entry.node_id, error = %err, "failed to parse remote fleet event");
                 }
@@ -244,12 +396,21 @@ async fn consume_sse_response(
     Ok(())
 }
 
-fn publish_event(state: &SharedRuntimeState, entry: &FleetNodeEntry, event: AgentActivityEvent) {
-    mark_event(&event.workspace_id, state, entry);
+fn publish_event(
+    state: &SharedRuntimeState,
+    entry: &FleetNodeEntry,
+    subscription: &FleetWorkspaceSubscription,
+    mut event: AgentActivityEvent,
+) {
+    let remote_workspace_id = event.workspace_id.clone();
+    mark_event(state, entry, subscription);
+    event.workspace_id = subscription.local_workspace_id.clone();
     let envelope = FleetEventEnvelope::AgentActivity(FleetAgentActivityEvent {
         node_id: entry.node_id.clone(),
         node_ip: entry.node_ip.clone(),
         node_name: entry.node_name.clone(),
+        remote_workspace_id: Some(remote_workspace_id),
+        workspace_identity: subscription.workspace_identity.clone(),
         workspace_id: event.workspace_id.clone(),
         agent_id: event.agent_id.clone(),
         received_at: chrono::Utc::now().to_rfc3339(),
@@ -262,24 +423,37 @@ fn publish_event(state: &SharedRuntimeState, entry: &FleetNodeEntry, event: Agen
     let _ = tx.send(envelope);
 }
 
-fn mark_connected(state: &SharedRuntimeState, entry: &FleetNodeEntry, workspace: &str) {
-    update_status(state, entry, workspace, |status| {
+fn mark_connected(
+    state: &SharedRuntimeState,
+    entry: &FleetNodeEntry,
+    subscription: &FleetWorkspaceSubscription,
+) {
+    update_status(state, entry, subscription, |status| {
         status.status = FleetNodeConnectionStatus::Connected;
         status.last_connected_at = Some(chrono::Utc::now().to_rfc3339());
         status.last_error = None;
     });
 }
 
-fn mark_event(workspace: &str, state: &SharedRuntimeState, entry: &FleetNodeEntry) {
-    update_status(state, entry, workspace, |status| {
+fn mark_event(
+    state: &SharedRuntimeState,
+    entry: &FleetNodeEntry,
+    subscription: &FleetWorkspaceSubscription,
+) {
+    update_status(state, entry, subscription, |status| {
         status.status = FleetNodeConnectionStatus::Connected;
         status.last_event_at = Some(chrono::Utc::now().to_rfc3339());
         status.last_error = None;
     });
 }
 
-fn mark_down(state: &SharedRuntimeState, entry: &FleetNodeEntry, workspace: &str, error: String) {
-    update_status(state, entry, workspace, |status| {
+fn mark_down(
+    state: &SharedRuntimeState,
+    entry: &FleetNodeEntry,
+    subscription: &FleetWorkspaceSubscription,
+    error: String,
+) {
+    update_status(state, entry, subscription, |status| {
         status.status = FleetNodeConnectionStatus::Down;
         status.last_error = Some(error);
         status.retry_count = status.retry_count.saturating_add(1);
@@ -289,12 +463,16 @@ fn mark_down(state: &SharedRuntimeState, entry: &FleetNodeEntry, workspace: &str
 fn update_status(
     state: &SharedRuntimeState,
     entry: &FleetNodeEntry,
-    workspace: &str,
+    subscription: &FleetWorkspaceSubscription,
     update: impl FnOnce(&mut FleetNodeStatus),
 ) {
     let status = {
         let mut s = state.lock().unwrap();
-        let key = status_key(&entry.node_id, workspace);
+        let key = status_key(
+            &entry.node_id,
+            &subscription.local_workspace_id,
+            &subscription.remote_workspace_id,
+        );
         let status = s
             .fleet_status
             .entry(key)
@@ -302,7 +480,9 @@ fn update_status(
                 node_id: entry.node_id.clone(),
                 node_ip: entry.node_ip.clone(),
                 node_name: entry.node_name.clone(),
-                workspace_id: workspace.to_string(),
+                remote_workspace_id: subscription.remote_workspace_id(),
+                workspace_identity: subscription.workspace_identity.clone(),
+                workspace_id: subscription.local_workspace_id.clone(),
                 status: FleetNodeConnectionStatus::Connecting,
                 last_connected_at: None,
                 last_event_at: None,
@@ -323,8 +503,45 @@ fn publish_status(state: &SharedRuntimeState, status: FleetNodeStatus) {
     let _ = tx.send(FleetEventEnvelope::NodeStatus(status));
 }
 
-pub fn status_key(node_id: &str, workspace: &str) -> String {
-    format!("{node_id}\u{0}{workspace}")
+pub fn status_key(node_id: &str, local_workspace: &str, remote_workspace: &str) -> String {
+    format!("{node_id}\u{0}{local_workspace}\u{0}{remote_workspace}")
+}
+
+#[derive(Clone, Debug)]
+struct FleetWorkspaceSubscription {
+    remote_workspace_id: String,
+    local_workspace_id: String,
+    workspace_identity: Option<String>,
+}
+
+impl FleetWorkspaceSubscription {
+    fn remote_workspace_id(&self) -> Option<String> {
+        (self.remote_workspace_id != self.local_workspace_id)
+            .then(|| self.remote_workspace_id.clone())
+    }
+}
+
+fn workspace_subscriptions(entry: &FleetNodeEntry) -> Vec<FleetWorkspaceSubscription> {
+    if !entry.workspace_mappings.is_empty() {
+        return entry
+            .workspace_mappings
+            .iter()
+            .map(|mapping| FleetWorkspaceSubscription {
+                remote_workspace_id: mapping.remote_workspace_id.clone(),
+                local_workspace_id: mapping.local_workspace_id.clone(),
+                workspace_identity: Some(mapping.workspace_identity.clone()),
+            })
+            .collect();
+    }
+    entry
+        .workspaces
+        .iter()
+        .map(|workspace| FleetWorkspaceSubscription {
+            remote_workspace_id: workspace.clone(),
+            local_workspace_id: workspace.clone(),
+            workspace_identity: None,
+        })
+        .collect()
 }
 
 #[derive(Default)]

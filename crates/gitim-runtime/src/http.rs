@@ -4052,6 +4052,16 @@ async fn fleet_nodes_upsert(
         )
             .into_response();
     }
+    let entry = match crate::fleet::resolve_workspace_mappings(&state, entry).await {
+        Ok(entry) => entry,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(err, "no_matching_fleet_workspace")),
+            )
+                .into_response()
+        }
+    };
 
     let mut cfg = crate::user_config::read();
     cfg.upsert_fleet_node(entry.clone());
@@ -4522,6 +4532,8 @@ struct WorkspaceSummary {
     workspace_name: String,
     path: String,
     provider: GitProvider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_identity: Option<String>,
     initialized: bool,
 }
 
@@ -4536,6 +4548,10 @@ fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSumma
         workspace_name: ctx.workspace_name.clone(),
         path: ctx.path.to_string_lossy().into_owned(),
         provider,
+        remote_identity: ctx
+            .git_config
+            .as_ref()
+            .and_then(|config| config.git.remote_identity()),
         initialized: workspace_initialized(ctx),
     }
 }
@@ -5451,6 +5467,7 @@ mod tests {
             workspace_name: "Frontend".to_string(),
             path: "/ws/frontend".to_string(),
             provider: GitProvider::Local,
+            remote_identity: None,
             initialized: false,
         };
         let json = serde_json::to_value(&summary).unwrap();

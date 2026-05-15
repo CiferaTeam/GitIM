@@ -9,6 +9,13 @@ pub struct WorkspaceEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetWorkspaceMapping {
+    pub remote_workspace_id: String,
+    pub local_workspace_id: String,
+    pub workspace_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetNodeEntry {
     pub node_id: String,
     pub base_url: String,
@@ -18,6 +25,8 @@ pub struct FleetNodeEntry {
     pub node_name: Option<String>,
     #[serde(default)]
     pub workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_mappings: Vec<FleetWorkspaceMapping>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -415,6 +424,7 @@ mod tests {
             node_ip: Some("100.64.0.10".to_string()),
             node_name: Some("mac-mini".to_string()),
             workspaces: workspaces.into_iter().map(str::to_string).collect(),
+            workspace_mappings: Vec::new(),
         }
     }
 

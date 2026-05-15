@@ -190,3 +190,20 @@ impl WorkspaceConfig {
         Ok(())
     }
 }
+
+impl GitConfig {
+    pub fn remote_identity(&self) -> Option<String> {
+        match self.provider {
+            GitProvider::Local => None,
+            GitProvider::Github => {
+                let remote_url = self.remote_url.as_deref()?.trim();
+                let (owner, repo) = crate::github::parse_github_url(remote_url).ok()?;
+                Some(format!(
+                    "github.com/{}/{}",
+                    owner.to_ascii_lowercase(),
+                    repo.to_ascii_lowercase()
+                ))
+            }
+        }
+    }
+}

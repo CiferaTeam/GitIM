@@ -121,6 +121,35 @@ fn inject_workspace(
         .insert(slug_str.to_string(), ctx);
 }
 
+fn inject_github_workspace_with_remote(
+    state: &SharedRuntimeState,
+    slug_str: &str,
+    workspace_name: &str,
+    path: &std::path::Path,
+    remote_url: &str,
+) {
+    let mut ctx = WorkspaceContext::new(
+        slug_str.to_string(),
+        workspace_name.to_string(),
+        path.to_path_buf(),
+    );
+    ctx.git_config = Some(WorkspaceConfig {
+        workspace: path.to_string_lossy().into_owned(),
+        created_at: "2026-04-18T00:00:00Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Github,
+            remote_url: Some(remote_url.to_string()),
+            token: Some("tok".to_string()),
+            github_email: None,
+        },
+    });
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert(slug_str.to_string(), ctx);
+}
+
 // -- 1. list empty ----------------------------------------------------------
 
 #[tokio::test]
@@ -131,6 +160,44 @@ async fn list_workspaces_empty() {
     let (status, body) = send(router, "GET", "/workspaces", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["workspaces"], json!([]));
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn list_workspaces_includes_remote_identity_for_github_only() {
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+    let root = TempDir::new().unwrap();
+
+    inject_workspace(
+        &state,
+        "local-room",
+        "Local Room",
+        &root.path().join("local-room"),
+        GitProvider::Local,
+    );
+    inject_github_workspace_with_remote(
+        &state,
+        "github-room",
+        "GitHub Room",
+        &root.path().join("github-room"),
+        "https://github.com/Org/Repo.git",
+    );
+
+    let (status, body) = send(router, "GET", "/workspaces", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let workspaces = body["workspaces"].as_array().expect("workspaces");
+    let local = workspaces
+        .iter()
+        .find(|w| w["slug"] == "local-room")
+        .expect("local workspace");
+    let github = workspaces
+        .iter()
+        .find(|w| w["slug"] == "github-room")
+        .expect("github workspace");
+
+    assert!(local.get("remote_identity").is_none() || local["remote_identity"].is_null());
+    assert_eq!(github["remote_identity"], "github.com/org/repo");
 }
 
 // -- 2. health shape --------------------------------------------------------
