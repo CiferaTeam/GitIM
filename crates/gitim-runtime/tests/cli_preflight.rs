@@ -72,33 +72,31 @@ async fn test_preflight_claude_returns_status() {
 #[tokio::test]
 async fn test_preflight_unknown_provider_errors() {
     // Server returns 400 + `{"ok": false, "error": "unknown provider"}` —
-    // crucially WITHOUT an `error_code` field. The CLI HTTP layer's
-    // body-first classification treats `ok: false` (no error_code) as a
-    // structured rejection and synthesizes `code = "unspecified"` so the
-    // response doesn't fall through as success. The downstream contract
-    // we care about is exit code = 2 (permanent), preserved either way.
+    // crucially WITHOUT an `error_code` field. With body-first
+    // classification on a 4xx, the CLI now falls through to
+    // `HttpStatus(400, _)` (4xx without `error_code` → status decides),
+    // which the exit-code mapper still classifies as permanent (exit 2).
+    // The contract that matters is the exit code, not the variant; the
+    // earlier sentinel-synthesis branch only fires for 2xx now to preserve
+    // 5xx-transient semantics (see http.rs `process_response_inner`).
     let (addr, server) = spawn_server().await;
     let client = client_for(addr);
 
     let result = cmd_preflight::run(&client, "invalid-provider".to_string(), None, None).await;
     let err = result.expect_err("unknown provider must surface as CliError");
     match &err {
-        CliError::ResponseErrorCode { code, message, http_status } => {
-            assert_eq!(*http_status, 400, "unknown provider must be 400");
-            assert_eq!(
-                code, "unspecified",
-                "no error_code in body → synthesized 'unspecified'",
-            );
+        CliError::HttpStatus(status, body) => {
+            assert_eq!(*status, 400, "unknown provider must be 400");
             assert!(
-                message.contains("unknown provider"),
-                "message must include server's error text: {message}",
+                body.contains("unknown provider"),
+                "body excerpt must include server's error text: {body}",
             );
         }
-        other => panic!("expected ResponseErrorCode (ok:false body), got: {other:?}"),
+        other => panic!("expected HttpStatus(400, _), got: {other:?}"),
     }
 
     // Exit-code mapping is unit-tested in `cli::exit_code::from_cli_error`
-    // but a sanity-check here pins the integration: structured rejection → exit 2.
+    // but a sanity-check here pins the integration: 4xx → exit 2 (permanent).
     assert_eq!(
         gitim_runtime::cli::from_cli_error(&err),
         2,

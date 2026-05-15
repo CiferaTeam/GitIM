@@ -113,11 +113,19 @@ impl Client {
         // block the CLI process indefinitely, hanging an agent's Bash tool
         // call. Connect timeout is small because we only ever talk to
         // loopback; anything slower than a second is a stuck listener.
-        // Request timeout is loose enough to cover `add-agent`, which does
-        // a full clone inside the runtime before responding.
+        //
+        // Request timeout has to cover the slowest synchronous handler we
+        // call. `add-agent` is the bound: the runtime awaits
+        // `provision_agent` inline, which `git clone`s the workspace remote
+        // before responding. Large monorepos over slow uplinks can take
+        // minutes — 60s aborts the client mid-clone, leaving an
+        // orphaned half-provisioned state on the runtime side. 5 minutes is
+        // an empirical envelope wide enough for realistic GitHub repos but
+        // narrow enough to surface a hung server. Status / list-agents are
+        // bounded by reqwest's TCP read timeout, not this 300s wall.
         let inner = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .expect("reqwest client builds with default settings");
         Self { base_url, inner }
@@ -185,26 +193,32 @@ async fn process_response(resp: reqwest::Response) -> Result<serde_json::Value, 
     process_response_inner(status, &bytes)
 }
 
-/// Body-first response classification. The HTTP status is only consulted as
-/// a fallback when the body lacks structured fields — the runtime is
-/// inconsistent about pairing structured errors with status codes, so we
-/// privilege the body.
+/// Body-first response classification with one critical refinement: the
+/// `ok: false` synthesis path only fires for 2xx responses. For 4xx/5xx
+/// without a structured `error_code` we let HTTP status decide the
+/// classification, because the agent's exit-code mapper relies on 5xx
+/// mapping to **transient (3)** — synthesizing a code on every `ok: false`
+/// would silently flip 5xx into permanent (2) and break the retry contract
+/// (Architecture §4).
 ///
 /// Decision order:
-/// 1. Try parse body as JSON.
-/// 2. If parsed: `error_code` present → ResponseErrorCode (regardless of
-///    HTTP status — handles 200/4xx/5xx + structured error uniformly).
-/// 3. If parsed: `ok: false` (without `error_code`) → ResponseErrorCode with
-///    `code = "unspecified"`, message from `error` field. Catches the case
-///    where the runtime returns 200 with a failure body but forgot to set
-///    a structured code — without this, the CLI would treat the response
-///    as success.
-/// 4. If parsed and 2xx → Ok(value).
-/// 5. If parsed and 4xx/5xx without structured fields → HttpStatus with body
-///    excerpt.
-/// 6. If parse failed and 4xx/5xx → HttpStatus with body excerpt.
-/// 7. If parse failed and 2xx → Parse error (the runtime should always
-///    return JSON; a 200 with non-JSON is a protocol bug).
+/// 1. Try parse body as JSON. If parse fails:
+///      a. status 4xx/5xx → `HttpStatus` (status decides exit class)
+///      b. status 2xx → `Parse` (the runtime should always return JSON;
+///         a 200 with non-JSON is a protocol bug worth surfacing)
+/// 2. Body parsed and contains `error_code` → `ResponseErrorCode`
+///    (regardless of HTTP status — `error_code` is the canonical signal
+///    per Architecture §1, including 5xx + structured code → permanent).
+/// 3. Body parsed, status 2xx, `ok: false` (no `error_code`) →
+///    `ResponseErrorCode` with synthesized `code = "!cli:missing_error_code"`.
+///    Catches the case where the runtime returns 200 with a failure body
+///    but forgot to set a structured code — without this, the CLI would
+///    treat the response as success. The `!cli:` prefix marks the value as
+///    CLI-side synthesis (see the synthesis branch for the convention).
+/// 4. Body parsed and status 2xx, no failure signal → `Ok(value)`.
+/// 5. Body parsed and status 4xx/5xx without structured fields →
+///    `HttpStatus` with body excerpt. Lets exit-code mapper apply the
+///    transient-vs-permanent decision off HTTP status alone.
 fn process_response_inner(
     status: reqwest::StatusCode,
     bytes: &[u8],
@@ -227,7 +241,7 @@ fn process_response_inner(
     };
 
     // Body parsed. Structured `error_code` wins regardless of HTTP status —
-    // see decision order in the doc comment above.
+    // including 5xx + code → permanent (per spec §4).
     if let Some(code) = value.get("error_code").and_then(|v| v.as_str()) {
         let message = value
             .get("message")
@@ -242,11 +256,20 @@ fn process_response_inner(
         });
     }
 
-    // No structured `error_code`, but body explicitly signals failure via
-    // `ok: false`. Don't let this fall through as success. Synthesize a
-    // generic code so the agent still hits the exit-2 (permanent) path,
-    // matching how a code-bearing failure would have classified.
-    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+    // 2xx + `ok: false` without `error_code`: the runtime promised success
+    // via status but contradicted itself in the body. Synthesize a sentinel
+    // code so we don't silently fall through as success.
+    //
+    // The `!cli:` prefix is reserved for CLI-side synthesized codes —
+    // runtime endpoints only emit snake_case lowercase identifiers via
+    // `ErrorBody::with_code`, so `!` cannot collide with a future real
+    // error_code. If you ever need another sentinel, namespace it under
+    // `!cli:<purpose>`.
+    //
+    // For 4xx/5xx without `error_code` we deliberately fall through to
+    // `HttpStatus` below — synthesizing a code there would map every 5xx
+    // into permanent (exit 2) and break the transient-retry contract.
+    if status.is_success() && value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
         let message = value
             .get("error")
             .and_then(|v| v.as_str())
@@ -254,14 +277,15 @@ fn process_response_inner(
             .unwrap_or("")
             .to_string();
         return Err(CliError::ResponseErrorCode {
-            code: "unspecified".to_string(),
+            code: "!cli:missing_error_code".to_string(),
             message,
             http_status: status_code,
         });
     }
 
-    // Body parsed but has neither `error_code` nor `ok: false`. Status
-    // decides: 4xx/5xx → HttpStatus, 2xx → Ok.
+    // Body parsed but has neither `error_code` nor a 2xx `ok: false`.
+    // Status decides: 4xx → permanent, 5xx → transient (per the
+    // exit-code mapper).
     if status.is_client_error() || status.is_server_error() {
         return Err(CliError::HttpStatus(status_code, bytes_to_excerpt(bytes)));
     }
@@ -509,13 +533,16 @@ mod tests {
     fn ok_false_without_error_code_classified_as_response_error() {
         // Regression: previous behavior fell through to `Ok(value)` for
         // 200 + `{ok:false}` without `error_code`. That made the caller
-        // treat a failure as success. We now synthesize a generic code so
-        // the exit-code mapper hits the permanent path.
+        // treat a failure as success. We now synthesize a sentinel code so
+        // the exit-code mapper hits the permanent path. The `!cli:` prefix
+        // marks the code as CLI-side synthesis so it can't collide with a
+        // future runtime-emitted `error_code` (runtime only emits
+        // snake_case lowercase).
         let bytes = br#"{"ok":false,"error":"something broke"}"#;
         let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
         match err {
             CliError::ResponseErrorCode { code, message, http_status } => {
-                assert_eq!(code, "unspecified");
+                assert_eq!(code, "!cli:missing_error_code");
                 assert_eq!(message, "something broke");
                 assert_eq!(http_status, 200);
             }
@@ -531,8 +558,86 @@ mod tests {
         let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
         match err {
             CliError::ResponseErrorCode { code, message, .. } => {
-                assert_eq!(code, "unspecified");
+                assert_eq!(code, "!cli:missing_error_code");
                 assert_eq!(message, "db connection lost");
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    // ── Status-class boundaries for the body-first/status-fallback split ────
+
+    #[test]
+    fn test_5xx_with_ok_false_no_error_code_classifies_as_http_status() {
+        // Regression: 5xx + `{ok:false}` without `error_code` must classify
+        // as `HttpStatus(500, _)` so the exit-code mapper preserves the
+        // transient-retry path. The previous synthesis behaviour incorrectly
+        // produced `ResponseErrorCode` here and mapped a transient failure
+        // into permanent (exit 2). See `process_response_inner` doc.
+        let bytes = br#"{"ok":false,"error":"daemon down"}"#;
+        let err = process_response_inner(StatusCode::INTERNAL_SERVER_ERROR, bytes)
+            .expect_err("must error");
+        match err {
+            CliError::HttpStatus(status, body) => {
+                assert_eq!(status, 500);
+                assert!(body.contains("daemon down"), "body excerpt: {body}");
+            }
+            other => panic!("expected HttpStatus(500, _), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_5xx_with_ok_false_and_error_code_classifies_as_response_error() {
+        // 5xx + structured `error_code` → `ResponseErrorCode`. The code is
+        // the canonical signal even on 5xx; the agent's exit-code mapper
+        // then classifies as permanent (exit 2) — the daemon was reachable
+        // and gave a structured rejection. Don't retry on a structured no.
+        let bytes = br#"{"ok":false,"error_code":"daemon_unreachable","error":"daemon went away"}"#;
+        let err = process_response_inner(StatusCode::INTERNAL_SERVER_ERROR, bytes)
+            .expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode {
+                code, http_status, ..
+            } => {
+                assert_eq!(code, "daemon_unreachable");
+                assert_eq!(http_status, 500);
+            }
+            other => panic!("expected ResponseErrorCode, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_4xx_with_ok_true_classifies_as_http_status() {
+        // Conflicting signals: 4xx status paired with `ok: true` body.
+        // Status wins because the runtime explicitly emits 4xx for
+        // permanent client errors. A buggy server shouldn't be able to
+        // sneak past with a misleading `ok: true`.
+        let bytes = br#"{"ok":true,"data":42}"#;
+        let err = process_response_inner(StatusCode::BAD_REQUEST, bytes).expect_err("must error");
+        match err {
+            CliError::HttpStatus(status, _) => {
+                assert_eq!(status, 400);
+            }
+            other => panic!("expected HttpStatus(400, _), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_2xx_with_ok_false_no_error_code_synthesizes_sentinel() {
+        // Companion to `ok_false_without_error_code_...` — explicit
+        // assertion that the synthesized code is exactly the documented
+        // sentinel string. Pin against accidental rename.
+        let bytes = br#"{"ok":false,"error":"foo"}"#;
+        let err = process_response_inner(StatusCode::OK, bytes).expect_err("must error");
+        match err {
+            CliError::ResponseErrorCode {
+                code,
+                message,
+                http_status,
+            } => {
+                assert_eq!(code, "!cli:missing_error_code");
+                assert_eq!(message, "foo");
+                assert_eq!(http_status, 200);
             }
             other => panic!("expected ResponseErrorCode, got: {other:?}"),
         }
@@ -600,22 +705,26 @@ mod tests {
         }
     }
 
-    // ── Timeout: connect to a non-listening port → fails fast, doesn't hang ─
+    // ── Timeout *config presence*: dead-port request fails as Transport ────
 
     /// Build a Client and try a request against a port nothing's listening
-    /// on. The connect must fail within the configured connect_timeout (5s)
-    /// — much less than the outer 15s guard. Without our timeout config the
-    /// OS-default could be 1-2 minutes.
+    /// on, then assert the failure surfaces as `CliError::Transport`. The
+    /// real claim being pinned here is **config wiring**, not the timeout
+    /// value itself — loopback connect-refused is instant on macOS/Linux
+    /// because the kernel rejects the SYN immediately, so this test would
+    /// pass even if `connect_timeout` were removed entirely.
     ///
-    /// Loopback connect-refused is usually instant on macOS/Linux (the
-    /// kernel rejects without waiting). The real value of this test is the
-    /// outer `tokio::time::timeout` guard: if a future regression accidentally
-    /// drops the timeout config, a hung listener scenario won't surface here,
-    /// but a flat `connect_timeout` removal won't make this test hang either —
-    /// it'll just rely on kernel refusal. To exercise the timeout itself we
-    /// would need a TCP listener that accepts but never replies. That's
-    /// out-of-scope; locking the build-time config in `Client::new` is
-    /// adequate coverage.
+    /// What we'd need to test the timeout *value* is a TCP listener that
+    /// accepts but never replies (so the request hangs waiting for headers).
+    /// That's out of scope for this unit suite. The 15s outer guard is
+    /// there as a backstop: if a regression somehow makes the request
+    /// genuinely hang against connect-refused (very unlikely), the test
+    /// fails loudly instead of stalling the test runner.
+    ///
+    /// In short: this test guarantees the dead-port path → Transport. The
+    /// 300s request timeout and 5s connect timeout configured in
+    /// `Client::new` are locked in by the build itself (any code path that
+    /// drops them is a static change reviewers will catch).
     #[tokio::test]
     async fn client_request_does_not_hang_against_dead_port() {
         // Pick a likely-dead port. Bind+drop a TCP listener to grab a free

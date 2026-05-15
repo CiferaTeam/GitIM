@@ -237,10 +237,12 @@ async fn test_update_dotenv_file_too_large() {
 // ── Runtime-level rejection — exit 2 (permanent) ────────────────────────────
 
 /// Agent doesn't exist in the workspace. Runtime's `agents_patch` returns
-/// 404 with `{ok: false}` (no `error_code`), which the CLI surfaces as
-/// `CliError::ResponseErrorCode { code: "unspecified", http_status: 404 }`
-/// — body-first classification synthesizes a generic code when `ok: false`
-/// has no structured `error_code`. Either way, exit code 2 (permanent).
+/// 404 with `{ok: false}` (no `error_code`). With body-first classification,
+/// 4xx without `error_code` falls through to `CliError::HttpStatus(404, _)` —
+/// the synthesis sentinel only fires for 2xx, so 5xx still maps to transient
+/// (see http.rs `process_response_inner`). The downstream contract is exit
+/// code 2 (permanent), preserved by the 4xx → permanent mapping in
+/// `from_cli_error`.
 #[tokio::test]
 async fn test_update_agent_not_found() {
     let (addr, state, server) = spawn_server().await;
@@ -260,16 +262,19 @@ async fn test_update_agent_not_found() {
         .expect_err("missing agent must error");
 
     match &err {
-        CliError::ResponseErrorCode { code, http_status, .. } => {
-            assert_eq!(*http_status, 404);
-            assert_eq!(code, "unspecified");
+        CliError::HttpStatus(status, body) => {
+            assert_eq!(*status, 404);
+            assert!(
+                body.contains("agent not found"),
+                "body excerpt must include server's error text: {body}",
+            );
         }
-        other => panic!("expected ResponseErrorCode(404, unspecified), got: {other:?}"),
+        other => panic!("expected HttpStatus(404, _), got: {other:?}"),
     }
     assert_eq!(
         from_cli_error(&err),
         2,
-        "structured ok:false rejection → permanent (exit 2)"
+        "4xx without structured error_code → permanent (exit 2)"
     );
 
     server.abort();
