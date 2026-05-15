@@ -993,18 +993,34 @@ pub async fn preflight_pi() -> PreflightResult {
 /// process so the call exercises a specific profile (e.g.
 /// `~/.hermes/profiles/gitim-<handler>/`) rather than the default profile.
 /// `None` preserves the inherited environment.
+///
+/// `env_override`, when set, is merged into the child process env (overriding
+/// inherited values with the same key, and applied AFTER `HERMES_HOME` so a
+/// caller-supplied `HERMES_HOME` in `env_override` wins). Used by
+/// `preflight_for_add_request` to inject the agent's configured env vars (e.g.
+/// `ANTHROPIC_API_KEY`) so the preflight exercises the same credentials the
+/// agent will run under. `None` preserves the inherited environment.
 pub async fn preflight_hermes_with(
     bin: &str,
     timeout: Duration,
     hermes_home: Option<&Path>,
     llm_provider: Option<&str>,
     llm_model: Option<&str>,
+    env_override: Option<HashMap<String, String>>,
 ) -> PreflightResult {
     match (llm_provider, llm_model) {
         (Some(provider), Some(model)) => {
-            preflight_hermes_chat(bin, timeout, hermes_home, provider, model).await
+            preflight_hermes_chat(
+                bin,
+                timeout,
+                hermes_home,
+                provider,
+                model,
+                env_override.as_ref(),
+            )
+            .await
         }
-        _ => preflight_hermes_acp(bin, timeout, hermes_home).await,
+        _ => preflight_hermes_acp(bin, timeout, hermes_home, env_override.as_ref()).await,
     }
 }
 
@@ -1013,6 +1029,7 @@ async fn preflight_hermes_acp(
     bin: &str,
     timeout: Duration,
     hermes_home: Option<&Path>,
+    env_override: Option<&HashMap<String, String>>,
 ) -> PreflightResult {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1040,6 +1057,9 @@ async fn preflight_hermes_acp(
         .kill_on_drop(true);
     if let Some(home) = hermes_home {
         cmd.env("HERMES_HOME", home);
+    }
+    if let Some(env) = env_override {
+        cmd.envs(env);
     }
 
     let mut child = match cmd.spawn() {
@@ -1151,6 +1171,7 @@ async fn preflight_hermes_chat(
     hermes_home: Option<&Path>,
     llm_provider: &str,
     llm_model: &str,
+    env_override: Option<&HashMap<String, String>>,
 ) -> PreflightResult {
     let started = Instant::now();
 
@@ -1167,6 +1188,9 @@ async fn preflight_hermes_chat(
         .kill_on_drop(true);
     if let Some(home) = hermes_home {
         cmd.env("HERMES_HOME", home);
+    }
+    if let Some(env) = env_override {
+        cmd.envs(env);
     }
 
     let child = match cmd.spawn() {
@@ -1244,7 +1268,46 @@ async fn preflight_hermes_chat(
 /// Run preflight against the default `hermes` binary against the user's
 /// active profile (no `HERMES_HOME` override, no LLM override).
 pub async fn preflight_hermes() -> PreflightResult {
-    preflight_hermes_with("hermes", Duration::from_secs(30), None, None, None).await
+    preflight_hermes_with("hermes", Duration::from_secs(30), None, None, None, None).await
+}
+
+/// Read `(provider, model)` from the user's hermes default profile config.
+///
+/// Resolves the hermes home directory from the `HERMES_HOME` env var (falling
+/// back to `~/.hermes`), then reads `<hermes_home>/config.yaml` and extracts
+/// `model.provider` and `model.default`. Used by `preflight_for_add_request`
+/// when the agent add request omits both `llm_provider` and `llm_model` —
+/// the runtime resolves the default-profile pair and forwards it to chat-mode
+/// preflight so we exercise the same configuration the agent will inherit.
+///
+/// Returns `None` if any of: the config file is missing, parsing fails, or
+/// either field is absent / non-string. Returning `None` lets callers fall
+/// back to ACP-mode preflight rather than fail the add outright.
+///
+/// **Schema note**: the hermes `config.yaml` shape is owned by hermes; this
+/// function parses only the two fields it needs to avoid coupling to hermes
+/// internal layout. If hermes renames or restructures these keys we'll surface
+/// `None` and the caller will degrade to ACP-mode preflight.
+pub fn read_default_profile_llm() -> Option<(String, String)> {
+    let home = std::env::var_os("HERMES_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")))?;
+    read_default_profile_llm_from(&home)
+}
+
+/// Testable variant of [`read_default_profile_llm`] with an explicit
+/// `hermes_home` directory. The env-aware version resolves the directory
+/// then calls this. Tests can call this directly to avoid mutating
+/// `HERMES_HOME` (which is process-global and races under cargo's
+/// multi-threaded runner).
+pub fn read_default_profile_llm_from(hermes_home: &Path) -> Option<(String, String)> {
+    let config_path = hermes_home.join("config.yaml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let root: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let model = root.get("model")?;
+    let provider = model.get("provider").and_then(|v| v.as_str())?.to_string();
+    let default_model = model.get("default").and_then(|v| v.as_str())?.to_string();
+    Some((provider, default_model))
 }
 
 /// Concatenate all `text` part payloads from opencode's NDJSON stream.

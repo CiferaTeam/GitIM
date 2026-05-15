@@ -4261,6 +4261,7 @@ async fn preflight_handler(
                 None,
                 params.llm_provider.as_deref(),
                 params.llm_model.as_deref(),
+                None,
             )
             .await;
             (StatusCode::OK, Json(result)).into_response()
