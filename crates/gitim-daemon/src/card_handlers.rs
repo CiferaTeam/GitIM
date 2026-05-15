@@ -252,7 +252,7 @@ pub async fn handle_create_card(
 /// `git checkout -- <meta_rel>`.  Failures are logged but do not change
 /// the caller's return value — the original error is still what gets
 /// reported.
-fn restore_card_yaml(state: &SharedState, meta_rel: &str) {
+fn restore_card_yaml(state: &SharedState, meta_rel: &str, context: &str) {
     match std::process::Command::new("git")
         .args(["reset", "HEAD", "--", meta_rel])
         .current_dir(&state.repo_root)
@@ -260,12 +260,13 @@ fn restore_card_yaml(state: &SharedState, meta_rel: &str) {
     {
         Ok(out) if !out.status.success() => {
             error!(
-                "archive_card: yaml reset failed: {}",
+                "{}: yaml reset failed: {}",
+                context,
                 String::from_utf8_lossy(&out.stderr)
             );
         }
         Err(e) => {
-            error!("archive_card: yaml reset spawn failed: {}", e);
+            error!("{}: yaml reset spawn failed: {}", context, e);
         }
         _ => {}
     }
@@ -276,12 +277,13 @@ fn restore_card_yaml(state: &SharedState, meta_rel: &str) {
     {
         Ok(out) if !out.status.success() => {
             error!(
-                "archive_card: yaml checkout failed: {}",
+                "{}: yaml checkout failed: {}",
+                context,
                 String::from_utf8_lossy(&out.stderr)
             );
         }
         Err(e) => {
-            error!("archive_card: yaml checkout spawn failed: {}", e);
+            error!("{}: yaml checkout spawn failed: {}", context, e);
         }
         _ => {}
     }
@@ -372,7 +374,7 @@ pub async fn handle_archive_card(
         .join(ch_name.to_string())
         .join("cards");
     if let Err(e) = std::fs::create_dir_all(&archive_cards_dir) {
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "archive_card");
         return Response::error(format!("failed to create archive dir: {}", e));
     }
 
@@ -380,7 +382,7 @@ pub async fn handle_archive_card(
     let to_rel = format!("archive/channels/{}/cards/{}", ch_name, card_id);
     if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
         // git mv hasn't moved the directory yet — only yaml needs restoring.
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "archive_card");
         return Response::error(format!("git mv failed: {}", e));
     }
 
@@ -400,7 +402,7 @@ pub async fn handle_archive_card(
         }
         // Restore the yaml file to its committed state: unstage then restore
         // working tree (undoes both the yaml stamp and any staged changes from git mv).
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "archive_card");
         return Response::error(format!(
             "archive_card commit failed: {}; rolled back git mv",
             e
@@ -441,6 +443,10 @@ pub async fn handle_unarchive_card(
     author: String,
 ) -> Response {
     // 1. Validate user
+    // Note: handle_archive_card calls ensure_author_not_departed here;
+    // unarchive intentionally does not — a departed user's collaborators
+    // may need to recover their cards. Preserve this asymmetry unless a
+    // product decision changes it.
     if let Err(e) = ensure_known_user(&state, &author).await {
         return Response::error(e);
     }
@@ -519,7 +525,7 @@ pub async fn handle_unarchive_card(
         .join(ch_name.to_string())
         .join("cards");
     if let Err(e) = std::fs::create_dir_all(&active_cards_dir) {
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "unarchive_card");
         return Response::error(format!("failed to create cards dir: {}", e));
     }
 
@@ -527,7 +533,7 @@ pub async fn handle_unarchive_card(
     let from_rel = &located.rel_path; // archive/channels/<ch>/cards/<id>
     let to_rel = format!("channels/{}/cards/{}", ch_name, card_id);
     if let Err(e) = state.git_storage.mv(from_rel, &to_rel) {
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "unarchive_card");
         return Response::error(format!("git mv failed: {}", e));
     }
 
@@ -545,7 +551,7 @@ pub async fn handle_unarchive_card(
         if let Err(rb_err) = state.git_storage.mv(&to_rel, from_rel) {
             error!("unarchive_card: rollback mv also failed: {}", rb_err);
         }
-        restore_card_yaml(&state, &meta_rel);
+        restore_card_yaml(&state, &meta_rel, "unarchive_card");
         return Response::error(format!(
             "unarchive_card commit failed: {}; rolled back git mv",
             e
