@@ -9,7 +9,7 @@
 //! `cli_*` integration tests at handler granularity. We only add subprocess
 //! coverage for behaviors that *only* manifest in a real process:
 //!   - `--version` / `--help` global flags (clap built-ins),
-//!   - unknown subcommand → clap exit 2,
+//!   - unknown subcommand → exit 1 (we override clap's default exit 2),
 //!   - legacy positional form rejection (verifies T1 didn't leave a back door),
 //!   - subcommand-level `--help` exists,
 //!   - status against an unreachable runtime maps to exit 1.
@@ -119,7 +119,7 @@ fn test_help_flag_lists_subcommands() {
 }
 
 // ---------------------------------------------------------------------------
-// Unknown / malformed argv → clap exit 2
+// Unknown / malformed argv → exit 1 (we override clap's default exit 2)
 // ---------------------------------------------------------------------------
 
 #[test]
