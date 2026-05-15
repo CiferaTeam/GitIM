@@ -1312,6 +1312,9 @@ export async function archiveCard(
     const permissionError = checkCardArchivePermission(card, s.me.handler, "archive");
     if (permissionError) return err(permissionError);
 
+    const updatedYaml = stringifyCardMeta({ ...card, archived_via: "manual" }) as string;
+    await writeFile(`${located.absDir}/card.meta.yaml`, updatedYaml);
+
     const targetRelDir = `archive/channels/${channel}/cards/${cardId}`;
     const targetAbsDir = `${s.repoDir}/${targetRelDir}`;
     await moveCardDirectory(
@@ -1344,6 +1347,11 @@ export async function unarchiveCard(
     const card = await readCardMeta(channel, cardId, `${located.absDir}/card.meta.yaml`);
     const permissionError = checkCardArchivePermission(card, s.me.handler, "unarchive");
     if (permissionError) return err(permissionError);
+
+    const cardWithoutMark = { ...card } as Partial<typeof card>;
+    delete cardWithoutMark.archived_via;
+    const updatedYaml = stringifyCardMeta(cardWithoutMark as typeof card) as string;
+    await writeFile(`${located.absDir}/card.meta.yaml`, updatedYaml);
 
     const targetRelDir = `channels/${channel}/cards/${cardId}`;
     const targetAbsDir = `${s.repoDir}/${targetRelDir}`;

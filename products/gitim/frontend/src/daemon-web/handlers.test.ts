@@ -146,7 +146,7 @@ vi.mock("gitim-wasm", () => ({
   }),
   stringifyCardMeta: vi.fn((meta: Record<string, unknown>) => {
     const labels = Array.isArray(meta.labels) ? meta.labels : [];
-    return [
+    const lines = [
       `title: ${meta.title}`,
       `channel: ${meta.channel}`,
       `status: ${meta.status}`,
@@ -156,8 +156,12 @@ vi.mock("gitim-wasm", () => ({
       `created_by: ${meta.created_by}`,
       `created_at: ${meta.created_at}`,
       `updated_at: ${meta.updated_at}`,
-      "",
-    ].join("\n");
+    ];
+    if (meta.archived_via !== undefined) {
+      lines.push(`archived_via: ${meta.archived_via}`);
+    }
+    lines.push("");
+    return lines.join("\n");
   }),
   validateCardId: vi.fn((cardId: string) => {
     if (!/^[0-9a-f-]{1,20}$/.test(cardId)) throw new Error("invalid card_id");
@@ -1213,6 +1217,23 @@ describe("daemon-web handlers", () => {
       .toBe(false);
     expect(commits.at(-1)?.message)
       .toBe("card: unarchive 20260317-120000-abc in general by @lewis");
+  });
+
+  it("stamps archived_via=manual in yaml on archiveCard", async () => {
+    await archiveCard("general", "20260317-120000-abc");
+    const yaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(yaml).toContain("archived_via: manual");
+  });
+
+  it("clears archived_via in yaml on unarchiveCard", async () => {
+    await archiveCard("general", "20260317-120000-abc");
+    await unarchiveCard("general", "20260317-120000-abc");
+    const yaml = files.get(
+      "/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(yaml).not.toContain("archived_via");
   });
 });
 
