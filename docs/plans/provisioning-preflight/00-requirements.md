@@ -41,7 +41,7 @@ Review trail:
 ```
 1. handler_conflict 检查
 2. NEW: preflight ← 用 request body 的 env + model + llm_provider/llm_model
-        失败 → 直接 return ErrorBody，零 side effects
+        失败 → 直接 return ErrorBody，无 durable agent artifact（git fetch 在 handler_conflict 已跑，是 pre-existing 副作用，不算 preflight 引入）
 3. provision_agent (只在 preflight 通过后才动)
 4. 写 me.json
 5. hermes profile clone + LLM config (hermes only)
@@ -69,7 +69,9 @@ handler_conflict check
    ↓
 preflight (NEW)
    ├── pass → continue
-   └── fail → return ErrorBody { error_code: "provision_preflight_failed", preflight_detail }
+   └── fail → return ErrorBody { error_code: <classified>, preflight_detail }
+         (top-level code 通常 "provision_preflight_failed"；
+          已识别的 setup-level 失败用更具体 code 如 "hermes_default_profile_no_llm")
 provision_agent
    (existing flow, unchanged)
 ```
@@ -130,9 +132,9 @@ claude / codex / opencode / pi / hermes 全部纳入。mock provider 走 always-
 实施：
 - `preflight_for_add_request` for hermes：
   - 如 add request 含 `llm_provider` + `llm_model` 双值 → `preflight_hermes_with(hermes_home: None, llm_provider: Some(X), llm_model: Some(Y))` 走 chat-mode hello with overrides
-  - 如 **两个都缺失** → 读 `~/.hermes/profiles/<default>/config.yaml` 的 `model.default` + provider，回填到 `preflight_hermes_with(llm_provider: Some(resolved), llm_model: Some(resolved))` → chat-mode hello
+  - 如 **两个都缺失** → 读 `$HERMES_HOME/config.yaml` (默认 `~/.hermes/config.yaml`，per hermes_profile.rs:46) 的 `model.default` + provider，回填到 `preflight_hermes_with(llm_provider: Some(resolved), llm_model: Some(resolved))` → chat-mode hello
   - 如 **只缺一个** → preflight 直接 fail（已是现有 runtime contract：`missing_llm_provider` error_code，see http.rs:2136）
-  - 如 default profile 没装（无 `~/.hermes/profiles/<default>/`）→ 已有 `hermes_not_setup` error_code 处理
+  - 如 default profile 没装（无 `$HERMES_HOME` (默认 `~/.hermes`)）→ 已有 `hermes_not_setup` error_code 处理
 
 Hermes invariant 文档化：`hermes profile create --clone` 是 hermes CLI 的契约 —— clone 会带 `.env` + `auth.json` + LLM config。所以 preflight against `hermes_home: None` (= user default profile) 验证的是"agent clone 后会继承的 LLM 配置"。这是 deliberate，不是 sloppy。
 
@@ -242,7 +244,7 @@ Preflight **不** catch（运行时才暴露）：
 - **Mock provider**：always-pass short-circuit verified
 - **CLI plumbing**：失败时 CLI stderr 含 preflight_detail.output_preview
 - **Post-preflight failure path**（确认未 regress）：mock-fail 在 hermes profile clone 阶段 → 仍走现有 cleanup_agent_dir + delete_profile（不应破现有 path）
-- **Top-level timeout**：mock provider 超时 → ErrorBody with `provision_preflight_failed` + timeout-flavored preflight_detail（不是 hung connection）
+- **Top-level timeout**：用 fake/stub provider binary（PATH override 注入一个 `sleep 9999` 假二进制）→ preflight 超时 → ErrorBody with `provision_preflight_failed` + timeout-flavored preflight_detail（不是 hung connection）。**不**用 mock provider 测 timeout —— mock 是 short-circuit，根本不 shell out
 - **Rollback**: N/A for preflight path（gate 无 side effect）
 - **Concurrent add**: 已有 handler_conflict 测试覆盖
 - **Test seam**：`preflight_for_add_request` 的 binary resolver 接受测试 hook（让 fake binary 注入），避免要求 CI 装真 Claude/Codex
@@ -263,7 +265,7 @@ Preflight **不** catch（运行时才暴露）：
   - `provider == "mock"` → short-circuit `PreflightResult::success("mock", ...)`，不 shell out
   - `provider == "hermes"`：
     - 如 `llm_provider` + `llm_model` 双值 → `preflight_hermes_with(hermes_home: None, llm_provider: Some(X), llm_model: Some(Y), env_override)` chat-mode
-    - 如**两个都缺失** → 读 `~/.hermes/profiles/<default>/config.yaml` 的 `model.default` + provider → 回填 chat-mode preflight
+    - 如**两个都缺失** → 读 `$HERMES_HOME/config.yaml` (默认 `~/.hermes/config.yaml`，per hermes_profile.rs:46) 的 `model.default` + provider → 回填 chat-mode preflight
     - 如**只缺一个** → 已有 runtime 路径返 `missing_llm_provider`（per http.rs:2136）—— preflight 不重复 validate
     - 如 default profile 没装 → 已有 `hermes_not_setup` 路径处理
     - 如 default profile 有 profile 但无 LLM 配置 → 返 `PreflightResult::failure(error_code: "hermes_default_profile_no_llm")`
@@ -284,9 +286,14 @@ Preflight **不** catch（运行时才暴露）：
       req.llm_model.as_deref(),
   ).await;
   if !pf.available {
+      // top-level error_code 通常 = "provision_preflight_failed"
+      // 但某些可识别的 setup-level 失败用更具体的 code（agent shell-out 可 branch on top-level）：
+      //   - default profile 装了但无 LLM 配置 → "hermes_default_profile_no_llm"
+      //   - 其它（auth fail / model not found / network / timeout / 真 LLM 拒绝）→ "provision_preflight_failed"
+      let code = classify_preflight_error_code(&pf);  // returns &'static str
       return Json(ErrorBody::with_preflight(
           format!("provision preflight failed: {}", pf.error.as_deref().unwrap_or("")),
-          "provision_preflight_failed",
+          code,
           pf,
       )).into_response();
   }
@@ -361,7 +368,7 @@ Preflight **不** catch（运行时才暴露）：
 1. **`PreflightResult` typed mirror in cli/dto.rs**：CLI 端是直接 `pub use gitim_runtime::preflight::PreflightResult`（lib 直引）还是镜像一个 `cli::dto::PreflightResult`（typed wire DTO 风格）？后者跟 cli T5 的 DTO 风格一致，可能略好。Writing-plans 决定
 2. **opencode / pi env_override 实际能不能注入 auth**：opencode 走 `opencode auth login` 写盘 token，env var 不是 primary auth path。env_override 对它意义有限 —— 但仍可注入 `OPENCODE_TOKEN_*` 之类，writing-plans 调研
 3. **Frontend `PreflightResult` typed import**：`products/gitim/frontend/src/lib/types.ts` 已有 PreflightResult import (per existing dialog usage at line 18) —— 路径复用即可
-4. **default profile config.yaml parsing**：preflight hermes 路径在缺 llm 时要读 `~/.hermes/profiles/<default>/config.yaml`。Hermes config.yaml schema 由 hermes 控，我们 parse 哪些字段？建议只 read `model.default` + `model.provider`，缺失则报 `hermes_default_profile_no_llm`
+4. **default profile config.yaml parsing**：preflight hermes 路径在缺 llm 时要读 `$HERMES_HOME/config.yaml` (默认 `~/.hermes/config.yaml`，per hermes_profile.rs:46)。Hermes config.yaml schema 由 hermes 控，我们 parse 哪些字段？建议只 read `model.default` + `model.provider`，缺失则报 `hermes_default_profile_no_llm`
 
 
 ---
