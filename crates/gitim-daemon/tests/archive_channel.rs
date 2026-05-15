@@ -112,6 +112,17 @@ async fn archive_channel(state: Arc<AppState>, channel: &str) -> gitim_daemon::a
     handle_request(req, state).await
 }
 
+/// Unarchives a channel as alice.
+async fn unarchive_channel(state: Arc<AppState>, channel: &str) -> gitim_daemon::api::Response {
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "unarchive_channel",
+        "channel": channel,
+        "author": "alice",
+    }))
+    .unwrap();
+    handle_request(req, state).await
+}
+
 // ─── 1. active cards follow the channel ──────────────────────────────────────
 
 #[tokio::test]
@@ -218,5 +229,66 @@ async fn archive_channel_does_not_touch_existing_manual_archived_cards() {
         auto_meta.archived_via,
         Some(gitim_core::types::card::ArchivedVia::Channel),
         "active card should be archived_via=Channel"
+    );
+}
+
+// ─── 3. unarchive_channel restores only archived_via=channel cards ────────────
+
+#[tokio::test]
+async fn unarchive_channel_restores_only_channel_archived_cards() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Archive one card manually first.
+    let manual_card = create_card(state.clone(), "general", "manual").await;
+    archive_card(state.clone(), "general", &manual_card).await;
+
+    // Create a second card still active when the channel is archived.
+    let auto_card = create_card(state.clone(), "general", "auto").await;
+
+    // Archive the channel — auto_card moves to archive with archived_via=Channel.
+    let resp = archive_channel(state.clone(), "general").await;
+    assert!(resp.ok, "archive_channel failed: {:?}", resp.error);
+
+    // Now unarchive the channel.
+    let resp = unarchive_channel(state.clone(), "general").await;
+    assert!(resp.ok, "unarchive_channel failed: {:?}", resp.error);
+
+    // auto_card should be restored to the active location with archived_via cleared.
+    let active_meta = state.repo_root.join(format!(
+        "channels/general/cards/{}/card.meta.yaml",
+        auto_card
+    ));
+    let auto_yaml =
+        std::fs::read_to_string(&active_meta).expect("auto card should be back in active location");
+    let auto: gitim_core::types::CardMeta = serde_yaml::from_str(&auto_yaml).unwrap();
+    assert_eq!(auto.archived_via, None, "auto card archived_via should be None after unarchive");
+    assert!(
+        !auto_yaml.contains("archived_via"),
+        "archived_via field should be absent from yaml (skipped_serializing_if)"
+    );
+
+    // manual_card should remain in the archive with its Manual stamp intact.
+    let manual_archived_meta = state.repo_root.join(format!(
+        "archive/channels/general/cards/{}/card.meta.yaml",
+        manual_card
+    ));
+    let manual_yaml = std::fs::read_to_string(&manual_archived_meta)
+        .expect("manual card should still be in archive");
+    let manual: gitim_core::types::CardMeta = serde_yaml::from_str(&manual_yaml).unwrap();
+    assert_eq!(
+        manual.archived_via,
+        Some(gitim_core::types::card::ArchivedVia::Manual),
+        "manual card must keep Manual stamp"
+    );
+
+    // Working tree must be clean after the operation.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&state.repo_root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "working tree should be clean after unarchive"
     );
 }
