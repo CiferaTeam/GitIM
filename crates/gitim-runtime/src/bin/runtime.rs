@@ -208,10 +208,36 @@ enum Command {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    if let Err(msg) = validate_args(&args) {
+        eprintln!("{msg}");
+        // Exit code 2 matches clap's convention for argv errors.
+        std::process::exit(2);
+    }
+
     match args.command {
         None => run_server(args.port, args.daemon).await,
         Some(cmd) => run_cli(cmd).await,
     }
+}
+
+/// Reject argv combinations that clap accepts but the dispatch silently
+/// ignores. Specifically: `--port` and `--daemon` are top-level fields on
+/// `Args` (not on the subcommand variants and not `global = true`), so
+/// `gitim-runtime --port 8080 status` parses fine, but `run_cli` doesn't
+/// read either field — the CLI hits the default port instead of 8080.
+/// Surfacing a clear error here is friendlier than letting the request go
+/// to the wrong runtime. CLI users wanting to pin the runtime port should
+/// set `GITIM_RUNTIME_PORT`, which `resolve_base_url` honors.
+fn validate_args(args: &Args) -> Result<(), String> {
+    if args.command.is_some() && (args.port.is_some() || args.daemon) {
+        return Err(
+            "--port and --daemon are server-mode flags and cannot be combined with a \
+             subcommand. To target a specific runtime port from the CLI, set the \
+             GITIM_RUNTIME_PORT environment variable."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// One-shot CLI dispatch. Subcommand bodies live in `cli::cmd_*` modules and
@@ -646,10 +672,64 @@ mod argv_dispatch_tests {
 
     #[test]
     fn port_with_subcommand_rejected() {
-        // --port is server-mode-only; combining it with a subcommand should
-        // be an "unexpected argument" error, not a silent no-op.
+        // --port appears *after* the subcommand → clap routes it to the
+        // subcommand, doesn't find it there, and rejects with "unexpected
+        // argument". This catches the obvious-looking misuse cleanly.
         let result = Args::try_parse_from(["gitim-runtime", "status", "--port", "8080"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn port_before_subcommand_at_top_level_parses_but_validate_rejects() {
+        // The sneakier form: --port BEFORE the subcommand. Clap parses
+        // this fine — `args.port = Some(8080), args.command = Some(Status)`
+        // — but `run_cli` ignores `args.port` and silently talks to the
+        // default port. `validate_args` blocks the combination in main.
+        let args = Args::try_parse_from(["gitim-runtime", "--port", "8080", "status"])
+            .expect("clap accepts --port at top level even with a subcommand");
+        assert_eq!(args.port, Some(8080));
+        assert!(matches!(args.command, Some(Command::Status)));
+        let err = validate_args(&args).expect_err("validate_args must reject this combination");
+        assert!(err.contains("--port"), "error message must mention --port: {err}");
+        assert!(
+            err.contains("GITIM_RUNTIME_PORT"),
+            "error message must point users to the env var: {err}",
+        );
+    }
+
+    #[test]
+    fn daemon_before_subcommand_validate_rejects() {
+        // Same shape as the --port case for --daemon (-d). Clap accepts it
+        // as a top-level flag; we reject the combination at runtime.
+        let args = Args::try_parse_from(["gitim-runtime", "-d", "status"])
+            .expect("clap accepts -d at top level even with a subcommand");
+        assert!(args.daemon);
+        assert!(matches!(args.command, Some(Command::Status)));
+        let err = validate_args(&args).expect_err("validate_args must reject this combination");
+        assert!(err.contains("--daemon"), "error message must mention --daemon: {err}");
+    }
+
+    #[test]
+    fn port_alone_no_subcommand_ok() {
+        // Server-mode use of --port is the supported case.
+        let args = Args::try_parse_from(["gitim-runtime", "--port", "8080"])
+            .expect("clap accepts --port in server mode");
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn subcommand_alone_ok() {
+        // Plain subcommand invocation must pass validation.
+        let args =
+            Args::try_parse_from(["gitim-runtime", "status"]).expect("clap accepts bare subcommand");
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn no_args_validate_ok() {
+        // Server-mode default invocation.
+        let args = Args::try_parse_from(["gitim-runtime"]).expect("clap accepts no args");
+        assert!(validate_args(&args).is_ok());
     }
 
     #[test]

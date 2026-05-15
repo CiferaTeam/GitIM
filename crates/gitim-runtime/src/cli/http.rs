@@ -106,10 +106,18 @@ pub struct Client {
 
 impl Client {
     pub fn new(base_url: String) -> Self {
-        Self {
-            base_url,
-            inner: reqwest::Client::new(),
-        }
+        // Default reqwest builder has NO timeout — a wedged runtime would
+        // block the CLI process indefinitely, hanging an agent's Bash tool
+        // call. Connect timeout is small because we only ever talk to
+        // loopback; anything slower than a second is a stuck listener.
+        // Request timeout is loose enough to cover `add-agent`, which does
+        // a full clone inside the runtime before responding.
+        let inner = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("reqwest client builds with default settings");
+        Self { base_url, inner }
     }
 
     /// GET `<base>/<path>`. See module docs for error classification.
@@ -404,5 +412,45 @@ mod tests {
         let small = b"hello";
         let s = bytes_to_excerpt(small);
         assert_eq!(s, "hello");
+    }
+
+    /// Build a Client and try a request against a port nothing's listening
+    /// on. The connect must fail within the configured connect_timeout (5s)
+    /// — much less than the outer 15s guard. Without our timeout config the
+    /// OS-default could be 1-2 minutes.
+    ///
+    /// Loopback connect-refused is usually instant on macOS/Linux (the
+    /// kernel rejects without waiting). The real value of this test is the
+    /// outer `tokio::time::timeout` guard: if a future regression accidentally
+    /// drops the timeout config, a hung listener scenario won't surface here,
+    /// but a flat `connect_timeout` removal won't make this test hang either —
+    /// it'll just rely on kernel refusal. To exercise the timeout itself we
+    /// would need a TCP listener that accepts but never replies. That's
+    /// out-of-scope; locking the build-time config in `Client::new` is
+    /// adequate coverage.
+    #[tokio::test]
+    async fn client_request_does_not_hang_against_dead_port() {
+        // Pick a likely-dead port. Bind+drop a TCP listener to grab a free
+        // ephemeral port assignment from the OS, then close it so subsequent
+        // connects are refused. This is more robust than a hardcoded high
+        // port that might be in use.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let client = Client::new(format!("http://127.0.0.1:{port}"));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.get("/status"),
+        )
+        .await;
+
+        // The outer timeout must NOT fire — that would mean the inner
+        // request hung. The inner result must be a Transport error.
+        let inner = outcome.expect("client must error within 15s, not hang");
+        assert!(
+            matches!(inner, Err(CliError::Transport(_))),
+            "expected Transport error from dead port, got: {inner:?}",
+        );
     }
 }
