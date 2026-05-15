@@ -204,6 +204,13 @@ pub async fn handle_archive_channel(
         }
     }
 
+    // Hold commit_lock for the rest of this handler — archive_channel mutates
+    // the tree in many steps (yaml stamps + N card mvs + channel meta+thread mvs
+    // + single commit). Without the lock a concurrent writer could interleave
+    // commits between our mvs and our commit, leaving the working tree in a
+    // half-archived state that the push-rebase would not cleanly resolve.
+    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+
     // 3. Read channel meta, confirm channel exists
     let meta_path = state
         .repo_root
@@ -301,12 +308,9 @@ pub async fn handle_archive_channel(
                     ));
                 }
             };
+            meta.archived_via = Some(gitim_core::types::card::ArchivedVia::Channel);
             let new_yaml = match serde_yaml::to_string(&meta) {
-                Ok(_) => {
-                    // Stamp and re-serialize.
-                    meta.archived_via = Some(gitim_core::types::card::ArchivedVia::Channel);
-                    serde_yaml::to_string(&meta).unwrap()
-                }
+                Ok(s) => s,
                 Err(e) => {
                     for prev_meta_rel in &stamped_yamls {
                         crate::card_handlers::restore_card_yaml(
@@ -504,6 +508,10 @@ pub async fn handle_archive_channel(
         }
     }
 
+    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
+    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
+    drop(_write_guard);
+
     // 9. Remove channel from thread_cache
     state.thread_cache.write().await.remove(&channel);
 
@@ -528,13 +536,25 @@ pub async fn handle_unarchive_channel(
         Err(e) => return Response::error(format!("invalid channel name: {}", e)),
     };
 
-    // 2. Validate author is registered
+    // 2. Validate author is registered.
+    // Note: handle_archive_channel calls ensure_author_not_departed here;
+    // unarchive intentionally does not — a departed user's collaborators
+    // may need to recover the channel, and only the creator can unarchive
+    // (permission check below), so blocking departed users would leave
+    // their channels permanently stuck in archive. Preserve this asymmetry
+    // unless a product decision changes it.
     {
         let users = state.users.read().await;
         if !users.contains(&author) {
             return Response::error(format!("unknown user: {}", author));
         }
     }
+
+    // Hold commit_lock for the rest of this handler — unarchive_channel mutates
+    // the tree in many steps (yaml clears + filtered card mvs + channel meta+thread
+    // mvs + single commit). Concurrent writers would otherwise interleave commits
+    // mid-operation.
+    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
 
     // 3. Read archive meta; fail if source not present
     let archive_meta_path = state
@@ -868,6 +888,10 @@ pub async fn handle_unarchive_channel(
             ));
         }
     }
+
+    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
+    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
+    drop(_write_guard);
 
     // 10. Remove channel from thread_cache (symmetry with archive_channel)
     state.thread_cache.write().await.remove(&channel);
