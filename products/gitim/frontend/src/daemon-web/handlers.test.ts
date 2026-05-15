@@ -687,8 +687,12 @@ describe("daemon-web handlers", () => {
       filepaths: [
         "archive/channels/general.meta.yaml",
         "archive/channels/general.thread",
+        "archive/channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "archive/channels/general/cards/20260317-120000-abc/discussion.thread",
         "channels/general.meta.yaml",
         "channels/general.thread",
+        "channels/general/cards/20260317-120000-abc/card.meta.yaml",
+        "channels/general/cards/20260317-120000-abc/discussion.thread",
       ],
       message: "archive: #general by @lewis",
     });
@@ -1234,6 +1238,121 @@ describe("daemon-web handlers", () => {
       "/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"
     )!;
     expect(yaml).not.toContain("archived_via");
+  });
+
+  it("archiveChannel moves cards subtree and stamps archived_via=channel", async () => {
+    // Override channel meta to make lewis the creator (required for archiveChannel)
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    // Seed a second active card (CARD2) alongside the existing CARD1
+    const card2Id = "20260317-130000-def";
+    dirs.set("/repo/channels/general/cards", ["20260317-120000-abc", card2Id]);
+    dirs.set(`/repo/channels/general/cards/${card2Id}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/channels/general/cards/${card2Id}/card.meta.yaml`,
+      [
+        "title: Second card",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: lewis",
+        "created_by: lewis",
+        "created_at: 20260317T130000Z",
+        "updated_at: 20260317T130000Z",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/channels/general/cards/${card2Id}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260317T130000Z] card2 note\n",
+    );
+
+    await archiveChannel("general");
+
+    // Active card paths should be gone
+    expect(files.has("/repo/channels/general/cards/20260317-120000-abc/card.meta.yaml"))
+      .toBe(false);
+    expect(files.has(`/repo/channels/general/cards/${card2Id}/card.meta.yaml`))
+      .toBe(false);
+
+    // Archive card paths should exist with archived_via: channel
+    const yaml1 = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    const yaml2 = files.get(
+      `/repo/archive/channels/general/cards/${card2Id}/card.meta.yaml`
+    )!;
+    expect(yaml1).toContain("archived_via: channel");
+    expect(yaml2).toContain("archived_via: channel");
+  });
+
+  it("archiveChannel does not overwrite archived_via=manual for already-archived cards", async () => {
+    // Override channel meta to make lewis the creator
+    files.set(
+      "/repo/channels/general.meta.yaml",
+      [
+        "display_name: General",
+        "created_by: lewis",
+        "created_at: 20260317T120000Z",
+        "introduction: Team chat",
+        "members:",
+        "  - alice",
+        "  - lewis",
+        "",
+      ].join("\n"),
+    );
+
+    // MANUAL_CARD: already archived via archiveCard (lives in archive/channels/general/cards/)
+    const manualId = "20260317-110000-man";
+    dirs.set("/repo/archive/channels/general/cards", [manualId]);
+    dirs.set(`/repo/archive/channels/general/cards/${manualId}`, [
+      "card.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`,
+      [
+        "title: Manual card",
+        "channel: general",
+        "status: todo",
+        "labels:",
+        "assignee: lewis",
+        "created_by: lewis",
+        "created_at: 20260317T110000Z",
+        "updated_at: 20260317T110000Z",
+        "archived_via: manual",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/archive/channels/general/cards/${manualId}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260317T110000Z] manual note\n",
+    );
+
+    // Only the default active card (from seedState) remains under channels/general/cards/
+    await archiveChannel("general");
+
+    // Manual-archived card should be untouched (archived_via still "manual")
+    const manualYaml = files.get(
+      `/repo/archive/channels/general/cards/${manualId}/card.meta.yaml`
+    )!;
+    expect(manualYaml).toContain("archived_via: manual");
+    expect(manualYaml).not.toContain("archived_via: channel");
   });
 });
 

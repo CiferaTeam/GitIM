@@ -692,18 +692,82 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
       return err(`channel '${channel}' is already archived`);
     }
 
-    await moveChannelFiles(
-      channel,
-      {
-        metaRelPath,
-        threadRelPath: `channels/${channel}.thread`,
-      },
-      {
-        metaRelPath: `archive/channels/${channel}.meta.yaml`,
-        threadRelPath: `archive/channels/${channel}.thread`,
-      },
+    // Discover active cards and stamp archived_via=channel before moving.
+    const activeCardsDir = `${s.repoDir}/channels/${channel}/cards`;
+    type CardMove = { cardId: string; fromRel: string; toRel: string };
+    const cardMoves: CardMove[] = [];
+    if (await exists(activeCardsDir)) {
+      const cardIds = await readdir(activeCardsDir);
+      for (const cardId of cardIds) {
+        const cardMetaPath = `${activeCardsDir}/${cardId}/card.meta.yaml`;
+        if (!(await exists(cardMetaPath))) continue;
+        const cardYaml = await readFile(cardMetaPath);
+        const card = parseYaml(cardYaml) as Card;
+        const stamped = { ...card, archived_via: "channel" as const };
+        await writeFile(cardMetaPath, stringifyCardMeta(stamped) as string);
+        cardMoves.push({
+          cardId,
+          fromRel: `channels/${channel}/cards/${cardId}`,
+          toRel: `archive/channels/${channel}/cards/${cardId}`,
+        });
+      }
+    }
+
+    // Copy card files to archive destinations.
+    if (cardMoves.length > 0) {
+      await mkdirp(`${s.repoDir}/archive/channels/${channel}/cards`);
+      for (const m of cardMoves) {
+        await mvCardDirectory(`${s.repoDir}/${m.fromRel}`, `${s.repoDir}/${m.toRel}`);
+      }
+    }
+
+    // Read channel meta + thread for the move.
+    const channelFromMeta = metaRelPath;
+    const channelFromThread = `channels/${channel}.thread`;
+    const channelToMeta = `archive/channels/${channel}.meta.yaml`;
+    const channelToThread = `archive/channels/${channel}.thread`;
+    const metaContent = await readFile(`${s.repoDir}/${channelFromMeta}`);
+    if (!(await exists(`${s.repoDir}/${channelFromThread}`))) {
+      throw new Error(`thread file for channel '${channel}' does not exist`);
+    }
+    const threadContent = await readFile(`${s.repoDir}/${channelFromThread}`);
+    await mkdirp(`${s.repoDir}/archive/channels`);
+    await writeFile(`${s.repoDir}/${channelToMeta}`, metaContent);
+    await writeFile(`${s.repoDir}/${channelToThread}`, threadContent);
+
+    // Single commit covering channel files + all card files.
+    const adds = [
+      channelToMeta,
+      channelToThread,
+      ...cardMoves.flatMap((m) => [
+        `${m.toRel}/card.meta.yaml`,
+        `${m.toRel}/discussion.thread`,
+      ]),
+    ];
+    const removes = [
+      channelFromMeta,
+      channelFromThread,
+      ...cardMoves.flatMap((m) => [
+        `${m.fromRel}/card.meta.yaml`,
+        `${m.fromRel}/discussion.thread`,
+      ]),
+    ];
+
+    await gitOps.addRemoveAndCommit(
+      s.repoDir,
+      adds,
+      removes,
       `archive: #${channel} by @${s.me.handler}`,
+      s.me.handler,
     );
+
+    // Clean up source files from working tree after commit.
+    for (const m of cardMoves) {
+      await removeTrackedFile(`${s.repoDir}/${m.fromRel}/card.meta.yaml`);
+      await removeTrackedFile(`${s.repoDir}/${m.fromRel}/discussion.thread`);
+    }
+    await removeTrackedFile(`${s.repoDir}/${channelFromMeta}`);
+    await removeTrackedFile(`${s.repoDir}/${channelFromThread}`);
 
     await refreshChannelsCache();
     const sync = await syncAfterCommit();
@@ -1678,6 +1742,20 @@ async function moveChannelFiles(
 
   await removeTrackedFile(fromMetaAbsPath);
   await removeTrackedFile(fromThreadAbsPath);
+}
+
+// Copy a card directory's tracked files (card.meta.yaml + discussion.thread) to a new
+// location. Source cleanup is done later via removeTrackedFile after the git commit.
+async function mvCardDirectory(fromAbs: string, toAbs: string): Promise<void> {
+  await mkdirp(toAbs);
+  const items = ["card.meta.yaml", "discussion.thread"];
+  for (const item of items) {
+    const fromItem = `${fromAbs}/${item}`;
+    const toItem = `${toAbs}/${item}`;
+    if (!(await exists(fromItem))) continue;
+    const content = await readFile(fromItem);
+    await writeFile(toItem, content);
+  }
 }
 
 async function removeTrackedFile(path: string): Promise<void> {
