@@ -129,6 +129,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("index initialization failed (search unavailable): {}", e);
     }
 
+    // Reconcile any legacy orphan cards from pre-Task-3.x archive_channel
+    // implementations that only moved channel meta+thread, leaving
+    // channels/<ch>/cards/ behind. This is a one-shot boot-time migration;
+    // when there is nothing to do (the common case) it exits immediately.
+    if let Err(e) = gitim_daemon::reconcile::reconcile_orphan_cards(app_state.clone()).await {
+        tracing::error!("reconcile_orphan_cards failed at boot: {}", e);
+        // Non-fatal — proceed to handler loop; sync_loop will pick up on next cycle.
+    }
+
     // Start sync loop only if identity is already configured (restart scenario).
     // On first startup (no me.json), the sync loop is deferred until after onboard.
     if app_state.current_user.read().await.is_some() || is_guest_from_me {
