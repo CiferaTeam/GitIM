@@ -1353,6 +1353,13 @@ describe("daemon-web handlers", () => {
     )!;
     expect(manualYaml).toContain("archived_via: manual");
     expect(manualYaml).not.toContain("archived_via: channel");
+
+    // The default active card from seedState should be moved to archive and
+    // stamped archived_via: channel (mixed-scenario isolation).
+    const autoYaml = files.get(
+      "/repo/archive/channels/general/cards/20260317-120000-abc/card.meta.yaml"
+    )!;
+    expect(autoYaml).toContain("archived_via: channel");
   });
 });
 
