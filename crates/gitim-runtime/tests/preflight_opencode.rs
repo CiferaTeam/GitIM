@@ -2,9 +2,13 @@
 //! branches against controlled fake binaries, plus an ignored end-to-end
 //! test against a real opencode CLI login.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use gitim_runtime::preflight::{preflight_opencode, preflight_opencode_with, ErrorKind};
+use gitim_runtime::preflight::{
+    preflight_opencode, preflight_opencode_with, preflight_opencode_with_config, ErrorKind,
+    PreflightOverrides,
+};
 
 mod common;
 use common::{fixture, resolve_stdbin};
@@ -75,4 +79,89 @@ async fn test_preflight_opencode_real_hello() {
         preview.contains("GITIM_OK"),
         "expected GITIM_OK in preview, got: {preview}"
     );
+}
+
+// --- Override tests for preflight_opencode_with_config ---
+//
+// Same fake-binary pattern as the claude/codex override tests:
+// `echo-env-argv.sh` exits non-zero after echoing argv and `MY_TEST_KEY` to
+// stderr, which `preflight_opencode_with_config` captures into `result.error`.
+// opencode ignores `model_override` by design — see doc comment on
+// `preflight_opencode_with_config`.
+
+#[tokio::test]
+async fn opencode_with_config_env_override_reaches_subprocess() {
+    let script = fixture("echo-env-argv.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let mut env = HashMap::new();
+    env.insert("MY_TEST_KEY".to_string(), "expected-value".to_string());
+
+    let overrides = PreflightOverrides {
+        env_override: Some(env),
+        model_override: None,
+    };
+    let result = preflight_opencode_with_config(
+        script.to_str().unwrap(),
+        Duration::from_secs(5),
+        overrides,
+    )
+    .await;
+
+    assert!(!result.available);
+    assert_eq!(result.error_kind, Some(ErrorKind::Other));
+    let err = result.error.expect("error should be set");
+    assert!(
+        err.contains("MY_TEST_KEY=expected-value"),
+        "env override not reflected in subprocess stderr: {err}"
+    );
+}
+
+#[tokio::test]
+async fn opencode_with_config_model_override_is_ignored() {
+    let script = fixture("echo-env-argv.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let overrides = PreflightOverrides {
+        env_override: None,
+        model_override: Some("should-not-appear".to_string()),
+    };
+    let result = preflight_opencode_with_config(
+        script.to_str().unwrap(),
+        Duration::from_secs(5),
+        overrides,
+    )
+    .await;
+
+    assert!(!result.available);
+    assert_eq!(result.error_kind, Some(ErrorKind::Other));
+    let err = result.error.expect("error should be set");
+    // The model override string must NOT appear anywhere in the captured
+    // argv — opencode's CLI has no model arg, so we drop the override
+    // silently rather than splicing it onto the command line.
+    assert!(
+        !err.contains("should-not-appear"),
+        "model override leaked into opencode argv despite being ignored by design: {err}"
+    );
+}
+
+#[tokio::test]
+async fn opencode_with_config_default_behavior_matches_old_function() {
+    // Compare the stable fields between the legacy wrapper and the new
+    // _with_config entry called with `Default::default()` — they must agree
+    // on classification, provider, and version fields. `duration_ms` is
+    // excluded because it's a wall-clock measurement.
+    let bin = "/usr/bin/definitely-not-opencode-xyz";
+    let timeout = Duration::from_secs(5);
+
+    let via_wrapper = preflight_opencode_with(bin, timeout).await;
+    let via_config =
+        preflight_opencode_with_config(bin, timeout, PreflightOverrides::default()).await;
+
+    assert_eq!(via_wrapper.available, via_config.available);
+    assert_eq!(via_wrapper.provider, via_config.provider);
+    assert_eq!(via_wrapper.error_kind, via_config.error_kind);
+    assert_eq!(via_wrapper.model_used, via_config.model_used);
+    assert_eq!(via_wrapper.version, via_config.version);
+    assert_eq!(via_wrapper.error_kind, Some(ErrorKind::NotInstalled));
 }

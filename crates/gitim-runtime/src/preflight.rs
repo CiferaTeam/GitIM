@@ -633,14 +633,30 @@ pub async fn preflight_codex() -> PreflightResult {
     preflight_codex_with("codex", Duration::from_secs(60)).await
 }
 
-/// Run a real-hello ping against the opencode CLI at `bin`.
+/// Run a real-hello ping against the opencode CLI at `bin`, with optional
+/// per-call overrides for env vars.
 ///
 /// Unlike claude/codex where we force a cheap model, opencode uses whatever
 /// model the user authenticated with via `opencode auth login`. We cannot
 /// predict that at preflight time, so we accept the variance. System prompt
 /// is injected via OPENCODE_CONFIG_CONTENT as a minimal echo agent to keep
 /// the request cheap and deterministic.
-pub async fn preflight_opencode_with(bin: &str, timeout: Duration) -> PreflightResult {
+///
+/// When `overrides.env_override` is `Some`, those key/values are merged into
+/// the child process (overriding any inherited values with the same key, and
+/// taking precedence over the fixed `OPENCODE_CONFIG_CONTENT` /
+/// `OPENCODE_PERMISSION` only if the caller deliberately re-specifies those
+/// keys — normal callers shouldn't).
+///
+/// **`overrides.model_override` is ignored**: opencode's CLI does not accept
+/// a per-invocation model arg; the model is wired at `opencode auth login`
+/// time. The field is preserved in [`PreflightOverrides`] so a future opencode
+/// version adding a `--model` flag won't force a signature change here.
+pub async fn preflight_opencode_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
     let started = Instant::now();
 
     let tmpdir = match tempfile::tempdir() {
@@ -683,6 +699,10 @@ pub async fn preflight_opencode_with(bin: &str, timeout: Duration) -> PreflightR
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -756,12 +776,23 @@ pub async fn preflight_opencode_with(bin: &str, timeout: Duration) -> PreflightR
     }
 }
 
+/// Run a real-hello ping against the opencode CLI at `bin`.
+///
+/// Thin wrapper over [`preflight_opencode_with_config`] preserved for the
+/// `/preflight/{provider}` HTTP route and tests that don't need agent-aware
+/// overrides. New call sites that have access to an agent's env should prefer
+/// [`preflight_opencode_with_config`] directly.
+pub async fn preflight_opencode_with(bin: &str, timeout: Duration) -> PreflightResult {
+    preflight_opencode_with_config(bin, timeout, PreflightOverrides::default()).await
+}
+
 /// Run a real-hello preflight against the default `opencode` binary.
 pub async fn preflight_opencode() -> PreflightResult {
     preflight_opencode_with("opencode", Duration::from_secs(60)).await
 }
 
-/// Run a real-hello ping against the Pi CLI at `bin` using `--mode rpc`.
+/// Run a real-hello ping against the Pi CLI at `bin` using `--mode rpc`, with
+/// optional per-call overrides for env vars.
 ///
 /// Protocol:
 /// 1. Spawn `pi --mode rpc --no-session --no-tools`
@@ -770,7 +801,21 @@ pub async fn preflight_opencode() -> PreflightResult {
 /// 4. Explicitly kill the process — in `--no-session` mode Pi may exit naturally,
 ///    but we kill unconditionally to guarantee cleanup in both session/no-session modes
 /// 5. Classify the result using the standard `NotInstalled`/`Timeout`/`Other` taxonomy
-pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult {
+///
+/// When `overrides.env_override` is `Some`, those key/values are merged into
+/// the child process (overriding any inherited values with the same key).
+///
+/// **`overrides.model_override` is ignored**: pi stores provider and model
+/// separately on disk (see `gitim-agent-provider/src/pi/mod.rs:333` —
+/// `~/.pi/config.json` is the source of truth), and the CLI has no
+/// per-invocation `--model` flag. The field is preserved in
+/// [`PreflightOverrides`] for signature consistency with other providers and
+/// for a future pi version that exposes a model arg.
+pub async fn preflight_pi_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let started = Instant::now();
@@ -781,6 +826,10 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -907,6 +956,16 @@ pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult 
             duration_ms,
         )
     }
+}
+
+/// Run a real-hello ping against the Pi CLI at `bin`.
+///
+/// Thin wrapper over [`preflight_pi_with_config`] preserved for the
+/// `/preflight/{provider}` HTTP route and tests that don't need agent-aware
+/// overrides. New call sites that have access to an agent's env should prefer
+/// [`preflight_pi_with_config`] directly.
+pub async fn preflight_pi_with(bin: &str, timeout: Duration) -> PreflightResult {
+    preflight_pi_with_config(bin, timeout, PreflightOverrides::default()).await
 }
 
 /// Run a real-hello preflight against the default `pi` binary.
