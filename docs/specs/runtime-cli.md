@@ -420,6 +420,25 @@ esac
 
 ---
 
+## Known gap：Provisioning preflight（v2 跟进）
+
+**现状**：`gitim-runtime add-agent` 直接 POST `/agents/add`。Server 端 `provision_agent` 跑 `git clone` + 写 `me.json` + 写 `.env` + 装 hermes profile（如适用），**不** 用真实 agent config 跑 hello round-trip。
+
+**后果**：env / model 配置出错（PAT 失效、model 名拼错、hermes LLM 没配等），不会在 add-agent 阶段暴露 —— agent 会被成功加进 workspace，第一个 turn 才在 agent_loop 里报错。
+
+**WebUI 现状**：`add-agent-dialog.tsx` 在 add 前点 "detect" 跑 `GET /preflight/{provider}` 做客户端预检。但这只验"机器上 provider CLI 装了没"，**不** 验"这个 agent 的 specific config（model + env + system prompt）真能跑"。所以即便 preflight 通过，加完 agent 仍可能在 first turn 挂掉。
+
+**Workaround for v1 CLI users / agents**：
+1. 先跑 `gitim-runtime preflight <provider> [--llm-provider X --llm-model Y]` 验环境层
+2. 看 exit code 0 + JSON `ok:true` 才 `gitim-runtime add-agent ...`
+3. add-agent 后建议在频道里 @ 新 agent 一句简短任务验真实 round-trip，失败立刻 `burn-agent --hard`
+
+**v2 follow-up**：`provisioning-preflight` feature — 让 server `agents_add` 在 `provision_agent` 成功后、`spawn_agent_loop` 之前，**用 agent 真实落盘的 config**（me.json + .env + hermes profile）跑一次同步 hello round-trip。失败 → cleanup_agent_dir + delete_profile + 返回 `error_code: "provision_preflight_failed"`。所有 caller（CLI / WebUI / 未来 SDK）都自动受益，WebUI 可同步删掉客户端 detect 步骤。设计起在 `docs/plans/provisioning-preflight/`（v1 land 后开新 worktree）。
+
+涉及 cross-cutting 改动（provider trait 加 `hello(config)` method、`agents_add` 调用顺序、WebUI 删 client-side preflight + 改 add 体感），所以 v1 不带，单开一 PR。
+
+---
+
 ## 关联
 
 - 设计来源 / "为什么这么做"：[`docs/plans/runtime-cli/00-requirements.md`](../plans/runtime-cli/00-requirements.md)
