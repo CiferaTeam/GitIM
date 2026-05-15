@@ -702,7 +702,7 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
         const cardMetaPath = `${activeCardsDir}/${cardId}/card.meta.yaml`;
         if (!(await exists(cardMetaPath))) continue;
         const cardYaml = await readFile(cardMetaPath);
-        const card = parseYaml(cardYaml) as Card;
+        const card = parseYaml(cardYaml) as unknown as Card;
         const stamped = { ...card, archived_via: "channel" as const };
         await writeFile(cardMetaPath, stringifyCardMeta(stamped) as string);
         cardMoves.push({
@@ -713,12 +713,16 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
       }
     }
 
-    // Copy card files to archive destinations.
+    // Copy card files to archive destinations. mkdirp is recursive, so the
+    // cards parent (archive/channels/<ch>/cards) covers archive/channels/<ch>
+    // as well — no separate mkdirp needed for the channel meta+thread path.
     if (cardMoves.length > 0) {
       await mkdirp(`${s.repoDir}/archive/channels/${channel}/cards`);
       for (const m of cardMoves) {
         await mvCardDirectory(`${s.repoDir}/${m.fromRel}`, `${s.repoDir}/${m.toRel}`);
       }
+    } else {
+      await mkdirp(`${s.repoDir}/archive/channels`);
     }
 
     // Read channel meta + thread for the move.
@@ -731,7 +735,6 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
       throw new Error(`thread file for channel '${channel}' does not exist`);
     }
     const threadContent = await readFile(`${s.repoDir}/${channelFromThread}`);
-    await mkdirp(`${s.repoDir}/archive/channels`);
     await writeFile(`${s.repoDir}/${channelToMeta}`, metaContent);
     await writeFile(`${s.repoDir}/${channelToThread}`, threadContent);
 
@@ -1748,13 +1751,12 @@ async function moveChannelFiles(
 // location. Source cleanup is done later via removeTrackedFile after the git commit.
 async function mvCardDirectory(fromAbs: string, toAbs: string): Promise<void> {
   await mkdirp(toAbs);
-  const items = ["card.meta.yaml", "discussion.thread"];
-  for (const item of items) {
-    const fromItem = `${fromAbs}/${item}`;
-    const toItem = `${toAbs}/${item}`;
-    if (!(await exists(fromItem))) continue;
-    const content = await readFile(fromItem);
-    await writeFile(toItem, content);
+  // Invariant: every card directory contains both files (set by createCard).
+  // If either is missing, readFile throws — let it propagate so the caller's
+  // try/catch returns an error response rather than producing partial state.
+  for (const item of ["card.meta.yaml", "discussion.thread"]) {
+    const content = await readFile(`${fromAbs}/${item}`);
+    await writeFile(`${toAbs}/${item}`, content);
   }
 }
 
