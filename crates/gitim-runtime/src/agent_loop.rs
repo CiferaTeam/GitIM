@@ -1090,6 +1090,27 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
                 continue;
             }
 
+            // Recipients-based routing filter.
+            //
+            // Daemon attaches `recipients: [handler...]` to each
+            // routable message entry (channel + dm). If the array is
+            // present and non-empty, this message is only "for" the
+            // listed handlers — skip if self isn't one of them.
+            //
+            // Empty array or missing field falls back to broadcast
+            // (legacy behavior). That covers three cases at once:
+            // (1) old daemon without the field, (2) card_thread and
+            // cron_thread which intentionally don't route, (3) the
+            // daemon-side empty-recipients warn fallback for malformed
+            // channel meta.
+            if let Some(recipients) = entry["recipients"].as_array() {
+                if !recipients.is_empty()
+                    && !recipients.iter().any(|v| v.as_str() == Some(self_handler))
+                {
+                    continue;
+                }
+            }
+
             has_external = true;
             let body = entry["body"].as_str().unwrap_or("");
             let timestamp = entry["timestamp"].as_str().unwrap_or("");
