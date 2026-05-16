@@ -101,8 +101,9 @@ crates/gitim-agent-provider/src/
   lib.rs                        CHANGED. 声明 acp, cursor, kimi, 去掉 stubs
 
 crates/gitim-runtime/src/
-  preflight.rs                  CHANGED. + preflight_cursor_with_config, + preflight_kimi_with_config
-  http.rs                       CHANGED. add_agent server-side gate dispatch
+  preflight.rs                  CHANGED. + preflight_cursor_with_config / + preflight_kimi_with_config
+                                + cursor_bin / kimi_bin override 字段 + dispatch_preflight 两个 match 分支
+  (http.rs                      不需要改 — preflight_for_add_request 已经间接 dispatch)
 ```
 
 ### `acp::AcpClient` 设计
@@ -281,7 +282,7 @@ fn kimi_tool_name_from_title(title: &str) -> String {
 - 删除 `crates/gitim-agent-provider/src/stubs/`(只有一个 cursor stub)
 - `lib.rs`:`mod cursor;`,去掉 `mod stubs;`
 - `provider.rs::create()`:`"cursor" => Ok(Box::new(crate::cursor::CursorProvider::new(config)))`
-- `preflight.rs` + `http.rs` 加 cursor 分支
+- `preflight.rs` 加 cursor 分支(`dispatch_preflight` match + `cursor_bin` override 字段;`http.rs` 不动)
 - 内联 tests
 - **验证**:`cargo test -p gitim-agent-provider` + `cargo test -p gitim-runtime --test preflight`
 
@@ -300,7 +301,7 @@ fn kimi_tool_name_from_title(title: &str) -> String {
 - 用 `acp::AcpClient`,接通 `kimi acp` 启动 / tool-name mapper / `set_session_model`
 - `lib.rs`:`mod kimi;`
 - `provider.rs::create()`:`"kimi" => ...`
-- `preflight.rs` + `http.rs` 加 kimi 分支
+- `preflight.rs` 加 kimi 分支(`dispatch_preflight` match + `kimi_bin` override 字段;`http.rs` 不动)
 - 内联 tests
 - **验证**:`cargo test -p gitim-agent-provider -p gitim-runtime`
 
