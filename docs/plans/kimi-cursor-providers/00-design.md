@@ -42,6 +42,47 @@
 - Cursor 的 `step_finish` 阶段事件细粒度上报到 SSE —— v1 只在 ExecResult 终值里用
 - Kimi 的 ACP `session/cancel` 显式响应 —— 沿用 hermes 现有 cancel 行为
 
+## 会话管理模型(重要前提)
+
+**Kimi 和 cursor 都走 claude-style session model,跟 hermes 的 in-loop self-managed 不同。**
+
+| 维度 | claude / codex / kimi / cursor | hermes |
+|---|---|---|
+| Provider 进程生命周期 | per-`execute()` —— 每个 turn 启一次子进程,turn 结束被 kill | per-`execute()`(也是) |
+| Session state 持有方 | provider CLI 自己持有(磁盘 / ACP server 内存),session_id 给 runtime 当 opaque token | 同上 |
+| Runtime `AgentState.session_token` | 持有 opaque token,跨 turn 透传 | 持有 opaque token,跨 turn 透传 |
+| `[[RESET]]` 通道 | **开启** —— agent 在文本里 emit `[[RESET]]`,runtime 把 token 清空,下次 execute() 不带 resume_token | 关闭 —— hermes 自己在 50% threshold 做 in-loop compression |
+| 占用 preamble (`[系统通知]`) | **开启** —— runtime 跨 `WARN_AT_PERCENT` 时注入 | 关闭 |
+| `self_managed_context()` | `false` | `true` |
+| `usage_is_cumulative()` | claude/codex/cursor `false`(per-turn delta);kimi `true`(ACP cumulative,runtime 走 baseline subtraction) | `true` |
+
+**Runtime 视角**(`agent_loop.rs`):
+```
+state.session_token: Option<String>            // opaque to runtime
+↓
+provider.execute(prompt, ExecOptions { resume_token: state.session_token, ... })
+↓
+ExecResult.session_token: Option<String>       // 新或同一个,runtime 透明写回 state
+↓
+if text 含 "[[RESET]]" && !self_managed_context: state.session_token = None
+```
+
+**Wire-level 翻译**(provider 自己负责,runtime 不关心):
+
+| Provider | resume 怎么传给 CLI |
+|---|---|
+| claude | `--resume <session_id>` CLI arg(`claude/mod.rs:78`) |
+| codex | `--resume-thread <thread_id>` |
+| cursor | `cursor-agent chat ... --resume <session_id>` CLI arg(stream-json 协议)|
+| kimi | ACP `session/resume { sessionId }` RPC,启动 `kimi acp` 子进程后第一件事调用 |
+| hermes | 同 kimi 的 ACP `session/resume` |
+
+**`AcpClient` 的生命周期范围**:
+- `AcpClient::new(...)` 在 provider `execute()` 内调,绑定本次 `kimi acp` / `hermes acp` 子进程的 stdin/stdout
+- Turn 结束,子进程 kill,`AcpClient` 一起丢
+- **不跨 turn 持有**。`usage` Mutex 内的累积只是本 turn 内多个 step / `usage_update` notification 的累计,turn 结束随 client 一起销毁
+- 跨 turn 的 token usage baseline 在 runtime `AgentState.last_session_usage`,跟 `AcpClient` 无关
+
 ## 架构
 
 ### 文件改动地图
@@ -73,7 +114,7 @@ pub struct AcpClient {
     stdin: ChildStdin,
     pending: Mutex<HashMap<i64, oneshot::Sender<JsonRpcResult>>>,
     pending_tools: Mutex<HashMap<String, PendingToolCall>>,
-    usage: Mutex<ProviderUsage>,         // session-accumulated
+    usage: Mutex<ProviderUsage>,         // per-execute()-accumulated (随 client 销毁,不跨 turn)
     hooks: AcpHooks,
 }
 
@@ -114,7 +155,9 @@ pub fn detect_api_failure(output: &str) -> Option<String>;
 
 ### Cursor 设计
 
-- bin = `cursor-agent`,args = `--output-format stream-json -p <prompt>`,可选 `--resume <session_id>` / `--model <model>`
+- bin = `cursor-agent`
+- args = `chat -p <merged_prompt> --output-format stream-json --yolo [--workspace <cwd>] [--model <m>] [--resume <id>]`
+- **`merged_prompt`** = `opts.system_prompt ? opts.system_prompt + "\n\n---\n\n" + prompt : prompt` —— 因为 cursor-agent CLI **不支持** `--system-prompt` / `--max-turns`(参考 `multica/cursor.go:415-416` 注解)。要么拼进 user prompt,要么靠 cwd 里的 `AGENTS.md` / `.cursor/skills/` 文件。本次走拼接,简单且对 runtime 透明。
 - 事件 → GitIM Event 映射:
 
 | Multica cursor 事件 | GitIM Event |
