@@ -13,4 +13,11 @@ pub enum ProviderError {
 
     #[error("provider not implemented: {0}")]
     NotImplemented(String),
+
+    /// Wire-level protocol error — JSON-RPC reported an `error` object,
+    /// the stream ended mid-handshake, or a request timed out before
+    /// receiving a response. Carries a human-readable description shaped
+    /// for `ExecResult.error`.
+    #[error("protocol error: {0}")]
+    Protocol(String),
 }
