@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gitim-cors-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-07",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+  "vars": {
+    "ALLOW_ORIGINS": "https://gitim.io,https://www.gitim.io",
+    "ALLOWED_HOSTS": "github.com",
+    "INSECURE_HTTP_ORIGINS": ""
+  }
+}

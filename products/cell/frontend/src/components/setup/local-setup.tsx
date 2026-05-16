@@ -6,6 +6,9 @@ import { setBackend } from "../../lib/client";
 import { SetupShell } from "./setup-shell";
 
 const LOCAL_CONFIG_KEY = "gitim-local-config";
+const PUBLIC_CORS_PROXY = "https://cors.isomorphic-git.org";
+const DEFAULT_CORS_PROXY =
+  import.meta.env.VITE_GIT_CORS_PROXY?.trim() || PUBLIC_CORS_PROXY;
 
 interface LocalConfig {
   remoteUrl: string;
@@ -43,9 +46,7 @@ export function LocalSetup() {
 
   const saved = loadSavedConfig();
   const [remoteUrl, setRemoteUrl] = useState(saved.remoteUrl ?? "");
-  const [corsProxy, setCorsProxy] = useState(
-    saved.corsProxy ?? "https://cors.isomorphic-git.org",
-  );
+  const [corsProxy, setCorsProxy] = useState(saved.corsProxy ?? DEFAULT_CORS_PROXY);
   const [token, setToken] = useState("");
   const [inferredHandler, setInferredHandler] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -164,7 +165,7 @@ export function LocalSetup() {
             type="url"
             value={corsProxy}
             onChange={(e) => setCorsProxy(e.target.value)}
-            placeholder="https://cors.isomorphic-git.org"
+            placeholder={DEFAULT_CORS_PROXY}
             className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
           />
         </div>
