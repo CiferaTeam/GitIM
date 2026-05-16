@@ -379,6 +379,48 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Refresh the WebUI/context HUD from a provider's live usage event.
+    ///
+    /// This deliberately does not mutate AgentState on disk, update
+    /// `last_session_usage`, accumulate token logs, or arm threshold reset
+    /// notices. Those are per-turn accounting decisions and remain owned by
+    /// `update_session_usage` after `provider.execute()` returns.
+    fn update_live_session_usage(&self, session_id: &str, provider_reported: &ProviderUsage) {
+        let estimated_tokens = AgentState::load(&self.repo_root)
+            .map(|state| state.estimated_tokens)
+            .unwrap_or(0);
+        let model = self.model.as_deref().unwrap_or("");
+        let max = crate::context_window::default_max_tokens(&self.provider_type, model);
+        let now = chrono::Utc::now().to_rfc3339();
+        let Some(snap) = compute_snapshot(
+            session_id,
+            Some(provider_reported),
+            estimated_tokens,
+            max,
+            self.provider.usage_is_cumulative(),
+            &now,
+        ) else {
+            return;
+        };
+
+        if let Some(rs) = &self.runtime_state {
+            if let Ok(mut s) = rs.lock() {
+                if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
+                    if let Some(info) = ctx.agents.get_mut(&self.handler) {
+                        info.session_usage = Some(snap.clone());
+                    }
+                }
+            }
+        }
+
+        let payload = UsageEventPayload {
+            snap: &snap,
+            usage_summary: None,
+        };
+        let detail = serde_json::to_string(&payload).unwrap_or_default();
+        self.emit_activity("usage", &detail);
+    }
+
     /// Convert the provider's raw `ProviderUsage` into a per-turn delta.
     ///
     /// - When the provider declares `reports_usage() == false` (gemini,
@@ -726,6 +768,9 @@ impl AgentLoop {
                                 gitim_agent_provider::Event::Error { content } => {
                                     tracing::warn!(error = %content, "agent error event");
                                     self.emit_activity("error", content);
+                                }
+                                gitim_agent_provider::Event::Usage { session_id, usage } => {
+                                    self.update_live_session_usage(session_id, usage);
                                 }
                                 _ => {}
                             }
@@ -1629,6 +1674,49 @@ mod tests {
         assert!(
             info.session_usage.is_none(),
             "clear must drop the in-memory snapshot so HUD stops showing stale percent"
+        );
+    }
+
+    #[test]
+    fn live_session_usage_updates_hud_without_persisting_accounting_state() {
+        let (loop_, state, mut rx, tmp) =
+            harness_with_usage_snapshot("framer-opus", "gitim-company");
+        let usage = ProviderUsage {
+            context_tokens: Some(5_000),
+            context_window_tokens: Some(10_000),
+            ..Default::default()
+        };
+
+        loop_.update_live_session_usage("sid-live", &usage);
+
+        {
+            let s = state.lock().unwrap();
+            let info = s.workspaces["gitim-company"]
+                .agents
+                .get("framer-opus")
+                .expect("agent present");
+            let snap = info.session_usage.as_ref().expect("live snapshot");
+            assert_eq!(snap.session_id, "sid-live");
+            assert_eq!(snap.max_tokens, Some(10_000));
+            assert!(
+                (snap.used_percent - 50.0).abs() < 0.01,
+                "live usage percent: {}",
+                snap.used_percent
+            );
+        }
+
+        let ev = rx.try_recv().expect("live usage event must be emitted");
+        assert_eq!(ev.event_type, "usage");
+        let payload: serde_json::Value = serde_json::from_str(&ev.detail).expect("usage json");
+        assert_eq!(payload["session_id"], "sid-live");
+        assert_eq!(payload["max_tokens"], 10_000);
+        assert!(
+            payload.get("usage_summary").is_none(),
+            "live HUD refresh must not fabricate cumulative usage summary"
+        );
+        assert!(
+            !AgentState::state_path(tmp.path()).exists(),
+            "live HUD refresh must not persist agent-state; final turn accounting owns disk writes"
         );
     }
 
