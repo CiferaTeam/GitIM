@@ -15,8 +15,10 @@ import { toHandler, validateHandler } from "@/lib/client";
 import {
   PROVIDER_IDS,
   PROVIDERS,
+  resolveProviderModelCatalog,
   type PreflightResult,
   type ProviderId,
+  type ProviderModelCatalog,
 } from "@/lib/providers";
 import {
   HERMES_DEFAULT_LLM_PROVIDER,
@@ -53,7 +55,8 @@ export function AddAgentDialog() {
     preflight: PreflightResult | null;
   } | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const modelFetchSeq = useRef(0);
+  const hermesModelFetchSeq = useRef(0);
+  const providerModelFetchSeq = useRef(0);
 
   // Hermes-specific LLM selection state
   const [llmProvider, setLlmProvider] = useState("");
@@ -64,12 +67,23 @@ export function AddAgentDialog() {
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
   const [llmModelsError, setLlmModelsError] = useState<string | null>(null);
   const [customModelInput, setCustomModelInput] = useState("");
+  const [providerModelCatalog, setProviderModelCatalog] =
+    useState<ProviderModelCatalog | null>(null);
+  const [providerModelsLoading, setProviderModelsLoading] = useState(false);
+  const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
 
   const handler = toHandler(name.trim());
   const validationError = name.trim() ? validateHandler(name.trim()) : null;
-  const availableModels = provider ? PROVIDERS[provider].models : [];
+  const providerInfo = provider ? PROVIDERS[provider as ProviderId] : null;
+  const resolvedProviderModels = providerInfo
+    ? resolveProviderModelCatalog(providerInfo, providerModelCatalog)
+    : null;
+  const availableModels = resolvedProviderModels?.models ?? [];
   // Custom model option sentinel value
   const CUSTOM_MODEL_VALUE = "__custom__";
+  const PROVIDER_CUSTOM_MODEL_VALUE = "__provider_custom__";
+  const selectedProviderModel =
+    model === PROVIDER_CUSTOM_MODEL_VALUE ? providerCustomModelInput.trim() : model;
   // Effective model to pass to API: custom input overrides the select value
   const effectiveModel =
     llmModel === CUSTOM_MODEL_VALUE ? customModelInput : llmModel;
@@ -96,12 +110,33 @@ export function AddAgentDialog() {
       setLlmModelsError(null);
       setCustomModelInput("");
     }
+    setProviderModelCatalog(null);
+    setProviderModelsLoading(false);
+    setProviderCustomModelInput("");
+  }, [provider]);
+
+  useEffect(() => {
+    if (!provider || provider === "hermes" || !PROVIDERS[provider].runtimeModels) {
+      providerModelFetchSeq.current += 1;
+      setProviderModelCatalog(null);
+      setProviderModelsLoading(false);
+      return;
+    }
+
+    const seq = ++providerModelFetchSeq.current;
+    setProviderModelCatalog(null);
+    setProviderModelsLoading(true);
+    client.listProviderModels(provider).then((res) => {
+      if (seq !== providerModelFetchSeq.current) return;
+      setProviderModelCatalog(res.ok ? (res.data ?? null) : null);
+      setProviderModelsLoading(false);
+    });
   }, [provider]);
 
   // When llmProvider changes, fetch models for that provider
   useEffect(() => {
     if (!llmProvider || isHermesDefaultLlmProvider(llmProvider)) {
-      modelFetchSeq.current += 1;
+      hermesModelFetchSeq.current += 1;
       setLlmModels([]);
       setLlmModelsLoading(false);
       setLlmModelsError(null);
@@ -112,9 +147,9 @@ export function AddAgentDialog() {
     setCustomModelInput("");
     setLlmModelsLoading(true);
     setLlmModelsError(null);
-    const seq = ++modelFetchSeq.current;
+    const seq = ++hermesModelFetchSeq.current;
     client.listHermesLlmModels(llmProvider).then((res) => {
-      if (seq !== modelFetchSeq.current) return; // stale, drop
+      if (seq !== hermesModelFetchSeq.current) return; // stale, drop
       if (res.ok && res.data) {
         setLlmModels(res.data.models);
         setLlmModelsError(res.data.error);
@@ -146,6 +181,9 @@ export function AddAgentDialog() {
     setLlmModelsLoading(false);
     setLlmModelsError(null);
     setCustomModelInput("");
+    setProviderModelCatalog(null);
+    setProviderModelsLoading(false);
+    setProviderCustomModelInput("");
   }
 
   function preflightKindLabel(kind: PreflightResult["error_kind"]): string {
@@ -164,8 +202,9 @@ export function AddAgentDialog() {
     if (!next) resetForm();
   }
 
-  const providerInfo = provider ? PROVIDERS[provider as ProviderId] : null;
-  const modelRequired = providerInfo ? !providerInfo.modelOptional : true;
+  const modelRequired = providerInfo
+    ? !resolvedProviderModels?.supportsDefault && !providerInfo.modelOptional
+    : true;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -179,7 +218,7 @@ export function AddAgentDialog() {
       validationError ||
       submitting ||
       !provider ||
-      (modelRequired && !model) ||
+      (modelRequired && !selectedProviderModel) ||
       hermesLlmIncomplete
     )
       return;
@@ -202,7 +241,7 @@ export function AddAgentDialog() {
         name.trim(),
         provider,
         systemPrompt.trim(),
-        model,
+        provider === "hermes" ? model : selectedProviderModel,
         envMap,
         introduction.trim(),
         joinGeneral,
@@ -253,6 +292,9 @@ export function AddAgentDialog() {
                 onChange={(e) => {
                   setProvider(e.target.value as ProviderId | "");
                   setModel("");
+                  setProviderCustomModelInput("");
+                  setProviderModelCatalog(null);
+                  setProviderModelsLoading(false);
                   // Clear any prior provisioning failure — the previous
                   // diagnostic is no longer relevant once the provider changes.
                   setSubmitError(null);
@@ -332,24 +374,15 @@ export function AddAgentDialog() {
               )}
             </div>
 
-            {providerInfo?.modelOptional ? (
+            {provider === "hermes" ? (
               <div className="space-y-1.5">
                 <label className="text-sm font-medium">Model</label>
                 <p className="text-xs text-muted-foreground">
-                  {provider === "hermes" ? (
-                    <>
-                      Hermes uses the default model from <code>hermes setup</code>{" "}
-                      unless an override is selected below.
-                    </>
-                  ) : (
-                    <>
-                      {providerInfo.label} uses its configured default model. No
-                      selection needed.
-                    </>
-                  )}
+                  Hermes uses the default model from <code>hermes setup</code>{" "}
+                  unless an override is selected below.
                 </p>
               </div>
-            ) : (
+            ) : providerInfo ? (
               <div className="space-y-1.5">
                 <label className="text-sm font-medium" htmlFor="agent-model">
                   Model
@@ -357,19 +390,50 @@ export function AddAgentDialog() {
                 <select
                   id="agent-model"
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => {
+                    setModel(e.target.value);
+                    if (e.target.value !== PROVIDER_CUSTOM_MODEL_VALUE) {
+                      setProviderCustomModelInput("");
+                    }
+                  }}
                   disabled={!provider}
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <option value="">— Select model —</option>
+                  {resolvedProviderModels?.supportsDefault && (
+                    <option value="">Use CLI default</option>
+                  )}
+                  {!resolvedProviderModels?.supportsDefault && (
+                    <option value="">— Select model —</option>
+                  )}
                   {availableModels.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.label}
                     </option>
                   ))}
+                  {resolvedProviderModels?.supportsCustom && (
+                    <option value={PROVIDER_CUSTOM_MODEL_VALUE}>Custom…</option>
+                  )}
                 </select>
+                {providerModelsLoading && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    Loading runtime models…
+                  </div>
+                )}
+                {providerModelCatalog?.error && (
+                  <p className="text-xs text-muted-foreground">
+                    Runtime models unavailable; default and custom values still work.
+                  </p>
+                )}
+                {model === PROVIDER_CUSTOM_MODEL_VALUE && (
+                  <Input
+                    value={providerCustomModelInput}
+                    onChange={(e) => setProviderCustomModelInput(e.target.value)}
+                    placeholder={resolvedProviderModels?.customHint ?? "model id"}
+                  />
+                )}
               </div>
-            )}
+            ) : null}
 
             {provider === "hermes" && (
               <div className="space-y-3 rounded-md border border-input p-3">
@@ -541,7 +605,7 @@ export function AddAgentDialog() {
                   !!validationError ||
                   submitting ||
                   !provider ||
-                  (modelRequired && !model) ||
+                  (modelRequired && !selectedProviderModel) ||
                   isHermesLlmSelectionIncomplete(
                     provider,
                     llmProvider,

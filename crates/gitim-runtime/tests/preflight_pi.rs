@@ -144,16 +144,13 @@ async fn pi_with_config_env_override_reaches_subprocess() {
 }
 
 #[tokio::test]
-async fn pi_with_config_model_override_is_ignored() {
+async fn pi_with_config_model_override_reaches_subprocess() {
     let script = fixture("pi-rpc-echo-argv.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
 
     let overrides = PreflightOverrides {
         env_override: None,
-        // pi has no model arg — the override should be silently dropped.
-        // Use a marker the fixture would echo verbatim if we ever spliced
-        // it onto argv.
-        model_override: Some("should-not-appear-GITIM_OK".to_string()),
+        model_override: Some("openai/gpt-test".to_string()),
     };
     let result =
         preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides).await;
@@ -162,10 +159,12 @@ async fn pi_with_config_model_override_is_ignored() {
     // parent treats it as a valid response and we get `output_preview` back.
     assert!(result.available, "expected available, got {result:?}");
     let preview = result.output_preview.expect("output_preview should be set");
-    // argv must remain the hardcoded set — no `--model`, no override leak.
     assert!(
-        !preview.contains("should-not-appear"),
-        "model override leaked into pi argv despite being ignored by design: {preview}"
+        preview.contains("--provider")
+            && preview.contains("openai")
+            && preview.contains("--model")
+            && preview.contains("gpt-test"),
+        "model override not reflected in pi argv: {preview}"
     );
     assert!(
         preview.contains("--mode")

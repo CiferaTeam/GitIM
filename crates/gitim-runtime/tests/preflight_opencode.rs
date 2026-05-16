@@ -86,8 +86,8 @@ async fn test_preflight_opencode_real_hello() {
 // Same fake-binary pattern as the claude/codex override tests:
 // `echo-env-argv.sh` exits non-zero after echoing argv and `MY_TEST_KEY` to
 // stderr, which `preflight_opencode_with_config` captures into `result.error`.
-// opencode ignores `model_override` by design — see doc comment on
-// `preflight_opencode_with_config`.
+// opencode supports a per-invocation `--model provider/model` override; add
+// preflight must verify the same selected model the agent will run with.
 
 #[tokio::test]
 async fn opencode_with_config_env_override_reaches_subprocess() {
@@ -115,13 +115,13 @@ async fn opencode_with_config_env_override_reaches_subprocess() {
 }
 
 #[tokio::test]
-async fn opencode_with_config_model_override_is_ignored() {
+async fn opencode_with_config_model_override_reaches_subprocess() {
     let script = fixture("echo-env-argv.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
 
     let overrides = PreflightOverrides {
         env_override: None,
-        model_override: Some("should-not-appear".to_string()),
+        model_override: Some("openai/gpt-test".to_string()),
     };
     let result =
         preflight_opencode_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
@@ -130,12 +130,9 @@ async fn opencode_with_config_model_override_is_ignored() {
     assert!(!result.available);
     assert_eq!(result.error_kind, Some(ErrorKind::Other));
     let err = result.error.expect("error should be set");
-    // The model override string must NOT appear anywhere in the captured
-    // argv — opencode's CLI has no model arg, so we drop the override
-    // silently rather than splicing it onto the command line.
     assert!(
-        !err.contains("should-not-appear"),
-        "model override leaked into opencode argv despite being ignored by design: {err}"
+        err.contains("--model") && err.contains("openai/gpt-test"),
+        "model override not reflected in opencode argv: {err}"
     );
 }
 

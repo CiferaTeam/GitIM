@@ -4509,6 +4509,21 @@ async fn preflight_handler(
     }
 }
 
+/// HTTP handler for `GET /providers/{provider}/models`.
+///
+/// Returns the provider's runtime-visible model catalog when the backing CLI
+/// exposes one. Catalog lookup failures stay inside the JSON `error` field so
+/// clients can still offer "Use CLI default" and custom model input.
+async fn provider_models_handler(
+    axum::extract::Path(provider): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let result = crate::model_catalog::list_provider_models(&provider).await;
+    (StatusCode::OK, Json(result)).into_response()
+}
+
 async fn activity_middleware(
     State(state): State<SharedRuntimeState>,
     request: axum::extract::Request,
@@ -5319,6 +5334,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         )
         .route("/fleet/nodes/{node_id}", delete(fleet_nodes_delete))
         .route("/preflight/{provider}", get(preflight_handler))
+        .route("/providers/{provider}/models", get(provider_models_handler))
         .route("/hermes/llm/providers", get(list_hermes_llm_providers))
         .route(
             "/hermes/llm/providers/{id}/models",

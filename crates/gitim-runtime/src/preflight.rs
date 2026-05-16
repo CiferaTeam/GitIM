@@ -258,6 +258,15 @@ fn map_spawn_error(err: &std::io::Error) -> ErrorKind {
     }
 }
 
+fn split_provider_model(value: &str) -> Option<(&str, &str)> {
+    let (provider, model) = value.split_once('/')?;
+    if provider.is_empty() || model.is_empty() {
+        None
+    } else {
+        Some((provider, model))
+    }
+}
+
 /// Extract the `result` text from `claude --print --output-format json` stdout.
 ///
 /// Tolerates both shapes the Claude CLI has been observed to emit:
@@ -668,22 +677,17 @@ pub async fn preflight_codex() -> PreflightResult {
 /// Run a real-hello ping against the opencode CLI at `bin`, with optional
 /// per-call overrides for env vars.
 ///
-/// Unlike claude/codex where we force a cheap model, opencode uses whatever
-/// model the user authenticated with via `opencode auth login`. We cannot
-/// predict that at preflight time, so we accept the variance. System prompt
-/// is injected via OPENCODE_CONFIG_CONTENT as a minimal echo agent to keep
-/// the request cheap and deterministic.
+/// When `overrides.model_override` is set, the ping uses opencode's
+/// per-invocation `--model provider/model` flag so add-agent verifies the
+/// same model the agent will run with. When omitted, opencode uses its
+/// configured CLI default. System prompt is injected via OPENCODE_CONFIG_CONTENT
+/// as a minimal echo agent to keep the request cheap and deterministic.
 ///
 /// When `overrides.env_override` is `Some`, those key/values are merged into
 /// the child process (overriding any inherited values with the same key, and
 /// taking precedence over the fixed `OPENCODE_CONFIG_CONTENT` /
 /// `OPENCODE_PERMISSION` only if the caller deliberately re-specifies those
 /// keys — normal callers shouldn't).
-///
-/// **`overrides.model_override` is ignored**: opencode's CLI does not accept
-/// a per-invocation model arg; the model is wired at `opencode auth login`
-/// time. The field is preserved in [`PreflightOverrides`] so a future opencode
-/// version adding a `--model` flag won't force a signature change here.
 pub async fn preflight_opencode_with_config(
     bin: &str,
     timeout: Duration,
@@ -713,18 +717,29 @@ pub async fn preflight_opencode_with_config(
     })
     .to_string();
 
+    let mut args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+    ];
+    if let Some(model) = overrides
+        .model_override
+        .as_deref()
+        .filter(|m| !m.is_empty())
+    {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    args.extend([
+        "--agent".to_string(),
+        "gitim_preflight".to_string(),
+        "--".to_string(),
+        "Reply with exactly: GITIM_OK".to_string(),
+    ]);
+
     let mut cmd = tokio::process::Command::new(bin);
     cmd.current_dir(tmpdir.path())
-        .args([
-            "run",
-            "--format",
-            "json",
-            "--dangerously-skip-permissions",
-            "--agent",
-            "gitim_preflight",
-            "--",
-            "Reply with exactly: GITIM_OK",
-        ])
+        .args(&args)
         .env("OPENCODE_CONFIG_CONTENT", &config_content)
         .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)
         .stdin(Stdio::null())
@@ -794,7 +809,7 @@ pub async fn preflight_opencode_with_config(
         PreflightResult::success(
             "opencode",
             None,
-            None, // model_used = whatever user auth'd; unknown at CLI level
+            overrides.model_override.clone(),
             duration_ms,
             Some(truncate(&text, PREVIEW_TRUNCATE)),
         )
@@ -837,12 +852,10 @@ pub async fn preflight_opencode() -> PreflightResult {
 /// When `overrides.env_override` is `Some`, those key/values are merged into
 /// the child process (overriding any inherited values with the same key).
 ///
-/// **`overrides.model_override` is ignored**: pi stores provider and model
-/// separately on disk (see `gitim-agent-provider/src/pi/mod.rs:333` —
-/// `~/.pi/config.json` is the source of truth), and the CLI has no
-/// per-invocation `--model` flag. The field is preserved in
-/// [`PreflightOverrides`] for signature consistency with other providers and
-/// for a future pi version that exposes a model arg.
+/// When `overrides.model_override` is set, values shaped as `provider/model`
+/// are split into Pi's native `--provider provider --model model` flags. Other
+/// values are passed as `--model value`. When omitted, Pi uses its configured
+/// default.
 pub async fn preflight_pi_with_config(
     bin: &str,
     timeout: Duration,
@@ -852,8 +865,23 @@ pub async fn preflight_pi_with_config(
 
     let started = Instant::now();
 
+    let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+    if let Some(model) = overrides
+        .model_override
+        .as_deref()
+        .filter(|m| !m.is_empty())
+    {
+        if let Some((provider, model_id)) = split_provider_model(model) {
+            args.extend(["--provider".to_string(), provider.to_string()]);
+            args.extend(["--model".to_string(), model_id.to_string()]);
+        } else {
+            args.extend(["--model".to_string(), model.to_string()]);
+        }
+    }
+    args.extend(["--no-session".to_string(), "--no-tools".to_string()]);
+
     let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(["--mode", "rpc", "--no-session", "--no-tools"])
+    cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -976,7 +1004,7 @@ pub async fn preflight_pi_with_config(
         PreflightResult::success(
             "pi",
             None,
-            None, // model_used — Pi uses its configured default; unknown at preflight time
+            overrides.model_override.clone(),
             duration_ms,
             Some(truncate(&collected_text, PREVIEW_TRUNCATE)),
         )
@@ -1409,9 +1437,8 @@ pub struct PreflightDispatchOverrides {
 /// Behavior summary:
 /// - `mock` → short-circuit `success` (no spawn). Used by tests and the mock
 ///   provider that has no CLI binary at all.
-/// - `claude` / `codex` → spawn the CLI with `env` and `model` overrides.
-/// - `opencode` / `pi` → spawn the CLI with `env` only (model is configured
-///   externally — opencode at `auth login`, pi in `~/.pi/config.json`).
+/// - `claude` / `codex` / `opencode` / `pi` → spawn the CLI with `env` and
+///   `model` overrides where the provider exposes a per-invocation model flag.
 /// - `hermes` → branch on `(llm_provider, llm_model)`:
 ///   - both `Some` → chat-mode preflight with the explicit pair.
 ///   - both `None` → read default profile's `config.yaml`; if it has a
@@ -1489,7 +1516,6 @@ async fn dispatch_preflight(
     overrides: &PreflightDispatchOverrides,
 ) -> PreflightResult {
     // Standard env/model overrides bundle used by claude/codex/opencode/pi.
-    // (opencode/pi ignore model_override by design — see their docs.)
     let prov_overrides = PreflightOverrides {
         env_override: env.cloned(),
         model_override: model.map(String::from),

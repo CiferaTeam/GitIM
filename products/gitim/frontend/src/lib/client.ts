@@ -25,7 +25,11 @@ import type {
   PollResponse,
   WorkspaceSummary,
 } from "./types";
-import type { PreflightResult, ProviderId } from "./providers";
+import type {
+  PreflightResult,
+  ProviderId,
+  ProviderModelCatalog,
+} from "./providers";
 import type { HermesLlmProvider, HermesLlmModelList } from "./hermes-llm";
 import type {
   Backend,
@@ -1215,6 +1219,35 @@ export async function preflightProvider(
     if (opts?.llmModel) params.set("llm_model", opts.llmModel);
     const qs = params.size > 0 ? `?${params.toString()}` : "";
     const res = await fetch(`${baseUrl()}/preflight/${provider}${qs}`);
+    const data = await res.json();
+    if (res.ok) {
+      return { ok: true, data };
+    }
+    return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listProviderModels(
+  provider: ProviderId,
+): Promise<ApiResponse<ProviderModelCatalog>> {
+  if (isLocalMode()) {
+    return {
+      ok: true,
+      data: {
+        provider,
+        source: "browser_mode",
+        supports_default: true,
+        supports_custom: provider !== "hermes",
+        custom_format_hint: null,
+        models: [],
+        error: "provider model catalog is unavailable in browser mode",
+      },
+    };
+  }
+  try {
+    const res = await fetch(`${baseUrl()}/providers/${provider}/models`);
     const data = await res.json();
     if (res.ok) {
       return { ok: true, data };

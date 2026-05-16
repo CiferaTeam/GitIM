@@ -160,6 +160,38 @@ async fn test_preflight_codex_returns_result_shape() {
     );
 }
 
+#[tokio::test]
+#[serial(path_env)]
+async fn test_provider_models_codex_returns_degradable_catalog_shape() {
+    let _path_guard = PathGuard::install_empty();
+    let (router, _state) = create_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/providers/codex/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body["provider"], serde_json::Value::String("codex".into()));
+    assert_eq!(
+        body["source"],
+        serde_json::Value::String("codex_debug_models".into())
+    );
+    assert_eq!(body["supports_default"], serde_json::Value::Bool(true));
+    assert_eq!(body["supports_custom"], serde_json::Value::Bool(true));
+    assert!(
+        body["models"].as_array().unwrap().is_empty(),
+        "body: {body}"
+    );
+    assert!(body["error"].as_str().unwrap().contains("failed to spawn"));
+}
+
 // -- /preflight/{provider}?llm_provider=...&llm_model=... query param tests --
 
 /// Test 1: GET /preflight/hermes?llm_provider=X&llm_model=Y

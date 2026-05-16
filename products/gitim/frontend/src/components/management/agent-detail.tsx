@@ -1,21 +1,28 @@
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
-import { PROVIDERS } from "@/lib/providers";
+import {
+  PROVIDERS,
+  resolveProviderModelCatalog,
+  type ProviderModelCatalog,
+} from "@/lib/providers";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
-import { ArrowLeft, Play, Pause, Flame, Pencil } from "lucide-react";
+import { ArrowLeft, Play, Pause, Flame, Loader2, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-status";
 import { ProviderBadge } from "./provider-badge";
 import { BurnAgentDialog } from "./burn-agent-dialog";
 import { AgentUsageCard } from "./agent-usage-card";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
+
+const PROVIDER_CUSTOM_MODEL_VALUE = "__provider_custom__";
 
 function Field({
   label,
@@ -57,25 +64,78 @@ export function AgentDetail() {
   type Mode = "view" | "edit" | "saving";
   const [mode, setMode] = useState<Mode>("view");
   const [draftModel, setDraftModel] = useState("");
+  const [draftModelIsCustom, setDraftModelIsCustom] = useState(false);
+  const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
   const [draftIntroduction, setDraftIntroduction] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
+  const [providerModelCatalog, setProviderModelCatalog] =
+    useState<ProviderModelCatalog | null>(null);
+  const [providerModelsLoading, setProviderModelsLoading] = useState(false);
+  const providerModelFetchSeq = useRef(0);
 
   const activities = useAgentActivityStore((s) => s.activities);
 
   const agent: Agent | undefined = agents.find((a) => a.id === agentId);
   const agentEvents = agent ? (activities[agent.id] ?? []) : [];
+  const providerInfo = agent?.provider ? PROVIDERS[agent.provider] : null;
+  const resolvedProviderModels = providerInfo
+    ? resolveProviderModelCatalog(providerInfo, providerModelCatalog)
+    : null;
+  const modelOptions = resolvedProviderModels?.models ?? [];
+  const canEditModel = Boolean(
+    providerInfo !== null &&
+      agent?.provider !== "hermes" &&
+      (resolvedProviderModels?.supportsDefault ||
+        resolvedProviderModels?.supportsCustom ||
+        modelOptions.length > 0),
+  );
+  const selectedDraftModel = draftModelIsCustom
+    ? providerCustomModelInput.trim()
+    : draftModel.trim();
+  const draftModelSelectValue = draftModelIsCustom
+    ? PROVIDER_CUSTOM_MODEL_VALUE
+    : draftModel;
+
+  function loadProviderModelCatalog(provider: NonNullable<Agent["provider"]>) {
+    if (provider === "hermes" || !PROVIDERS[provider].runtimeModels) {
+      providerModelFetchSeq.current += 1;
+      setProviderModelCatalog(null);
+      setProviderModelsLoading(false);
+      return;
+    }
+
+    const seq = ++providerModelFetchSeq.current;
+    setProviderModelCatalog(null);
+    setProviderModelsLoading(true);
+    client.listProviderModels(provider).then((res) => {
+      if (seq !== providerModelFetchSeq.current) return;
+      setProviderModelCatalog(res.ok ? (res.data ?? null) : null);
+      setProviderModelsLoading(false);
+    });
+  }
 
   function enterEditMode() {
     if (!agent) return;
-    setDraftModel(agent.model ?? "");
+    const currentModel = agent.model ?? "";
+    const knownCurrentModel = modelOptions.some((m) => m.id === currentModel);
+    const useCustomModel =
+      currentModel !== "" &&
+      !knownCurrentModel &&
+      Boolean(resolvedProviderModels?.supportsCustom);
+    setDraftModel(useCustomModel ? "" : currentModel);
+    setDraftModelIsCustom(useCustomModel);
+    setProviderCustomModelInput(useCustomModel ? currentModel : "");
     setDraftPrompt(agent.systemPrompt ?? "");
     setDraftIntroduction(agent.introduction ?? "");
     setDraftEnv(
       Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
     );
     setEditError(null);
+    if (agent.provider) {
+      loadProviderModelCatalog(agent.provider);
+    }
     setMode("edit");
   }
 
@@ -83,7 +143,7 @@ export function AgentDetail() {
     mode === "edit" &&
     agent !== undefined &&
     (() => {
-      if (draftModel.trim() !== (agent.model ?? "")) return true;
+      if (selectedDraftModel !== (agent.model ?? "")) return true;
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
       // Introduction
@@ -114,6 +174,9 @@ export function AgentDetail() {
     if (isDirty && !window.confirm("Discard unsaved changes?")) {
       return;
     }
+    providerModelFetchSeq.current += 1;
+    setProviderModelCatalog(null);
+    setProviderModelsLoading(false);
     setMode("view");
     setEditError(null);
   }
@@ -129,13 +192,10 @@ export function AgentDetail() {
       env?: Record<string, string>;
     } = {};
 
-    const providerInfo = agent.provider ? PROVIDERS[agent.provider] : null;
     const modelEditable =
       agent.status === "offline" &&
-      providerInfo !== null &&
-      !providerInfo.modelOptional &&
-      providerInfo.models.length > 0;
-    const newModel = draftModel.trim();
+      canEditModel;
+    const newModel = selectedDraftModel;
     const oldModel = agent.model ?? "";
     const modelChanged = modelEditable && newModel !== oldModel;
     if (modelChanged) {
@@ -185,6 +245,9 @@ export function AgentDetail() {
         toast.error("Model was not updated");
         return;
       }
+      providerModelFetchSeq.current += 1;
+      setProviderModelCatalog(null);
+      setProviderModelsLoading(false);
       setMode("view");
 
       // Generation-aware toast lines.
@@ -223,13 +286,9 @@ export function AgentDetail() {
   }
 
   const isRunning = agent.status !== "offline";
-  const providerInfo = agent.provider ? PROVIDERS[agent.provider] : null;
-  const modelOptions = providerInfo?.models ?? [];
   const showModelEditor =
     mode !== "view" &&
-    providerInfo !== null &&
-    !providerInfo.modelOptional &&
-    modelOptions.length > 0;
+    canEditModel;
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -314,18 +373,55 @@ export function AgentDetail() {
           {showModelEditor ? (
             <div className="space-y-1.5">
               <select
-                value={draftModel}
-                onChange={(e) => setDraftModel(e.target.value)}
+                value={draftModelSelectValue}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === PROVIDER_CUSTOM_MODEL_VALUE) {
+                    setDraftModelIsCustom(true);
+                    setProviderCustomModelInput(selectedDraftModel);
+                  } else {
+                    setDraftModelIsCustom(false);
+                    setDraftModel(next);
+                    setProviderCustomModelInput("");
+                  }
+                }}
                 disabled={isRunning || mode === "saving"}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <option value="">— Provider default —</option>
+                {resolvedProviderModels?.supportsDefault && (
+                  <option value="">Use CLI default</option>
+                )}
+                {!resolvedProviderModels?.supportsDefault && (
+                  <option value="">— Select model —</option>
+                )}
                 {modelOptions.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.label}
                   </option>
                 ))}
+                {resolvedProviderModels?.supportsCustom && (
+                  <option value={PROVIDER_CUSTOM_MODEL_VALUE}>Custom…</option>
+                )}
               </select>
+              {providerModelsLoading && (
+                <div className="flex items-center gap-2 text-xs text-text-muted">
+                  <Loader2 className="size-3 animate-spin" />
+                  Loading runtime models…
+                </div>
+              )}
+              {providerModelCatalog?.error && (
+                <p className="text-xs text-text-muted">
+                  Runtime models unavailable; default and custom values still work.
+                </p>
+              )}
+              {draftModelIsCustom && (
+                <Input
+                  value={providerCustomModelInput}
+                  onChange={(e) => setProviderCustomModelInput(e.target.value)}
+                  placeholder={resolvedProviderModels?.customHint ?? "model id"}
+                  disabled={isRunning || mode === "saving"}
+                />
+              )}
               {isRunning && (
                 <p className="text-xs text-text-muted">
                   Stop the agent before changing model.

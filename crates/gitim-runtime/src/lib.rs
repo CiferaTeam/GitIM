@@ -15,6 +15,7 @@ pub mod gitignore;
 pub mod hermes_llm;
 pub mod hermes_profile;
 pub mod http;
+pub mod model_catalog;
 pub mod poller;
 pub mod preflight;
 pub mod slug;

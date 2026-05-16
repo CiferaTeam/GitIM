@@ -30,9 +30,23 @@ export interface ProviderModel {
   label: string;
 }
 
+export interface ProviderModelCatalog {
+  provider: string;
+  source: string;
+  supports_default: boolean;
+  supports_custom: boolean;
+  custom_format_hint: string | null;
+  models: ProviderModel[];
+  error: string | null;
+}
+
 export interface ProviderInfo {
   label: string;
   models: ProviderModel[];
+  runtimeModels?: boolean;
+  supportsDefaultModel?: boolean;
+  supportsCustomModel?: boolean;
+  customModelHint?: string;
   /**
    * If true, Model selection is optional — the provider picks its own default
    * (e.g. opencode uses the user's `opencode auth login` default). Empty model
@@ -41,9 +55,34 @@ export interface ProviderInfo {
   modelOptional?: boolean;
 }
 
+export interface ResolvedProviderModelCatalog {
+  models: ProviderModel[];
+  supportsDefault: boolean;
+  supportsCustom: boolean;
+  customHint: string;
+}
+
+export function resolveProviderModelCatalog(
+  providerInfo: ProviderInfo,
+  catalog: ProviderModelCatalog | null | undefined,
+): ResolvedProviderModelCatalog {
+  return {
+    models: catalog?.models.length ? catalog.models : providerInfo.models,
+    supportsDefault:
+      catalog?.supports_default ?? providerInfo.supportsDefaultModel ?? false,
+    supportsCustom:
+      catalog?.supports_custom ?? providerInfo.supportsCustomModel ?? false,
+    customHint:
+      catalog?.custom_format_hint ?? providerInfo.customModelHint ?? "model id",
+  };
+}
+
 export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   claude: {
     label: "Claude",
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "model id accepted by claude --model",
     models: [
       { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
       { id: "claude-opus-4-7", label: "Claude Opus 4.7" },
@@ -52,6 +91,10 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   },
   codex: {
     label: "Codex",
+    runtimeModels: true,
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "model id accepted by codex --model",
     models: [
       { id: "gpt-5.5", label: "GPT-5.5" },
       { id: "gpt-5.4", label: "GPT-5.4" },
@@ -60,11 +103,19 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   },
   opencode: {
     label: "OpenCode",
+    runtimeModels: true,
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "provider/model",
     models: [],
     modelOptional: true,
   },
   pi: {
     label: "Pi",
+    runtimeModels: true,
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "provider/model or model",
     models: [],
     modelOptional: true,
   },
