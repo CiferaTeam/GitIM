@@ -161,6 +161,10 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
+    // Tracks whether we saw a terminal `result` envelope. If the stdout stream
+    // closes cleanly without one, we promote `final_status` to `Failed` —
+    // truncation / protocol error. Mirrors claude/mod.rs:294-298.
+    let mut saw_result = false;
     // step_usage accumulates per-step token counts from `step_finish` events.
     // result_usage holds the authoritative session total from a `result` event.
     // If `result` carries usage, we prefer it; otherwise fall back to step_usage.
@@ -224,6 +228,15 @@ async fn drive_session(
                                     } else if subtype == "error" {
                                         let err_msg = cursor_error_text(&evt);
                                         if !err_msg.is_empty() {
+                                            // Mirror claude's "if not already terminal,
+                                            // promote to Failed now" discipline so the
+                                            // ExecResult never carries a status/error
+                                            // contradiction.
+                                            promote_to_failed_if_completed(
+                                                &mut final_status,
+                                                &mut final_error,
+                                                &err_msg,
+                                            );
                                             try_send_event(&event_tx, Event::Error {
                                                 content: err_msg,
                                             });
@@ -249,6 +262,7 @@ async fn drive_session(
                                     });
                                 }
                                 "result" => {
+                                    saw_result = true;
                                     // is_error or subtype="error" → fail-status.
                                     let is_error = evt.is_error
                                         || evt.subtype.as_deref() == Some("error");
@@ -281,7 +295,11 @@ async fn drive_session(
                                 "error" => {
                                     let err_msg = cursor_error_text(&evt);
                                     if !err_msg.is_empty() {
-                                        final_error = Some(err_msg.clone());
+                                        promote_to_failed_if_completed(
+                                            &mut final_status,
+                                            &mut final_error,
+                                            &err_msg,
+                                        );
                                         try_send_event(&event_tx, Event::Error {
                                             content: err_msg,
                                         });
@@ -338,6 +356,11 @@ async fn drive_session(
         let _ = child.start_kill();
     } else if final_status == ExecStatus::Aborted {
         let _ = child.start_kill();
+    } else if !saw_result && final_status == ExecStatus::Completed {
+        // Stream ended without a result message — truncated or protocol error.
+        // Mirrors claude/mod.rs:294-298.
+        final_status = ExecStatus::Failed;
+        final_error = Some("cursor-agent stream ended without a result message".to_string());
     }
 
     if final_status != ExecStatus::Timeout {
@@ -398,6 +421,23 @@ async fn drive_session(
 fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("cursor event channel full, dropping event");
+    }
+}
+
+/// Promote `final_status` to `Failed` and stash `err_msg` as `final_error`,
+/// but only if the status is still `Completed`. Once a stream has reached a
+/// terminal state (`Failed` / `Aborted` / `Timeout`), preserve the first
+/// terminal cause — later errors get logged via the event channel but don't
+/// rewrite the verdict. Mirrors claude/mod.rs's "if not already terminal,
+/// set it now" discipline (see claude/mod.rs:302-305).
+fn promote_to_failed_if_completed(
+    final_status: &mut ExecStatus,
+    final_error: &mut Option<String>,
+    err_msg: &str,
+) {
+    if *final_status == ExecStatus::Completed {
+        *final_status = ExecStatus::Failed;
+        *final_error = Some(err_msg.to_string());
     }
 }
 
@@ -587,5 +627,41 @@ mod tests {
         assert!(p.reports_usage());
         assert!(!p.usage_is_cumulative());
         assert!(!p.self_managed_context());
+    }
+
+    /// `promote_to_failed_if_completed` must flip Completed → Failed on the
+    /// first error, but never overwrite a status that's already terminal —
+    /// otherwise a late `error` envelope arriving after a cancel/timeout
+    /// would rewrite the (more accurate) original verdict.
+    #[test]
+    fn promote_to_failed_only_when_completed() {
+        // Completed → Failed (the happy path: cursor emits an error envelope
+        // and the run hadn't reached any terminal state yet).
+        let mut status = ExecStatus::Completed;
+        let mut err: Option<String> = None;
+        promote_to_failed_if_completed(&mut status, &mut err, "boom");
+        assert_eq!(status, ExecStatus::Failed);
+        assert_eq!(err.as_deref(), Some("boom"));
+
+        // Already Failed → no-op (preserve first cause).
+        let mut status = ExecStatus::Failed;
+        let mut err = Some("first cause".to_string());
+        promote_to_failed_if_completed(&mut status, &mut err, "second cause");
+        assert_eq!(status, ExecStatus::Failed);
+        assert_eq!(err.as_deref(), Some("first cause"));
+
+        // Aborted → no-op (cancel-by-steering wins).
+        let mut status = ExecStatus::Aborted;
+        let mut err = Some("cancelled by steering".to_string());
+        promote_to_failed_if_completed(&mut status, &mut err, "late error");
+        assert_eq!(status, ExecStatus::Aborted);
+        assert_eq!(err.as_deref(), Some("cancelled by steering"));
+
+        // Timeout → no-op (timeout wins).
+        let mut status = ExecStatus::Timeout;
+        let mut err = Some("timed out".to_string());
+        promote_to_failed_if_completed(&mut status, &mut err, "late error");
+        assert_eq!(status, ExecStatus::Timeout);
+        assert_eq!(err.as_deref(), Some("timed out"));
     }
 }
