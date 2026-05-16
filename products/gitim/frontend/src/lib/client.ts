@@ -52,6 +52,7 @@ import {
 } from "./browser-workspaces";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -329,7 +330,7 @@ export async function createWorkspace(
 
     const record = createBrowserWorkspace({
       remoteUrl: req.git.remote_url,
-      corsProxy: "https://cors.isomorphic-git.org",
+      corsProxy: DEFAULT_GIT_CORS_PROXY,
       handler: "",
       workspaceName: req.workspace_name,
     });
