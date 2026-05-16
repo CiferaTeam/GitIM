@@ -10,7 +10,12 @@ export interface WorkspaceUsage {
   totals: UsageBucket;
   today: UsageBucket;
   byDay: UsageDayEntry[];
+  /** One entry per distinct provider across the workspace, including
+   *  providers whose agents have produced zero usage so far. */
   byProvider: { provider: string; bucket: UsageBucket }[];
+  /** One entry per agent (handler is unique per agent). Zero-usage agents
+   *  appear with a ZERO_BUCKET so the UI can render them as `0`. */
+  byHandler: { handler: string; bucket: UsageBucket }[];
   /** True only when at least one agent in the workspace has produced
    *  usage data. Lets components branch into a "no data yet" state. */
   hasData: boolean;
@@ -29,6 +34,7 @@ const EMPTY_USAGE: WorkspaceUsage = {
   today: ZERO_BUCKET,
   byDay: [],
   byProvider: [],
+  byHandler: [],
   hasData: false,
 };
 
@@ -70,25 +76,47 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
   // an agent first seen mid-window — defensive).
   const byDay = mergeByDay(summaries.map((e) => e.summary.byDay));
 
+  // byProvider: enumerate every distinct provider across ALL agents, so a
+  // provider whose agents have produced zero so far still shows up as `0`.
   const byProviderMap = new Map<string, UsageBucket[]>();
-  for (const { provider, summary } of summaries) {
-    const arr = byProviderMap.get(provider) ?? [];
-    arr.push(summary.totals);
-    byProviderMap.set(provider, arr);
+  for (const a of agents) {
+    const key = a.provider ?? "unknown";
+    const arr = byProviderMap.get(key) ?? [];
+    arr.push(a.usageSummary?.totals ?? { ...ZERO_BUCKET });
+    byProviderMap.set(key, arr);
   }
   const byProvider = Array.from(byProviderMap.entries())
     .map(([provider, buckets]) => ({
       provider,
       bucket: mergeBuckets(buckets),
     }))
-    .sort((a, b) => totalSum(b.bucket) - totalSum(a.bucket));
+    .sort(compareEntry((e) => e.provider));
+
+  // byHandler: one entry per agent (handler is unique). Zero-usage agents
+  // get ZERO_BUCKET so the UI can still list them.
+  const byHandler = agents
+    .map((a) => ({
+      handler: a.id,
+      bucket: a.usageSummary?.totals ?? { ...ZERO_BUCKET },
+    }))
+    .sort(compareEntry((e) => e.handler));
 
   return {
     totals,
     today,
     byDay,
     byProvider,
+    byHandler,
     hasData: true,
+  };
+}
+
+function compareEntry<T extends { bucket: UsageBucket }>(
+  labelOf: (e: T) => string,
+) {
+  return (a: T, b: T) => {
+    const diff = totalSum(b.bucket) - totalSum(a.bucket);
+    return diff !== 0 ? diff : labelOf(a).localeCompare(labelOf(b));
   };
 }
 

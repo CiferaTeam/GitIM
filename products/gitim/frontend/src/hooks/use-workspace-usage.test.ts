@@ -116,4 +116,55 @@ describe("aggregateWorkspaceUsage", () => {
     ]);
     expect(out.byProvider[0].provider).toBe("unknown");
   });
+
+  it("sorts byProvider by token total desc, alphabetical on ties", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("a", "codex", summary(bucket(100, 0), bucket(0, 0))),
+      agent("b", "claude", summary(bucket(100, 0), bucket(0, 0))),
+      agent("c", "opencode", summary(bucket(50, 0), bucket(0, 0))),
+    ]);
+    expect(out.byProvider.map((p) => p.provider)).toEqual([
+      "claude",
+      "codex",
+      "opencode",
+    ]);
+  });
+
+  it("byHandler enumerates every agent including zero-usage ones", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("alice", "codex", summary(bucket(100, 50), bucket(40, 20))),
+      agent("bob", "claude"),
+      agent("carol", "pi", summary(bucket(10, 5), bucket(0, 0))),
+    ]);
+    expect(out.byHandler.map((h) => h.handler)).toEqual([
+      "alice",
+      "carol",
+      "bob",
+    ]);
+    expect(out.byHandler.find((h) => h.handler === "bob")?.bucket).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheCreation: 0,
+      turns: 0,
+    });
+  });
+
+  it("byProvider enumerates every distinct provider including zero-usage ones", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("alice", "codex", summary(bucket(100, 50), bucket(40, 20))),
+      agent("bob", "claude"),
+    ]);
+    expect(out.byProvider.map((p) => p.provider)).toEqual(["codex", "claude"]);
+    expect(out.byProvider.find((p) => p.provider === "claude")?.bucket.input).toBe(0);
+  });
+
+  it("returns empty byHandler when hasData=false (header stays hidden)", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("a", "claude"),
+      agent("b", "codex"),
+    ]);
+    expect(out.hasData).toBe(false);
+    expect(out.byHandler).toEqual([]);
+  });
 });
