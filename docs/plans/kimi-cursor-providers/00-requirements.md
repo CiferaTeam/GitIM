@@ -31,8 +31,7 @@
 - `crates/gitim-agent-provider/src/lib.rs` 模块声明
 - `crates/gitim-agent-provider/src/provider.rs` `create()` match 接通
 - `crates/gitim-agent-provider/src/stubs/mod.rs` 删除(只剩一个 cursor stub,被实装替代后没剩内容)
-- `crates/gitim-runtime/src/preflight.rs` 加 `preflight_cursor_with_config` 和 `preflight_kimi_with_config`
-- `crates/gitim-runtime/src/http.rs` add_agent server-side preflight gate 加 cursor/kimi 分支
+- `crates/gitim-runtime/src/preflight.rs` 加 `preflight_cursor_with_config` 和 `preflight_kimi_with_config`,并在 `dispatch_preflight` 函数里加 `"cursor" =>` / `"kimi" =>` 两个 match 分支(`http.rs` 不需要改 —— `add_agent` 经 `preflight_for_add_request` 间接 dispatch)
 
 ### Out-of-scope(v1)
 
@@ -121,6 +120,11 @@ pub struct AcpClient {
 pub struct AcpHooks {
     pub tool_name_mapper: fn(&str) -> String,
     pub accept_notification: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// 是否把 ACP `usage_update` 通知作为 `Event::Usage` 上抛给 runtime。
+    /// hermes = false(已在 `session/prompt` 响应里拿到 cumulative,中游再发会被
+    /// `usage_is_cumulative` 的 baseline subtraction 双计);
+    /// kimi = true(runtime UI 想要 live 进度显示)。
+    pub emit_live_usage: bool,
 }
 
 impl AcpClient {
@@ -151,6 +155,7 @@ pub fn detect_api_failure(output: &str) -> Option<String>;
 **取舍**:
 - `tool_name_mapper` 用函数指针 `fn(&str) -> String`,无状态,简单
 - `accept_notification` 用 `Option<Arc<dyn Fn>>`,v1 hermes/kimi 都不用,留口子给未来的 "current-turn-only" 场景(kiro)
+- `emit_live_usage` 字段在 Task 2 实施期加入(plan 原始设计漏了这条);hermes 维持原"丢 mid-stream usage" 行为靠它显式 `false`;kimi 设 `true` 开启 live usage events 到 runtime UI
 - 错误嗅探(`newACPProviderErrorSniffer` in multica)v1 沿用 hermes 现有 `detect_api_failure`,放 `acp/parse.rs`
 
 ### Cursor 设计
@@ -237,14 +242,22 @@ fn kimi_tool_name_from_title(title: &str) -> String {
 4. 第一个 text content notification 到达 → PASS。kill。
 5. error_kind 同上
 
-### http.rs gate
+### Preflight dispatch 分支
 
-`add_agent` 在 `handler_conflict` 检查后、`provision_agent` 之前的 server-side gate 加:
+`add_agent` 的 server-side preflight gate 通过 `preflight_for_add_request` 委托给 `preflight::dispatch_preflight`,所以新 provider 只需在 `dispatch_preflight` 加 match 分支:
 
 ```rust
-"cursor" => preflight_cursor_with_config(&env, opts.model.as_deref()).await,
-"kimi"   => preflight_kimi_with_config(&env, opts.model.as_deref()).await,
+"cursor" => {
+    let bin = overrides.cursor_bin.as_deref().unwrap_or(DEFAULT_BIN_CURSOR);
+    preflight_cursor_with_config(bin, inner_timeout, prov_overrides).await
+}
+"kimi" => {
+    let bin = overrides.kimi_bin.as_deref().unwrap_or(DEFAULT_BIN_KIMI);
+    preflight_kimi_with_config(bin, inner_timeout, prov_overrides).await
+}
 ```
+
+`http.rs` 不需要改动。`PreflightDispatchOverrides` 加 `cursor_bin: Option<String>` / `kimi_bin: Option<String>` 两个 test-seam 字段。
 
 ## 测试
 
