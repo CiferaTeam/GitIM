@@ -4,8 +4,9 @@ use crate::state::SharedState;
 
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler};
+use gitim_core::types::{ChannelMeta, Handler, Message, ThreadEntry};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tracing::warn;
 
 pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response {
@@ -487,11 +488,13 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             continue;
         }
 
-        let entries: Vec<serde_json::Value> = parsed
-            .entries
-            .iter()
-            .map(|entry| entry_to_json(entry))
-            .collect();
+        let entries = enrich_entries_with_recipients(
+            &parsed.entries,
+            kind,
+            &channel,
+            &path_str,
+            &state.repo_root,
+        );
 
         changes.push(gitim_core::responses::PollChange {
             channel,
@@ -505,6 +508,109 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         changes,
     };
     Response::success(serde_json::to_value(payload).unwrap())
+}
+
+/// Render thread entries to JSON, attaching a `recipients` field to
+/// Message entries based on the channel kind:
+///   - kind == "channel" → 3-rule routing via `compute_recipients`
+///     (channel owner + parent-chain ancestors + explicit mentions)
+///   - kind == "dm"      → recipients = sorted [member_a, member_b]
+///   - other kinds       → no recipients (broadcast fallback applies
+///                         on the runtime side; preserves prior
+///                         behavior for card_thread / cron_thread)
+///
+/// Event entries (join/leave/etc.) never carry recipients regardless
+/// of kind — routing is per-message and events are workspace-wide.
+fn enrich_entries_with_recipients(
+    entries: &[ThreadEntry],
+    kind: &str,
+    channel: &str,
+    path_str: &str,
+    repo_root: &Path,
+) -> Vec<serde_json::Value> {
+    // Pre-load the channel meta + full thread once per change for parent
+    // chain context. The diff only carries newly-added lines, so to walk
+    // a reply's parent into pre-existing history we must read the full
+    // committed thread file from disk.
+    let channel_context: Option<(ChannelMeta, Vec<Message>)> = if kind == "channel" {
+        let meta_path = repo_root
+            .join("channels")
+            .join(format!("{}.meta.yaml", channel));
+        let thread_path = repo_root
+            .join("channels")
+            .join(format!("{}.thread", channel));
+        let meta = std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|s| serde_yaml::from_str::<ChannelMeta>(&s).ok());
+        let messages: Vec<Message> = std::fs::read_to_string(&thread_path)
+            .ok()
+            .and_then(|s| parse_thread(&s).ok())
+            .map(|tf| {
+                tf.entries
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        ThreadEntry::Message(m) => Some(m),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        meta.map(|m| (m, messages))
+    } else {
+        None
+    };
+
+    // For DM threads, derive the sorted member pair from the filename
+    // stem. (Members are also in `dm/<stem>.meta.yaml` for some setups
+    // but the filename is the authoritative source.)
+    let dm_members: Option<Vec<String>> = if kind == "dm" {
+        path_str
+            .strip_prefix("dm/")
+            .and_then(|s| s.strip_suffix(".thread"))
+            .and_then(parse_dm_filename)
+            .map(|(a, b)| {
+                let mut v = vec![a.to_string(), b.to_string()];
+                v.sort();
+                v
+            })
+    } else {
+        None
+    };
+
+    entries
+        .iter()
+        .map(|entry| {
+            let mut json = entry_to_json(entry);
+            if let ThreadEntry::Message(msg) = entry {
+                let recipients: Option<Vec<String>> = match (kind, &channel_context, &dm_members) {
+                    ("channel", Some((meta, msgs)), _) => {
+                        let r = gitim_core::recipients::compute_recipients(msg, meta, msgs);
+                        if r.is_empty() {
+                            // Spec guarantees Rule 1 always fires when
+                            // created_by is set; empty here means either
+                            // missing meta (logged above as failed read)
+                            // or malformed meta. Surface a warn so it's
+                            // diagnosable, fall through to broadcast.
+                            warn!(
+                                channel = %channel,
+                                line = msg.line_number,
+                                "poll: empty recipients computed; falling back to broadcast"
+                            );
+                            None
+                        } else {
+                            Some(r)
+                        }
+                    }
+                    ("dm", _, Some(members)) => Some(members.clone()),
+                    _ => None,
+                };
+                if let Some(r) = recipients {
+                    json["recipients"] = serde_json::json!(r);
+                }
+            }
+            json
+        })
+        .collect()
 }
 
 fn board_handler_from_path(path: &str) -> Option<&str> {
