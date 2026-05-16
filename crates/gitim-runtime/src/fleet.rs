@@ -5,7 +5,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use tokio::task::AbortHandle;
 
-use crate::http::{AgentActivityEvent, SharedRuntimeState};
+use crate::http::{AgentActivityEvent, AgentInfo, SharedRuntimeState};
 use crate::user_config::{FleetNodeEntry, FleetWorkspaceMapping};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -32,6 +32,21 @@ pub struct FleetAgentActivityEvent {
     pub agent_id: String,
     pub received_at: String,
     pub event: AgentActivityEvent,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FleetAgentSnapshot {
+    pub node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<String>,
+    pub workspace_id: String,
+    pub agent: AgentInfo,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -295,6 +310,68 @@ pub async fn resolve_workspace_mappings(
     Ok(entry)
 }
 
+pub async fn fetch_agent_snapshots(state: &SharedRuntimeState) -> Vec<FleetAgentSnapshot> {
+    let nodes: Vec<_> = {
+        let s = state.lock().unwrap();
+        s.fleet_nodes
+            .values()
+            .map(|runtime| runtime.entry.clone())
+            .collect()
+    };
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build fleet agents client");
+            return Vec::new();
+        }
+    };
+
+    let mut snapshots = Vec::new();
+    for entry in nodes {
+        for subscription in workspace_subscriptions(&entry) {
+            match fetch_remote_agents(&client, &entry.base_url, &subscription.remote_workspace_id)
+                .await
+            {
+                Ok(agents) => {
+                    snapshots.extend(agents.into_iter().map(|agent| FleetAgentSnapshot {
+                        node_id: entry.node_id.clone(),
+                        node_ip: entry.node_ip.clone(),
+                        node_name: entry.node_name.clone(),
+                        remote_workspace_id: subscription.remote_workspace_id(),
+                        workspace_identity: subscription.workspace_identity.clone(),
+                        workspace_id: subscription.local_workspace_id.clone(),
+                        agent,
+                    }));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        node_id = %entry.node_id,
+                        workspace = %subscription.remote_workspace_id,
+                        error = %err,
+                        "failed to fetch remote fleet agents",
+                    );
+                }
+            }
+        }
+    }
+
+    snapshots.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.workspace_id.cmp(&b.workspace_id))
+            .then_with(|| a.agent.id.cmp(&b.agent.id))
+    });
+    snapshots
+}
+
 fn local_remote_identities(state: &SharedRuntimeState) -> Vec<(String, String)> {
     let mut identities: Vec<_> = {
         let s = state.lock().unwrap();
@@ -338,6 +415,35 @@ async fn fetch_remote_workspaces(base_url: &str) -> Result<RemoteWorkspacesRespo
         .json::<RemoteWorkspacesResponse>()
         .await
         .map_err(|e| format!("failed to parse remote workspaces: {e}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteAgentsResponse {
+    #[serde(default)]
+    agents: Vec<AgentInfo>,
+}
+
+async fn fetch_remote_agents(
+    client: &reqwest::Client,
+    base_url: &str,
+    workspace: &str,
+) -> Result<Vec<AgentInfo>, String> {
+    let url = format!(
+        "{}/workspaces/{}/agents",
+        base_url.trim_end_matches('/'),
+        utf8_percent_encode(workspace, NON_ALPHANUMERIC)
+    );
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to fetch remote agents: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("remote agents returned error: {e}"))?
+        .json::<RemoteAgentsResponse>()
+        .await
+        .map_err(|e| format!("failed to parse remote agents: {e}"))?;
+    Ok(response.agents)
 }
 
 async fn subscribe_workspace_loop(

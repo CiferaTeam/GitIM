@@ -12,6 +12,7 @@ import {
   updateBrowserWorkspace,
   type BrowserWorkspaceRecord,
 } from "../../lib/browser-workspaces";
+import { DEFAULT_GIT_CORS_PROXY } from "../../lib/git-cors-proxy";
 
 interface BrowserWorkspaceFormProps {
   initial?: BrowserWorkspaceRecord;
@@ -19,8 +20,6 @@ interface BrowserWorkspaceFormProps {
   onConnected: (record: BrowserWorkspaceRecord, token: string) => Promise<boolean> | boolean;
   onCancel?: () => void;
 }
-
-const DEFAULT_CORS_PROXY = "https://cors.isomorphic-git.org";
 
 export function BrowserWorkspaceForm({
   initial,
@@ -31,7 +30,7 @@ export function BrowserWorkspaceForm({
   const [workspaceName, setWorkspaceName] = useState(initial?.workspace_name ?? "");
   const [remoteUrl, setRemoteUrl] = useState(initial?.remoteUrl ?? "");
   const [token, setToken] = useState("");
-  const [corsProxy, setCorsProxy] = useState(initial?.corsProxy ?? DEFAULT_CORS_PROXY);
+  const [corsProxy, setCorsProxy] = useState(initial?.corsProxy ?? DEFAULT_GIT_CORS_PROXY);
   const [inferredHandler, setInferredHandler] = useState(initial?.handler ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -141,7 +140,7 @@ export function BrowserWorkspaceForm({
           type="url"
           value={corsProxy}
           onChange={(event) => setCorsProxy(event.target.value)}
-          placeholder={DEFAULT_CORS_PROXY}
+          placeholder={DEFAULT_GIT_CORS_PROXY}
           className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
         />
         <p className="text-xs leading-relaxed text-text-muted">

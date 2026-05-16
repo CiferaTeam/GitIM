@@ -21,6 +21,8 @@ import type {
   CronRunEntry,
   CronSummary,
   CronTimelineResponse,
+  FleetAgentSnapshot,
+  FleetNodeStatus,
   Message,
   PollResponse,
   WorkspaceSummary,
@@ -56,6 +58,7 @@ import {
 } from "./browser-workspaces";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -333,7 +336,7 @@ export async function createWorkspace(
 
     const record = createBrowserWorkspace({
       remoteUrl: req.git.remote_url,
-      corsProxy: "https://cors.isomorphic-git.org",
+      corsProxy: DEFAULT_GIT_CORS_PROXY,
       handler: "",
       workspaceName: req.workspace_name,
     });
@@ -1291,7 +1294,7 @@ export async function listHermesLlmModels(providerId: string): Promise<ApiRespon
   }
 }
 
-function mapBackendAgent(raw: Record<string, unknown>): Agent {
+export function mapBackendAgent(raw: Record<string, unknown>): Agent {
   const rawUsage = raw.session_usage as Record<string, unknown> | undefined;
   const sessionUsage: Agent["sessionUsage"] = rawUsage
     ? {
@@ -1324,6 +1327,34 @@ function mapBackendAgent(raw: Record<string, unknown>): Agent {
     llmProvider: (raw.llm_provider as string) ?? undefined,
     llmModel: (raw.llm_model as string) ?? undefined,
     usageSummary,
+  };
+}
+
+function mapFleetAgentSnapshot(raw: Record<string, unknown>): FleetAgentSnapshot {
+  return {
+    nodeId: (raw.node_id as string) ?? "",
+    nodeIp: (raw.node_ip as string) ?? undefined,
+    nodeName: (raw.node_name as string) ?? undefined,
+    remoteWorkspaceId: (raw.remote_workspace_id as string) ?? undefined,
+    workspaceIdentity: (raw.workspace_identity as string) ?? undefined,
+    workspaceId: (raw.workspace_id as string) ?? "",
+    agent: mapBackendAgent((raw.agent as Record<string, unknown>) ?? {}),
+  };
+}
+
+function mapFleetNodeStatus(raw: Record<string, unknown>): FleetNodeStatus {
+  return {
+    nodeId: (raw.node_id as string) ?? "",
+    nodeIp: (raw.node_ip as string) ?? undefined,
+    nodeName: (raw.node_name as string) ?? undefined,
+    remoteWorkspaceId: (raw.remote_workspace_id as string) ?? undefined,
+    workspaceIdentity: (raw.workspace_identity as string) ?? undefined,
+    workspaceId: (raw.workspace_id as string) ?? "",
+    status: (raw.status as FleetNodeStatus["status"]) ?? "down",
+    lastConnectedAt: (raw.last_connected_at as string) ?? undefined,
+    lastEventAt: (raw.last_event_at as string) ?? undefined,
+    lastError: (raw.last_error as string) ?? undefined,
+    retryCount: (raw.retry_count as number) ?? 0,
   };
 }
 
@@ -1392,6 +1423,40 @@ export async function listAgents(slug: string): Promise<ApiResponse> {
     return { ok: true, data: { agents } };
   } catch {
     return mockClient.listAgents();
+  }
+}
+
+export async function listFleetAgents(): Promise<ApiResponse<{ agents: FleetAgentSnapshot[] }>> {
+  if (isLocalMode()) {
+    return { ok: true, data: { agents: [] } };
+  }
+  try {
+    const res = await fetch(`${baseUrl()}/fleet/agents`);
+    const data = await res.json();
+    if (!data.ok) return data;
+    const agents = ((data.agents ?? []) as Record<string, unknown>[]).map(
+      mapFleetAgentSnapshot,
+    );
+    return { ok: true, data: { agents } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listFleetStatus(): Promise<ApiResponse<{ nodes: FleetNodeStatus[] }>> {
+  if (isLocalMode()) {
+    return { ok: true, data: { nodes: [] } };
+  }
+  try {
+    const res = await fetch(`${baseUrl()}/fleet/status`);
+    const data = await res.json();
+    if (!data.ok) return data;
+    const nodes = ((data.nodes ?? []) as Record<string, unknown>[]).map(
+      mapFleetNodeStatus,
+    );
+    return { ok: true, data: { nodes } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

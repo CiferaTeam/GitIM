@@ -1,18 +1,23 @@
-import { useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import type { Agent, FleetAgentSnapshot, FleetNodeStatus } from "@/lib/types";
 import type { ArchivedUserEntry } from "@/lib/client";
 import { AddAgentDialog } from "./add-agent-dialog";
 import { AgentCard } from "./agent-card";
 import { ArchivedAgentCard } from "./archived-agent-card";
 import { WorkspaceUsageHeader } from "./workspace-usage-header";
-import { Archive, Bot, Search, SlidersHorizontal } from "lucide-react";
+import { Archive, Bot, Search, Server, SlidersHorizontal } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 
 export function AgentList() {
   const agents = useAgentStore((s) => s.agents);
+  const fleetAgents = useFleetStore((s) => s.agents);
+  const fleetStatuses = useFleetStore((s) => s.statuses);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
@@ -47,12 +52,33 @@ export function AgentList() {
     setArchivedLoading(false);
   }
 
-  const filteredAgents = agents.filter((a) => {
-    const matchesQuery =
-      !query.trim() || a.name.toLowerCase().includes(query.toLowerCase());
-    const matchesStatus = !statusFilter || a.status === statusFilter;
-    return matchesQuery && matchesStatus;
-  });
+  const remoteSnapshots = useMemo(
+    () => fleetAgents.filter((snapshot) => snapshot.workspaceId === activeSlug),
+    [activeSlug, fleetAgents],
+  );
+  const remoteStatuses = useMemo(
+    () => fleetStatuses.filter((status) => status.workspaceId === activeSlug),
+    [activeSlug, fleetStatuses],
+  );
+  const allAgentsForUsage = useMemo(
+    () => [...agents, ...remoteSnapshots.map((snapshot) => snapshot.agent)],
+    [agents, remoteSnapshots],
+  );
+  const filteredAgents = agents.filter((agent) =>
+    matchesAgent(agent, query, statusFilter),
+  );
+  const filteredRemoteSnapshots = remoteSnapshots.filter((snapshot) =>
+    matchesAgent(snapshot.agent, query, statusFilter, snapshot),
+  );
+  const visibleRemoteStatuses = statusFilter
+    ? []
+    : remoteStatuses.filter((status) => matchesNodeStatus(status, query));
+  const remoteGroups = groupRemoteAgents(
+    filteredRemoteSnapshots,
+    remoteStatuses,
+    visibleRemoteStatuses,
+  );
+  const hasFleetContext = remoteSnapshots.length > 0 || remoteStatuses.length > 0;
 
   // The status filter is meaningless for archived rows (runtime metadata is
   // gone), so we only filter archived by free-text query against the
@@ -140,34 +166,65 @@ export function AgentList() {
         </div>
       </div>
 
-      <WorkspaceUsageHeader />
+      <WorkspaceUsageHeader
+        agents={allAgentsForUsage}
+        label={hasFleetContext ? "Fleet Usage" : "Workspace Usage"}
+      />
 
-      {/* Active agents grid */}
-      {filteredAgents.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {filteredAgents.length > 0 && (
+        <AgentNodeSection
+          title="Local"
+          subtitle="This node"
+          agents={filteredAgents}
+          showUsage={hasFleetContext}
+        >
           {filteredAgents.map((agent) => (
             <AgentCard key={agent.id} agent={agent} />
           ))}
-        </div>
-      ) : (
-        // Only show the empty state when there are no archived rows to
-        // render either — otherwise the empty state stomps on a populated
-        // archived section below.
+        </AgentNodeSection>
+      )}
+
+      {remoteGroups.map((group) => (
+        <AgentNodeSection
+          key={group.nodeId}
+          title={group.title}
+          subtitle={group.subtitle}
+          agents={group.snapshots.map((snapshot) => snapshot.agent)}
+          status={group.status}
+          showUsage
+        >
+          {group.snapshots.length === 0 ? (
+            <p className="text-sm text-text-muted">No agents reported.</p>
+          ) : (
+            group.snapshots.map((snapshot) => (
+              <AgentCard
+                key={`${snapshot.nodeId}:${snapshot.workspaceId}:${snapshot.agent.id}`}
+                agent={snapshot.agent}
+                readOnly
+              />
+            ))
+          )}
+        </AgentNodeSection>
+      ))}
+
+      {filteredAgents.length === 0 &&
+        remoteGroups.length === 0 &&
         (!showArchived || filteredArchived.length === 0) && (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-surface flex items-center justify-center mb-4 border border-border">
               <Bot className="size-7 text-primary" />
             </div>
             <p className="text-foreground font-medium">
-              {agents.length === 0 ? "No agents yet" : "No agents match your filters"}
+              {agents.length === 0 && remoteSnapshots.length === 0
+                ? "No agents yet"
+                : "No agents match your filters"}
             </p>
             <p className="text-sm text-text-muted mt-1 max-w-xs">
-              {agents.length === 0
+              {agents.length === 0 && remoteSnapshots.length === 0
                 ? "Get started by adding your first agent to the workspace."
                 : "Try adjusting your search or filter criteria."}
             </p>
           </div>
-        )
       )}
 
       {/* Archived section (dual-source) */}
@@ -209,4 +266,157 @@ export function AgentList() {
       )}
     </div>
   );
+}
+
+interface AgentNodeSectionProps {
+  title: string;
+  subtitle: string;
+  agents: Agent[];
+  status?: FleetNodeStatus;
+  showUsage?: boolean;
+  children: ReactNode;
+}
+
+function AgentNodeSection({
+  title,
+  subtitle,
+  agents,
+  status,
+  showUsage = false,
+  children,
+}: AgentNodeSectionProps) {
+  return (
+    <section className="mb-6">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface">
+            <Server className="size-4 text-text-secondary" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-base font-semibold">{title}</h2>
+              <Badge variant="outline" className="border-border-strong text-text-secondary">
+                {agents.length}
+              </Badge>
+              {status && nodeStatusBadge(status)}
+            </div>
+            <p className="truncate text-xs text-text-muted">{subtitle}</p>
+          </div>
+        </div>
+      </div>
+      {showUsage && (
+        <WorkspaceUsageHeader
+          agents={agents}
+          label={`${title} Usage`}
+          className="mb-3"
+        />
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+interface RemoteAgentGroup {
+  nodeId: string;
+  title: string;
+  subtitle: string;
+  snapshots: FleetAgentSnapshot[];
+  status?: FleetNodeStatus;
+}
+
+function groupRemoteAgents(
+  snapshots: FleetAgentSnapshot[],
+  statuses: FleetNodeStatus[],
+  statusOnlyStatuses: FleetNodeStatus[] = statuses,
+): RemoteAgentGroup[] {
+  const byNode = new Map<string, FleetAgentSnapshot[]>();
+  for (const status of statusOnlyStatuses) {
+    if (!byNode.has(status.nodeId)) {
+      byNode.set(status.nodeId, []);
+    }
+  }
+  for (const snapshot of snapshots) {
+    const arr = byNode.get(snapshot.nodeId) ?? [];
+    arr.push(snapshot);
+    byNode.set(snapshot.nodeId, arr);
+  }
+
+  return Array.from(byNode.entries())
+    .map(([nodeId, nodeSnapshots]) => {
+      const first = nodeSnapshots[0];
+      const status = statuses.find(
+        (s) => s.nodeId === nodeId && s.workspaceId === (first?.workspaceId ?? s.workspaceId),
+      );
+      const title = first?.nodeName ?? status?.nodeName ?? nodeId;
+      const subtitle = [
+        nodeId,
+        first?.nodeIp ?? status?.nodeIp,
+        first?.remoteWorkspaceId ?? status?.remoteWorkspaceId,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return {
+        nodeId,
+        title,
+        subtitle,
+        snapshots: [...nodeSnapshots].sort((a, b) =>
+          a.agent.name.localeCompare(b.agent.name),
+        ),
+        status,
+      };
+    })
+    .sort((a, b) => a.title.localeCompare(b.title));
+}
+
+function matchesAgent(
+  agent: Agent,
+  query: string,
+  statusFilter: string | null,
+  snapshot?: FleetAgentSnapshot,
+) {
+  const q = query.trim().toLowerCase();
+  const matchesQuery =
+    q.length === 0 ||
+    [
+      agent.name,
+      agent.id,
+      agent.provider,
+      agent.model,
+      snapshot?.nodeId,
+      snapshot?.nodeName,
+      snapshot?.nodeIp,
+    ]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(q));
+  const matchesStatus = !statusFilter || agent.status === statusFilter;
+  return matchesQuery && matchesStatus;
+}
+
+function matchesNodeStatus(status: FleetNodeStatus, query: string) {
+  const q = query.trim().toLowerCase();
+  if (q.length === 0) return true;
+  return [status.nodeId, status.nodeName, status.nodeIp, status.remoteWorkspaceId]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(q));
+}
+
+function nodeStatusBadge(status: FleetNodeStatus) {
+  switch (status.status) {
+    case "connected":
+      return (
+        <Badge className="bg-success/15 text-success border border-success/30 hover:bg-success/20">
+          Connected
+        </Badge>
+      );
+    case "connecting":
+      return (
+        <Badge className="bg-warning/15 text-warning border border-warning/30 hover:bg-warning/20">
+          Connecting
+        </Badge>
+      );
+    case "down":
+      return <Badge variant="destructive">Down</Badge>;
+  }
 }

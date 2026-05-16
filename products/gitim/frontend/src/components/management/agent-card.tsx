@@ -40,9 +40,10 @@ function avatarColor(name: string) {
 
 interface AgentCardProps {
   agent: Agent;
+  readOnly?: boolean;
 }
 
-export function AgentCard({ agent }: AgentCardProps) {
+export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const navigate = useNavigate();
@@ -72,8 +73,10 @@ export function AgentCard({ agent }: AgentCardProps) {
   return (
     <>
       <Card
-        className="relative overflow-hidden cursor-pointer hover:shadow-lg hover:shadow-[var(--color-shadow)] transition-all duration-200 hover:border-border-strong bg-card/60 group"
-        onClick={() => navigate(`/management/${agent.id}`)}
+        className={`relative overflow-hidden hover:shadow-lg hover:shadow-[var(--color-shadow)] transition-all duration-200 hover:border-border-strong bg-card/60 group ${readOnly ? "" : "cursor-pointer"}`}
+        onClick={() => {
+          if (!readOnly) navigate(`/management/${agent.id}`);
+        }}
       >
         {/* Status bar */}
         <div className={`absolute top-0 left-0 right-0 h-1 ${statusBarColor(agent.status)}`} />
@@ -127,46 +130,50 @@ export function AgentCard({ agent }: AgentCardProps) {
           </div>
         </CardContent>
 
-        <CardFooter className="gap-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
-          <Button
-            variant={isRunning ? "outline" : "default"}
-            size="sm"
-            onClick={handleToggle}
-            className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
-          >
-            {isRunning ? (
-              <><Pause className="size-3.5 mr-1" /> Stop</>
-            ) : (
-              <><Play className="size-3.5 mr-1" /> Start</>
-            )}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => navigate(`/management/${agent.id}`)}
-            className="border-border-strong hover:bg-surface-hover"
-          >
-            <Settings className="size-3.5 mr-1" />
-            Details
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setBurnOpen(true)}
-            className="text-destructive hover:text-destructive hover:bg-destructive/10"
-          >
-            <Flame className="size-3.5 mr-1" />
-            Burn
-          </Button>
-        </CardFooter>
+        {!readOnly && (
+          <CardFooter className="gap-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
+            <Button
+              variant={isRunning ? "outline" : "default"}
+              size="sm"
+              onClick={handleToggle}
+              className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
+            >
+              {isRunning ? (
+                <><Pause className="size-3.5 mr-1" /> Stop</>
+              ) : (
+                <><Play className="size-3.5 mr-1" /> Start</>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(`/management/${agent.id}`)}
+              className="border-border-strong hover:bg-surface-hover"
+            >
+              <Settings className="size-3.5 mr-1" />
+              Details
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setBurnOpen(true)}
+              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Flame className="size-3.5 mr-1" />
+              Burn
+            </Button>
+          </CardFooter>
+        )}
       </Card>
 
-      <BurnAgentDialog
-        agentId={agent.id}
-        agentName={agent.name}
-        open={burnOpen}
-        onOpenChange={setBurnOpen}
-      />
+      {!readOnly && (
+        <BurnAgentDialog
+          agentId={agent.id}
+          agentName={agent.name}
+          open={burnOpen}
+          onOpenChange={setBurnOpen}
+        />
+      )}
     </>
   );
 }

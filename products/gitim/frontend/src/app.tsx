@@ -16,6 +16,7 @@ import { useBoardStore } from "./hooks/use-board-store";
 import { useCardStore, parseCardScope, cardPathKey } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
+import { useFleetSSE, useFleetStore } from "./hooks/use-fleet-store";
 import { useIsMobile } from "./hooks/use-media-query";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type {
@@ -156,6 +157,9 @@ export default function App() {
   const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
   const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
+  const setFleetAgents = useFleetStore((s) => s.setAgents);
+  const setFleetStatuses = useFleetStore((s) => s.setStatuses);
+  const resetFleetForSwitch = useFleetStore((s) => s.resetForWorkspaceSwitch);
   const setBoards = useBoardStore((s) => s.setBoards);
   const setSelectedBoard = useBoardStore((s) => s.setSelectedBoard);
   const resetBoardsForSwitch = useBoardStore((s) => s.resetForWorkspaceSwitch);
@@ -209,6 +213,7 @@ export default function App() {
 
   // Agent activity SSE is scoped to the active workspace
   useAgentActivitySSE(mode === "remote" ? activeSlug : null);
+  useFleetSSE(mode === "remote" ? activeSlug : null);
 
   // Keep refs in sync with stores
   useEffect(() => {
@@ -292,6 +297,8 @@ export default function App() {
         channelsRes,
         usersRes,
         agentsRes,
+        fleetAgentsRes,
+        fleetStatusRes,
         cardsRes,
         boardsRes,
         archivedCardsRes,
@@ -302,6 +309,12 @@ export default function App() {
         mode === "remote"
           ? client.listAgents(slug)
           : Promise.resolve({ ok: true, data: { agents: [] } }),
+        mode === "remote"
+          ? client.listFleetAgents()
+          : Promise.resolve({ ok: true, data: { agents: [] } }),
+        mode === "remote"
+          ? client.listFleetStatus()
+          : Promise.resolve({ ok: true, data: { nodes: [] } }),
         client.listCards(slug),
         client.listBoards(slug),
         client.listArchivedCards(slug),
@@ -411,6 +424,10 @@ export default function App() {
       if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
       if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
       if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
+      if (fleetAgentsRes.ok && fleetAgentsRes.data)
+        setFleetAgents(fleetAgentsRes.data.agents);
+      if (fleetStatusRes.ok && fleetStatusRes.data)
+        setFleetStatuses(fleetStatusRes.data.nodes);
       if (cardsRes.ok && cardsRes.data) {
         const cards = cardsRes.data.cards as Card[];
         if (options.preserveSelection) {
@@ -469,6 +486,8 @@ export default function App() {
       setChannels,
       setUsers,
       setAgents,
+      setFleetAgents,
+      setFleetStatuses,
       setCards,
       mergeCards,
       setArchivedCards,
@@ -705,10 +724,20 @@ export default function App() {
       }
 
       if (mode === "remote") {
-        const agentsRes = await client.listAgents(slug);
+        const [agentsRes, fleetAgentsRes, fleetStatusRes] = await Promise.all([
+          client.listAgents(slug),
+          client.listFleetAgents(),
+          client.listFleetStatus(),
+        ]);
         if (!isCurrentPollTarget()) return;
         if (agentsRes.ok && agentsRes.data) {
           setAgents(agentsRes.data.agents as Agent[]);
+        }
+        if (fleetAgentsRes.ok && fleetAgentsRes.data) {
+          setFleetAgents(fleetAgentsRes.data.agents);
+        }
+        if (fleetStatusRes.ok && fleetStatusRes.data) {
+          setFleetStatuses(fleetStatusRes.data.nodes);
         }
       }
 
@@ -747,6 +776,8 @@ export default function App() {
     markDmArchived,
     markDmUnarchived,
     setAgents,
+    setFleetAgents,
+    setFleetStatuses,
     setUsers,
     setBoards,
     setSelectedBoard,
@@ -782,6 +813,7 @@ export default function App() {
     // `addMessages` can't append ws-B entries onto ws-A's list.
     resetChatForSwitch();
     resetAgentsForSwitch();
+    resetFleetForSwitch();
     resetCardsForSwitch();
     resetBoardsForSwitch();
     sinceRef.current = undefined;
@@ -888,11 +920,14 @@ export default function App() {
     setChannels,
     setUsers,
     setAgents,
+    setFleetAgents,
+    setFleetStatuses,
     setCards,
     setBoards,
     setHeadCommit,
     resetChatForSwitch,
     resetAgentsForSwitch,
+    resetFleetForSwitch,
     resetCardsForSwitch,
     resetBoardsForSwitch,
     setConnected,

@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
     channels: vi.fn(),
     users: vi.fn(),
     listAgents: vi.fn(),
+    listFleetAgents: vi.fn(),
+    listFleetStatus: vi.fn(),
     listCards: vi.fn(),
     listBoards: vi.fn(),
     listArchivedCards: vi.fn(),
@@ -71,6 +73,16 @@ vi.mock("./lib/client", () => mocks.client);
 vi.mock("./hooks/use-agent-activity", () => ({
   useAgentActivitySSE: () => undefined,
 }));
+
+vi.mock("./hooks/use-fleet-store", async () => {
+  const actual = await vi.importActual<typeof import("./hooks/use-fleet-store")>(
+    "./hooks/use-fleet-store",
+  );
+  return {
+    ...actual,
+    useFleetSSE: () => undefined,
+  };
+});
 
 vi.mock("./hooks/use-media-query", () => ({
   useIsMobile: () => false,
@@ -180,6 +192,8 @@ describe("App card thread toasts", () => {
     });
     mocks.client.users.mockResolvedValue({ ok: true, data: { users: ["lewis", "alice"] } });
     mocks.client.listAgents.mockResolvedValue({ ok: true, data: { agents: [] } });
+    mocks.client.listFleetAgents.mockResolvedValue({ ok: true, data: { agents: [] } });
+    mocks.client.listFleetStatus.mockResolvedValue({ ok: true, data: { nodes: [] } });
     mocks.client.listCards.mockResolvedValue({
       ok: true,
       data: {

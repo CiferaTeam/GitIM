@@ -196,6 +196,12 @@ struct FleetStatusResponse {
 }
 
 #[derive(Serialize)]
+struct FleetAgentsResponse {
+    ok: bool,
+    agents: Vec<crate::fleet::FleetAgentSnapshot>,
+}
+
+#[derive(Serialize)]
 struct FleetNodeUpsertResponse {
     ok: bool,
     node: crate::user_config::FleetNodeEntry,
@@ -271,7 +277,7 @@ pub struct AgentActivityEvent {
     pub timestamp: String, // ISO8601
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub id: String,
     pub handler: String,
@@ -4051,6 +4057,11 @@ async fn fleet_status(State(state): State<SharedRuntimeState>) -> Json<FleetStat
     Json(FleetStatusResponse { ok: true, nodes })
 }
 
+async fn fleet_agents(State(state): State<SharedRuntimeState>) -> Json<FleetAgentsResponse> {
+    let agents = crate::fleet::fetch_agent_snapshots(&state).await;
+    Json(FleetAgentsResponse { ok: true, agents })
+}
+
 async fn fleet_nodes_upsert(
     State(state): State<SharedRuntimeState>,
     Json(req): Json<crate::user_config::FleetNodeEntry>,
@@ -5328,6 +5339,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .nest("/workspaces/{slug}", ws_router)
         .route("/fleet/events", get(fleet_events))
         .route("/fleet/status", get(fleet_status))
+        .route("/fleet/agents", get(fleet_agents))
         .route(
             "/fleet/nodes",
             get(fleet_nodes_list).post(fleet_nodes_upsert),

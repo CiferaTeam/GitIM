@@ -1,7 +1,8 @@
 import { formatTokens } from "@/lib/format-tokens";
 import { sparklinePath } from "@/lib/sparkline";
-import { useWorkspaceUsage } from "@/hooks/use-workspace-usage";
-import type { UsageBucket } from "@/lib/types";
+import { aggregateWorkspaceUsage, useWorkspaceUsage } from "@/hooks/use-workspace-usage";
+import type { Agent, UsageBucket } from "@/lib/types";
+import { useMemo } from "react";
 
 function bucketTotal(b: UsageBucket): number {
   return b.input + b.output + b.cacheRead + b.cacheCreation;
@@ -11,8 +12,23 @@ function bucketTotal(b: UsageBucket): number {
  *  Sums every agent's `usageSummary` client-side and renders the workspace-
  *  level totals + 30-day sparkline + per-provider breakdown. Hides itself
  *  when no agent has produced usage data yet. */
-export function WorkspaceUsageHeader() {
-  const usage = useWorkspaceUsage();
+interface WorkspaceUsageHeaderProps {
+  agents?: Agent[];
+  label?: string;
+  className?: string;
+}
+
+export function WorkspaceUsageHeader({
+  agents,
+  label = "Workspace Usage",
+  className = "mb-4",
+}: WorkspaceUsageHeaderProps) {
+  const storeUsage = useWorkspaceUsage();
+  const propUsage = useMemo(
+    () => (agents ? aggregateWorkspaceUsage(agents) : null),
+    [agents],
+  );
+  const usage = propUsage ?? storeUsage;
   if (!usage.hasData) return null;
 
   const totalTokens = bucketTotal(usage.totals);
@@ -20,10 +36,10 @@ export function WorkspaceUsageHeader() {
   const sparklineValues = usage.byDay.map((d) => bucketTotal(d.bucket));
 
   return (
-    <section className="mb-4 rounded-lg border border-border-soft bg-card/40 px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <section className={`${className} rounded-lg border border-border-soft bg-card/40 px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between`}>
       <div className="flex flex-col gap-1">
         <div className="text-xs uppercase tracking-wide text-text-muted">
-          Workspace Usage
+          {label}
         </div>
         <div className="flex items-baseline gap-2">
           <span className="text-xl font-mono text-foreground">
