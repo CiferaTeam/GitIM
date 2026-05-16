@@ -89,10 +89,12 @@ pub struct AcpClient {
     next_id: Mutex<i64>,
     pending: Mutex<HashMap<i64, oneshot::Sender<JsonRpcResponse>>>,
     /// Tracks tool calls between their `tool_call` and `tool_call_update`
-    /// notifications. Currently informational only — hermes and kimi
-    /// receive full `rawInput` up front and don't need argument streaming.
-    /// Kept on the struct (per design) so kiro / future ACP servers that
-    /// do stream arguments can plug in without changing the API.
+    /// notifications. Reserved for future argument-streaming ACP servers
+    /// (kiro) — hermes and kimi receive complete `rawInput` on the
+    /// `tool_call` notification, so v1 keeps the map allocated but never
+    /// inserts or removes. When a real consumer arrives, populate it in
+    /// `dispatch_parsed` and read it in the new consumer's branch; the
+    /// `#[allow(dead_code)]` comes off naturally.
     #[allow(dead_code)]
     pending_tools: Mutex<HashMap<String, PendingToolCall>>,
     /// Cumulative usage observed via `session/update` notifications during
@@ -123,7 +125,10 @@ pub enum JsonRpcResponse {
 /// State a single tool call carries between its initiating `tool_call`
 /// notification and the matching `tool_call_update` completion. Crate-
 /// private — kept on the [`AcpClient`] type only as a placeholder for
-/// future argument-streaming ACP servers (see the field doc).
+/// future argument-streaming ACP servers (see the field doc on
+/// [`AcpClient::pending_tools`]). The struct is never instantiated in
+/// v1, so an `#[allow(dead_code)]` masks the unused-struct warning;
+/// once a real consumer constructs it, that attribute comes off.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct PendingToolCall {
@@ -437,6 +442,20 @@ impl AcpClient {
         let _ = stdin.shutdown().await;
     }
 
+    /// Drop every pending request sender so blocked `request()` awaiters
+    /// observe `Err(_)` from their oneshot receiver immediately, mapped to
+    /// `ProviderError::Protocol("…response channel closed (stream ended)")`.
+    ///
+    /// The reader task MUST call this on stream exit (`Ok(None)` or
+    /// `Err(_)` from `next_line()`). Without it, an in-flight `request`
+    /// would block on its oneshot until the driver's outer
+    /// `tokio::time::timeout` fires — defaulting to 20 minutes for hermes
+    /// — turning every mid-prompt child crash into a 20-minute hang.
+    pub async fn fail_pending(&self) {
+        // Dropping every Sender wakes its receiver with `Err(Closed)`.
+        self.pending.lock().await.clear();
+    }
+
     /// Internal helper — translates a [`ParsedNotification`] into the
     /// corresponding `Event::*` (with the hook-mapped tool name), and
     /// updates the per-execute accumulators.
@@ -461,14 +480,12 @@ impl AcpClient {
                 call_id,
                 input,
             } => {
+                // `pending_tools` deliberately not populated — hermes/kimi
+                // receive full `rawInput` on the `tool_call` notification
+                // and don't need to buffer arguments across stream events.
+                // The map stays on `AcpClient` as the design's plug point
+                // for future argument-streaming ACP servers (kiro).
                 let mapped = (self.hooks.tool_name_mapper)(&tool);
-                self.pending_tools.lock().await.insert(
-                    call_id.clone(),
-                    PendingToolCall {
-                        tool: mapped.clone(),
-                        input: input.clone(),
-                    },
-                );
                 try_send_event(
                     event_tx,
                     Event::ToolUse {
@@ -482,9 +499,6 @@ impl AcpClient {
                 call_id,
                 output: tool_output,
             } => {
-                // Discard the pending entry — we currently re-emit nothing
-                // from it (call_id alone is the link the runtime needs).
-                let _ = self.pending_tools.lock().await.remove(&call_id);
                 try_send_event(
                     event_tx,
                     Event::ToolResult {
@@ -501,13 +515,14 @@ impl AcpClient {
                 // pushes if the runtime token accumulator listened to them.
                 *self.usage.lock().await = u.clone();
                 if self.hooks.emit_live_usage {
-                    let session_id = self
-                        .current_session_id
-                        .lock()
-                        .await
-                        .clone()
-                        .unwrap_or_default();
-                    try_send_event(event_tx, Event::Usage { session_id, usage: u });
+                    // Drop pre-session usage updates silently — some ACP
+                    // servers emit them during initialize, before any
+                    // `session/new` response sets `current_session_id`.
+                    // Fabricating an empty session_id would corrupt the
+                    // runtime's per-session usage book-keeping.
+                    if let Some(session_id) = self.current_session_id.lock().await.clone() {
+                        try_send_event(event_tx, Event::Usage { session_id, usage: u });
+                    }
                 }
             }
         }
@@ -518,8 +533,120 @@ fn extract_session_id(v: &Value) -> Option<String> {
     v.get("sessionId").and_then(|x| x.as_str()).map(String::from)
 }
 
-fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
+/// Best-effort event emission — drops the event on a full channel rather
+/// than blocking the driver / reader task. Used inside the ACP dispatch
+/// path and re-used by the hermes driver for its own `Event::Status`
+/// emission so the warning text is consistent.
+pub(crate) fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("event channel full, dropping event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::process::Command as TokioCommand;
+    use tokio::time::{timeout, Duration};
+
+    fn test_hooks() -> AcpHooks {
+        AcpHooks {
+            tool_name_mapper: AcpHooks::identity_tool_mapper,
+            accept_notification: None,
+            emit_live_usage: false,
+        }
+    }
+
+    /// Regression test for the stream-close hang the refactor introduced
+    /// and the `fail_pending` call in the reader exit path fixes.
+    ///
+    /// Setup: spawn `sh -c 'sleep 30'` (a process that never reads stdin
+    /// nor writes stdout but holds both pipes open), wrap its stdin in an
+    /// `AcpClient`, fire a request, then kill the child. The reader task
+    /// hits EOF on stdout, calls `fail_pending`, and the in-flight
+    /// `request().await` must return `Err(_)` within milliseconds — not
+    /// block until any outer timeout the caller might wrap us in. We give
+    /// the test a generous 5s wall clock; the unblock should be
+    /// ~immediate.
+    ///
+    /// We use a non-echoing fake (rather than `cat`) so the request's
+    /// stdin write succeeds into the void instead of being echoed back as
+    /// a synthetic JSON-RPC response — without that, `handle_line` would
+    /// parse the echo's `id` field and resolve the pending oneshot as Ok.
+    #[tokio::test]
+    async fn stream_close_releases_pending() {
+        let mut child = TokioCommand::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("sh must be on PATH");
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+
+        let client = Arc::new(AcpClient::new("test", stdin, test_hooks()));
+
+        // Reader task — mirrors the production hermes wiring including the
+        // fail_pending() call on stream exit. This is the contract under
+        // test.
+        let reader_client = Arc::clone(&client);
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(8);
+        let reader = tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                reader_client.handle_line(&line, &event_tx).await;
+            }
+            reader_client.fail_pending().await;
+        });
+
+        // Fire the request in the background — it'll block on its oneshot
+        // until either a real response (cat won't send one) or fail_pending
+        // drops the sender.
+        let request_client = Arc::clone(&client);
+        let request = tokio::spawn(async move {
+            request_client.request("ping", json!({})).await
+        });
+
+        // Wait for the request's stdin write to complete so we exercise the
+        // post-write window — the one where `fail_pending` is the critical
+        // actor. Without this delay the kill races the write, broken-pipe
+        // wins, and the test no longer regresses if `fail_pending` is
+        // removed. cat echoes the line back so a quick `wait` on a sentinel
+        // round-trip would be more deterministic, but a 50ms sleep keeps the
+        // test trivially understandable and is still fast.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Kill cat so its stdout closes → reader sees EOF → fail_pending fires.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+
+        let result = timeout(Duration::from_secs(5), request)
+            .await
+            .expect("request should unblock once reader calls fail_pending")
+            .expect("join handle");
+
+        match result {
+            Err(ProviderError::Protocol(msg)) => {
+                // Two races land in the same property — the request
+                // either failed at write time ("stdin write failed …
+                // Broken pipe") because we killed the child first, or
+                // it succeeded into the void and was released by
+                // `fail_pending` once the reader hit EOF
+                // ("response channel closed (stream ended)"). Both
+                // satisfy the contract: `request` must not hang.
+                assert!(
+                    msg.contains("stream ended") || msg.contains("Broken pipe"),
+                    "expected stream-ended or broken-pipe diagnostic, got: {msg}"
+                );
+            }
+            other => panic!("expected ProviderError::Protocol, got {other:?}"),
+        }
+
+        // Drain the reader so the test exits cleanly.
+        let _ = timeout(Duration::from_secs(1), reader).await;
     }
 }

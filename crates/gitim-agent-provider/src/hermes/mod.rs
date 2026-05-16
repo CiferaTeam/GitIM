@@ -9,8 +9,8 @@ use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::acp::{AcpClient, AcpHooks};
 use crate::acp::parse::detect_api_failure;
+use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
     ProviderError, ProviderUsage, Session,
@@ -247,7 +247,13 @@ async fn drive_session(
 
     // Reader task — pumps stdout through AcpClient::handle_line so JSON-RPC
     // responses land on their pending oneshots and session/update
-    // notifications turn into Event::* on event_tx.
+    // notifications turn into Event::* on event_tx. On stream exit (clean
+    // EOF or read error) we MUST fail any in-flight pending requests:
+    // without that, a mid-prompt child crash would leave the driver's
+    // `request()` future blocked on its oneshot until the outer
+    // `tokio::time::timeout` fires (20 minutes for hermes). The pre-refactor
+    // event loop broke on `Ok(None)` and failed in seconds; `fail_pending`
+    // restores that fast-fail behavior for the shared-reader topology.
     let reader_acp = Arc::clone(&acp);
     let reader_event_tx = event_tx.clone();
     let reader_handle = tokio::spawn(async move {
@@ -264,6 +270,7 @@ async fn drive_session(
                 }
             }
         }
+        reader_acp.fail_pending().await;
     });
 
     // ── Handshake (initialize → authenticate → new_session/resume) ──
@@ -297,7 +304,7 @@ async fn drive_session(
                 result_tx,
                 ExecStatus::Failed,
                 String::new(),
-                Some(provider_error_message(&e)),
+                Some(e.to_string()),
                 start,
                 &session_id,
                 None,
@@ -357,7 +364,7 @@ async fn drive_session(
         }
         Ok(Some(Err(e))) => {
             final_status = ExecStatus::Failed;
-            final_error = Some(provider_error_message(&e));
+            final_error = Some(e.to_string());
         }
         Ok(None) => {
             info!(pid, "cancelled by steering");
@@ -384,10 +391,12 @@ async fn drive_session(
     // killed). Wait for it to drain so any trailing notifications that
     // arrived after the prompt response — usually none for hermes, but
     // possible — get processed into the text accumulator before we
-    // sample the final output.
+    // sample the final output. After this await, no further `handle_line`
+    // calls happen and the accumulator is stable — a single read is
+    // sufficient.
     let _ = reader_handle.await;
 
-    let mut output = acp.collected_output().await;
+    let output = acp.collected_output().await;
 
     if final_status == ExecStatus::Completed {
         if let Some(api_err) = detect_api_failure(&output) {
@@ -410,10 +419,6 @@ async fn drive_session(
             _ => {}
         }
     }
-
-    // Final output drain — covers the case where additional text content
-    // arrived between the previous sample and child exit.
-    output = acp.collected_output().await;
 
     let duration = start.elapsed();
     info!(pid, ?final_status, ?duration, "hermes finished");
@@ -467,19 +472,3 @@ fn send_result(
     });
 }
 
-fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
-    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
-        warn!("event channel full, dropping event");
-    }
-}
-
-/// Extract the human-readable inner message from a [`ProviderError`],
-/// matching the un-prefixed shape the previous inline rpc_call produced
-/// in `ExecResult.error`. The `thiserror`-generated `Display` impl
-/// prepends `"protocol error: "` which would be redundant noise here.
-fn provider_error_message(e: &ProviderError) -> String {
-    match e {
-        ProviderError::Protocol(msg) => msg.clone(),
-        other => other.to_string(),
-    }
-}

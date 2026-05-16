@@ -16,8 +16,10 @@ pub enum ProviderError {
 
     /// Wire-level protocol error — JSON-RPC reported an `error` object,
     /// the stream ended mid-handshake, or a request timed out before
-    /// receiving a response. Carries a human-readable description shaped
-    /// for `ExecResult.error`.
-    #[error("protocol error: {0}")]
+    /// receiving a response. The carried string already names the failing
+    /// method / message; `Display` is passthrough so it can flow straight
+    /// into `ExecResult.error` without a redundant `"protocol error: "`
+    /// prefix.
+    #[error("{0}")]
     Protocol(String),
 }
