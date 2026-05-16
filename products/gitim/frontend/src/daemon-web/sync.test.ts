@@ -46,6 +46,7 @@ vi.mock("./auth-errors", () => ({
 }));
 
 import { getState, initState, setState } from "./state";
+import { withRepoLock } from "./repo-lock";
 import { runSync } from "./sync";
 
 const baseThread = "[L000001][P000000][@alice][20260317T120000Z] base\n";
@@ -168,6 +169,35 @@ describe("daemon-web sync", () => {
     });
   });
 
+  it("does not reset while a local writer holds the repo lock", async () => {
+    let releaseWriter!: () => void;
+    const writer = withRepoLock(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseWriter = resolve;
+        }),
+    );
+    await Promise.resolve();
+
+    setState({ headCommit: "local-head", defaultBranch: "main" });
+    gitMocks.resolveHead.mockResolvedValueOnce("local-head");
+    gitMocks.resolveRemoteHead.mockResolvedValueOnce("remote-head");
+
+    const sync = runSync({ forceNewCycle: true });
+    await Promise.resolve();
+
+    expect(gitMocks.resetToRemote).not.toHaveBeenCalled();
+
+    releaseWriter();
+    await writer;
+    await sync;
+
+    expect(gitMocks.resetToRemote).toHaveBeenCalledWith(
+      "/repo",
+      "refs/remotes/origin/main",
+    );
+  });
+
   it("shares an in-flight sync for concurrent non-forced calls", async () => {
     let releaseFetch!: () => void;
     gitMocks.fetchOrigin.mockImplementationOnce(
@@ -182,7 +212,9 @@ describe("daemon-web sync", () => {
 
     const first = runSync();
     const second = runSync();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(gitMocks.fetchOrigin).toHaveBeenCalledTimes(1);
+    });
     releaseFetch();
 
     await expect(Promise.all([first, second])).resolves.toEqual([
