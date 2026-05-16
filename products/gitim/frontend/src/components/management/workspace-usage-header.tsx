@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { workspaceIdentity } from "@/lib/workspace-key";
@@ -53,19 +53,21 @@ export function WorkspaceUsageHeader({
     ? workspaceIdentity(mode, activeWorkspace)
     : null;
 
-  const [breakdown, setBreakdown] = useState<UsageBreakdown>(() =>
-    workspaceKey
-      ? readUiState(workspaceKey).usageBreakdown
-      : DEFAULT_UI_STATE.usageBreakdown,
-  );
+  const initialBreakdown = workspaceKey
+    ? readUiState(workspaceKey).usageBreakdown
+    : DEFAULT_UI_STATE.usageBreakdown;
+  const [breakdown, setBreakdown] = useState<UsageBreakdown>(initialBreakdown);
+  const [persistedKey, setPersistedKey] = useState(workspaceKey);
 
   // Re-hydrate when the workspace key changes — switching workspaces without
   // remounting this component would otherwise show the previous workspace's
-  // preference until the next click.
-  useEffect(() => {
-    if (!workspaceKey) return;
-    setBreakdown(readUiState(workspaceKey).usageBreakdown);
-  }, [workspaceKey]);
+  // preference until the next click. Done as in-render setState rather than
+  // useEffect because the value derives from props; see
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  if (workspaceKey !== persistedKey) {
+    setPersistedKey(workspaceKey);
+    setBreakdown(initialBreakdown);
+  }
 
   if (!usage.hasData) return null;
 
