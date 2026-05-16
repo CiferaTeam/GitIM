@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 mod error;
 pub mod gemini;
 pub mod hermes;
