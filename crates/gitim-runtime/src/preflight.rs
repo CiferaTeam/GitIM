@@ -1837,6 +1837,18 @@ pub async fn preflight_cursor_with_config(
     }
 }
 
+/// Run preflight against the default `cursor-agent` binary with no overrides.
+/// Used by direct `/preflight/cursor` callers; the add-agent path uses
+/// [`preflight_for_add_request`] which threads agent env + model.
+pub async fn preflight_cursor() -> PreflightResult {
+    preflight_cursor_with_config(
+        DEFAULT_BIN_CURSOR,
+        Duration::from_secs(60),
+        PreflightOverrides::default(),
+    )
+    .await
+}
+
 /// Read `(provider, model)` from the user's hermes default profile config.
 ///
 /// Resolves the hermes home directory from the `HERMES_HOME` env var (falling
