@@ -277,6 +277,7 @@ import {
 } from "./handlers";
 import { getState, initState, setState } from "./state";
 import { getActiveFsName } from "./storage";
+import { withRepoLock } from "./repo-lock";
 
 const generalThread =
   "[L000001][P000000][@alice][20260317T120000Z] hello\n" +
@@ -924,6 +925,35 @@ describe("daemon-web handlers", () => {
       status: "pushed",
     });
     expect(runSyncMock).toHaveBeenCalledWith({ forceNewCycle: true });
+  });
+
+  it("does not write a sent message while a sync holds the repo lock", async () => {
+    let releaseSync!: () => void;
+    const sync = withRepoLock(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSync = resolve;
+        }),
+    );
+    await Promise.resolve();
+
+    const sent = send("general", "from locked mobile send");
+    await Promise.resolve();
+
+    expect(files.get("/repo/channels/general.thread")).not.toContain(
+      "from locked mobile send",
+    );
+    expect(commits).toHaveLength(0);
+
+    releaseSync();
+    await sync;
+    const res = await sent;
+
+    expect(res.ok).toBe(true);
+    expect(files.get("/repo/channels/general.thread")).toContain(
+      "from locked mobile send",
+    );
+    expect(commits.at(-1)?.message).toContain("L000003");
   });
 
   it("keeps the local line number and surfaces sync failure after send", async () => {

@@ -7,6 +7,7 @@ import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
 import { isAuthFailure } from "./auth-errors";
 import { validateHandler } from "./paths";
+import { withRepoLock } from "./repo-lock";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -102,6 +103,10 @@ function errorMessage(e: unknown): string {
 let syncInFlight: Promise<SyncResult> | null = null;
 
 async function runSyncOnce(): Promise<SyncResult> {
+  return withRepoLock(runSyncOnceLocked);
+}
+
+async function runSyncOnceLocked(): Promise<SyncResult> {
   const s = getState();
   const beforeHead = s.headCommit;
   if (!s.token) {

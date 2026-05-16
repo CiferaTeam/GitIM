@@ -42,6 +42,7 @@ import {
 } from "./paths";
 import type { Card, CardStatus } from "../lib/types";
 import { tokenAuth } from "./auth";
+import { withRepoLock } from "./repo-lock";
 
 type ApiResponse = {
   ok: boolean;
@@ -49,6 +50,10 @@ type ApiResponse = {
   error?: string;
   error_code?: string;
 };
+
+type SendWriteResult =
+  | { kind: "written"; lineNumber: number }
+  | { kind: "response"; response: ApiResponse };
 
 type RawCardMeta = Omit<Card, "card_id">;
 
@@ -502,80 +507,92 @@ export async function send(
   replyTo?: number,
 ): Promise<ApiResponse> {
   try {
-    const s = getState();
-    if (!s.token) return reconnectRequired();
-    const target = resolveThreadTarget(channel);
-    const filePath = target.threadPath;
-    const absPath = `${s.repoDir}/${filePath}`;
+    const writeResult: SendWriteResult = await withRepoLock(async () => {
+      const s = getState();
+      if (!s.token) return { kind: "response", response: reconnectRequired() };
+      const target = resolveThreadTarget(channel);
+      const filePath = target.threadPath;
+      const absPath = `${s.repoDir}/${filePath}`;
 
-    if (target.kind === "channel") {
-      const metaPath = `${s.repoDir}/${channelMetaPath(target.name)}`;
-      if (!(await exists(metaPath))) {
-        return err(`channel '${target.name}' not found`);
-      }
-      const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
-      if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
-        return err("not_member");
-      }
-    } else {
-      if (!target.members.includes(s.me.handler)) {
-        return err("not_dm_participant");
-      }
-      for (const member of target.members) {
-        if (!(await exists(`${s.repoDir}/users/${member}.meta.yaml`))) {
-          return err(`unknown DM participant: ${member}`);
+      if (target.kind === "channel") {
+        const metaPath = `${s.repoDir}/${channelMetaPath(target.name)}`;
+        if (!(await exists(metaPath))) {
+          return {
+            kind: "response",
+            response: err(`channel '${target.name}' not found`),
+          };
+        }
+        const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
+        if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
+          return { kind: "response", response: err("not_member") };
+        }
+      } else {
+        if (!target.members.includes(s.me.handler)) {
+          return { kind: "response", response: err("not_dm_participant") };
+        }
+        for (const member of target.members) {
+          if (!(await exists(`${s.repoDir}/users/${member}.meta.yaml`))) {
+            return {
+              kind: "response",
+              response: err(`unknown DM participant: ${member}`),
+            };
+          }
         }
       }
-    }
 
-    // Read existing content
-    let existing = "";
-    if (await exists(absPath)) {
-      existing = await readFile(absPath);
-    } else {
-      await mkdir(`${s.repoDir}/${target.kind === "dm" ? "dm" : "channels"}`);
-    }
+      // Read existing content
+      let existing = "";
+      if (await exists(absPath)) {
+        existing = await readFile(absPath);
+      } else {
+        await mkdir(`${s.repoDir}/${target.kind === "dm" ? "dm" : "channels"}`);
+      }
 
-    // Find next line number
-    const file = parseThread(existing);
-    const maxLine =
-      file.entries.length > 0
-        ? Math.max(...file.entries.map((e) => e.line_number))
-        : 0;
-    const nextLine = maxLine + 1;
+      // Find next line number
+      const file = parseThread(existing);
+      const maxLine =
+        file.entries.length > 0
+          ? Math.max(...file.entries.map((e) => e.line_number))
+          : 0;
+      const nextLine = maxLine + 1;
 
-    // Generate timestamp
-    const now = new Date();
-    const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-    const timestamp =
-      `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
-      `T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
+      // Generate timestamp
+      const now = new Date();
+      const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+      const timestamp =
+        `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+        `T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
 
-    const line = formatMessage(
-      nextLine,
-      replyTo ?? 0,
-      s.me.handler,
-      timestamp,
-      body,
-    );
+      const line = formatMessage(
+        nextLine,
+        replyTo ?? 0,
+        s.me.handler,
+        timestamp,
+        body,
+      );
 
-    // Append to file
-    let newContent = existing;
-    if (newContent && !newContent.endsWith("\n")) newContent += "\n";
-    newContent += line;
-    await writeFile(absPath, newContent);
+      // Append to file
+      let newContent = existing;
+      if (newContent && !newContent.endsWith("\n")) newContent += "\n";
+      newContent += line;
+      await writeFile(absPath, newContent);
 
-    // Commit
-    await gitOps.addAndCommit(
-      s.repoDir,
-      [filePath],
-      `msg: @${s.me.handler} -> ${target.name} L${String(nextLine).padStart(6, "0")}`,
-      s.me.handler,
-    );
+      // Commit
+      await gitOps.addAndCommit(
+        s.repoDir,
+        [filePath],
+        `msg: @${s.me.handler} -> ${target.name} L${String(nextLine).padStart(6, "0")}`,
+        s.me.handler,
+      );
+
+      return { kind: "written", lineNumber: nextLine };
+    });
+
+    if (writeResult.kind === "response") return writeResult.response;
 
     const sync = await syncAfterCommit();
 
-    return ok({ line_number: nextLine, ...sync });
+    return ok({ line_number: writeResult.lineNumber, ...sync });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }
