@@ -112,11 +112,16 @@ DM 频道(路径 `dm/<a>--<b>.thread`)的每条消息 `recipients = [member_a, m
 
 理由:DM 是 2 人对话,不存在 fanout 问题,而且 DM 漏发会让对方一脸懵。
 
-### P7 — 删掉 runtime 现有的 body mention 扫描
+### P7 — Runtime 加 recipients 过滤,保留 body mention 作为 display tag
 
-新逻辑替换旧的 mention 字符串检查。Mention 语义的定义权完全交给 daemon (`compute_recipients` 内部读 `Message.mentions`)。
+现状澄清:runtime 的 `body.contains(&self_mention)` 检查**只用于设置 `[MENTION]` 显示标签**,不是 filter。当前 runtime 对消息**不做内容过滤** —— 所有非自作者 message 都被拼进 prompt 喂给 LLM。这正是 cascade 的根源。
 
-行为变化:之前 runtime 是"被 mention 才回",现在是"recipients 包含我就回"。**严格扩大** —— 之前会回的现在也会回,但之前不会回的现在也可能会回(owner / parent-chain 接续场景)。
+新逻辑:
+- 在 `format_changes_as_prompt` 里加一步 "self 不在 entry.recipients 就 skip"(recipients 非空时)
+- recipients **空或缺失** → 不过滤(broadcast fallback,见 fallback 节)
+- 保留 `body.contains(&mention)` 给 `[MENTION]` tag —— 这是给 LLM 的有用信号("这条专门点了你"),不要因为重构丢掉
+
+行为变化:**严格收紧** —— 之前所有非自作者 message 都进 prompt(N agent 全部唤醒);之后只有 recipients 含自己的 message 进 prompt(对应 agent 才唤醒)。Cascade 被路由规则 cap 在 owner + parent-chain + mention 命中的 agent 集合。
 
 ---
 
