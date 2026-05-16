@@ -220,3 +220,26 @@ async fn join_channel_legacy_body_forwards_empty_targets() {
         })
     );
 }
+
+#[tokio::test]
+async fn list_archived_channels_forwards_pagination_query() {
+    let (router, mut daemon, _tmp) = setup();
+    let (status, body) = send(
+        router,
+        "GET",
+        "/workspaces/test-ws/im/channels/archived?offset=10&limit=25",
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"ok": true, "data": {"accepted": true}}));
+    assert_eq!(
+        daemon.next_request().await,
+        json!({
+            "method": "archived_channels",
+            "offset": 10,
+            "limit": 25,
+        })
+    );
+}

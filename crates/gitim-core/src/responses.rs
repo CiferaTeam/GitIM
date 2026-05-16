@@ -77,6 +77,15 @@ pub struct ListChannelsResponse {
     pub channels: Vec<ChannelSummary>,
 }
 
+/// Response payload for `Request::ListArchivedChannels` when callers opt into
+/// pagination. The unpaged compatibility path omits `has_more`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedChannelsResponse {
+    pub channels: Vec<ChannelSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+}
+
 /// Active users with optional archived users in a single payload.
 ///
 /// `include_archived` on the request controls whether `archived_users` is

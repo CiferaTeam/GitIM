@@ -1069,14 +1069,20 @@ export async function unarchiveChannel(
 
 export async function listArchivedChannels(
   slug: string,
-): Promise<ApiResponse<{ channels: Channel[] }>> {
+  opts?: { offset?: number; limit?: number },
+): Promise<ApiResponse<{ channels: Channel[]; has_more?: boolean }>> {
   if (isLocalMode()) {
     void slug;
-    return localChannelArchiveBackend().listArchivedChannels() as Promise<
-      ApiResponse<{ channels: Channel[] }>
+    return localChannelArchiveBackend().listArchivedChannels(opts) as Promise<
+      ApiResponse<{ channels: Channel[]; has_more?: boolean }>
     >;
   }
-  const res = await fetch(`${wsBase(slug)}/im/channels/archived`);
+  const params = new URLSearchParams();
+  if (typeof opts?.offset === "number") params.set("offset", String(opts.offset));
+  if (typeof opts?.limit === "number") params.set("limit", String(opts.limit));
+  const query = params.toString();
+  const suffix = query ? `?${query}` : "";
+  const res = await fetch(`${wsBase(slug)}/im/channels/archived${suffix}`);
   return await res.json();
 }
 

@@ -153,9 +153,19 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
     Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
-pub async fn handle_list_archived_channels(state: SharedState) -> Response {
-    use gitim_core::responses::{ChannelSummary, ListChannelsResponse};
+pub async fn handle_list_archived_channels(
+    state: SharedState,
+    offset: usize,
+    limit: Option<usize>,
+) -> Response {
+    use gitim_core::responses::{ChannelSummary, ListArchivedChannelsResponse};
     let mut channels: Vec<ChannelSummary> = Vec::new();
+
+    if let Some(limit) = limit {
+        if limit == 0 || limit > 100 {
+            return Response::error(format!("invalid limit {limit}: must be 1..=100"));
+        }
+    }
 
     // 扫描 archive/channels/*.meta.yaml — 读取 members 字段
     let arch_ch_dir = state.repo_root.join("archive").join("channels");
@@ -181,7 +191,19 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
     }
 
     channels.sort_by(|a, b| a.name.cmp(&b.name));
-    Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
+    let (channels, has_more) = match limit {
+        Some(limit) => {
+            // Peek limit+1 to compute has_more without an extra count pass.
+            let window: Vec<_> = channels.into_iter().skip(offset).take(limit + 1).collect();
+            let has_more = window.len() > limit;
+            (window.into_iter().take(limit).collect(), Some(has_more))
+        }
+        None => (channels.into_iter().skip(offset).collect(), None),
+    };
+
+    Response::success(
+        serde_json::to_value(ListArchivedChannelsResponse { channels, has_more }).unwrap(),
+    )
 }
 
 /// List active users. When `include_archived` is true, also scan
@@ -433,4 +455,78 @@ pub async fn handle_stop(state: SharedState) -> Response {
         status: "stopping".to_string(),
     };
     Response::success(serde_json::to_value(payload).unwrap())
+}
+
+#[cfg(test)]
+mod archived_channel_tests {
+    use super::*;
+    use crate::api::Event;
+    use crate::state::AppState;
+    use gitim_core::types::Config;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::broadcast;
+
+    fn state_for(repo_root: &std::path::Path) -> SharedState {
+        let (tx, _) = broadcast::channel::<Event>(16);
+        Arc::new(AppState::new(
+            repo_root.to_path_buf(),
+            Config::default(),
+            tx,
+            None,
+        ))
+    }
+
+    fn write_archived_channel(repo_root: &std::path::Path, name: &str) {
+        let dir = repo_root.join("archive/channels");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.meta.yaml")),
+            [
+                "display_name: Test",
+                "created_by: lewis",
+                "created_at: 20260516T000000Z",
+                "introduction: Test channel",
+                "members:",
+                "  - lewis",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_archived_channels_pages_sorted_window() {
+        let tmp = TempDir::new().unwrap();
+        let state = state_for(tmp.path());
+        for name in ["gamma", "alpha", "beta"] {
+            write_archived_channel(tmp.path(), name);
+        }
+
+        let first = handle_list_archived_channels(state.clone(), 0, Some(2)).await;
+        assert!(first.ok);
+        assert_eq!(
+            first.data.unwrap(),
+            serde_json::json!({
+                "channels": [
+                    {"name": "alpha", "kind": "archived_channel", "members": ["lewis"]},
+                    {"name": "beta", "kind": "archived_channel", "members": ["lewis"]},
+                ],
+                "has_more": true,
+            })
+        );
+
+        let second = handle_list_archived_channels(state, 2, Some(2)).await;
+        assert!(second.ok);
+        assert_eq!(
+            second.data.unwrap(),
+            serde_json::json!({
+                "channels": [
+                    {"name": "gamma", "kind": "archived_channel", "members": ["lewis"]},
+                ],
+                "has_more": false,
+            })
+        );
+    }
 }

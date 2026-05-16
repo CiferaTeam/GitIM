@@ -123,7 +123,10 @@ export interface CardBackend {
 export interface ChannelArchiveBackend {
   archiveChannel(channel: string): Promise<ApiResponse>;
   unarchiveChannel(channel: string): Promise<ApiResponse>;
-  listArchivedChannels(): Promise<ApiResponse>;
+  listArchivedChannels(opts?: {
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResponse>;
 }
 
 export interface DmArchiveBackend {
@@ -445,8 +448,11 @@ export class LocalBackend implements Backend {
   unarchiveChannel(channel: string): Promise<ApiResponse> {
     return this.call("unarchiveChannel", channel);
   }
-  listArchivedChannels(): Promise<ApiResponse> {
-    return this.call("listArchivedChannels");
+  listArchivedChannels(opts?: {
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResponse> {
+    return this.call("listArchivedChannels", opts);
   }
   archiveDm(peer: string): Promise<ApiResponse> {
     return this.call("archiveDm", peer);

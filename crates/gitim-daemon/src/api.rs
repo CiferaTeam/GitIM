@@ -241,7 +241,12 @@ pub enum Request {
         author: Option<String>,
     },
     #[serde(rename = "archived_channels")]
-    ListArchivedChannels,
+    ListArchivedChannels {
+        #[serde(default)]
+        offset: usize,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     #[serde(rename = "create_card")]
     CreateCard {
         channel: String,
@@ -535,6 +540,32 @@ mod tests {
         let req2: Request = serde_json::from_str(json_no_ch).unwrap();
         match req2 {
             Request::ListArchivedCards { channel } => assert_eq!(channel, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn list_archived_channels_request_carries_pagination() {
+        let json = r#"{"method":"archived_channels","offset":5,"limit":10}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedChannels { offset, limit } => {
+                assert_eq!(offset, 5);
+                assert_eq!(limit, Some(10));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn list_archived_channels_request_defaults_to_unpaged() {
+        let json = r#"{"method":"archived_channels"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedChannels { offset, limit } => {
+                assert_eq!(offset, 0);
+                assert_eq!(limit, None);
+            }
             _ => panic!("wrong variant"),
         }
     }

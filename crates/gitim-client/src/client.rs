@@ -258,6 +258,21 @@ impl GitimClient {
         self.request("archived_channels", json!({})).await
     }
 
+    pub async fn list_archived_channels_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "archived_channels",
+            json!({
+                "offset": offset,
+                "limit": limit,
+            }),
+        )
+        .await
+    }
+
     pub async fn archive_dm(&self, peer: &str) -> Result<ApiResponse, ClientError> {
         self.request("archive_dm", json!({ "peer": peer })).await
     }
@@ -876,6 +891,17 @@ mod tests {
                 "prefix": "al",
                 "offset": 0,
                 "limit": 5,
+            }),
+        );
+
+        let list_channels_paged =
+            build_request("archived_channels", json!({"offset": 10, "limit": 25}));
+        assert_eq!(
+            list_channels_paged,
+            json!({
+                "method": "archived_channels",
+                "offset": 10,
+                "limit": 25,
             }),
         );
 

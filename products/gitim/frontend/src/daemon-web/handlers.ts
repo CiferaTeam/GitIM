@@ -893,7 +893,10 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
   }
 }
 
-export async function listArchivedChannels(): Promise<ApiResponse> {
+export async function listArchivedChannels(opts?: {
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResponse> {
   try {
     const s = getState();
     const archiveChannelsDir = `${s.repoDir}/archive/channels`;
@@ -926,6 +929,15 @@ export async function listArchivedChannels(): Promise<ApiResponse> {
     }
 
     archivedChannels.sort((a, b) => a.name.localeCompare(b.name));
+    if (typeof opts?.limit === "number") {
+      const offset = Math.max(0, opts.offset ?? 0);
+      const limit = Math.min(100, Math.max(1, opts.limit));
+      const window = archivedChannels.slice(offset, offset + limit + 1);
+      return ok({
+        channels: window.slice(0, limit),
+        has_more: window.length > limit,
+      });
+    }
     return ok({ channels: archivedChannels });
   } catch (e) {
     return err(String((e as Error).message ?? e));
