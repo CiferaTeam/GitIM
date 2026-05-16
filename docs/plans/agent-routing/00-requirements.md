@@ -77,25 +77,34 @@ Cascade 是 agent 特有问题(agent 会自动回复 → 触发其他 agent),hum
 
 未来若出现"创建者离开需要换主响应"的真实需求,再加 `owner: Option<Handler>` 并提供转让命令。v1 不预判。
 
-### P5 — Wire format 用 wrapper 而非扩 `ThreadEntry`
+### P5 — Wire format:在 entry JSON 对象上加 `recipients` 字段
 
-```rust
-pub struct PollEntry {
-    #[serde(flatten)]
-    pub entry: ThreadEntry,
+`PollChange.entries` 现状是 `Vec<serde_json::Value>`,每个 entry 是 `entry_to_json` 渲染出的 opaque JSON 对象(`type: "message" | "event"` 区分)。保留这个 opaque-Value 架构,**只在 Message 类型 entry 的 JSON 对象上多塞一个 `recipients: [handler...]` 字段**。
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recipients: Vec<Handler>,
+```jsonc
+// Message entry 渲染后的 JSON(新增 recipients):
+{
+  "type": "message",
+  "line_number": 12,
+  "point_to": 8,
+  "author": "alice",
+  "timestamp": "...",
+  "body": "...",
+  "mentions": ["bob"],
+  "links": [],
+  "recipients": ["channel-owner", "alice", "bob"]   // ← 新加
 }
 
-pub struct PollChange {
-    pub channel: String,
-    pub kind: ChangeKind,
-    pub entries: Vec<PollEntry>,  // was Vec<ThreadEntry>
+// Event entry(join/leave 等系统事件):不加 recipients,事件不走路由
+{
+  "type": "event",
+  ...
 }
 ```
 
-`ThreadEntry` 保持"磁盘上的消息"语义;`PollEntry` 是"poll 时计算附带的元数据"。Concerns 分清,`recipients` 不混进磁盘解析层。
+- `recipients` 在 Message entry 计算且非空时输出;Event entry 永不输出。
+- 旧 client 反序列化时忽略未知字段(serde_json::Value 天然忽略)。新 runtime 期望 Message entry 上有此字段,缺失时降级为广播(见 fallback 节)。
+- 不引入新的 `PollEntry` 类型 —— 现有 `Vec<Value>` 架构允许直接给 JSON 对象加字段,改动最小。
 
 ### P6 — DM 频道绕过 3 规则
 
@@ -219,9 +228,10 @@ fn compute_recipients(
 ## 影响面
 
 **修改**:
-- `gitim-core/src/types/poll.rs`(或同等位置)—— `PollEntry` 新类型
 - `gitim-core/src/recipients.rs`(新文件)—— `compute_recipients` 纯函数
-- `gitim-daemon/src/handlers/poll.rs` —— 构造 `PollChange.entries` 时调 `compute_recipients`
+- `gitim-core/src/lib.rs` —— 导出 recipients 模块
+- `gitim-daemon/src/handlers/serde.rs::entry_to_json` —— 调整为可选附带 recipients(或在 poll.rs 调用方处加字段)
+- `gitim-daemon/src/handlers/poll.rs` —— 渲染每条 message entry 时调 `compute_recipients` 并塞进 JSON
 - `gitim-runtime/src/agent_loop.rs::format_changes_as_prompt` —— 加 recipients filter,删 body mention 扫描
 
 **不修改**:
