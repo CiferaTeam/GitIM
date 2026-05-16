@@ -90,6 +90,13 @@ pub enum Event {
     ToolResult { call_id: String, output: String },
     /// Agent status change.
     Status { status: String },
+    /// Live usage snapshot emitted during execution. This is display-only:
+    /// callers should use it to refresh HUD/SSE state, not to accumulate
+    /// billing totals for the turn.
+    Usage {
+        session_id: String,
+        usage: ProviderUsage,
+    },
     /// Error during execution.
     Error { content: String },
     /// Log message from the agent process.

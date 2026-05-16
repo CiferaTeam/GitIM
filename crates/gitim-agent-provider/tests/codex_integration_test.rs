@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gitim_agent_provider::{create, Event, ExecOptions, ExecStatus, ProviderConfig};
 
@@ -35,6 +35,26 @@ fn slow_mock_config() -> ProviderConfig {
         "1".to_string(),
     );
     config
+}
+
+fn live_usage_mock_config(codex_home: &PathBuf) -> ProviderConfig {
+    let mut config = mock_config();
+    config.env.insert(
+        "MOCK_CODEX_WRITE_ROLLOUT_USAGE".to_string(),
+        "1".to_string(),
+    );
+    config
+        .env
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
+    config
+}
+
+fn temp_codex_home() -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("gitim-codex-home-{}-{stamp}", std::process::id()))
 }
 
 #[tokio::test]
@@ -96,6 +116,47 @@ async fn execute_and_resume_return_completed_with_thread_id() {
     assert_eq!(result2.status, ExecStatus::Completed);
     assert_eq!(result2.output, "Resumed mock codex thread");
     assert_eq!(result2.session_token.as_deref(), Some("mock-codex-thread"));
+}
+
+#[tokio::test]
+async fn codex_streams_live_context_usage_from_rollout() {
+    let codex_home = temp_codex_home();
+    let provider = create("codex", live_usage_mock_config(&codex_home)).unwrap();
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let mut session = provider
+        .execute(
+            "hello",
+            ExecOptions {
+                cwd: Some(cwd),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut live_usage = None;
+    while let Some(event) = session.events.recv().await {
+        if let Event::Usage { session_id, usage } = event {
+            live_usage = Some((session_id, usage));
+            break;
+        }
+    }
+    while session.events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    let _ = std::fs::remove_dir_all(&codex_home);
+
+    assert_eq!(result.status, ExecStatus::Completed);
+    let (session_id, usage) = live_usage.expect("live usage event should stream");
+    assert_eq!(session_id, "mock-codex-thread");
+    assert_eq!(usage.context_tokens, Some(1234));
+    assert_eq!(usage.context_window_tokens, Some(258_400));
+
+    let final_usage = result.usage.expect("final usage should still parse");
+    assert_eq!(final_usage.input_tokens, Some(1));
+    assert_eq!(final_usage.context_tokens, Some(1234));
+    assert_eq!(final_usage.context_window_tokens, Some(258_400));
 }
 
 #[tokio::test]

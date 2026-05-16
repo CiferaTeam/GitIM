@@ -115,6 +115,7 @@ impl Provider for CodexProvider {
 
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
+        let codex_home = codex_home_from_env(&self.config.env);
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
@@ -133,6 +134,7 @@ impl Provider for CodexProvider {
                 pid,
                 stderr_tail,
                 cancel_token_inner,
+                codex_home,
             )
             .await;
         });
@@ -156,6 +158,7 @@ async fn drive_session(
     pid: u32,
     stderr_tail: SharedStderrTail,
     cancel_token: CancellationToken,
+    codex_home: Option<PathBuf>,
 ) {
     let start = Instant::now();
     let mut output = String::new();
@@ -164,6 +167,9 @@ async fn drive_session(
     let mut final_error: Option<String> = None;
     let mut saw_turn_completed = false;
     let mut latest_usage: Option<ProviderUsage> = None;
+    let mut last_live_context_usage: Option<ProviderUsage> = None;
+    let mut live_rollout_path: Option<PathBuf> = None;
+    let mut live_rollout_len: Option<u64> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -192,54 +198,58 @@ async fn drive_session(
                         continue;
                     }
 
-                    let parsed = match parse_line(&line) {
-                        Some(parsed) => parsed,
-                        None => continue,
-                    };
-
-                    match parsed {
-                        ParsedMessage::ThreadStarted { id } => {
-                            thread_id = Some(id);
-                            try_send_event(
-                                &event_tx,
-                                Event::Status {
-                                    status: "running".to_string(),
-                                },
-                            );
-                        }
-                        ParsedMessage::Text { content } => {
-                            append_output(&mut output, &content);
-                            try_send_event(&event_tx, Event::Text { content });
-                        }
-                        ParsedMessage::ToolUse { call_id, command } => {
-                            try_send_event(
-                                &event_tx,
-                                Event::ToolUse {
-                                    tool: "Bash".to_string(),
-                                    call_id,
-                                    input: json!({ "command": command }),
-                                },
-                            );
-                        }
-                        ParsedMessage::ToolResult { call_id, output } => {
-                            try_send_event(&event_tx, Event::ToolResult { call_id, output });
-                        }
-                        ParsedMessage::TurnCompleted { usage } => {
-                            // `turn.completed.usage` is the only billing
-                            // signal codex emits on stdout, and it's
-                            // session-cumulative. The codex `Provider`
-                            // impl declares `usage_is_cumulative() == true`
-                            // so the runtime subtracts a per-session
-                            // baseline for the accumulator. Context-window
-                            // occupancy is filled separately from rollout
-                            // `token_count` events scanned by thread_id
-                            // after the process exits.
-                            if let Some(u) = usage {
-                                latest_usage = Some(u);
+                    if let Some(parsed) = parse_line(&line) {
+                        match parsed {
+                            ParsedMessage::ThreadStarted { id } => {
+                                thread_id = Some(id);
+                                try_send_event(
+                                    &event_tx,
+                                    Event::Status {
+                                        status: "running".to_string(),
+                                    },
+                                );
                             }
-                            saw_turn_completed = true;
+                            ParsedMessage::Text { content } => {
+                                append_output(&mut output, &content);
+                                try_send_event(&event_tx, Event::Text { content });
+                            }
+                            ParsedMessage::ToolUse { call_id, command } => {
+                                try_send_event(
+                                    &event_tx,
+                                    Event::ToolUse {
+                                        tool: "Bash".to_string(),
+                                        call_id,
+                                        input: json!({ "command": command }),
+                                    },
+                                );
+                            }
+                            ParsedMessage::ToolResult { call_id, output } => {
+                                try_send_event(&event_tx, Event::ToolResult { call_id, output });
+                            }
+                            ParsedMessage::TurnCompleted { usage } => {
+                                // `turn.completed.usage` is the only billing
+                                // signal codex emits on stdout, and it's
+                                // session-cumulative. The codex `Provider`
+                                // impl declares `usage_is_cumulative() == true`
+                                // so the runtime subtracts a per-session
+                                // baseline for the accumulator. Context-window
+                                // occupancy is filled separately from rollout
+                                // `token_count` events scanned by thread_id.
+                                if let Some(u) = usage {
+                                    latest_usage = Some(u);
+                                }
+                                saw_turn_completed = true;
+                            }
                         }
                     }
+                    maybe_send_live_context_usage(
+                        &event_tx,
+                        codex_home.as_deref(),
+                        thread_id.as_deref(),
+                        &mut live_rollout_path,
+                        &mut live_rollout_len,
+                        &mut last_live_context_usage,
+                    );
                 }
                 _ = cancel_token.cancelled() => {
                     info!(pid, "cancelled by steering");
@@ -278,7 +288,7 @@ async fn drive_session(
     }
 
     if let Some(tid) = thread_id.as_deref() {
-        if let Some(context_usage) = read_rollout_context_usage(tid) {
+        if let Some(context_usage) = read_rollout_context_usage(codex_home.as_deref(), tid) {
             attach_context_usage(&mut latest_usage, context_usage);
         }
     }
@@ -287,7 +297,7 @@ async fn drive_session(
         // Codex writes richer diagnostics to the session rollout file than it
         // streams to stdout, so failed turns get one more pass over that file.
         if let Some(tid) = thread_id.as_deref() {
-            if let Some(reason) = diagnose_rollout_failure(tid) {
+            if let Some(reason) = diagnose_rollout_failure(codex_home.as_deref(), tid) {
                 final_error = append_failure_detail(final_error, reason);
             }
         }
@@ -486,17 +496,21 @@ struct RawLine {
 /// human-readable failure reason if one of the known patterns appears.
 /// Returns None when nothing matches — callers fall back to the generic
 /// "exit status" message.
-fn diagnose_rollout_failure(thread_id: &str) -> Option<String> {
-    let codex_home = codex_home()?;
+fn diagnose_rollout_failure(codex_home: Option<&Path>, thread_id: &str) -> Option<String> {
+    let codex_home = codex_home?;
     let rollout = find_rollout_file(&codex_home.join("sessions"), thread_id)?;
     let content = std::fs::read_to_string(&rollout).ok()?;
     scan_rollout_content(&content)
 }
 
-fn read_rollout_context_usage(thread_id: &str) -> Option<ProviderUsage> {
-    let codex_home = codex_home()?;
+fn read_rollout_context_usage(codex_home: Option<&Path>, thread_id: &str) -> Option<ProviderUsage> {
+    let codex_home = codex_home?;
     let rollout = find_rollout_file(&codex_home.join("sessions"), thread_id)?;
-    let content = std::fs::read_to_string(&rollout).ok()?;
+    read_rollout_context_usage_from_path(&rollout)
+}
+
+fn read_rollout_context_usage_from_path(rollout: &Path) -> Option<ProviderUsage> {
+    let content = std::fs::read_to_string(rollout).ok()?;
     scan_rollout_context_usage(&content)
 }
 
@@ -506,7 +520,75 @@ fn attach_context_usage(latest_usage: &mut Option<ProviderUsage>, context_usage:
     usage.context_window_tokens = context_usage.context_window_tokens;
 }
 
-fn codex_home() -> Option<PathBuf> {
+fn maybe_send_live_context_usage(
+    event_tx: &mpsc::Sender<Event>,
+    codex_home: Option<&Path>,
+    thread_id: Option<&str>,
+    rollout_path: &mut Option<PathBuf>,
+    rollout_len: &mut Option<u64>,
+    last_sent: &mut Option<ProviderUsage>,
+) {
+    let Some(thread_id) = thread_id else {
+        return;
+    };
+    let Some(codex_home) = codex_home else {
+        return;
+    };
+    let Some(path) = rollout_path_for_thread(codex_home, rollout_path, thread_id) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+    let len = metadata.len();
+    if rollout_len.is_some_and(|prev| prev == len) {
+        return;
+    }
+    *rollout_len = Some(len);
+    let Some(context_usage) = read_rollout_context_usage_from_path(&path) else {
+        return;
+    };
+    if same_context_usage(last_sent.as_ref(), &context_usage) {
+        return;
+    }
+    *last_sent = Some(context_usage.clone());
+    try_send_event(
+        event_tx,
+        Event::Usage {
+            session_id: thread_id.to_string(),
+            usage: context_usage,
+        },
+    );
+}
+
+fn rollout_path_for_thread(
+    codex_home: &Path,
+    cached: &mut Option<PathBuf>,
+    thread_id: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = cached.as_ref().filter(|path| path.exists()) {
+        return Some(path.clone());
+    }
+    let path = find_rollout_file(&codex_home.join("sessions"), thread_id)?;
+    *cached = Some(path.clone());
+    Some(path)
+}
+
+fn same_context_usage(previous: Option<&ProviderUsage>, current: &ProviderUsage) -> bool {
+    previous.is_some_and(|prev| {
+        prev.context_tokens == current.context_tokens
+            && prev.context_window_tokens == current.context_window_tokens
+    })
+}
+
+fn codex_home_from_env(
+    provider_env: &std::collections::HashMap<String, String>,
+) -> Option<PathBuf> {
+    if let Some(dir) = provider_env.get("CODEX_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     if let Ok(dir) = std::env::var("CODEX_HOME") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));

@@ -62,6 +62,15 @@ if [[ "${MOCK_CODEX_REQUIRE_MAX_EFFORT:-}" == "1" && "$SAW_MAX_EFFORT" != "true"
     exit 2
 fi
 
+if [[ "${MOCK_CODEX_WRITE_ROLLOUT_USAGE:-}" == "1" ]]; then
+    CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+    ROLLOUT_DIR="$CODEX_HOME_DIR/sessions/2026/05/15"
+    mkdir -p "$ROLLOUT_DIR"
+    cat > "$ROLLOUT_DIR/rollout-2026-05-15T00-00-00-$THREAD_ID.jsonl" <<'EOF'
+{"timestamp":"2026-05-15T00:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":1234},"model_context_window":258400},"rate_limits":null}}
+EOF
+fi
+
 echo '{"type":"thread.started","thread_id":"'"$THREAD_ID"'"}'
 echo '{"type":"turn.started"}'
 
