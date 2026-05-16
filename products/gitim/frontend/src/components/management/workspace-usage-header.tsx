@@ -10,14 +10,14 @@ import {
   writeUiState,
   type UsageBreakdown,
 } from "@/lib/ui-state";
-import { aggregateWorkspaceUsage, useWorkspaceUsage } from "@/hooks/use-workspace-usage";
+import {
+  aggregateWorkspaceUsage,
+  bucketTokenTotal,
+  useWorkspaceUsage,
+} from "@/hooks/use-workspace-usage";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import type { Agent, UsageBucket } from "@/lib/types";
-
-function bucketTotal(b: UsageBucket): number {
-  return b.input + b.output + b.cacheRead + b.cacheCreation;
-}
+import type { Agent } from "@/lib/types";
 
 interface WorkspaceUsageHeaderProps {
   agents?: Agent[];
@@ -30,7 +30,14 @@ interface WorkspaceUsageHeaderProps {
  *  level totals + 30-day sparkline + breakdown. The breakdown grouping
  *  dimension (Provider | Handler) is user-controlled and persists per
  *  workspace via `lib/ui-state.ts`. Hides itself when no agent has
- *  produced usage data yet. */
+ *  produced usage data yet.
+ *
+ *  Fleet-mode caveat: when this component renders multiple times on the same
+ *  screen (one per remote node — see `agent-list.tsx`), clicking the toggle
+ *  on one instance writes the new value to the shared workspace persistence
+ *  but does NOT push it to sibling instances. Siblings re-hydrate on their
+ *  next re-render. Same-tab cross-instance live sync is intentionally
+ *  out-of-scope for v1 (see `docs/plans/workspace-usage-breakdown-toggle/`). */
 export function WorkspaceUsageHeader({
   agents,
   label = "Workspace Usage",
@@ -71,9 +78,9 @@ export function WorkspaceUsageHeader({
 
   if (!usage.hasData) return null;
 
-  const totalTokens = bucketTotal(usage.totals);
-  const todayTokens = bucketTotal(usage.today);
-  const sparklineValues = usage.byDay.map((d) => bucketTotal(d.bucket));
+  const totalTokens = bucketTokenTotal(usage.totals);
+  const todayTokens = bucketTokenTotal(usage.today);
+  const sparklineValues = usage.byDay.map((d) => bucketTokenTotal(d.bucket));
 
   const entries =
     breakdown === "provider"
@@ -122,7 +129,7 @@ export function WorkspaceUsageHeader({
           </div>
           {entries.map(({ key, label: l, bucket }) => (
             <span key={key}>
-              {l} {formatTokens(bucketTotal(bucket))}
+              {l} {formatTokens(bucketTokenTotal(bucket))}
             </span>
           ))}
         </div>

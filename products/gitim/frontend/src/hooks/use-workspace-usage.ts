@@ -115,7 +115,7 @@ function compareEntry<T extends { bucket: UsageBucket }>(
   labelOf: (e: T) => string,
 ) {
   return (a: T, b: T) => {
-    const diff = totalSum(b.bucket) - totalSum(a.bucket);
+    const diff = bucketTokenTotal(b.bucket) - bucketTokenTotal(a.bucket);
     return diff !== 0 ? diff : labelOf(a).localeCompare(labelOf(b));
   };
 }
@@ -150,6 +150,8 @@ function mergeByDay(arrays: UsageDayEntry[][]): UsageDayEntry[] {
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
-function totalSum(b: UsageBucket): number {
+/** Sum the token-bearing fields of a usage bucket. Shared with the header
+ *  so the sort comparator here and the displayed totals there cannot drift. */
+export function bucketTokenTotal(b: UsageBucket): number {
   return b.input + b.output + b.cacheRead + b.cacheCreation;
 }
