@@ -9,6 +9,7 @@ pub mod link;
 pub mod me_json;
 pub mod mention;
 pub mod parser;
+pub mod recipients;
 pub mod responses;
 pub mod types;
 pub mod validator;
