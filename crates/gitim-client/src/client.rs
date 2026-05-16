@@ -254,8 +254,20 @@ impl GitimClient {
             .await
     }
 
-    pub async fn list_archived_channels(&self) -> Result<ApiResponse, ClientError> {
-        self.request("archived_channels", json!({})).await
+    pub async fn list_archived_channels(
+        &self,
+        prefix: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ApiResponse, ClientError> {
+        let mut body = serde_json::Map::new();
+        if let Some(p) = prefix {
+            body.insert("prefix".into(), serde_json::Value::String(p.to_string()));
+        }
+        body.insert("offset".into(), serde_json::Value::Number(offset.into()));
+        body.insert("limit".into(), serde_json::Value::Number(limit.into()));
+        self.request("archived_channels", serde_json::Value::Object(body))
+            .await
     }
 
     pub async fn archive_dm(&self, peer: &str) -> Result<ApiResponse, ClientError> {

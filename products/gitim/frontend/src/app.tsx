@@ -142,13 +142,17 @@ function WorkspaceIncomplete({ slug }: { slug: string }) {
 export default function App() {
   const setCurrentUser = useChatStore((s) => s.setCurrentUser);
   const setChannels = useChatStore((s) => s.setChannels);
-  const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
+  const invalidateArchivedChannelsView = useChatStore(
+    (s) => s.invalidateArchivedChannelsView,
+  );
   const setUsers = useChatStore((s) => s.setUsers);
   const setConnected = useChatStore((s) => s.setConnected);
   const addMessages = useChatStore((s) => s.addMessages);
   const setMessages = useChatStore((s) => s.setMessages);
   const selectChannel = useChatStore((s) => s.selectChannel);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
+  const markDmArchived = useChatStore((s) => s.markDmArchived);
+  const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
   const resetChatForSwitch = useChatStore((s) => s.resetForWorkspaceSwitch);
   const setAgents = useAgentStore((s) => s.setAgents);
   const resetAgentsForSwitch = useAgentStore((s) => s.resetForWorkspaceSwitch);
@@ -278,9 +282,9 @@ export default function App() {
         workspaceKey === workspaceRef.current;
       const previousChannel = useChatStore.getState().currentChannel;
 
-      // Archived DMs are *not* fetched here — they're lazy-loaded by the
-      // sidebar on first expand (and paginated + prefix-filtered server
-      // side). Including them in this bootstrap pre-loaded the entire
+      // Archived channels / DMs are *not* fetched here — they're lazy-loaded
+      // by the sidebar on first expand (and paginated + prefix-filtered
+      // server side). Including them in this bootstrap pre-loaded the entire
       // archive on every workspace activation, which doesn't scale.
       const [
         meRes,
@@ -289,7 +293,6 @@ export default function App() {
         agentsRes,
         cardsRes,
         boardsRes,
-        archivedChannelsRes,
         archivedCardsRes,
       ] = await Promise.all([
         client.me(slug),
@@ -300,7 +303,6 @@ export default function App() {
           : Promise.resolve({ ok: true, data: { agents: [] } }),
         client.listCards(slug),
         client.listBoards(slug),
-        client.listArchivedChannels(slug),
         client.listArchivedCards(slug),
       ]);
 
@@ -313,7 +315,6 @@ export default function App() {
           agentsRes,
           cardsRes,
           boardsRes,
-          archivedChannelsRes,
           archivedCardsRes,
         ].some(isUnknownWorkspaceResponse)
       ) {
@@ -331,9 +332,7 @@ export default function App() {
           : useBoardStore.getState().boards;
       const state = useChatStore.getState();
       const archivedChannels =
-        archivedChannelsRes.ok && archivedChannelsRes.data
-          ? (archivedChannelsRes.data.channels as Channel[])
-          : state.archivedChannels;
+        state.archivedChannelsView?.items ?? state.archivedChannels;
       const selectableChannels = [...nextChannels, ...archivedChannels];
       // DM stems look like `<min>--<max>`. We can't probe the archive view
       // for them at bootstrap (lazy-loaded), so treat any `--`-shaped name
@@ -409,8 +408,6 @@ export default function App() {
 
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
-      if (archivedChannelsRes.ok && archivedChannelsRes.data)
-        setArchivedChannels(archivedChannels);
       if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
       if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
       if (cardsRes.ok && cardsRes.data) {
@@ -458,7 +455,6 @@ export default function App() {
         agentsRes.ok &&
         cardsRes.ok &&
         boardsRes.ok &&
-        archivedChannelsRes.ok &&
         archivedCardsRes.ok &&
         (readRes === null || readRes.ok) &&
         (selectedBoardRes === null || selectedBoardRes.ok) &&
@@ -470,7 +466,6 @@ export default function App() {
       refreshAfterActiveUnavailable,
       setCurrentUser,
       setChannels,
-      setArchivedChannels,
       setUsers,
       setAgents,
       setCards,
@@ -550,7 +545,7 @@ export default function App() {
       const changes = (pollRes.data.changes ?? []) as PollChange[];
 
       let needChannelRefresh = false;
-      let needArchivedRefresh = false;
+      let needArchivedChannelInvalidate = false;
       let needCardRefresh = false;
       let needBoardRefresh = false;
 
@@ -599,25 +594,44 @@ export default function App() {
         }
 
         const displayName = apiToDisplay(change.channel);
+        const isDmChange =
+          change.kind === "dm" ||
+          change.kind === "dm_archived" ||
+          change.channel.startsWith("dm:") ||
+          (change.kind === "new_messages" && displayName.includes("--"));
+
+        if (change.kind === "dm_archived") {
+          markDmArchived(displayName);
+          needChannelRefresh = true;
+          continue;
+        }
+
         const knownChannel = channelsRef.current.some(
           (c) => c.name === displayName
         );
 
+        if (!knownChannel && isDmChange) {
+          // Active DM file reappeared (unarchive) or a new DM arrived while
+          // this clone had no local Channel entry. Seed it immediately so
+          // unread increments / sidebar visibility work before the slower
+          // channels() refresh returns.
+          markDmUnarchived(displayName);
+          needChannelRefresh = true;
+        }
+
         if (!knownChannel || change.kind === "channel_meta") {
           needChannelRefresh = true;
-          // An unknown channel that produced activity + a meta event is
-          // almost certainly one that was created and archived out-of-band
-          // (e.g. by an agent). Refetch archived so the record shows up
-          // there instead of just vanishing from the UI.
-          if (change.kind === "channel_meta" || !knownChannel) {
-            needArchivedRefresh = true;
+          // Channel archive/unarchive should not force-load the whole archive
+          // list. Invalidate the lazy view; the open sidebar refetches page 1.
+          if (!isDmChange && (change.kind === "channel_meta" || !knownChannel)) {
+            needArchivedChannelInvalidate = true;
             // Channel archive/unarchive flips which channels listCards
             // scans (s.channels = active only). Without this refresh the
             // kanban keeps showing cards from a now-archived channel
             // until some other card_meta change triggers a refetch.
             needCardRefresh = true;
           }
-          if (!knownChannel) continue;
+          if (!knownChannel && !isDmChange) continue;
         }
 
         if (displayName === currentChannelRef.current) {
@@ -650,12 +664,8 @@ export default function App() {
         }
       }
 
-      if (needArchivedRefresh) {
-        const arRes = await client.listArchivedChannels(slug);
-        if (!isCurrentPollTarget()) return;
-        if (arRes.ok && arRes.data) {
-          setArchivedChannels(arRes.data.channels as Channel[]);
-        }
+      if (needArchivedChannelInvalidate) {
+        invalidateArchivedChannelsView();
       }
 
       if (needCardRefresh) {
@@ -723,7 +733,9 @@ export default function App() {
     addMessages,
     incrementUnread,
     setChannels,
-    setArchivedChannels,
+    invalidateArchivedChannelsView,
+    markDmArchived,
+    markDmUnarchived,
     setAgents,
     setUsers,
     setBoards,

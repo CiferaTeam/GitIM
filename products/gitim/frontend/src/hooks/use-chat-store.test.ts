@@ -7,6 +7,16 @@ function dmEntry(stem: string, peer: string): ArchivedDmEntry {
   return { dm_pair_stem: stem, peer };
 }
 
+function channel(name: string, kind: Channel["kind"] = "channel"): Channel {
+  return {
+    name,
+    kind,
+    unreadCount: 0,
+    hasMention: false,
+    members: ["lewis"],
+  };
+}
+
 function msg(line: number, body: string, extra: Partial<Message> = {}): Message {
   return {
     line_number: line,
@@ -173,6 +183,121 @@ describe("useChatStore history pagination", () => {
 
     const lines = useChatStore.getState().messages.map((m) => m.line_number);
     expect(lines).toEqual([48, 49, 50, -1]);
+  });
+});
+
+describe("useChatStore archivedChannelsView", () => {
+  beforeEach(() => {
+    useChatStore.getState().resetForWorkspaceSwitch();
+  });
+
+  it("starts null on a fresh workspace", () => {
+    expect(useChatStore.getState().archivedChannelsView).toBeNull();
+  });
+
+  it("resetArchivedChannelsView writes a fresh view and clears the snapshot", () => {
+    useChatStore.getState().setArchivedChannels([channel("old")]);
+
+    useChatStore.getState().resetArchivedChannelsView("eng");
+
+    expect(useChatStore.getState().archivedChannels).toEqual([]);
+    expect(useChatStore.getState().archivedChannelsView).toEqual({
+      items: [],
+      offset: 0,
+      hasMore: true,
+      query: "eng",
+      loading: false,
+      error: null,
+    });
+  });
+
+  it("appendArchivedChannelsPage deduplicates by name and advances offset by incoming rows", () => {
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().appendArchivedChannelsPage({
+      items: [channel("alpha"), channel("beta")],
+      hasMore: true,
+    });
+    useChatStore.getState().appendArchivedChannelsPage({
+      items: [channel("beta"), channel("gamma")],
+      hasMore: false,
+    });
+
+    const view = useChatStore.getState().archivedChannelsView!;
+    expect(view.items.map((c) => c.name)).toEqual(["alpha", "beta", "gamma"]);
+    expect(view.offset).toBe(4);
+    expect(view.hasMore).toBe(false);
+    expect(useChatStore.getState().archivedChannels.map((c) => c.name)).toEqual([
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+  });
+
+  it("loading and error actions are no-ops until the view is initialized", () => {
+    useChatStore.getState().setArchivedChannelsLoading(true);
+    useChatStore.getState().setArchivedChannelsError("ignored");
+    expect(useChatStore.getState().archivedChannelsView).toBeNull();
+  });
+
+  it("setArchivedChannelsLoading clears errors when entering loading", () => {
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().setArchivedChannelsError("stale");
+
+    useChatStore.getState().setArchivedChannelsLoading(true);
+
+    const view = useChatStore.getState().archivedChannelsView!;
+    expect(view.loading).toBe(true);
+    expect(view.error).toBeNull();
+  });
+
+  it("markChannelArchived removes active channel and invalidates the archive view", () => {
+    useChatStore.getState().setChannels([channel("general")]);
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().appendArchivedChannelsPage({
+      items: [channel("old")],
+      hasMore: false,
+    });
+
+    useChatStore.getState().markChannelArchived("general");
+
+    expect(useChatStore.getState().channels).toEqual([]);
+    expect(useChatStore.getState().archivedChannels).toEqual([]);
+    expect(useChatStore.getState().archivedChannelsView).toBeNull();
+  });
+
+  it("markChannelUnarchived removes loaded archive item and seeds active channels", () => {
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().appendArchivedChannelsPage({
+      items: [
+        { ...channel("general"), kind: "archived_channel" as Channel["kind"] },
+        { ...channel("random"), kind: "archived_channel" as Channel["kind"] },
+      ],
+      hasMore: false,
+    });
+
+    useChatStore.getState().markChannelUnarchived("general");
+
+    expect(
+      useChatStore.getState().archivedChannelsView!.items.map((c) => c.name),
+    ).toEqual(["random"]);
+    expect(useChatStore.getState().channels).toEqual([
+      expect.objectContaining({ name: "general", kind: "channel" }),
+    ]);
+  });
+
+  it("invalidateArchivedChannelsView and resetForWorkspaceSwitch clear the lazy view", () => {
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().appendArchivedChannelsPage({
+      items: [channel("general")],
+      hasMore: false,
+    });
+
+    useChatStore.getState().invalidateArchivedChannelsView();
+    expect(useChatStore.getState().archivedChannelsView).toBeNull();
+
+    useChatStore.getState().resetArchivedChannelsView("");
+    useChatStore.getState().resetForWorkspaceSwitch();
+    expect(useChatStore.getState().archivedChannelsView).toBeNull();
   });
 });
 

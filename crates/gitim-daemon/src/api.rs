@@ -241,7 +241,14 @@ pub enum Request {
         author: Option<String>,
     },
     #[serde(rename = "archived_channels")]
-    ListArchivedChannels,
+    ListArchivedChannels {
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_archived_channels_limit")]
+        limit: usize,
+    },
     #[serde(rename = "create_card")]
     CreateCard {
         channel: String,
@@ -464,6 +471,10 @@ fn default_archived_dms_limit() -> usize {
     5
 }
 
+fn default_archived_channels_limit() -> usize {
+    10
+}
+
 fn default_role() -> String {
     "member".to_string()
 }
@@ -535,6 +546,42 @@ mod tests {
         let req2: Request = serde_json::from_str(json_no_ch).unwrap();
         match req2 {
             Request::ListArchivedCards { channel } => assert_eq!(channel, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn archived_channels_request_carries_pagination() {
+        let json = r#"{"method":"archived_channels","prefix":"eng","offset":10,"limit":20}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedChannels {
+                prefix,
+                offset,
+                limit,
+            } => {
+                assert_eq!(prefix.as_deref(), Some("eng"));
+                assert_eq!(offset, 10);
+                assert_eq!(limit, 20);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn archived_channels_request_defaults() {
+        let json = r#"{"method":"archived_channels"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::ListArchivedChannels {
+                prefix,
+                offset,
+                limit,
+            } => {
+                assert_eq!(prefix, None);
+                assert_eq!(offset, 0);
+                assert_eq!(limit, 10);
+            }
             _ => panic!("wrong variant"),
         }
     }

@@ -176,6 +176,7 @@ export type PollChangeKind =
   | "new_messages"
   | "channel"
   | "channel_meta"
+  | "dm_archived"
   | "dm"
   | "board"
   | "card_meta"

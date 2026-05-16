@@ -1235,6 +1235,45 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("reports archived DM changes from poll without resurrecting the deleted active path", async () => {
+    files.delete("/repo/dm/alice--lewis.thread");
+    dirs.set("/repo/archive", ["dm"]);
+    dirs.set("/repo/archive/dm", ["alice--lewis.thread"]);
+    files.set("/repo/archive/dm/alice--lewis.thread", dmThread);
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      "dm/alice--lewis.thread",
+      "archive/dm/alice--lewis.thread",
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toEqual([
+      {
+        channel: "dm:alice,lewis",
+        kind: "dm_archived",
+        entries: [],
+      },
+    ]);
+  });
+
+  it("does not report archived DM changes to non-participants", async () => {
+    setState({ me: { handler: "bob", display_name: "Bob" } });
+    dirs.set("/repo/archive", ["dm"]);
+    dirs.set("/repo/archive/dm", ["alice--lewis.thread"]);
+    files.set("/repo/archive/dm/alice--lewis.thread", dmThread);
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      "archive/dm/alice--lewis.thread",
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toEqual([]);
+  });
+
   it("poll delegates git state ownership to runSync", async () => {
     const git = vi.mocked(await import("./git"));
     git.resolveHead.mockResolvedValueOnce("remote-head");
@@ -1572,6 +1611,59 @@ describe("daemon-web readCard with since + limit semantics", () => {
     const res = await readCard("general", "20260317-120000-abc", { since: 7 });
     expect(res.ok).toBe(true);
     expect(entryLines(res)).toEqual([8, 9, 10]);
+  });
+});
+
+describe("daemon-web listArchivedChannels pagination", () => {
+  beforeEach(() => {
+    seedState();
+    const names = [
+      "eng-alpha",
+      "eng-beta",
+      "eng-delta",
+      "eng-gamma",
+      "ops",
+    ];
+    dirs.set("/repo/archive", ["channels"]);
+    dirs.set(
+      "/repo/archive/channels",
+      names.map((name) => `${name}.meta.yaml`),
+    );
+    for (const name of names) {
+      files.set(
+        `/repo/archive/channels/${name}.meta.yaml`,
+        [
+          `display_name: ${name}`,
+          "members:",
+          "  - lewis",
+          "",
+        ].join("\n"),
+      );
+    }
+  });
+
+  it("filters by prefix and returns paginated has_more", async () => {
+    const res = await listArchivedChannels({
+      prefix: "ENG",
+      offset: 1,
+      limit: 2,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.has_more).toBe(true);
+    expect(
+      (res.data?.channels as Array<{ name: string }>).map((c) => c.name),
+    ).toEqual(["eng-beta", "eng-delta"]);
+  });
+
+  it("clamps limit=0 to one row", async () => {
+    const res = await listArchivedChannels({ prefix: "eng", limit: 0 });
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.has_more).toBe(true);
+    expect(res.data?.channels).toEqual([
+      expect.objectContaining({ name: "eng-alpha" }),
+    ]);
   });
 });
 

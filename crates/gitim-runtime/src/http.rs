@@ -1206,15 +1206,29 @@ async fn im_channel_unarchive(
     api_response_to_json(client.unarchive_channel(&name).await)
 }
 
+#[derive(serde::Deserialize)]
+struct ArchivedChannelsQuery {
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 async fn im_list_archived_channels(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(q): axum::extract::Query<ArchivedChannelsQuery>,
 ) -> axum::response::Response {
     let client = match human_client(&state, &slug) {
         Ok(c) => c,
         Err(j) => return j,
     };
-    api_response_to_json(client.list_archived_channels().await)
+    let prefix = q.prefix.as_deref();
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(10).clamp(1, 100);
+    api_response_to_json(client.list_archived_channels(prefix, offset, limit).await)
 }
 
 async fn im_dm_archive(

@@ -188,47 +188,64 @@ pub async fn cmd_unarchive_channel(client: &GitimClient, mode: &OutputMode, name
 }
 
 pub async fn cmd_archived_channels(client: &GitimClient, mode: &OutputMode) {
-    match client.list_archived_channels().await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("Error: {msg}");
+    let mut all_channels: Vec<serde_json::Value> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        match client.list_archived_channels(None, offset, 100).await {
+            Ok(resp) => {
+                if !resp.ok {
+                    let msg = resp.error.as_deref().unwrap_or("unknown error");
+                    eprintln!("Error: {msg}");
+                    process::exit(1);
+                }
+                let data = resp.data.unwrap_or(serde_json::Value::Null);
+                let page = data
+                    .get("channels")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let page_len = page.len();
+                all_channels.extend(page);
+                let has_more = data
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !has_more || page_len == 0 {
+                    break;
+                }
+                offset += page_len;
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
                 process::exit(1);
             }
-            match mode {
-                OutputMode::Human => {
-                    let channels = resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("channels"))
-                        .and_then(|c| c.as_array());
+        }
+    }
 
-                    match channels {
-                        Some(arr) if !arr.is_empty() => {
-                            for ch in arr {
-                                if let Some(name) = ch.get("name").and_then(|n| n.as_str()) {
-                                    println!("#{name}");
-                                }
-                            }
-                        }
-                        _ => println!("暂无已归档频道"),
-                    }
-                }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
+    match mode {
+        OutputMode::Human => {
+            if all_channels.is_empty() {
+                println!("暂无已归档频道");
+                return;
+            }
+            for ch in all_channels {
+                if let Some(name) = ch.get("name").and_then(|n| n.as_str()) {
+                    println!("#{name}");
                 }
             }
         }
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
+        OutputMode::Json => {
+            let data = serde_json::json!({
+                "channels": all_channels,
+                "has_more": false,
+            });
+            match serde_json::to_string(&data) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("Error: failed to format output: {e}");
+                    process::exit(1);
+                }
+            }
         }
     }
 }

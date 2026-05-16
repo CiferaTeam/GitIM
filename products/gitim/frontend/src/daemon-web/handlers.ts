@@ -351,16 +351,33 @@ export async function poll(since?: string): Promise<ApiResponse> {
           changes.push({ channel: scope, kind: "card_thread", entries });
         }
       } else if (fp.startsWith("channels/") && fp.endsWith(".thread")) {
+        if (!(await exists(`${s.repoDir}/${fp}`))) continue;
         const channelName = fp
           .replace("channels/", "")
           .replace(".thread", "");
         const entries = await readChannelEntries(channelName);
         changes.push({ channel: channelName, kind: "new_messages", entries });
       } else if (fp.startsWith("dm/") && fp.endsWith(".thread")) {
+        if (!(await exists(`${s.repoDir}/${fp}`))) continue;
         const dmName = dmApiNameFromThreadPath(fp);
         if (!dmName) continue;
         const entries = await readChannelEntries(dmName);
         changes.push({ channel: dmName, kind: "new_messages", entries });
+      } else if (fp.startsWith("archive/dm/") && fp.endsWith(".thread")) {
+        const name = fp.slice("archive/dm/".length, -".thread".length);
+        let target: ReturnType<typeof resolveThreadTarget>;
+        try {
+          target = resolveThreadTarget(name);
+        } catch {
+          continue;
+        }
+        if (target.kind !== "dm") continue;
+        if (!target.members.includes(s.me.handler)) continue;
+        changes.push({
+          channel: `dm:${target.members[0]},${target.members[1]}`,
+          kind: "dm_archived",
+          entries: [],
+        });
       } else if (fp.startsWith("archive/channels/")) {
         const name = fp.replace("archive/channels/", "");
         if (name.includes("/")) continue;
@@ -893,11 +910,18 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
   }
 }
 
-export async function listArchivedChannels(): Promise<ApiResponse> {
+export async function listArchivedChannels(opts?: {
+  prefix?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResponse> {
   try {
+    const prefix = (opts?.prefix ?? "").toLowerCase();
+    const offset = Math.max(0, opts?.offset ?? 0);
+    const limit = Math.min(100, Math.max(1, opts?.limit ?? 10));
     const s = getState();
     const archiveChannelsDir = `${s.repoDir}/archive/channels`;
-    if (!(await exists(archiveChannelsDir))) return ok({ channels: [] });
+    if (!(await exists(archiveChannelsDir))) return ok({ channels: [], has_more: false });
 
     const items = await readdir(archiveChannelsDir);
     const archivedChannels: Array<{
@@ -909,6 +933,7 @@ export async function listArchivedChannels(): Promise<ApiResponse> {
     for (const item of items) {
       const channelName = channelNameFromMetaFile(item);
       if (!channelName) continue;
+      if (prefix && !channelName.toLowerCase().startsWith(prefix)) continue;
 
       const meta = parseYaml(
         await readFile(`${archiveChannelsDir}/${item}`),
@@ -926,7 +951,9 @@ export async function listArchivedChannels(): Promise<ApiResponse> {
     }
 
     archivedChannels.sort((a, b) => a.name.localeCompare(b.name));
-    return ok({ channels: archivedChannels });
+    const window = archivedChannels.slice(offset, offset + limit + 1);
+    const has_more = window.length > limit;
+    return ok({ channels: window.slice(0, limit), has_more });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }

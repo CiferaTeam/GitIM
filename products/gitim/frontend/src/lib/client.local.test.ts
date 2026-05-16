@@ -60,7 +60,9 @@ class MockLocalBackend {
   listArchivedCards = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   archiveChannel = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   unarchiveChannel = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
-  listArchivedChannels = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  listArchivedChannels = vi.fn<
+    (_opts?: { prefix?: string; offset?: number; limit?: number }) => Promise<ApiResponse>
+  >(() => Promise.resolve({ ok: true }));
   listBoards = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   showBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   initBoard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));

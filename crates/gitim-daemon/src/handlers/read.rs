@@ -153,8 +153,21 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
     Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
 }
 
-pub async fn handle_list_archived_channels(state: SharedState) -> Response {
-    use gitim_core::responses::{ChannelSummary, ListChannelsResponse};
+pub async fn handle_list_archived_channels(
+    state: SharedState,
+    prefix: Option<String>,
+    offset: usize,
+    limit: usize,
+) -> Response {
+    use gitim_core::responses::{ChannelSummary, ListArchivedChannelsResponse};
+
+    if limit == 0 || limit > 100 {
+        return Response::error(format!("invalid limit {limit}: must be 1..=100"));
+    }
+    let needle = prefix
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
     let mut channels: Vec<ChannelSummary> = Vec::new();
 
     // 扫描 archive/channels/*.meta.yaml — 读取 members 字段
@@ -165,6 +178,9 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
                 let fname = entry.file_name().to_string_lossy().to_string();
                 if fname.ends_with(".meta.yaml") {
                     let name = fname.trim_end_matches(".meta.yaml").to_string();
+                    if !needle.is_empty() && !name.to_ascii_lowercase().starts_with(&needle) {
+                        continue;
+                    }
                     let members: Vec<String> = std::fs::read_to_string(entry.path())
                         .ok()
                         .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
@@ -181,7 +197,14 @@ pub async fn handle_list_archived_channels(state: SharedState) -> Response {
     }
 
     channels.sort_by(|a, b| a.name.cmp(&b.name));
-    Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap())
+
+    let window: Vec<_> = channels.into_iter().skip(offset).take(limit + 1).collect();
+    let has_more = window.len() > limit;
+    let channels: Vec<_> = window.into_iter().take(limit).collect();
+
+    Response::success(
+        serde_json::to_value(ListArchivedChannelsResponse { channels, has_more }).unwrap(),
+    )
 }
 
 /// List active users. When `include_archived` is true, also scan

@@ -1069,15 +1069,46 @@ export async function unarchiveChannel(
 
 export async function listArchivedChannels(
   slug: string,
-): Promise<ApiResponse<{ channels: Channel[] }>> {
+  opts?: {
+    prefix?: string;
+    offset?: number;
+    limit?: number;
+  },
+): Promise<ApiResponse<{ channels: Channel[]; hasMore: boolean }>> {
+  const normalize = (
+    res: ApiResponse<{
+      channels: Channel[];
+      has_more?: boolean;
+      hasMore?: boolean;
+    }>,
+  ): ApiResponse<{ channels: Channel[]; hasMore: boolean }> => {
+    if (!res.ok || !res.data) {
+      return { ok: false, error: res.error, error_code: res.error_code };
+    }
+    return {
+      ok: true,
+      data: {
+        channels: res.data.channels,
+        hasMore: res.data.hasMore ?? res.data.has_more ?? false,
+      },
+    };
+  };
   if (isLocalMode()) {
     void slug;
-    return localChannelArchiveBackend().listArchivedChannels() as Promise<
-      ApiResponse<{ channels: Channel[] }>
-    >;
+    const res = (await localChannelArchiveBackend().listArchivedChannels(opts)) as ApiResponse<{
+      channels: Channel[];
+      has_more?: boolean;
+      hasMore?: boolean;
+    }>;
+    return normalize(res);
   }
-  const res = await fetch(`${wsBase(slug)}/im/channels/archived`);
-  return await res.json();
+  const params = new URLSearchParams();
+  if (opts?.prefix) params.set("prefix", opts.prefix);
+  if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await fetch(`${wsBase(slug)}/im/channels/archived${qs ? `?${qs}` : ""}`);
+  return normalize(await res.json());
 }
 
 export async function archiveDm(

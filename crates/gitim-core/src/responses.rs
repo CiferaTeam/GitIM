@@ -77,6 +77,16 @@ pub struct ListChannelsResponse {
     pub channels: Vec<ChannelSummary>,
 }
 
+/// Paginated response payload for `Request::ListArchivedChannels`.
+/// Active channels stay on `ListChannelsResponse`; archive browsing can grow
+/// without bound, so callers page it lazily.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListArchivedChannelsResponse {
+    pub channels: Vec<ChannelSummary>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
 /// Active users with optional archived users in a single payload.
 ///
 /// `include_archived` on the request controls whether `archived_users` is

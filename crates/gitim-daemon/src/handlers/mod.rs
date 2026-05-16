@@ -315,7 +315,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             };
             handle_unarchive_channel(state, channel, resolved_author).await
         }
-        Request::ListArchivedChannels => handle_list_archived_channels(state).await,
+        Request::ListArchivedChannels {
+            prefix,
+            offset,
+            limit,
+        } => handle_list_archived_channels(state, prefix, offset, limit).await,
         Request::CreateCard {
             channel,
             title,

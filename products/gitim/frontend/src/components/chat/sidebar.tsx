@@ -37,6 +37,8 @@ const ARCHIVED_DMS_PAGE_SIZE = 5;
 // Debounce window between the user typing in the prefix filter and the
 // fetch firing. 300ms is the standard "feels responsive without flooding".
 const ARCHIVED_DMS_PREFIX_DEBOUNCE_MS = 300;
+const ARCHIVED_CHANNELS_PAGE_SIZE = 10;
+const ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS = 300;
 
 interface PinnedConversations {
   channels: Set<string>;
@@ -166,6 +168,19 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentUser = useChatStore((s) => s.currentUser);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
+  const archivedChannelsView = useChatStore((s) => s.archivedChannelsView);
+  const resetArchivedChannelsView = useChatStore(
+    (s) => s.resetArchivedChannelsView,
+  );
+  const appendArchivedChannelsPage = useChatStore(
+    (s) => s.appendArchivedChannelsPage,
+  );
+  const setArchivedChannelsLoading = useChatStore(
+    (s) => s.setArchivedChannelsLoading,
+  );
+  const setArchivedChannelsError = useChatStore(
+    (s) => s.setArchivedChannelsError,
+  );
   // Pull each field of `archivedDmsView` individually — returning the
   // object itself works, but selecting fields keeps re-render scope tight
   // (and matches the project's selector style; see memory note on
@@ -182,7 +197,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
-  const setArchivedChannels = useChatStore((s) => s.setArchivedChannels);
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
@@ -194,7 +208,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     : null;
 
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [pendingArchivedChannelQuery, setPendingArchivedChannelQuery] =
+    useState("");
+  const archivedChannelQueryDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [archivedDmsOpen, setArchivedDmsOpen] = useState(false);
   // The input value the user is *currently typing*. We debounce before
   // pushing it into the store so each keystroke doesn't trigger a fetch.
@@ -337,6 +355,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           u.toLowerCase().includes(dmQuery.toLowerCase()) && u !== currentUser
       )
     : users.filter((u) => u !== currentUser);
+  const archivedChannelItems =
+    archivedChannelsView?.items ?? archivedChannels;
 
   useEffect(() => {
     if (!currentChannel) return;
@@ -380,28 +400,44 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     });
   }
 
+  async function fetchArchivedChannelsPage(query: string, offset: number) {
+    if (!activeSlug) return;
+    if (offset === 0) {
+      resetArchivedChannelsView(query);
+    }
+    setArchivedChannelsLoading(true);
+    try {
+      const res = await client.listArchivedChannels(activeSlug, {
+        prefix: query,
+        offset,
+        limit: ARCHIVED_CHANNELS_PAGE_SIZE,
+      });
+      const liveQuery =
+        useChatStore.getState().archivedChannelsView?.query;
+      if (liveQuery !== query) return;
+      if (res.ok && res.data) {
+        appendArchivedChannelsPage({
+          items: res.data.channels,
+          hasMore: res.data.hasMore,
+        });
+        setArchivedChannelsLoading(false);
+      } else {
+        const message = res.error ?? "unknown";
+        setArchivedChannelsError(message);
+        toast.error(`Failed to load archived channels: ${message}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "network error";
+      setArchivedChannelsError(message);
+      toast.error(`Failed to load archived channels: ${message}`);
+    }
+  }
+
   async function handleToggleArchivedSection() {
     const next = !archivedOpen;
     setArchivedOpen(next);
-    // Always refetch when opening: the archive list can change out-of-band
-    // (another agent archives, CLI archive, etc.) and a session cache would
-    // hide those events. The payload is small; the cost is one HTTP call
-    // per expand.
-    if (next) {
-      if (!activeSlug) return;
-      setArchivedLoading(true);
-      try {
-        const res = await client.listArchivedChannels(activeSlug);
-        if (res.ok && res.data) {
-          setArchivedChannels(res.data.channels);
-        } else {
-          toast.error(
-            `Failed to load archived channels: ${res.error ?? "unknown"}`,
-          );
-        }
-      } finally {
-        setArchivedLoading(false);
-      }
+    if (next && archivedChannelsView === null) {
+      await fetchArchivedChannelsPage(pendingArchivedChannelQuery, 0);
     }
   }
 
@@ -424,6 +460,29 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     } catch {
       /* refresh is best-effort; markChannelUnarchived already seeded the entry */
     }
+  }
+
+  useEffect(() => {
+    if (
+      archivedOpen &&
+      archivedChannelsView === null &&
+      activeSlug &&
+      !archivedChannelQueryDebounceRef.current
+    ) {
+      void fetchArchivedChannelsPage(pendingArchivedChannelQuery, 0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivedOpen, archivedChannelsView, activeSlug]);
+
+  function handleArchivedChannelPrefixChange(value: string) {
+    setPendingArchivedChannelQuery(value);
+    if (archivedChannelQueryDebounceRef.current) {
+      clearTimeout(archivedChannelQueryDebounceRef.current);
+    }
+    archivedChannelQueryDebounceRef.current = setTimeout(() => {
+      archivedChannelQueryDebounceRef.current = null;
+      void fetchArchivedChannelsPage(value, 0);
+    }, ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS);
   }
 
   function peerFromDmName(name: string): string | null {
@@ -523,6 +582,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   // setTimeout doesn't write to an unmounted store consumer.
   useEffect(() => {
     return () => {
+      if (archivedChannelQueryDebounceRef.current) {
+        clearTimeout(archivedChannelQueryDebounceRef.current);
+        archivedChannelQueryDebounceRef.current = null;
+      }
       if (dmQueryDebounceRef.current) {
         clearTimeout(dmQueryDebounceRef.current);
         dmQueryDebounceRef.current = null;
@@ -705,52 +768,132 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             ].join(" ")}
           />
           <span className="uppercase font-semibold tracking-wider">Archived</span>
-          {archivedChannels.length > 0 && (
+          {archivedChannelItems.length > 0 && (
             <span className="ml-1 text-text-faint font-mono">
-              {archivedChannels.length}
+              {archivedChannelItems.length}
+              {archivedChannelsView?.hasMore ? "+" : ""}
             </span>
           )}
         </button>
         {archivedOpen && (
-          <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
-            {archivedChannels.length === 0 ? (
-              <li className="px-2 py-1.5 text-[11px] text-text-muted">
-                {archivedLoading ? "Loading…" : "No archived channels"}
-              </li>
-            ) : (
-              archivedChannels.map((ch) => {
-                const isActive = currentChannel === ch.name;
-                return (
-                  <li
-                    key={ch.name}
-                    className={[
-                      "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
-                      isActive
-                        ? "bg-surface/60 text-foreground opacity-100"
-                        : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
-                    ].join(" ")}
-                    title="Archived — read only. Click to view; use the restore button to unarchive."
-                    onClick={() => onChannelSelect(ch.name)}
-                  >
-                    <Hash className="size-3 text-text-faint shrink-0" />
-                    <span className="truncate flex-1">{ch.name}</span>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      title={`Unarchive #${ch.name}`}
-                      className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleUnarchiveChannel(ch.name);
-                      }}
+          <div className="mt-1 space-y-1">
+            <div className="relative px-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-text-faint" />
+              <input
+                type="text"
+                value={pendingArchivedChannelQuery}
+                onChange={(e) =>
+                  handleArchivedChannelPrefixChange(e.target.value)
+                }
+                placeholder="Filter channels..."
+                data-testid="sidebar-archived-channel-filter"
+                className="w-full h-7 pl-7 pr-2 rounded-md border border-border/60 bg-background/60 text-xs placeholder:text-text-faint focus:outline-none focus:ring-1 focus:ring-ring/50"
+              />
+            </div>
+            <ul className="space-y-0.5 max-h-40 overflow-y-auto">
+              {(() => {
+                if (archivedChannelsView === null) {
+                  return (
+                    <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                      Loading…
+                    </li>
+                  );
+                }
+                if (archivedChannelsView.error) {
+                  return (
+                    <li className="flex items-center justify-between px-2 py-1.5 text-[11px] text-destructive">
+                      <span className="truncate">
+                        Failed: {archivedChannelsView.error}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        title="Retry"
+                        onClick={() =>
+                          fetchArchivedChannelsPage(
+                            archivedChannelsView.query,
+                            0,
+                          )
+                        }
+                      >
+                        <span className="text-[11px]">Retry</span>
+                      </Button>
+                    </li>
+                  );
+                }
+                if (
+                  archivedChannelsView.loading &&
+                  archivedChannelsView.items.length === 0
+                ) {
+                  return (
+                    <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                      Loading…
+                    </li>
+                  );
+                }
+                if (archivedChannelsView.items.length === 0) {
+                  return (
+                    <li className="px-2 py-1.5 text-[11px] text-text-muted">
+                      {archivedChannelsView.query
+                        ? "No matches"
+                        : "No archived channels"}
+                    </li>
+                  );
+                }
+                return archivedChannelsView.items.map((ch) => {
+                  const isActive = currentChannel === ch.name;
+                  return (
+                    <li
+                      key={ch.name}
+                      data-testid="sidebar-archived-channel-item"
+                      className={[
+                        "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs cursor-pointer transition-all group",
+                        isActive
+                          ? "bg-surface/60 text-foreground opacity-100"
+                          : "text-text-muted opacity-70 hover:opacity-100 hover:bg-surface/40",
+                      ].join(" ")}
+                      title="Archived — read only. Click to view; use the restore button to unarchive."
+                      onClick={() => onChannelSelect(ch.name)}
                     >
-                      <ArchiveRestore className="size-3" />
-                    </Button>
-                  </li>
-                );
-              })
-            )}
-          </ul>
+                      <Hash className="size-3 text-text-faint shrink-0" />
+                      <span className="truncate flex-1">{ch.name}</span>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        title={`Unarchive #${ch.name}`}
+                        className="text-text-faint hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleUnarchiveChannel(ch.name);
+                        }}
+                      >
+                        <ArchiveRestore className="size-3" />
+                      </Button>
+                    </li>
+                  );
+                });
+              })()}
+            </ul>
+            {archivedChannelsView &&
+              archivedChannelsView.hasMore &&
+              archivedChannelsView.items.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="w-full justify-center text-[11px] text-text-muted hover:text-foreground"
+                  disabled={archivedChannelsView.loading}
+                  onClick={() =>
+                    fetchArchivedChannelsPage(
+                      archivedChannelsView.query,
+                      archivedChannelsView.offset,
+                    )
+                  }
+                  data-testid="sidebar-archived-channel-load-more"
+                >
+                  {archivedChannelsView.loading ? "Loading…" : "Load more"}
+                </Button>
+              )}
+          </div>
         )}
       </div>
 

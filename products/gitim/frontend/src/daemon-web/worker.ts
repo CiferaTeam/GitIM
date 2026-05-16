@@ -136,8 +136,10 @@ const handler: Record<
     handlers.archiveChannel(channel as string),
   unarchiveChannel: (channel: unknown) =>
     handlers.unarchiveChannel(channel as string),
-  listArchivedChannels: () =>
-    handlers.listArchivedChannels(),
+  listArchivedChannels: (payload: unknown) =>
+    handlers.listArchivedChannels(
+      payload as { prefix?: string; offset?: number; limit?: number } | undefined,
+    ),
   archiveDm: (peer: unknown) => handlers.archiveDm(peer as string),
   unarchiveDm: (peer: unknown) => handlers.unarchiveDm(peer as string),
   listArchivedDms: (payload: unknown) =>
