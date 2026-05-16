@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { PROVIDERS, resolveProviderModelCatalog } from "./providers";
+import {
+  PROVIDERS,
+  resolveProviderModelCatalog,
+  resolveProviderModelDraft,
+} from "./providers";
 
 describe("resolveProviderModelCatalog", () => {
   it("uses runtime models ahead of static fallback models", () => {
@@ -43,5 +47,35 @@ describe("resolveProviderModelCatalog", () => {
     expect(resolved.supportsDefault).toBe(true);
     expect(resolved.supportsCustom).toBe(true);
     expect(resolved.customHint).toBe("provider/model");
+  });
+});
+
+describe("resolveProviderModelDraft", () => {
+  it("selects a runtime-listed current model instead of treating it as custom", () => {
+    const resolved = resolveProviderModelCatalog(PROVIDERS.opencode, {
+      provider: "opencode",
+      source: "opencode_models",
+      supports_default: true,
+      supports_custom: true,
+      custom_format_hint: "provider/model",
+      models: [{ id: "openai/gpt-e2e-small", label: "openai/gpt-e2e-small" }],
+      error: null,
+    });
+
+    expect(resolveProviderModelDraft("openai/gpt-e2e-small", resolved)).toEqual({
+      model: "openai/gpt-e2e-small",
+      isCustom: false,
+      customModelInput: "",
+    });
+  });
+
+  it("keeps unknown current models in the custom input when custom is supported", () => {
+    const resolved = resolveProviderModelCatalog(PROVIDERS.opencode, null);
+
+    expect(resolveProviderModelDraft("vendor/future-model", resolved)).toEqual({
+      model: "",
+      isCustom: true,
+      customModelInput: "vendor/future-model",
+    });
   });
 });

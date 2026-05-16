@@ -9,6 +9,7 @@ import * as client from "@/lib/client";
 import {
   PROVIDERS,
   resolveProviderModelCatalog,
+  resolveProviderModelDraft,
   type ProviderModelCatalog,
 } from "@/lib/providers";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
@@ -98,7 +99,18 @@ export function AgentDetail() {
     ? PROVIDER_CUSTOM_MODEL_VALUE
     : draftModel;
 
-  function loadProviderModelCatalog(provider: NonNullable<Agent["provider"]>) {
+  function applyDraftModelSelection(currentModel: string) {
+    if (!resolvedProviderModels) return;
+    const draft = resolveProviderModelDraft(currentModel, resolvedProviderModels);
+    setDraftModel(draft.model);
+    setDraftModelIsCustom(draft.isCustom);
+    setProviderCustomModelInput(draft.customModelInput);
+  }
+
+  function loadProviderModelCatalog(
+    provider: NonNullable<Agent["provider"]>,
+    currentModel: string,
+  ) {
     if (provider === "hermes" || !PROVIDERS[provider].runtimeModels) {
       providerModelFetchSeq.current += 1;
       setProviderModelCatalog(null);
@@ -111,7 +123,15 @@ export function AgentDetail() {
     setProviderModelsLoading(true);
     client.listProviderModels(provider).then((res) => {
       if (seq !== providerModelFetchSeq.current) return;
-      setProviderModelCatalog(res.ok ? (res.data ?? null) : null);
+      const catalog = res.ok ? (res.data ?? null) : null;
+      setProviderModelCatalog(catalog);
+      if (catalog) {
+        const resolved = resolveProviderModelCatalog(PROVIDERS[provider], catalog);
+        const draft = resolveProviderModelDraft(currentModel, resolved);
+        setDraftModel(draft.model);
+        setDraftModelIsCustom(draft.isCustom);
+        setProviderCustomModelInput(draft.customModelInput);
+      }
       setProviderModelsLoading(false);
     });
   }
@@ -119,14 +139,7 @@ export function AgentDetail() {
   function enterEditMode() {
     if (!agent) return;
     const currentModel = agent.model ?? "";
-    const knownCurrentModel = modelOptions.some((m) => m.id === currentModel);
-    const useCustomModel =
-      currentModel !== "" &&
-      !knownCurrentModel &&
-      Boolean(resolvedProviderModels?.supportsCustom);
-    setDraftModel(useCustomModel ? "" : currentModel);
-    setDraftModelIsCustom(useCustomModel);
-    setProviderCustomModelInput(useCustomModel ? currentModel : "");
+    applyDraftModelSelection(currentModel);
     setDraftPrompt(agent.systemPrompt ?? "");
     setDraftIntroduction(agent.introduction ?? "");
     setDraftEnv(
@@ -134,7 +147,7 @@ export function AgentDetail() {
     );
     setEditError(null);
     if (agent.provider) {
-      loadProviderModelCatalog(agent.provider);
+      loadProviderModelCatalog(agent.provider, currentModel);
     }
     setMode("edit");
   }

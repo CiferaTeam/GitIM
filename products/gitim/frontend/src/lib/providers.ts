@@ -62,6 +62,12 @@ export interface ResolvedProviderModelCatalog {
   customHint: string;
 }
 
+export interface ProviderModelDraft {
+  model: string;
+  isCustom: boolean;
+  customModelInput: string;
+}
+
 export function resolveProviderModelCatalog(
   providerInfo: ProviderInfo,
   catalog: ProviderModelCatalog | null | undefined,
@@ -75,6 +81,23 @@ export function resolveProviderModelCatalog(
     customHint:
       catalog?.custom_format_hint ?? providerInfo.customModelHint ?? "model id",
   };
+}
+
+export function resolveProviderModelDraft(
+  currentModel: string,
+  catalog: ResolvedProviderModelCatalog,
+): ProviderModelDraft {
+  const model = currentModel.trim();
+  if (!model) {
+    return { model: "", isCustom: false, customModelInput: "" };
+  }
+  if (catalog.models.some((m) => m.id === model)) {
+    return { model, isCustom: false, customModelInput: "" };
+  }
+  if (catalog.supportsCustom) {
+    return { model: "", isCustom: true, customModelInput: model };
+  }
+  return { model, isCustom: false, customModelInput: "" };
 }
 
 export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
