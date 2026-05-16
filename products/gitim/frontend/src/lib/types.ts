@@ -117,6 +117,7 @@ export interface UserInfo {
 
 export interface AgentActivityEvent {
   agent_id: string;
+  workspace_id?: string;
   // "burned" is broadcast by /agents/burn (and the B.4 self-departed
   // self-heal path) once the agent is removed from the workspace. E.3
   // will render it; until then renderers fall through gracefully without
@@ -131,6 +132,64 @@ export interface AgentActivityEvent {
   detail: string;
   timestamp: string; // ISO8601
 }
+
+export type FleetNodeConnectionStatus = "connecting" | "connected" | "down";
+
+export interface FleetNodeStatus {
+  nodeId: string;
+  nodeIp?: string;
+  nodeName?: string;
+  remoteWorkspaceId?: string;
+  workspaceIdentity?: string;
+  workspaceId: string;
+  status: FleetNodeConnectionStatus;
+  lastConnectedAt?: string;
+  lastEventAt?: string;
+  lastError?: string;
+  retryCount: number;
+}
+
+export interface FleetAgentSnapshot {
+  nodeId: string;
+  nodeIp?: string;
+  nodeName?: string;
+  remoteWorkspaceId?: string;
+  workspaceIdentity?: string;
+  workspaceId: string;
+  agent: Agent;
+}
+
+export interface FleetAgentActivityEnvelope {
+  kind: "agent_activity";
+  node_id: string;
+  node_ip?: string;
+  node_name?: string;
+  remote_workspace_id?: string;
+  workspace_identity?: string;
+  workspace_id: string;
+  agent_id: string;
+  received_at: string;
+  event: AgentActivityEvent;
+}
+
+export interface FleetNodeStatusEnvelope {
+  kind: "node_status";
+  node_id: string;
+  node_ip?: string;
+  node_name?: string;
+  remote_workspace_id?: string;
+  workspace_identity?: string;
+  workspace_id: string;
+  status: FleetNodeConnectionStatus;
+  last_connected_at?: string;
+  last_event_at?: string;
+  last_error?: string;
+  retry_count: number;
+}
+
+export type FleetEventEnvelope =
+  | FleetAgentActivityEnvelope
+  | FleetNodeStatusEnvelope;
 
 export interface ApiResponse<T = Record<string, unknown>> {
   ok: boolean;

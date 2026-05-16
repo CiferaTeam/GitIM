@@ -66,6 +66,56 @@ async fn remote_workspaces() -> axum::Json<serde_json::Value> {
     }))
 }
 
+async fn remote_agents() -> axum::Json<serde_json::Value> {
+    axum::Json(json!({
+        "ok": true,
+        "agents": [
+            {
+                "id": "cfo",
+                "handler": "cfo",
+                "display_name": "cfo",
+                "status": "running",
+                "last_activity": "2026-05-15T00:00:00Z",
+                "messages_processed": 13,
+                "repo_path": "/remote/room/cfo",
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "usage_summary": {
+                    "provider_reports_usage": true,
+                    "first_seen": "2026-05-15T00:00:00Z",
+                    "last_updated": "2026-05-15T00:10:00Z",
+                    "totals": {
+                        "input": 100,
+                        "output": 20,
+                        "cache_read": 300,
+                        "cache_creation": 40,
+                        "turns": 2
+                    },
+                    "today": {
+                        "input": 30,
+                        "output": 10,
+                        "cache_read": 50,
+                        "cache_creation": 0,
+                        "turns": 1
+                    },
+                    "by_day": [
+                        {
+                            "date": "2026-05-15",
+                            "bucket": {
+                                "input": 30,
+                                "output": 10,
+                                "cache_read": 50,
+                                "cache_creation": 0,
+                                "turns": 1
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }))
+}
+
 async fn spawn_remote_runtime() -> (
     String,
     broadcast::Sender<AgentActivityEvent>,
@@ -74,6 +124,7 @@ async fn spawn_remote_runtime() -> (
     let (tx, _) = broadcast::channel(16);
     let app = Router::new()
         .route("/workspaces", get(remote_workspaces))
+        .route("/workspaces/{slug}/agents", get(remote_agents))
         .route("/workspaces/{slug}/agents/events", get(remote_agent_events))
         .with_state(tx.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -165,6 +216,13 @@ fn fleet_status_request() -> Request<Body> {
         .unwrap()
 }
 
+fn fleet_agents_request() -> Request<Body> {
+    Request::builder()
+        .uri("/fleet/agents")
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).expect("response body is JSON")
@@ -243,6 +301,46 @@ async fn wait_for_frame_containing(
             "frame containing {needle:?} did not arrive; last frame: {text}"
         );
     }
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_agents_lists_remote_agent_snapshots_with_node_metadata() {
+    let _home_guard = HomeGuard::install();
+    let (remote_base_url, _remote_tx, remote_server) = spawn_remote_runtime().await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+
+    let add_resp = router
+        .clone()
+        .oneshot(post_fleet_node(&remote_base_url))
+        .await
+        .expect("add fleet node response");
+    assert_eq!(add_resp.status(), StatusCode::OK);
+
+    let resp = router
+        .clone()
+        .oneshot(fleet_agents_request())
+        .await
+        .expect("fleet agents response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+
+    assert_eq!(body["ok"], true);
+    let agents = body["agents"].as_array().expect("agents array");
+    assert_eq!(agents.len(), 1, "{body}");
+    let row = &agents[0];
+    assert_eq!(row["node_id"], "remote-runtime-a");
+    assert_eq!(row["node_ip"], "100.64.0.10");
+    assert_eq!(row["node_name"], "mac-mini");
+    assert_eq!(row["workspace_id"], "room");
+    assert_eq!(row["remote_workspace_id"], "remote-room");
+    assert_eq!(row["workspace_identity"], "github.com/org/repo");
+    assert_eq!(row["agent"]["id"], "cfo");
+    assert_eq!(row["agent"]["status"], "running");
+    assert_eq!(row["agent"]["usage_summary"]["today"]["turns"], 1);
+
+    remote_server.abort();
 }
 
 #[tokio::test]
