@@ -732,6 +732,33 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("pages archived channels when limit is supplied", async () => {
+    registerDir("/repo/archive");
+    registerDir("/repo/archive/channels");
+    for (const name of ["alpha", "beta", "gamma"]) {
+      files.set(
+        `/repo/archive/channels/${name}.meta.yaml`,
+        ["display_name: Test", "members:", "  - lewis", ""].join("\n"),
+      );
+      registerFile(`/repo/archive/channels/${name}.meta.yaml`);
+    }
+
+    const first = await listArchivedChannels({ offset: 0, limit: 2 });
+    const second = await listArchivedChannels({ offset: 2, limit: 2 });
+
+    expect(first.data).toEqual({
+      channels: [
+        { name: "alpha", kind: "archived_channel", members: ["lewis"] },
+        { name: "beta", kind: "archived_channel", members: ["lewis"] },
+      ],
+      has_more: true,
+    });
+    expect(second.data).toEqual({
+      channels: [{ name: "gamma", kind: "archived_channel", members: ["lewis"] }],
+      has_more: false,
+    });
+  });
+
   it("restores archived channels into active lists", async () => {
     files.set(
       "/repo/channels/general.meta.yaml",

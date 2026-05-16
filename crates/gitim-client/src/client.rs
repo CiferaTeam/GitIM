@@ -891,6 +891,17 @@ mod tests {
             }),
         );
 
+        let list_channels_paged =
+            build_request("archived_channels", json!({"offset": 10, "limit": 25}));
+        assert_eq!(
+            list_channels_paged,
+            json!({
+                "method": "archived_channels",
+                "offset": 10,
+                "limit": 25,
+            }),
+        );
+
         let list_users = build_request("list_archived_users", json!({}));
         assert_eq!(list_users, json!({"method": "list_archived_users"}));
 
