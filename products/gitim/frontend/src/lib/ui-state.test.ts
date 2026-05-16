@@ -41,6 +41,7 @@ describe("ui-state", () => {
       channel: null,
       boardHandler: "alice",
       cardsShowArchived: true,
+      usageBreakdown: "provider",
     });
   });
 
@@ -53,6 +54,7 @@ describe("ui-state", () => {
       channel: "general",
       boardHandler: null,
       cardsShowArchived: false,
+      usageBreakdown: "provider",
     });
   });
 
@@ -63,6 +65,7 @@ describe("ui-state", () => {
       channel: "general",
       boardHandler: "alice",
       cardsShowArchived: false,
+      usageBreakdown: "provider",
     });
   });
 
@@ -76,5 +79,33 @@ describe("ui-state", () => {
     const before = localStorage.length;
     readUiState(null);
     expect(localStorage.length).toBe(before);
+  });
+
+  it("defaults usageBreakdown to 'provider'", () => {
+    expect(readUiState("runtime:myws").usageBreakdown).toBe("provider");
+  });
+
+  it("round-trips a valid usageBreakdown value", () => {
+    writeUiState("runtime:myws", { usageBreakdown: "handler" });
+    expect(readUiState("runtime:myws").usageBreakdown).toBe("handler");
+  });
+
+  it("falls back to default when persisted usageBreakdown is invalid", () => {
+    localStorage.setItem(
+      "gitim-ui-state:runtime:myws",
+      JSON.stringify({ usageBreakdown: "bogus" }),
+    );
+    expect(readUiState("runtime:myws").usageBreakdown).toBe("provider");
+  });
+
+  it("falls back to default when persisted state lacks usageBreakdown", () => {
+    localStorage.setItem(
+      "gitim-ui-state:runtime:myws",
+      JSON.stringify({ channel: "general", cardsShowArchived: true }),
+    );
+    const state = readUiState("runtime:myws");
+    expect(state.usageBreakdown).toBe("provider");
+    expect(state.channel).toBe("general");
+    expect(state.cardsShowArchived).toBe(true);
   });
 });
