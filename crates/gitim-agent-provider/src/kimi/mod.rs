@@ -313,36 +313,55 @@ async fn drive_session(
     let resume_clone = resume_token.clone();
     let cwd_clone = cwd_str.clone();
     let model_clone = model.clone();
+    // Handshake returns `Result<sid, (partial_sid, err)>` so the failure
+    // arm can carry a session id that was already established before a
+    // later step (specifically `set_session_model`) failed. Plan contract
+    // (01-plan.md:1333): set_session_model failure must produce
+    // `ExecResult { status: Failed, session_token: Some(sid), … }` so the
+    // user can retry with a corrected model and resume the same
+    // conversation. Earlier code used `?` short-circuit and dropped the
+    // locally-bound sid, which silently broke that continuity guarantee.
     let handshake = async move {
-        handshake_acp.initialize().await?;
+        handshake_acp.initialize().await.map_err(|e| (None, e))?;
         let sid = if let Some(token) = resume_clone {
-            let (actual, changed) = handshake_acp.resume_session(&cwd_clone, &token).await?;
+            let (actual, changed) = handshake_acp
+                .resume_session(&cwd_clone, &token)
+                .await
+                .map_err(|e| (None, e))?;
             if changed {
                 warn!(
                     backend = "kimi",
                     requested = %token,
                     actual = %actual,
-                    "agent returned a different session id on resume — original was likely lost; continuing with the new id"
+                    "kimi agent returned a different session id on resume — original was likely lost; continuing with the new id"
                 );
             }
             actual
         } else {
-            handshake_acp.new_session(&cwd_clone).await?
+            handshake_acp
+                .new_session(&cwd_clone)
+                .await
+                .map_err(|e| (None, e))?
         };
         // If the caller chose a model, switch the session to it before
         // any prompt. Failure here MUST fail the task — silently falling
         // back to kimi's default would let the user think their pick
         // was honoured while the task actually ran on something else.
-        // (multica kimi.go:251-268 — same contract.)
+        // (multica kimi.go:251-268 — same contract.) The Err arm carries
+        // `Some(sid)` so the outer driver can stamp it onto
+        // ExecResult.session_token.
         if let Some(m) = model_clone.as_deref().filter(|s| !s.is_empty()) {
             handshake_acp.set_session_model(&sid, m).await.map_err(|e| {
-                ProviderError::Protocol(format!(
-                    "kimi could not switch to model {m:?}: {e}"
-                ))
+                (
+                    Some(sid.clone()),
+                    ProviderError::Protocol(format!(
+                        "kimi could not switch to model {m:?}: {e}"
+                    )),
+                )
             })?;
             info!(session_id = %sid, model = %m, "kimi session model set");
         }
-        Ok::<String, ProviderError>(sid)
+        Ok::<String, (Option<String>, ProviderError)>(sid)
     };
 
     match tokio::time::timeout(handshake_timeout, handshake).await {
@@ -350,8 +369,15 @@ async fn drive_session(
             session_id = sid;
             info!(pid, session_id = %session_id, "kimi session established");
         }
-        Ok(Err(e)) => {
+        Ok(Err((partial_sid, e))) => {
             warn!(pid, error = %e, "kimi handshake failed");
+            // Preserve any partial session id — when set_session_model
+            // fails the runtime needs the (now-established) sid back so
+            // the user's next-turn `resume_token` can carry the same
+            // session forward after the user corrects the model.
+            if let Some(sid) = partial_sid {
+                session_id = sid;
+            }
             let _ = child.start_kill();
             send_result(
                 result_tx,
