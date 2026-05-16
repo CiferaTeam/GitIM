@@ -1,15 +1,16 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use tokio_util::sync::CancellationToken;
 
+use crate::acp::parse::detect_api_failure;
+use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
     ProviderError, ProviderUsage, Session,
@@ -18,6 +19,7 @@ use crate::{
 pub mod prompts;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
 const EVENT_CHANNEL_BUFFER: usize = 256;
 
 pub struct HermesProvider {
@@ -97,10 +99,8 @@ impl Provider for HermesProvider {
 
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-        let args = vec!["acp".to_string()];
-
         let mut cmd = Command::new(&exec_path);
-        cmd.args(&args)
+        cmd.arg("acp")
             .stdout(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -138,12 +138,23 @@ impl Provider for HermesProvider {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
 
+        let hooks = AcpHooks {
+            tool_name_mapper: hermes_tool_name_from_title,
+            accept_notification: None,
+            // ExecResult.usage is owned by the prompt-response value;
+            // mid-stream usage_update notifications are intentionally
+            // dropped (display-only) so the runtime token accumulator
+            // never sees them as live events either.
+            emit_live_usage: false,
+        };
+        let acp = Arc::new(AcpClient::new("hermes", stdin, hooks));
+
         let join_handle = tokio::spawn(async move {
             drive_session(
                 child,
-                stdin,
                 stdout,
                 stderr,
+                acp,
                 event_tx,
                 result_tx,
                 timeout,
@@ -165,57 +176,6 @@ impl Provider for HermesProvider {
     }
 }
 
-// ── Public types for parse tests ──
-
-/// Parsed result from a session/update notification's params object.
-#[derive(Debug)]
-pub enum ParsedNotification {
-    /// Text content from an agent message chunk.
-    Text { content: String },
-    /// Thinking / reasoning content.
-    Thinking { content: String },
-    /// Tool invocation.
-    ToolCall {
-        tool: String,
-        call_id: String,
-        input: Value,
-    },
-    /// Tool result (completed or failed).
-    ToolResult { call_id: String, output: String },
-    /// Mid-session token usage push. Hermes emits these as
-    /// `sessionUpdate: "usage_update"` with camelCase fields, separately
-    /// from the snake_case usage on the final session/prompt response.
-    Usage(ProviderUsage),
-}
-
-/// Detect a hermes-internal API failure that's been streamed as plain
-/// assistant text rather than a JSON-RPC error. Hermes catches LLM API
-/// exceptions in its agent loop and turns them into a `final_response`
-/// string, so the ACP `session/prompt` reply still looks successful
-/// (`stop_reason=end_turn`, no `error` field) — but the agent never
-/// actually runs any tools. We have to fall back to substring matching
-/// against the stable error prefixes hermes emits, otherwise the
-/// runtime reports "done" while the user sees no IM reply.
-///
-/// Returns the first line of the output (trimmed) when it starts with a
-/// known failure prefix; `None` otherwise.
-pub fn detect_api_failure(output: &str) -> Option<String> {
-    const KNOWN_PREFIXES: &[&str] = &[
-        // Botocore retry wrapper around AWS Bedrock / Anthropic / OpenAI
-        "API call failed after",
-        // Botocore validation
-        "Parameter validation failed",
-    ];
-    let trimmed = output.trim_start();
-    for prefix in KNOWN_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            let line = trimmed.lines().next()?.trim();
-            return Some(line.to_string());
-        }
-    }
-    None
-}
-
 /// Build the text sent to `session/prompt`.
 ///
 /// Hermes ACP does not expose a per-request system prompt parameter. Earlier
@@ -233,133 +193,26 @@ pub fn build_prompt_payload(prompt: &str) -> String {
     prompt.to_string()
 }
 
-/// Parse the `params` object from a `session/update` JSON-RPC notification.
-/// Returns None for unrecognized or ignorable update types.
-pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
-    let update = params.get("update")?;
-    let update_type = update.get("sessionUpdate")?.as_str()?;
-
-    match update_type {
-        "agent_message_chunk" => {
-            let text = update.get("content")?.get("text")?.as_str()?;
-            if text.is_empty() {
-                return None;
-            }
-            Some(ParsedNotification::Text {
-                content: text.to_string(),
-            })
-        }
-        "agent_thought_chunk" => {
-            let text = update.get("content")?.get("text")?.as_str()?;
-            if text.is_empty() {
-                return None;
-            }
-            Some(ParsedNotification::Thinking {
-                content: text.to_string(),
-            })
-        }
-        "tool_call" => {
-            let call_id = update.get("toolCallId")?.as_str()?.to_string();
-            let title = update.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = title
-                .split(':')
-                .next()
-                .unwrap_or("unknown")
-                .trim()
-                .to_string();
-            let input = update
-                .get("rawInput")
-                .cloned()
-                .unwrap_or(Value::Object(Default::default()));
-            Some(ParsedNotification::ToolCall {
-                tool,
-                call_id,
-                input,
-            })
-        }
-        "tool_call_update" => {
-            let status = update.get("status")?.as_str()?;
-            if status != "completed" && status != "failed" {
-                return None;
-            }
-            let call_id = update.get("toolCallId")?.as_str()?.to_string();
-            let output = update
-                .get("rawOutput")
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
-            Some(ParsedNotification::ToolResult { call_id, output })
-        }
-        "usage_update" => parse_acp_usage(update.get("usage")?).map(ParsedNotification::Usage),
-        _ => None,
-    }
-}
-
-/// Map a Hermes `usage` object to the provider-agnostic `ProviderUsage`.
+/// Map a hermes-emitted ACP tool title onto the runtime-expected name.
 ///
-/// Hermes surfaces usage in two shapes:
-/// 1. session/prompt response — ACP snake_case (`input_tokens`, etc.)
-/// 2. session/update `usage_update` — Hermes' camelCase
-///    (`inputTokens`, etc.)
-///
-/// Try snake_case first (ACP spec), camelCase as fallback. Returns
-/// `None` when none of the four counts are present, so empty
-/// `usage: {}` doesn't fabricate a 0% snapshot.
-///
-/// `parse_acp_usage_for_test` is a test-only re-export so
-/// `tests/hermes_usage_semantics_test.rs` can pin the prompt-response
-/// shape.
-pub fn parse_acp_usage_for_test(v: &Value) -> Option<ProviderUsage> {
-    parse_acp_usage(v)
+/// Hermes already emits tool titles whose prefix is the canonical name
+/// (e.g. `"terminal: ls -la"` → `"terminal"`, `"file_edit: path"` →
+/// `"file_edit"`). `parse_notification` strips everything after the
+/// first `:` and trims, so this mapper just passes the prefix through.
+/// The hook exists so kimi can plug in its capitalised-title normalizer
+/// (e.g. `"Read file"` → `"read_file"`) without changing hermes.
+pub fn hermes_tool_name_from_title(name: &str) -> String {
+    name.to_string()
 }
 
-fn parse_acp_usage(v: &Value) -> Option<ProviderUsage> {
-    let obj = v.as_object()?;
-    let pick = |snake: &str, camel: &str| -> Option<u64> {
-        obj.get(snake)
-            .or_else(|| obj.get(camel))
-            .and_then(Value::as_u64)
-    };
-    let input = pick("input_tokens", "inputTokens");
-    let output = pick("output_tokens", "outputTokens");
-    let cache_read = pick("cache_read_input_tokens", "cacheReadInputTokens");
-    let cache_creation = pick("cache_creation_input_tokens", "cacheCreationInputTokens");
-    if input.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none() {
-        return None;
-    }
-    Some(ProviderUsage {
-        input_tokens: input,
-        output_tokens: output,
-        used_percent: None,
-        cache_read_tokens: cache_read,
-        cache_creation_tokens: cache_creation,
-        context_tokens: None,
-        context_window_tokens: None,
-    })
-}
-
-// ── JSON-RPC types (internal) ──
-
-#[derive(Deserialize)]
-struct RpcResponse {
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<Value>,
-}
-
-// ── Session driver ──
+// ── Driver task ────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn drive_session(
     mut child: tokio::process::Child,
-    mut stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
     stderr: tokio::process::ChildStderr,
+    acp: Arc<AcpClient>,
     event_tx: mpsc::Sender<Event>,
     result_tx: oneshot::Sender<ExecResult>,
     timeout: Duration,
@@ -370,18 +223,10 @@ async fn drive_session(
     cwd_str: String,
 ) {
     let start = Instant::now();
-    let mut output = String::new();
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
-    // Hermes' id=3 prompt response carries session-cumulative `result.usage`.
-    // Capture it as `latest_usage`; the runtime maps these to per-turn deltas
-    // via `Provider::usage_is_cumulative() -> true`. Occupancy is owned by
-    // hermes' own compression (`self_managed_context() -> true`), so these
-    // numbers feed only the billing accumulator, never the HUD gauge.
     let mut latest_usage: Option<ProviderUsage> = None;
-
-    let mut reader = BufReader::new(stdout).lines();
 
     // Collect stderr tail for error reporting
     let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -400,155 +245,51 @@ async fn drive_session(
         }
     });
 
-    // JSON-RPC helper — sends a request and reads back the response with matching id.
-    async fn rpc_call(
-        stdin: &mut tokio::process::ChildStdin,
-        reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, String> {
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let mut buf = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-        buf.push(b'\n');
-        stdin
-            .write_all(&buf)
-            .await
-            .map_err(|e| format!("stdin write: {e}"))?;
-
-        // Read lines until we get response with matching id
+    // Reader task — pumps stdout through AcpClient::handle_line so JSON-RPC
+    // responses land on their pending oneshots and session/update
+    // notifications turn into Event::* on event_tx. On stream exit (clean
+    // EOF or read error) we MUST fail any in-flight pending requests:
+    // without that, a mid-prompt child crash would leave the driver's
+    // `request()` future blocked on its oneshot until the outer
+    // `tokio::time::timeout` fires (20 minutes for hermes). The pre-refactor
+    // event loop broke on `Ok(None)` and failed in seconds; `fail_pending`
+    // restores that fast-fail behavior for the shared-reader topology.
+    let reader_acp = Arc::clone(&acp);
+    let reader_event_tx = event_tx.clone();
+    let reader_handle = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
         loop {
             match reader.next_line().await {
                 Ok(Some(line)) => {
-                    let line = line.trim().to_string();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if let Ok(resp) = serde_json::from_str::<RpcResponse>(&line) {
-                        if resp.id == Some(id) {
-                            if let Some(err) = resp.error {
-                                return Err(format!(
-                                    "{method}: {} (code={})",
-                                    err.get("message")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown"),
-                                    err.get("code").and_then(|v| v.as_i64()).unwrap_or(0)
-                                ));
-                            }
-                            return Ok(resp.result.unwrap_or(Value::Null));
-                        }
-                    }
+                    reader_acp.handle_line(&line, &reader_event_tx).await;
                 }
-                Ok(None) => return Err(format!("{method}: stream ended")),
-                Err(e) => return Err(format!("{method}: read error: {e}")),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(error = %e, "hermes stdout read error");
+                    break;
+                }
             }
         }
-    }
+        reader_acp.fail_pending().await;
+    });
 
-    // Helper to send ExecResult and return early on handshake failure
-    fn send_result(
-        result_tx: oneshot::Sender<ExecResult>,
-        status: ExecStatus,
-        output: String,
-        error: Option<String>,
-        start: Instant,
-        session_id: &str,
-    ) {
-        let _ = result_tx.send(ExecResult {
-            status,
-            output,
-            error,
-            duration_ms: start.elapsed().as_millis() as u64,
-            session_token: if session_id.is_empty() {
-                None
-            } else {
-                Some(session_id.to_string())
-            },
-            usage: None,
-        });
-    }
+    // ── Handshake (initialize → authenticate → new_session/resume) ──
+    // Carries its own 30s ceiling, separate from the outer execute() timeout.
 
-    // ── Handshake (30s timeout — separate from the main event loop timeout) ──
-    // Note: any session/update notifications arriving during handshake are intentionally
-    // dropped. In practice hermes doesn't send them before the prompt response begins.
-
-    let handshake_timeout = timeout.min(Duration::from_secs(30));
-
-    let handshake = async {
-        // Step 1: initialize
-        let init_result = rpc_call(
-            &mut stdin,
-            &mut reader,
-            0,
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "clientInfo": {"name": "gitim-agent-sdk", "version": "0.1.0"},
-                "clientCapabilities": {},
-            }),
-        )
-        .await?;
-
-        // Step 2: authenticate using first available auth method (if any)
-        if let Some(method_id) = init_result
-            .get("authMethods")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|m| m.get("id"))
-            .and_then(|id| id.as_str())
-        {
-            rpc_call(
-                &mut stdin,
-                &mut reader,
-                1,
-                "authenticate",
-                json!({"methodId": method_id}),
-            )
-            .await?;
-        }
-
-        // Step 3: session/new or session/resume
-        // session/resume returns only {models} — session_id stays the same as the token passed in.
-        // session/new returns {sessionId, models}.
-        let sid = if let Some(ref token) = resume_token {
-            rpc_call(
-                &mut stdin,
-                &mut reader,
-                2,
-                "session/resume",
-                json!({"cwd": cwd_str, "sessionId": token}),
-            )
-            .await?;
-            token.clone()
+    let handshake_timeout = timeout.min(HANDSHAKE_TIMEOUT_MAX);
+    let handshake_acp = Arc::clone(&acp);
+    let resume_clone = resume_token.clone();
+    let cwd_clone = cwd_str.clone();
+    let handshake = async move {
+        let init = handshake_acp.initialize().await?;
+        handshake_acp.authenticate_first_method(&init).await?;
+        let sid = if let Some(token) = resume_clone {
+            let (actual, _changed) = handshake_acp.resume_session(&cwd_clone, &token).await?;
+            actual
         } else {
-            let result = rpc_call(
-                &mut stdin,
-                &mut reader,
-                2,
-                "session/new",
-                json!({"cwd": cwd_str, "mcpServers": []}),
-            )
-            .await?;
-            result
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
+            handshake_acp.new_session(&cwd_clone).await?
         };
-
-        // Step 4: send session/prompt (fire and forget — response arrives in event loop)
-        let prompt_req = json!({
-            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-            "params": {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]}
-        });
-        let mut buf = serde_json::to_vec(&prompt_req).map_err(|e| e.to_string())?;
-        buf.push(b'\n');
-        stdin
-            .write_all(&buf)
-            .await
-            .map_err(|e| format!("stdin write: {e}"))?;
-
-        Ok::<String, String>(sid)
+        Ok::<String, ProviderError>(sid)
     };
 
     match tokio::time::timeout(handshake_timeout, handshake).await {
@@ -562,31 +303,32 @@ async fn drive_session(
             send_result(
                 result_tx,
                 ExecStatus::Failed,
-                output,
-                Some(e),
+                String::new(),
+                Some(e.to_string()),
                 start,
                 &session_id,
+                None,
             );
             stderr_handle.abort();
+            reader_handle.abort();
             return;
         }
         Err(_) => {
-            warn!(
-                pid,
-                "hermes handshake timed out after {handshake_timeout:?}"
-            );
+            warn!(pid, "hermes handshake timed out after {handshake_timeout:?}");
             let _ = child.start_kill();
             send_result(
                 result_tx,
                 ExecStatus::Timeout,
-                output,
+                String::new(),
                 Some(format!(
                     "hermes handshake timed out after {handshake_timeout:?}"
                 )),
                 start,
                 &session_id,
+                None,
             );
             stderr_handle.abort();
+            reader_handle.abort();
             return;
         }
     }
@@ -598,102 +340,65 @@ async fn drive_session(
         },
     );
 
-    // ── Event loop: read notifications + final prompt response ──
+    // ── Prompt + outer timeout + cancel race ──
 
-    let read_result = tokio::time::timeout(timeout, async {
-        loop {
-            tokio::select! {
-                line = reader.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            let line = line.trim().to_string();
-                            if line.is_empty() { continue; }
+    let prompt_acp = Arc::clone(&acp);
+    let prompt_sid = session_id.clone();
+    let prompt_text = prompt.clone();
 
-                            let raw: Value = match serde_json::from_str(&line) {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    debug!(pid, line_len = line.len(), "unparsed line");
-                                    continue;
-                                }
-                            };
-
-                            // Prompt response (id=3) — final result
-                            if raw.get("id").and_then(|v| v.as_u64()) == Some(3) {
-                                if raw.get("error").is_some() {
-                                    final_status = ExecStatus::Failed;
-                                    final_error = Some(
-                                        raw["error"]["message"]
-                                            .as_str()
-                                            .unwrap_or("prompt failed")
-                                            .to_string(),
-                                    );
-                                } else if let Some(usage_val) = raw.pointer("/result/usage") {
-                                    if let Some(u) = parse_acp_usage(usage_val) {
-                                        latest_usage = Some(u);
-                                    }
-                                }
-                                break;
-                            }
-
-                            // Notification: session/update
-                            if raw.get("method").and_then(|v| v.as_str()) == Some("session/update") {
-                                if let Some(params) = raw.get("params") {
-                                    if let Some(parsed) = parse_notification(params) {
-                                        match parsed {
-                                            ParsedNotification::Text { content } => {
-                                                output.push_str(&content);
-                                                try_send_event(&event_tx, Event::Text { content });
-                                            }
-                                            ParsedNotification::Thinking { content } => {
-                                                try_send_event(&event_tx, Event::Thinking { content });
-                                            }
-                                            ParsedNotification::ToolCall { tool, call_id, input } => {
-                                                try_send_event(&event_tx, Event::ToolUse { tool, call_id, input });
-                                            }
-                                            ParsedNotification::ToolResult { call_id, output: tool_output } => {
-                                                try_send_event(&event_tx, Event::ToolResult { call_id, output: tool_output });
-                                            }
-                                            ParsedNotification::Usage(_) => {
-                                                // Drop: mid-stream usage_update is display-only;
-                                                // ExecResult.usage must come from the id=3 prompt
-                                                // response (per-turn delta) for the runtime token
-                                                // accumulator to stay deterministic.
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            warn!(pid, error = %e, "stdout read error");
-                            break;
-                        }
-                    }
-                }
-                _ = cancel_token.cancelled() => {
-                    info!(pid, "cancelled by steering");
-                    final_status = ExecStatus::Aborted;
-                    final_error = Some("cancelled by steering".to_string());
-                    break;
-                }
-            }
+    let prompt_outcome = tokio::time::timeout(timeout, async {
+        tokio::select! {
+            r = prompt_acp.prompt(&prompt_sid, &prompt_text) => Some(r),
+            _ = cancel_token.cancelled() => None,
         }
     })
     .await;
 
+    match prompt_outcome {
+        Ok(Some(Ok(outcome))) => {
+            // Match historical behavior: any cleanly-arriving prompt
+            // response is treated as Completed regardless of stopReason.
+            // (Mid-stream cancellation flows through the cancel_token arm
+            // below.)
+            latest_usage = outcome.usage;
+        }
+        Ok(Some(Err(e))) => {
+            final_status = ExecStatus::Failed;
+            final_error = Some(e.to_string());
+        }
+        Ok(None) => {
+            info!(pid, "cancelled by steering");
+            final_status = ExecStatus::Aborted;
+            final_error = Some("cancelled by steering".to_string());
+        }
+        Err(_) => {
+            final_status = ExecStatus::Timeout;
+            final_error = Some(format!("hermes timed out after {timeout:?}"));
+        }
+    }
+
     // ── Post-loop cleanup ──
 
-    // Drop stdin to signal EOF to hermes
-    drop(stdin);
+    // Signal end-of-input to hermes so it shuts the session cleanly; for
+    // timeout / abort we kill outright instead.
+    if final_status == ExecStatus::Timeout || final_status == ExecStatus::Aborted {
+        let _ = child.start_kill();
+    } else {
+        acp.close_stdin().await;
+    }
 
-    if read_result.is_err() {
-        final_status = ExecStatus::Timeout;
-        final_error = Some(format!("hermes timed out after {timeout:?}"));
-        let _ = child.start_kill();
-    } else if final_status == ExecStatus::Aborted {
-        let _ = child.start_kill();
-    } else if final_status == ExecStatus::Completed {
+    // The reader keeps running until the child closes stdout (or is
+    // killed). Wait for it to drain so any trailing notifications that
+    // arrived after the prompt response — usually none for hermes, but
+    // possible — get processed into the text accumulator before we
+    // sample the final output. After this await, no further `handle_line`
+    // calls happen and the accumulator is stable — a single read is
+    // sufficient.
+    let _ = reader_handle.await;
+
+    let output = acp.collected_output().await;
+
+    if final_status == ExecStatus::Completed {
         if let Some(api_err) = detect_api_failure(&output) {
             warn!(pid, error = %api_err, "hermes returned API failure as text");
             final_status = ExecStatus::Failed;
@@ -742,8 +447,28 @@ async fn drive_session(
     });
 }
 
-fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
-    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
-        warn!("event channel full, dropping event");
-    }
+/// Helper to send ExecResult on the result oneshot.
+#[allow(clippy::too_many_arguments)]
+fn send_result(
+    result_tx: oneshot::Sender<ExecResult>,
+    status: ExecStatus,
+    output: String,
+    error: Option<String>,
+    start: Instant,
+    session_id: &str,
+    usage: Option<ProviderUsage>,
+) {
+    let _ = result_tx.send(ExecResult {
+        status,
+        output,
+        error,
+        duration_ms: start.elapsed().as_millis() as u64,
+        session_token: if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id.to_string())
+        },
+        usage,
+    });
 }
+

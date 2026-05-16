@@ -1331,6 +1331,510 @@ pub async fn preflight_hermes() -> PreflightResult {
     preflight_hermes_with("hermes", Duration::from_secs(30), None, None, None, None).await
 }
 
+/// Preflight the `kimi` CLI with a real "say hi" hello over ACP.
+///
+/// Flow:
+/// 1. `kimi --version` to capture the version string (best-effort; failure
+///    here only emits `None` for version — the spawn at step 3 is what
+///    actually catches `not_installed`).
+/// 2. Spawn `kimi acp` with the agent's env injected.
+/// 3. Drive a minimal ACP session:
+///    `initialize → session/new → (session/set_model if model set) →
+///    session/prompt("say hi")`, then read stdout until the first
+///    `session/update` notification with text content arrives — that
+///    proves both CLI reachability and the configured model can serve a
+///    real LLM call.
+/// 4. Kill the child on first text content or timeout.
+///
+/// Notes:
+/// - Unlike hermes preflight (which short-circuits at `initialize`), kimi
+///   preflight drives a real prompt because kimi has no separate
+///   ACP-handshake-only mode that's meaningful to the user. The "real
+///   hello" rule (see `feedback_preflight_real_hello`) applies.
+/// - The JSON-RPC frames are written inline rather than via
+///   `gitim_agent_provider::acp::AcpClient`. The provider crate is
+///   already a runtime dep, so reuse would be technically possible —
+///   but the preflight stays in lockstep with `preflight_hermes_acp`'s
+///   inline pattern (which lives a few hundred lines above), keeping
+///   the two preflights structurally aligned and avoiding a code path
+///   where preflight blocks add-agent because of a provider-side
+///   refactor. ~50 lines of write/read here is cheaper than the
+///   coupling tax.
+/// - `kimi acp` ignores `--yolo` / `--auto-approve` (root-command flags);
+///   permission auto-approval is the daemon side's job and not relevant
+///   for preflight (which never gets to a tool call).
+pub async fn preflight_kimi_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command as TokioCommand;
+
+    let provider = "kimi";
+    let started = Instant::now();
+
+    // 1. Best-effort version capture. Failure to spawn here is the
+    //    canonical "not installed" signal returned below; success
+    //    fills the response's `version` for the WebUI display.
+    let version = TokioCommand::new(bin)
+        .arg("--version")
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // First line, last whitespace-separated token — matches the
+            // shape of `kimi --version` in practice (and is consistent
+            // with `query_version` above for runtime peers).
+            s.lines()
+                .next()
+                .and_then(|l| l.split_whitespace().last().map(|t| t.to_string()))
+        });
+
+    // 2. Spawn `kimi acp` with the agent's env vars injected (so the
+    //    preflight exercises the same credentials the agent will run
+    //    under).
+    let mut cmd = TokioCommand::new(bin);
+    cmd.arg("acp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("kimi CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn kimi acp: {e}")
+            };
+            return PreflightResult::failure(
+                provider,
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut reader = BufReader::new(stdout).lines();
+
+    // 3. Drive initialize → session/new → optional set_model → prompt,
+    //    then wait for the first text notification or terminal response.
+    let model = overrides.model_override.clone();
+    let handshake = async {
+        // Helper to ship a single JSON-RPC frame.
+        async fn send(
+            stdin: &mut tokio::process::ChildStdin,
+            req: serde_json::Value,
+        ) -> Result<(), String> {
+            let mut buf = serde_json::to_vec(&req).map_err(|e| format!("encode: {e}"))?;
+            buf.push(b'\n');
+            stdin
+                .write_all(&buf)
+                .await
+                .map_err(|e| format!("stdin write: {e}"))
+        }
+
+        // Helper to wait for the next JSON-RPC response (`{id, …}`) and
+        // either return its `result` or surface its `error.message`.
+        // Notifications (`method = session/update`) are inspected for the
+        // first text content payload while we wait for `id`.
+        async fn await_response(
+            reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+            expected_id: i64,
+        ) -> Result<serde_json::Value, String> {
+            loop {
+                let line = match reader.next_line().await {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
+                        return Err("ACP stream ended before response".to_string());
+                    }
+                    Err(e) => return Err(format!("stdout read: {e}")),
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let v: serde_json::Value =
+                    serde_json::from_str(line).map_err(|e| format!("parse: {e}"))?;
+                if v.get("id").and_then(|x| x.as_i64()) == Some(expected_id) {
+                    if let Some(err) = v.get("error") {
+                        return Err(format!(
+                            "{}: {}",
+                            expected_id,
+                            err.get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown")
+                        ));
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                }
+                // Otherwise: an unrelated notification — drop it on the
+                // floor, the prompt-phase reader is the one that watches
+                // for text content.
+            }
+        }
+
+        // initialize.
+        send(
+            &mut stdin,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientInfo": {
+                        "name": "gitim-preflight",
+                        "version": "0.1.0",
+                    },
+                    "clientCapabilities": {},
+                },
+            }),
+        )
+        .await?;
+        let _ = await_response(&mut reader, 0).await?;
+
+        // session/new.
+        send(
+            &mut stdin,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session/new",
+                "params": { "cwd": ".", "mcpServers": [] },
+            }),
+        )
+        .await?;
+        let session_res = await_response(&mut reader, 1).await?;
+        let session_id = session_res
+            .get("sessionId")
+            .and_then(|x| x.as_str())
+            .ok_or("session/new returned no session ID")?
+            .to_string();
+
+        // session/set_model (only when the caller specified a model).
+        // Failure here matches the runtime behaviour — fail the preflight
+        // rather than silently fall back to whatever default kimi picks.
+        let mut next_id = 2_i64;
+        if let Some(m) = model.as_deref().filter(|s| !s.is_empty()) {
+            send(
+                &mut stdin,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": next_id,
+                    "method": "session/set_model",
+                    "params": { "sessionId": &session_id, "modelId": m },
+                }),
+            )
+            .await?;
+            let _ = await_response(&mut reader, next_id).await?;
+            next_id += 1;
+        }
+
+        // session/prompt — fire-and-forget; we don't wait for the final
+        // response. Instead we read notifications and bail on the first
+        // text content (which is the cheapest possible "model is alive"
+        // signal) or on the prompt-response landing first (small replies
+        // sometimes ship without a streaming intermediate).
+        send(
+            &mut stdin,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": next_id,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": &session_id,
+                    "prompt": [{ "type": "text", "text": "say hi" }],
+                },
+            }),
+        )
+        .await?;
+
+        loop {
+            let line = match reader.next_line().await {
+                Ok(Some(l)) => l,
+                Ok(None) => {
+                    return Err("ACP stream ended before any text content arrived".to_string());
+                }
+                Err(e) => return Err(format!("stdout read: {e}")),
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(line).map_err(|e| format!("parse: {e}"))?;
+            // (a) The prompt response itself arrived — accept it as
+            // success (short replies can ship without intermediate
+            // session/update notifications). Surface any error first.
+            if v.get("id").and_then(|x| x.as_i64()) == Some(next_id) {
+                if let Some(err) = v.get("error") {
+                    return Err(format!(
+                        "session/prompt error: {}",
+                        err.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown")
+                    ));
+                }
+                return Ok::<String, String>(line.to_string());
+            }
+            // (b) A `session/update` notification — sniff for the first
+            // text content payload. The exact shape is the ACP spec
+            // `session/update.params.update.content[*].text` for
+            // `update.contentType in {agent_message_chunk, …}`; we don't
+            // need to parse all the variants here — any non-empty
+            // `text` field under the `update.content` tree counts as
+            // "the model is producing output".
+            if v.get("method").and_then(|m| m.as_str()) == Some("session/update") {
+                if find_text_chunk(&v) {
+                    return Ok(line.to_string());
+                }
+            }
+        }
+    };
+
+    let res = tokio::time::timeout(timeout, handshake).await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(Ok(preview)) => PreflightResult::success(
+            provider,
+            version,
+            overrides.model_override.clone(),
+            duration_ms,
+            Some(truncate(&preview, PREVIEW_TRUNCATE)),
+        ),
+        Ok(Err(e)) => {
+            PreflightResult::failure(provider, ErrorKind::Other, e, duration_ms)
+        }
+        Err(_) => PreflightResult::failure(
+            provider,
+            ErrorKind::Timeout,
+            format!("kimi preflight exceeded {}ms", timeout.as_millis()),
+            duration_ms,
+        ),
+    }
+}
+
+/// Walk an arbitrary `session/update` notification and return true on
+/// the first non-empty `text` field found anywhere in the tree.
+///
+/// ACP servers can pack text into a handful of shapes
+/// (`update.content[*].text`, `update.message.content[*].text`, etc.)
+/// and a tolerant walk costs us less than enumerating every variant —
+/// the only false-positive risk is if a non-text payload uses the key
+/// `text`, which neither hermes nor kimi do in practice.
+fn find_text_chunk(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, child) in map {
+                if k == "text" {
+                    if let Some(s) = child.as_str() {
+                        if !s.is_empty() {
+                            return true;
+                        }
+                    }
+                }
+                if find_text_chunk(child) {
+                    return true;
+                }
+            }
+            false
+        }
+        serde_json::Value::Array(arr) => arr.iter().any(find_text_chunk),
+        _ => false,
+    }
+}
+
+/// Run preflight against the default `kimi` binary with no overrides.
+/// Used by direct `/preflight/kimi` callers; the add-agent path uses
+/// [`preflight_for_add_request`] which threads agent env + model.
+pub async fn preflight_kimi() -> PreflightResult {
+    preflight_kimi_with_config("kimi", Duration::from_secs(60), PreflightOverrides::default())
+        .await
+}
+
+/// Preflight the `cursor-agent` CLI with a real "say hi" hello.
+///
+/// Flow:
+/// 1. Spawn `cursor-agent --version` to capture the version string (best-effort).
+/// 2. Spawn `cursor-agent chat -p "say hi" --output-format stream-json --yolo
+///    [--model <m>]`, read stdout line-by-line for the first `assistant` /
+///    `text` / `result` event; kill on first hit.
+/// 3. Bail with the appropriate [`ErrorKind`] on missing binary / timeout /
+///    non-zero exit before a terminal event arrives.
+///
+/// Notes:
+/// - We do NOT pull the `gitim-agent-provider::cursor::parse` module in here
+///   to keep `gitim-runtime` from depending on provider-internal envelope
+///   types. A minimal `serde_json::Value::get("type")` probe is sufficient
+///   — preflight only needs "did we see a terminal event" not full parsing.
+/// - Model override is forwarded as `--model X` when set; otherwise the
+///   user's configured default model is used (cursor-agent CLI picks its own
+///   default if neither is set).
+pub async fn preflight_cursor_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command as TokioCommand;
+
+    let provider = "cursor";
+    let started = Instant::now();
+
+    // 1. Capture --version (best-effort; failure to spawn here is the
+    //    canonical "not installed" signal).
+    let version = match TokioCommand::new(bin).arg("--version").output().await {
+        Ok(out) if out.status.success() => Some(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
+        Ok(_) => None,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("cursor-agent CLI not found at `{bin}`: {e}")
+            } else {
+                format!("cursor-agent --version failed: {e}")
+            };
+            return PreflightResult::failure(
+                provider,
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    // 2. Spawn the real hello.
+    let mut cmd = TokioCommand::new(bin);
+    cmd.arg("chat")
+        .arg("-p")
+        .arg("say hi")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--yolo")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(ref m) = overrides.model_override {
+        cmd.arg("--model").arg(m);
+    }
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("cursor-agent CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn cursor-agent: {e}")
+            };
+            return PreflightResult::failure(
+                provider,
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    // 3. Read until first terminal event or timeout.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(stdout).lines();
+
+    enum HelloOutcome {
+        Ok(String),
+        Err(String),
+    }
+
+    let read_fut = async {
+        let mut preview = String::new();
+        while let Some(line) = reader.next_line().await.ok().flatten() {
+            preview.push_str(&line);
+            preview.push('\n');
+            if preview.len() > 4096 {
+                break;
+            }
+            // Minimal envelope sniff: inline `serde_json::Value::get("type")`
+            // to avoid pulling the cursor provider's parse module into runtime
+            // (keeps the crate boundary clean).
+            let evt_type = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                });
+            if let Some(t) = evt_type {
+                match t.as_str() {
+                    "assistant" | "text" | "result" => {
+                        return Some(HelloOutcome::Ok(preview));
+                    }
+                    "error" => {
+                        return Some(HelloOutcome::Err(format!(
+                            "cursor reported error: {preview}"
+                        )));
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        None
+    };
+
+    let res = tokio::time::timeout(timeout, read_fut).await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(Some(HelloOutcome::Ok(preview))) => PreflightResult::success(
+            provider,
+            version,
+            overrides.model_override.clone(),
+            duration_ms,
+            Some(truncate(preview.trim(), PREVIEW_TRUNCATE)),
+        ),
+        Ok(Some(HelloOutcome::Err(msg))) => {
+            PreflightResult::failure(provider, ErrorKind::Other, msg, duration_ms)
+        }
+        Ok(None) => PreflightResult::failure(
+            provider,
+            ErrorKind::Other,
+            "cursor-agent exited before emitting any assistant/result event",
+            duration_ms,
+        ),
+        Err(_) => PreflightResult::failure(
+            provider,
+            ErrorKind::Timeout,
+            format!("cursor-agent preflight exceeded {}ms", timeout.as_millis()),
+            duration_ms,
+        ),
+    }
+}
+
 /// Read `(provider, model)` from the user's hermes default profile config.
 ///
 /// Resolves the hermes home directory from the `HERMES_HOME` env var (falling
@@ -1396,6 +1900,8 @@ const DEFAULT_BIN_CODEX: &str = "codex";
 const DEFAULT_BIN_OPENCODE: &str = "opencode";
 const DEFAULT_BIN_PI: &str = "pi";
 const DEFAULT_BIN_HERMES: &str = "hermes";
+const DEFAULT_BIN_KIMI: &str = "kimi";
+const DEFAULT_BIN_CURSOR: &str = "cursor-agent";
 
 /// Setup-level failure tags, attached to `PreflightResult.failure_code` by
 /// [`preflight_for_add_request`] and consumed by
@@ -1426,6 +1932,8 @@ pub struct PreflightDispatchOverrides {
     pub opencode_bin: Option<String>,
     pub pi_bin: Option<String>,
     pub hermes_bin: Option<String>,
+    pub kimi_bin: Option<String>,
+    pub cursor_bin: Option<String>,
     pub outer_timeout: Option<Duration>,
     pub hermes_home: Option<PathBuf>,
 }
@@ -1573,6 +2081,17 @@ async fn dispatch_preflight(
                 overrides.hermes_home.as_deref(),
             )
             .await
+        }
+        "kimi" => {
+            let bin = overrides.kimi_bin.as_deref().unwrap_or(DEFAULT_BIN_KIMI);
+            preflight_kimi_with_config(bin, inner_timeout, prov_overrides).await
+        }
+        "cursor" => {
+            let bin = overrides
+                .cursor_bin
+                .as_deref()
+                .unwrap_or(DEFAULT_BIN_CURSOR);
+            preflight_cursor_with_config(bin, inner_timeout, prov_overrides).await
         }
         other => PreflightResult::failure_with_code(
             other,
