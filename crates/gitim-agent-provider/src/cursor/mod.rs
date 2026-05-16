@@ -28,7 +28,9 @@ use crate::{
 
 pub mod parse;
 
-use parse::{cursor_error_text, normalize_stream_line, parse_event, CursorStreamEvent, CursorUsage};
+use parse::{
+    cursor_error_text, normalize_stream_line, parse_event, CursorStreamEvent, CursorUsage,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
@@ -378,12 +380,7 @@ async fn drive_session(
     }
 
     let duration = start.elapsed();
-    info!(
-        pid,
-        ?final_status,
-        ?duration,
-        "cursor-agent finished"
-    );
+    info!(pid, ?final_status, ?duration, "cursor-agent finished");
 
     stderr_handle.abort();
 
@@ -583,7 +580,14 @@ mod tests {
         let args = build_args("hi", &ExecOptions::default());
         assert_eq!(
             args,
-            vec!["chat", "-p", "hi", "--output-format", "stream-json", "--yolo"]
+            vec![
+                "chat",
+                "-p",
+                "hi",
+                "--output-format",
+                "stream-json",
+                "--yolo"
+            ]
         );
     }
 
@@ -617,7 +621,9 @@ mod tests {
         };
         let args = build_args("hi", &opts);
         assert!(args.windows(2).any(|w| w == ["--workspace", "/tmp/x"]));
-        assert!(args.windows(2).any(|w| w == ["--model", "claude-sonnet-4-6"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model", "claude-sonnet-4-6"]));
         assert!(args.windows(2).any(|w| w == ["--resume", "sess-abc"]));
     }
 

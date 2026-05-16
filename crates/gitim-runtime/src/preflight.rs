@@ -1617,9 +1617,7 @@ pub async fn preflight_kimi_with_config(
             duration_ms,
             Some(truncate(&preview, PREVIEW_TRUNCATE)),
         ),
-        Ok(Err(e)) => {
-            PreflightResult::failure(provider, ErrorKind::Other, e, duration_ms)
-        }
+        Ok(Err(e)) => PreflightResult::failure(provider, ErrorKind::Other, e, duration_ms),
         Err(_) => PreflightResult::failure(
             provider,
             ErrorKind::Timeout,
@@ -1663,8 +1661,12 @@ fn find_text_chunk(v: &serde_json::Value) -> bool {
 /// Used by direct `/preflight/kimi` callers; the add-agent path uses
 /// [`preflight_for_add_request`] which threads agent env + model.
 pub async fn preflight_kimi() -> PreflightResult {
-    preflight_kimi_with_config("kimi", Duration::from_secs(60), PreflightOverrides::default())
-        .await
+    preflight_kimi_with_config(
+        "kimi",
+        Duration::from_secs(60),
+        PreflightOverrides::default(),
+    )
+    .await
 }
 
 /// Preflight the `cursor-agent` CLI with a real "say hi" hello.

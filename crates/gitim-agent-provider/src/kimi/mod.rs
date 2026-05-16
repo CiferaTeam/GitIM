@@ -351,14 +351,17 @@ async fn drive_session(
         // `Some(sid)` so the outer driver can stamp it onto
         // ExecResult.session_token.
         if let Some(m) = model_clone.as_deref().filter(|s| !s.is_empty()) {
-            handshake_acp.set_session_model(&sid, m).await.map_err(|e| {
-                (
-                    Some(sid.clone()),
-                    ProviderError::Protocol(format!(
-                        "kimi could not switch to model {m:?}: {e}"
-                    )),
-                )
-            })?;
+            handshake_acp
+                .set_session_model(&sid, m)
+                .await
+                .map_err(|e| {
+                    (
+                        Some(sid.clone()),
+                        ProviderError::Protocol(format!(
+                            "kimi could not switch to model {m:?}: {e}"
+                        )),
+                    )
+                })?;
             info!(session_id = %sid, model = %m, "kimi session model set");
         }
         Ok::<String, (Option<String>, ProviderError)>(sid)

@@ -314,7 +314,10 @@ async fn drive_session(
             return;
         }
         Err(_) => {
-            warn!(pid, "hermes handshake timed out after {handshake_timeout:?}");
+            warn!(
+                pid,
+                "hermes handshake timed out after {handshake_timeout:?}"
+            );
             let _ = child.start_kill();
             send_result(
                 result_tx,
@@ -471,4 +474,3 @@ fn send_result(
         usage,
     });
 }
-

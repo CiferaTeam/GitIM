@@ -257,7 +257,8 @@ impl AcpClient {
             .and_then(|m| m.get("id"))
             .and_then(|id| id.as_str());
         if let Some(id) = method_id {
-            self.request("authenticate", json!({ "methodId": id })).await?;
+            self.request("authenticate", json!({ "methodId": id }))
+                .await?;
         }
         Ok(())
     }
@@ -386,10 +387,7 @@ impl AcpClient {
                 };
                 let _ = tx.send(response);
             } else {
-                debug!(
-                    provider = self.provider_name,
-                    id, "response for unknown id"
-                );
+                debug!(provider = self.provider_name, id, "response for unknown id");
             }
             return;
         }
@@ -459,17 +457,10 @@ impl AcpClient {
     /// Internal helper — translates a [`ParsedNotification`] into the
     /// corresponding `Event::*` (with the hook-mapped tool name), and
     /// updates the per-execute accumulators.
-    async fn dispatch_parsed(
-        &self,
-        parsed: ParsedNotification,
-        event_tx: &mpsc::Sender<Event>,
-    ) {
+    async fn dispatch_parsed(&self, parsed: ParsedNotification, event_tx: &mpsc::Sender<Event>) {
         match parsed {
             ParsedNotification::Text { content } => {
-                self.text_accumulator
-                    .lock()
-                    .await
-                    .push_str(&content);
+                self.text_accumulator.lock().await.push_str(&content);
                 try_send_event(event_tx, Event::Text { content });
             }
             ParsedNotification::Thinking { content } => {
@@ -521,7 +512,13 @@ impl AcpClient {
                     // Fabricating an empty session_id would corrupt the
                     // runtime's per-session usage book-keeping.
                     if let Some(session_id) = self.current_session_id.lock().await.clone() {
-                        try_send_event(event_tx, Event::Usage { session_id, usage: u });
+                        try_send_event(
+                            event_tx,
+                            Event::Usage {
+                                session_id,
+                                usage: u,
+                            },
+                        );
                     }
                 }
             }
@@ -530,7 +527,9 @@ impl AcpClient {
 }
 
 fn extract_session_id(v: &Value) -> Option<String> {
-    v.get("sessionId").and_then(|x| x.as_str()).map(String::from)
+    v.get("sessionId")
+        .and_then(|x| x.as_str())
+        .map(String::from)
 }
 
 /// Best-effort event emission — drops the event on a full channel rather
@@ -607,9 +606,7 @@ mod tests {
         // until either a real response (cat won't send one) or fail_pending
         // drops the sender.
         let request_client = Arc::clone(&client);
-        let request = tokio::spawn(async move {
-            request_client.request("ping", json!({})).await
-        });
+        let request = tokio::spawn(async move { request_client.request("ping", json!({})).await });
 
         // Wait for the request's stdin write to complete so we exercise the
         // post-write window — the one where `fail_pending` is the critical

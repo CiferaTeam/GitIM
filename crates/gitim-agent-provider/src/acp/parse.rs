@@ -360,7 +360,9 @@ mod tests {
             }
         });
         let msg = parse_notification(&params).unwrap();
-        assert!(matches!(msg, ParsedNotification::ToolCall { ref tool, .. } if tool == "file_edit"));
+        assert!(
+            matches!(msg, ParsedNotification::ToolCall { ref tool, .. } if tool == "file_edit")
+        );
     }
 
     // ── parse_acp_usage shape contract ─────────────────────────────

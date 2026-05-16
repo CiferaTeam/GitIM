@@ -13,9 +13,7 @@
 
 use std::time::Duration;
 
-use gitim_runtime::preflight::{
-    preflight_kimi_with_config, ErrorKind, PreflightOverrides,
-};
+use gitim_runtime::preflight::{preflight_kimi_with_config, ErrorKind, PreflightOverrides};
 
 mod common;
 use common::fixture;
@@ -83,12 +81,9 @@ async fn test_preflight_kimi_set_model_failure_fails() {
     let mut overrides = PreflightOverrides::default();
     overrides.model_override = Some("bogus-model".to_string());
 
-    let result = preflight_kimi_with_config(
-        script.to_str().unwrap(),
-        Duration::from_secs(5),
-        overrides,
-    )
-    .await;
+    let result =
+        preflight_kimi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
+            .await;
 
     assert!(
         !result.available,

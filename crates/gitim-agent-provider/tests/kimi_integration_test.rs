@@ -85,8 +85,5 @@ async fn executable_not_found_returns_error() {
     };
     let provider = create("kimi", config).unwrap();
     let result = provider.execute("test", ExecOptions::default()).await;
-    assert!(
-        result.is_err(),
-        "execute must error when binary is missing"
-    );
+    assert!(result.is_err(), "execute must error when binary is missing");
 }
