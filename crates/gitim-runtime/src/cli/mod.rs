@@ -21,6 +21,7 @@ pub mod cmd_workspaces;
 pub mod dto;
 pub mod exit_code;
 pub mod http;
+pub mod tunnel;
 pub mod workspace;
 
 pub use dto::{

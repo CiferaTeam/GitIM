@@ -76,6 +76,9 @@ enum Command {
     },
     /// Provision a new agent in a workspace.
     AddAgent {
+        /// Configured fleet node id. When set, the CLI targets that node's runtime.
+        #[arg(long)]
+        node: Option<String>,
         /// Workspace slug. Optional when exactly one workspace is configured.
         #[arg(long)]
         workspace: Option<String>,
@@ -123,6 +126,9 @@ enum Command {
     /// removes the clone. Use `--hard` to skip the protocol and quietly
     /// delete via `POST /agents/remove` with `hard_delete: true`.
     BurnAgent {
+        /// Configured fleet node id. When set, the CLI targets that node's runtime.
+        #[arg(long)]
+        node: Option<String>,
         /// Workspace slug. Optional when exactly one workspace is configured.
         #[arg(long)]
         workspace: Option<String>,
@@ -239,6 +245,51 @@ enum FleetCommand {
         #[arg(long = "node-id")]
         node_id: String,
     },
+    /// Manage a local SSH tunnel to a loopback-bound remote runtime.
+    Tunnel {
+        #[command(subcommand)]
+        command: FleetTunnelCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FleetTunnelCommand {
+    /// Start or reuse an SSH tunnel and register the node with the local runtime.
+    Up {
+        /// Stable node/runtime UUID. Used as the source identity in fleet events.
+        #[arg(long = "node-id")]
+        node_id: String,
+        /// SSH target accepted by the ssh binary, e.g. lewis@mac-mini.
+        #[arg(long = "ssh-target")]
+        ssh_target: String,
+        /// Host the remote runtime listens on from the remote machine's perspective.
+        #[arg(long = "remote-host", default_value = "127.0.0.1")]
+        remote_host: String,
+        /// Port the remote runtime listens on.
+        #[arg(long = "remote-port")]
+        remote_port: u16,
+        /// Local loopback port. Omitted means choose an available port.
+        #[arg(long = "local-port")]
+        local_port: Option<u16>,
+        /// Human-readable node label.
+        #[arg(long = "node-name")]
+        node_name: Option<String>,
+        /// Remote workspace slug filter. Repeatable; omitted means auto-map all matching git remotes.
+        #[arg(long = "workspace")]
+        workspaces: Vec<String>,
+    },
+    /// Show the local tunnel pid and remote runtime health.
+    Status {
+        /// Stable node/runtime UUID to inspect.
+        #[arg(long = "node-id")]
+        node_id: String,
+    },
+    /// Stop the local SSH tunnel for a node.
+    Down {
+        /// Stable node/runtime UUID to stop.
+        #[arg(long = "node-id")]
+        node_id: String,
+    },
 }
 
 #[tokio::main]
@@ -321,8 +372,8 @@ fn validate_args(args: &Args) -> Result<(), String> {
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
         cmd_add_agent, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight, cmd_runtime_id,
-        cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url, CliError,
-        Client, ErrorResponse,
+        cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url,
+        tunnel as cli_tunnel, CliError, Client, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -343,6 +394,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             detailed,
         } => cmd_list_agents::run(&client, workspace, detailed).await,
         Command::AddAgent {
+            node,
             workspace,
             handler,
             display_name,
@@ -370,13 +422,26 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 llm_provider,
                 llm_model,
             };
-            cmd_add_agent::run(&client, args).await
+            if let Some(node_id) = node.as_deref() {
+                let node_client = cli_tunnel::client_for_node(node_id).await?;
+                cmd_add_agent::run(&node_client, args).await
+            } else {
+                cmd_add_agent::run(&client, args).await
+            }
         }
         Command::BurnAgent {
+            node,
             workspace,
             id,
             hard,
-        } => cmd_burn_agent::run(&client, workspace, id, hard).await,
+        } => {
+            if let Some(node_id) = node.as_deref() {
+                let node_client = cli_tunnel::client_for_node(node_id).await?;
+                cmd_burn_agent::run(&node_client, workspace, id, hard).await
+            } else {
+                cmd_burn_agent::run(&client, workspace, id, hard).await
+            }
+        }
         Command::UpdateAgent {
             workspace,
             id,
@@ -424,6 +489,30 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 cmd_fleet::add(&client, args).await
             }
             FleetCommand::Remove { node_id } => cmd_fleet::remove(&client, node_id).await,
+            FleetCommand::Tunnel { command } => match command {
+                FleetTunnelCommand::Up {
+                    node_id,
+                    ssh_target,
+                    remote_host,
+                    remote_port,
+                    local_port,
+                    node_name,
+                    workspaces,
+                } => {
+                    let args = cmd_fleet::TunnelUpArgs {
+                        node_id,
+                        ssh_target,
+                        remote_host,
+                        remote_port,
+                        local_port,
+                        node_name,
+                        workspaces,
+                    };
+                    cmd_fleet::tunnel_up(&client, args).await
+                }
+                FleetTunnelCommand::Status { node_id } => cmd_fleet::tunnel_status(node_id).await,
+                FleetTunnelCommand::Down { node_id } => cmd_fleet::tunnel_down(node_id).await,
+            },
         },
     };
 
@@ -1116,6 +1205,7 @@ mod argv_subcommand_tests {
         .expect("parse must succeed");
         match args.command {
             Some(Command::AddAgent {
+                node,
                 workspace,
                 handler,
                 display_name,
@@ -1129,6 +1219,7 @@ mod argv_subcommand_tests {
                 llm_provider,
                 llm_model,
             }) => {
+                assert!(node.is_none());
                 assert!(workspace.is_none());
                 assert_eq!(handler, "tester");
                 assert_eq!(display_name, "Tester");
@@ -1178,6 +1269,7 @@ mod argv_subcommand_tests {
         .expect("parse must succeed");
         match args.command {
             Some(Command::AddAgent {
+                node,
                 workspace,
                 handler,
                 display_name,
@@ -1191,6 +1283,7 @@ mod argv_subcommand_tests {
                 llm_provider,
                 llm_model,
             }) => {
+                assert!(node.is_none());
                 assert_eq!(workspace.as_deref(), Some("ws-a"));
                 assert_eq!(handler, "alice");
                 assert_eq!(display_name, "Alice");
@@ -1305,10 +1398,12 @@ mod argv_subcommand_tests {
             .expect("parse must succeed");
         match args.command {
             Some(Command::BurnAgent {
+                node,
                 workspace,
                 id,
                 hard,
             }) => {
+                assert!(node.is_none());
                 assert!(workspace.is_none());
                 assert_eq!(id, "agent-1");
                 assert!(!hard);
@@ -1323,10 +1418,12 @@ mod argv_subcommand_tests {
             .expect("parse must succeed");
         match args.command {
             Some(Command::BurnAgent {
+                node,
                 workspace,
                 id,
                 hard,
             }) => {
+                assert!(node.is_none());
                 assert!(workspace.is_none());
                 assert_eq!(id, "x");
                 assert!(hard);
@@ -1348,10 +1445,12 @@ mod argv_subcommand_tests {
         .expect("parse must succeed");
         match args.command {
             Some(Command::BurnAgent {
+                node,
                 workspace,
                 id,
                 hard,
             }) => {
+                assert!(node.is_none());
                 assert_eq!(workspace.as_deref(), Some("ws-a"));
                 assert_eq!(id, "agent-1");
                 assert!(!hard);
@@ -1364,6 +1463,67 @@ mod argv_subcommand_tests {
     fn burn_agent_missing_id_fails() {
         let result = Args::try_parse_from(["gitim-runtime", "burn-agent"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_agent_with_node_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--node",
+            "mac-mini",
+            "--workspace",
+            "valley4",
+            "--handler",
+            "remote-bot",
+            "--display-name",
+            "Remote Bot",
+            "--provider",
+            "opencode",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::AddAgent {
+                node,
+                workspace,
+                handler,
+                ..
+            }) => {
+                assert_eq!(node.as_deref(), Some("mac-mini"));
+                assert_eq!(workspace.as_deref(), Some("valley4"));
+                assert_eq!(handler, "remote-bot");
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burn_agent_with_node_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "burn-agent",
+            "--node",
+            "mac-mini",
+            "--workspace",
+            "valley4",
+            "--id",
+            "remote-bot",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::BurnAgent {
+                node,
+                workspace,
+                id,
+                hard,
+            }) => {
+                assert_eq!(node.as_deref(), Some("mac-mini"));
+                assert_eq!(workspace.as_deref(), Some("valley4"));
+                assert_eq!(id, "remote-bot");
+                assert!(!hard);
+            }
+            other => panic!("expected BurnAgent, got {other:?}"),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1649,6 +1809,96 @@ mod argv_subcommand_tests {
                 assert_eq!(node_id, "remote-a");
             }
             other => panic!("expected Fleet::Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_tunnel_up_parses_with_explicit_local_port() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "fleet",
+            "tunnel",
+            "up",
+            "--node-id",
+            "mac-mini",
+            "--ssh-target",
+            "lewis@mac-mini",
+            "--remote-port",
+            "16868",
+            "--local-port",
+            "18068",
+            "--node-name",
+            "Mac Mini",
+            "--workspace",
+            "room",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::Fleet {
+                command:
+                    FleetCommand::Tunnel {
+                        command:
+                            FleetTunnelCommand::Up {
+                                node_id,
+                                ssh_target,
+                                remote_host,
+                                remote_port,
+                                local_port,
+                                node_name,
+                                workspaces,
+                            },
+                    },
+            }) => {
+                assert_eq!(node_id, "mac-mini");
+                assert_eq!(ssh_target, "lewis@mac-mini");
+                assert_eq!(remote_host, "127.0.0.1");
+                assert_eq!(remote_port, 16868);
+                assert_eq!(local_port, Some(18068));
+                assert_eq!(node_name.as_deref(), Some("Mac Mini"));
+                assert_eq!(workspaces, vec!["room"]);
+            }
+            other => panic!("expected Fleet::Tunnel::Up, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_tunnel_status_and_down_parse() {
+        let status = Args::try_parse_from([
+            "gitim-runtime",
+            "fleet",
+            "tunnel",
+            "status",
+            "--node-id",
+            "mac-mini",
+        ])
+        .expect("parse status");
+        match status.command {
+            Some(Command::Fleet {
+                command:
+                    FleetCommand::Tunnel {
+                        command: FleetTunnelCommand::Status { node_id },
+                    },
+            }) => assert_eq!(node_id, "mac-mini"),
+            other => panic!("expected Fleet::Tunnel::Status, got {other:?}"),
+        }
+
+        let down = Args::try_parse_from([
+            "gitim-runtime",
+            "fleet",
+            "tunnel",
+            "down",
+            "--node-id",
+            "mac-mini",
+        ])
+        .expect("parse down");
+        match down.command {
+            Some(Command::Fleet {
+                command:
+                    FleetCommand::Tunnel {
+                        command: FleetTunnelCommand::Down { node_id },
+                    },
+            }) => assert_eq!(node_id, "mac-mini"),
+            other => panic!("expected Fleet::Tunnel::Down, got {other:?}"),
         }
     }
 }

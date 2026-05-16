@@ -16,6 +16,20 @@ pub struct FleetWorkspaceMapping {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetSshTunnelConfig {
+    pub ssh_target: String,
+    #[serde(default = "default_tunnel_remote_host")]
+    pub remote_host: String,
+    pub remote_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
+}
+
+fn default_tunnel_remote_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetNodeEntry {
     pub node_id: String,
     pub base_url: String,
@@ -27,6 +41,8 @@ pub struct FleetNodeEntry {
     pub workspaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_mappings: Vec<FleetWorkspaceMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_tunnel: Option<FleetSshTunnelConfig>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -425,6 +441,7 @@ mod tests {
             node_name: Some("mac-mini".to_string()),
             workspaces: workspaces.into_iter().map(str::to_string).collect(),
             workspace_mappings: Vec::new(),
+            ssh_tunnel: None,
         }
     }
 
@@ -451,6 +468,32 @@ mod tests {
         );
         assert_eq!(loaded.fleet_nodes[0].node_name.as_deref(), Some("mac-mini"));
         assert_eq!(loaded.fleet_nodes[0].workspaces, vec!["room", "lab"]);
+    }
+
+    #[test]
+    fn fleet_node_ssh_tunnel_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let mut cfg = UserConfig::default();
+        let mut node = fleet_node("node-a", "http://127.0.0.1:18068", ["room"]);
+        node.ssh_tunnel = Some(FleetSshTunnelConfig {
+            ssh_target: "lewis@mac-mini".to_string(),
+            remote_host: "127.0.0.1".to_string(),
+            remote_port: 16868,
+            local_port: Some(18068),
+        });
+        cfg.upsert_fleet_node(node);
+        write_to(&cfg, &path).unwrap();
+
+        let loaded = read_from(Some(&path));
+        let tunnel = loaded.fleet_nodes[0]
+            .ssh_tunnel
+            .as_ref()
+            .expect("ssh_tunnel should roundtrip");
+        assert_eq!(tunnel.ssh_target, "lewis@mac-mini");
+        assert_eq!(tunnel.remote_host, "127.0.0.1");
+        assert_eq!(tunnel.remote_port, 16868);
+        assert_eq!(tunnel.local_port, Some(18068));
     }
 
     #[test]

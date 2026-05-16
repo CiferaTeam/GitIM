@@ -193,6 +193,7 @@ Provision 新 agent。对应 `POST /workspaces/{slug}/agents/add`。
 | `--handler <h>` | MUST | 小写 a-z 0-9 hyphens, 1-39 chars；runtime enforce 格式 + 唯一性 |
 | `--display-name <n>` | MUST | human-readable 显示名 |
 | `--provider <p>` | MUST | `claude` / `codex` / `hermes` / `opencode` / `pi` 等 |
+| `--node <node-id>` | MAY | 目标 fleet node；存在 SSH tunnel 配置时 CLI 会确保 tunnel 可用后请求该 node runtime |
 | `--workspace <slug>` | 仅当多 workspace | workspace 选择 |
 | `--model <m>` | MAY | provider-specific model id（e.g. `claude-opus-4-7`）。**Hermes 不用这个，用下面两个** |
 | `--system-prompt <text>` | MAY | inline system prompt。跟 `--system-prompt-file` 互斥 |
@@ -242,6 +243,7 @@ Departures an agent. 两种语义共享一个入口：
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `--id <id>` | MUST | agent id（实践中 = handler，但 wire shape 是 id） |
+| `--node <node-id>` | MAY | 目标 fleet node；存在 SSH tunnel 配置时 CLI 会确保 tunnel 可用后请求该 node runtime |
 | `--workspace <slug>` | 仅当多 workspace | |
 | `--hard` | MAY | 走 hard remove 而不是 ritual burn |
 
@@ -256,6 +258,71 @@ $ gitim-runtime burn-agent --workspace test --id tester-x --hard
 ```
 
 **典型错误**：`agent_not_found` / `not_an_agent`（id 不存在或不是 agent）。先 `list-agents` 确认。
+
+---
+
+### `gitim-runtime fleet tunnel ...`
+
+管理到远端 runtime 的本机 SSH tunnel，并把该 node 注册到本机 fleet observer。
+
+`fleet tunnel up` 会启动：
+
+```
+ssh -N -L 127.0.0.1:<local-port>:<remote-host>:<remote-port> <ssh-target>
+```
+
+成功后写入 `~/.gitim/runtime.json` 的 `fleet_nodes[]`，`base_url` 为 `http://127.0.0.1:<local-port>`，tunnel pid state 写入 `~/.gitim/fleet-tunnels/<node-id>.json`，ssh 日志写入 `~/.gitim/logs/fleet-tunnel-<node-id>.log`。
+
+**参数**：
+
+| 命令 | 参数 | 说明 |
+|---|---|---|
+| `fleet tunnel up` | `--node-id <id>` | stable node id |
+| `fleet tunnel up` | `--ssh-target <target>` | ssh 目标，如 `lewis@mac-mini` |
+| `fleet tunnel up` | `--remote-port <port>` | 远端 runtime port |
+| `fleet tunnel up` | `--remote-host <host>` | 默认 `127.0.0.1` |
+| `fleet tunnel up` | `--local-port <port>` | 可省略；省略时自动选择空闲本机端口 |
+| `fleet tunnel up` | `--workspace <slug>` | 可重复；传给 fleet workspace mapping |
+| `fleet tunnel status` | `--node-id <id>` | 输出 tunnel pid + runtime health |
+| `fleet tunnel down` | `--node-id <id>` | 停止 tunnel 并清理 pid state |
+
+**Sample**：
+
+```
+$ gitim-runtime fleet tunnel up \
+    --node-id mac-mini \
+    --ssh-target lewis@mac-mini \
+    --remote-port 16868 \
+    --local-port 18068 \
+    --workspace room
+{
+  "ok": true,
+  "node_id": "mac-mini",
+  "base_url": "http://127.0.0.1:18068",
+  "tunnel_status": "up",
+  "runtime_status": "healthy",
+  "node": {
+    "node_id": "mac-mini",
+    "base_url": "http://127.0.0.1:18068",
+    "workspaces": ["room"]
+  }
+}
+
+$ gitim-runtime add-agent --node mac-mini --workspace valley4 \
+    --handler remote-bot --display-name "Remote Bot" --provider opencode
+{"ok":true,"id":"remote-bot"}
+
+$ gitim-runtime burn-agent --node mac-mini --workspace valley4 --id remote-bot
+{"ok":true}
+
+$ gitim-runtime fleet tunnel down --node-id mac-mini
+{
+  "ok": true,
+  "node_id": "mac-mini",
+  "tunnel_status": "down",
+  "stopped_pid": 12345
+}
+```
 
 ---
 

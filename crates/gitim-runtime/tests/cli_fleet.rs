@@ -1,5 +1,6 @@
 use gitim_runtime::cli::cmd_fleet::{
-    build_add_body, extract_nodes_array, extract_status_array, AddArgs,
+    build_add_body, build_tunnel_node_body, extract_nodes_array, extract_status_array, AddArgs,
+    TunnelUpArgs,
 };
 use serde_json::json;
 
@@ -34,6 +35,29 @@ fn build_add_body_allows_missing_workspace_for_auto_mapping() {
 
     assert_eq!(body["node_id"], "remote-runtime-a");
     assert!(body["workspaces"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn build_tunnel_node_body_targets_loopback_base_url_and_persists_ssh_config() {
+    let body = build_tunnel_node_body(TunnelUpArgs {
+        node_id: "mac-mini".to_string(),
+        ssh_target: "lewis@mac-mini".to_string(),
+        remote_host: "127.0.0.1".to_string(),
+        remote_port: 16868,
+        local_port: Some(18068),
+        node_name: Some("Mac Mini".to_string()),
+        workspaces: vec!["room".to_string()],
+    })
+    .expect("body");
+
+    assert_eq!(body["node_id"], "mac-mini");
+    assert_eq!(body["base_url"], "http://127.0.0.1:18068");
+    assert_eq!(body["node_name"], "Mac Mini");
+    assert_eq!(body["workspaces"], json!(["room"]));
+    assert_eq!(body["ssh_tunnel"]["ssh_target"], "lewis@mac-mini");
+    assert_eq!(body["ssh_tunnel"]["remote_host"], "127.0.0.1");
+    assert_eq!(body["ssh_tunnel"]["remote_port"], 16868);
+    assert_eq!(body["ssh_tunnel"]["local_port"], 18068);
 }
 
 #[test]

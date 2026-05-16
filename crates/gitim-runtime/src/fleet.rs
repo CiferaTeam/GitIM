@@ -161,6 +161,20 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
             return Err("workspace mappings must be complete".to_string());
         }
     }
+    if let Some(tunnel) = &entry.ssh_tunnel {
+        if tunnel.ssh_target.trim().is_empty() {
+            return Err("ssh_tunnel.ssh_target is required".to_string());
+        }
+        if tunnel.remote_host.trim().is_empty() {
+            return Err("ssh_tunnel.remote_host is required".to_string());
+        }
+        if tunnel.remote_port == 0 {
+            return Err("ssh_tunnel.remote_port must be non-zero".to_string());
+        }
+        if tunnel.local_port == Some(0) {
+            return Err("ssh_tunnel.local_port must be non-zero".to_string());
+        }
+    }
     let url =
         reqwest::Url::parse(entry.base_url.trim()).map_err(|e| format!("invalid base_url: {e}"))?;
     match url.scheme() {
@@ -204,6 +218,16 @@ pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
             })
         })
         .collect();
+    entry.ssh_tunnel = entry.ssh_tunnel.map(|tunnel| {
+        let ssh_target = tunnel.ssh_target.trim().to_string();
+        let remote_host = tunnel.remote_host.trim().to_string();
+        crate::user_config::FleetSshTunnelConfig {
+            ssh_target,
+            remote_host,
+            remote_port: tunnel.remote_port,
+            local_port: tunnel.local_port,
+        }
+    });
     entry
 }
 
@@ -597,5 +621,28 @@ mod tests {
         assert!(parser.push_str("data: {\"a\"").is_empty());
         let out = parser.push_str(":1}\n\n");
         assert_eq!(out, vec!["{\"a\":1}"]);
+    }
+
+    #[test]
+    fn validate_node_rejects_incomplete_ssh_tunnel() {
+        let entry = FleetNodeEntry {
+            node_id: "node-a".to_string(),
+            base_url: "http://127.0.0.1:18068".to_string(),
+            node_ip: None,
+            node_name: None,
+            workspaces: vec!["room".to_string()],
+            workspace_mappings: Vec::new(),
+            ssh_tunnel: Some(crate::user_config::FleetSshTunnelConfig {
+                ssh_target: " ".to_string(),
+                remote_host: "127.0.0.1".to_string(),
+                remote_port: 16868,
+                local_port: Some(18068),
+            }),
+        };
+
+        assert_eq!(
+            validate_node(&normalize_node(entry)).unwrap_err(),
+            "ssh_tunnel.ssh_target is required"
+        );
     }
 }
