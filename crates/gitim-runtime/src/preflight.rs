@@ -1303,6 +1303,174 @@ pub async fn preflight_hermes() -> PreflightResult {
     preflight_hermes_with("hermes", Duration::from_secs(30), None, None, None, None).await
 }
 
+/// Preflight the `cursor-agent` CLI with a real "say hi" hello.
+///
+/// Flow:
+/// 1. Spawn `cursor-agent --version` to capture the version string (best-effort).
+/// 2. Spawn `cursor-agent chat -p "say hi" --output-format stream-json --yolo
+///    [--model <m>]`, read stdout line-by-line for the first `assistant` /
+///    `text` / `result` event; kill on first hit.
+/// 3. Bail with the appropriate [`ErrorKind`] on missing binary / timeout /
+///    non-zero exit before a terminal event arrives.
+///
+/// Notes:
+/// - We do NOT pull the `gitim-agent-provider::cursor::parse` module in here
+///   to keep `gitim-runtime` from depending on provider-internal envelope
+///   types. A minimal `serde_json::Value::get("type")` probe is sufficient
+///   — preflight only needs "did we see a terminal event" not full parsing.
+/// - Model override is forwarded as `--model X` when set; otherwise the
+///   user's configured default model is used (cursor-agent CLI picks its own
+///   default if neither is set).
+pub async fn preflight_cursor_with_config(
+    bin: &str,
+    timeout: Duration,
+    overrides: PreflightOverrides,
+) -> PreflightResult {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command as TokioCommand;
+
+    let provider = "cursor";
+    let started = Instant::now();
+
+    // 1. Capture --version (best-effort; failure to spawn here is the
+    //    canonical "not installed" signal).
+    let version = match TokioCommand::new(bin).arg("--version").output().await {
+        Ok(out) if out.status.success() => Some(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        ),
+        Ok(_) => None,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("cursor-agent CLI not found at `{bin}`: {e}")
+            } else {
+                format!("cursor-agent --version failed: {e}")
+            };
+            return PreflightResult::failure(
+                provider,
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    // 2. Spawn the real hello.
+    let mut cmd = TokioCommand::new(bin);
+    cmd.arg("chat")
+        .arg("-p")
+        .arg("say hi")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--yolo")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(ref m) = overrides.model_override {
+        cmd.arg("--model").arg(m);
+    }
+    if let Some(env) = &overrides.env_override {
+        cmd.envs(env);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = map_spawn_error(&e);
+            let msg = if kind == ErrorKind::NotInstalled {
+                format!("cursor-agent CLI not found at `{bin}`: {e}")
+            } else {
+                format!("failed to spawn cursor-agent: {e}")
+            };
+            return PreflightResult::failure(
+                provider,
+                kind,
+                msg,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
+    // 3. Read until first terminal event or timeout.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(stdout).lines();
+
+    enum HelloOutcome {
+        Ok(String),
+        Err(String),
+    }
+
+    let read_fut = async {
+        let mut preview = String::new();
+        while let Some(line) = reader.next_line().await.ok().flatten() {
+            preview.push_str(&line);
+            preview.push('\n');
+            if preview.len() > 4096 {
+                break;
+            }
+            // Minimal envelope sniff: inline `serde_json::Value::get("type")`
+            // to avoid pulling the cursor provider's parse module into runtime
+            // (keeps the crate boundary clean).
+            let evt_type = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                });
+            if let Some(t) = evt_type {
+                match t.as_str() {
+                    "assistant" | "text" | "result" => {
+                        return Some(HelloOutcome::Ok(preview));
+                    }
+                    "error" => {
+                        return Some(HelloOutcome::Err(format!(
+                            "cursor reported error: {preview}"
+                        )));
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        None
+    };
+
+    let res = tokio::time::timeout(timeout, read_fut).await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(Some(HelloOutcome::Ok(preview))) => PreflightResult::success(
+            provider,
+            version,
+            overrides.model_override.clone(),
+            duration_ms,
+            Some(truncate(preview.trim(), PREVIEW_TRUNCATE)),
+        ),
+        Ok(Some(HelloOutcome::Err(msg))) => {
+            PreflightResult::failure(provider, ErrorKind::Other, msg, duration_ms)
+        }
+        Ok(None) => PreflightResult::failure(
+            provider,
+            ErrorKind::Other,
+            "cursor-agent exited before emitting any assistant/result event",
+            duration_ms,
+        ),
+        Err(_) => PreflightResult::failure(
+            provider,
+            ErrorKind::Timeout,
+            format!("cursor-agent preflight exceeded {}ms", timeout.as_millis()),
+            duration_ms,
+        ),
+    }
+}
+
 /// Read `(provider, model)` from the user's hermes default profile config.
 ///
 /// Resolves the hermes home directory from the `HERMES_HOME` env var (falling
@@ -1368,6 +1536,7 @@ const DEFAULT_BIN_CODEX: &str = "codex";
 const DEFAULT_BIN_OPENCODE: &str = "opencode";
 const DEFAULT_BIN_PI: &str = "pi";
 const DEFAULT_BIN_HERMES: &str = "hermes";
+const DEFAULT_BIN_CURSOR: &str = "cursor-agent";
 
 /// Setup-level failure tags, attached to `PreflightResult.failure_code` by
 /// [`preflight_for_add_request`] and consumed by
@@ -1398,6 +1567,7 @@ pub struct PreflightDispatchOverrides {
     pub opencode_bin: Option<String>,
     pub pi_bin: Option<String>,
     pub hermes_bin: Option<String>,
+    pub cursor_bin: Option<String>,
     pub outer_timeout: Option<Duration>,
     pub hermes_home: Option<PathBuf>,
 }
@@ -1547,6 +1717,13 @@ async fn dispatch_preflight(
                 overrides.hermes_home.as_deref(),
             )
             .await
+        }
+        "cursor" => {
+            let bin = overrides
+                .cursor_bin
+                .as_deref()
+                .unwrap_or(DEFAULT_BIN_CURSOR);
+            preflight_cursor_with_config(bin, inner_timeout, prov_overrides).await
         }
         other => PreflightResult::failure_with_code(
             other,

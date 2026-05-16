@@ -10,7 +10,6 @@ pub mod opencode;
 pub mod pi;
 pub(crate) mod prompts;
 mod provider;
-mod stubs;
 mod types;
 pub(crate) mod util;
 

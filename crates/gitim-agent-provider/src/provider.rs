@@ -122,7 +122,7 @@ pub fn create(
         "hermes" => Ok(Box::new(crate::hermes::HermesProvider::new(config))),
         "openclaw" => Ok(Box::new(crate::openclaw::OpenclawProvider::new(config))),
         "mock" => Ok(Box::new(crate::mock::MockProvider::new(config))),
-        "cursor" => Ok(Box::new(crate::stubs::CursorProvider::new(config))),
+        "cursor" => Ok(Box::new(crate::cursor::CursorProvider::new(config))),
         "opencode" => Ok(Box::new(crate::opencode::OpencodeProvider::new(config))),
         "pi" => Ok(Box::new(crate::pi::PiProvider::new(config))),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),
