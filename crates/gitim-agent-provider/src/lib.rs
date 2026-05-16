@@ -5,6 +5,7 @@ pub mod cursor;
 mod error;
 pub mod gemini;
 pub mod hermes;
+pub mod kimi;
 pub mod mock;
 pub mod openclaw;
 pub mod opencode;

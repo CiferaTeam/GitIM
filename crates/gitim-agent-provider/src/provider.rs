@@ -120,6 +120,7 @@ pub fn create(
         "codex" => Ok(Box::new(crate::codex::CodexProvider::new(config))),
         "gemini" => Ok(Box::new(crate::gemini::GeminiProvider::new(config))),
         "hermes" => Ok(Box::new(crate::hermes::HermesProvider::new(config))),
+        "kimi" => Ok(Box::new(crate::kimi::KimiProvider::new(config))),
         "openclaw" => Ok(Box::new(crate::openclaw::OpenclawProvider::new(config))),
         "mock" => Ok(Box::new(crate::mock::MockProvider::new(config))),
         "cursor" => Ok(Box::new(crate::cursor::CursorProvider::new(config))),
