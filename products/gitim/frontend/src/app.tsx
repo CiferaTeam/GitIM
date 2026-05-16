@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import { Loader2 } from "lucide-react";
 import { BoardsView } from "./components/boards/boards-view";
 import { CardDetail } from "./components/cards/card-detail";
@@ -176,6 +176,7 @@ export default function App() {
   const setConnectionError = useConnectionStore((s) => s.setError);
   const isMobile = useIsMobile();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -587,7 +588,16 @@ export default function App() {
               ).join(", ");
               const noun =
                 others.length === 1 ? "new message" : `${others.length} new messages`;
-              toast.info(`Card #${shortId}: ${noun} from ${authors}`);
+              toast.info(`Card #${shortId}: ${noun} from ${authors}`, {
+                action: {
+                  label: "Open card",
+                  onClick: () => {
+                    navigate(
+                      `/cards/${encodeURIComponent(parsed.channel)}/${encodeURIComponent(parsed.cardId)}`,
+                    );
+                  },
+                },
+              });
             }
           }
           continue;
@@ -752,6 +762,7 @@ export default function App() {
     markWorkspaceUnavailable,
     markTransportUnavailable,
     reloadActiveWorkspaceState,
+    navigate,
     mode,
   ]);
 
