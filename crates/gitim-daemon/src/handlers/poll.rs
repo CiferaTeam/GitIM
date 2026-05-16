@@ -560,9 +560,11 @@ fn enrich_entries_with_recipients(
         None
     };
 
-    // For DM threads, derive the sorted member pair from the filename
-    // stem. (Members are also in `dm/<stem>.meta.yaml` for some setups
-    // but the filename is the authoritative source.)
+    // For DM threads, recipients = sorted member pair derived from the
+    // filename stem `<a>--<b>`. `parse_dm_filename` already returns the
+    // pair in lex order (filenames are canonicalized at write time by
+    // `dm_filename`), so the explicit `sort` here is defense against
+    // future filename-canonicalization drift rather than a real reorder.
     let dm_members: Option<Vec<String>> = if kind == "dm" {
         path_str
             .strip_prefix("dm/")

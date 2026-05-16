@@ -128,6 +128,28 @@ mod tests {
     }
 
     #[test]
+    fn multi_hop_cycle_terminates() {
+        // A → C, B → A, C → B (cycle A↔B↔C) with a new message
+        // pointing into the cycle. The walk picks up each ancestor
+        // exactly once, then the `visited` set short-circuits before
+        // re-entering A.
+        let a = msg(1, 3, "alice", vec![]); // A points to C
+        let b = msg(2, 1, "bob", vec![]); // B points to A
+        let c = msg(3, 2, "charlie", vec![]); // C points to B
+        let new = msg(4, 1, "dave", vec![]); // new points to A
+        let r = compute_recipients(&new, &meta("owner"), &[a, b, c]);
+        assert_eq!(
+            r,
+            vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "charlie".to_string(),
+                "owner".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn parent_chain_with_missing_ancestor_breaks_cleanly() {
         // new's parent points to line 99 which doesn't exist in
         // all_messages — walking stops, recipients is just the owner.
