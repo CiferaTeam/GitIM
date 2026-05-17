@@ -242,6 +242,32 @@ fn gitim_api_exposes_flow_commands() {
     assert!(api.contains("gitim flow rm"));
 }
 
+fn test_context() -> PromptContext<'static> {
+    PromptContext {
+        handler: "bot",
+        model: None,
+    }
+}
+
+#[test]
+fn gitim_api_exposes_flow_run_commands() {
+    let ctx = test_context();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("gitim flow start"), "missing flow start");
+    assert!(api.contains("gitim flow runs"), "missing flow runs");
+    assert!(api.contains("gitim flow run-show"), "missing flow run-show");
+    assert!(api.contains("gitim flow node-set"), "missing flow node-set");
+    assert!(
+        api.contains("gitim flow run-cancel"),
+        "missing flow run-cancel"
+    );
+    assert!(
+        api.contains("pending → in_progress → done"),
+        "missing state machine"
+    );
+}
+
 #[test]
 fn gitim_api_exposes_message_body_markers() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
