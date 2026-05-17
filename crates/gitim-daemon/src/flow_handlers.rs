@@ -215,17 +215,7 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
     let content = match std::fs::read_to_string(&abs) {
         Ok(c) => c,
         Err(_) => {
-            return Response::success(
-                serde_json::to_value(ValidateFlowResponse {
-                    slug: slug.to_string(),
-                    ok: false,
-                    items: vec![FlowValidationItem {
-                        kind: "error".into(),
-                        message: format!("flow not found: {}", slug),
-                    }],
-                })
-                .unwrap(),
-            );
+            return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
         }
     };
     let file_size = content.len();
