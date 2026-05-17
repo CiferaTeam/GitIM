@@ -5,6 +5,7 @@ pub mod card;
 pub mod channels;
 pub mod cron;
 pub mod dm;
+pub mod flow;
 pub mod messaging;
 pub mod onboard;
 pub mod update;

@@ -243,6 +243,12 @@ enum Commands {
         #[command(subcommand)]
         command: CronCommands,
     },
+
+    /// Flow template commands
+    Flow {
+        #[command(subcommand)]
+        command: FlowCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -558,6 +564,26 @@ enum CronCommands {
         /// Cron job name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum FlowCommands {
+    /// List all flow templates
+    List,
+    /// Show a flow template (markdown + ascii DAG)
+    Show { slug: String },
+    /// Create a stub flow template
+    Create {
+        slug: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Soft-delete a flow template (move to .trash/)
+    Rm { slug: String },
+    /// Validate a flow template (schema + double-source alignment)
+    Validate { slug: String },
 }
 
 #[tokio::main]
@@ -908,6 +934,23 @@ async fn main() {
             }
             CronCommands::Next { name } => commands::cron::cmd_next(&client, &mode, &name).await,
         },
+        Commands::Flow { command } => match command {
+            FlowCommands::List => commands::flow::cmd_flow_list(&client, &mode).await,
+            FlowCommands::Show { slug } => {
+                commands::flow::cmd_flow_show(&client, &mode, &slug).await
+            }
+            FlowCommands::Create {
+                slug,
+                name,
+                description,
+            } => commands::flow::cmd_flow_create(&client, &mode, &slug, &name, &description).await,
+            FlowCommands::Rm { slug } => {
+                commands::flow::cmd_flow_remove(&client, &mode, &slug).await
+            }
+            FlowCommands::Validate { slug } => {
+                commands::flow::cmd_flow_validate(&client, &mode, &slug).await
+            }
+        },
     }
 }
 
@@ -1227,6 +1270,65 @@ mod tests {
     #[test]
     fn cron_subcommand_requires_a_subcommand() {
         let r = Cli::try_parse_from(["gitim", "cron"]);
+        assert!(r.is_err());
+    }
+
+    // -- flow subcommand parsing --------------------------------------------
+
+    #[test]
+    fn flow_list_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "list"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_show_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "show", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_create_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "create", "release", "--name", "Release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_create_with_description_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "flow",
+            "create",
+            "release",
+            "--name",
+            "Release",
+            "--description",
+            "monthly release flow",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_rm_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "rm", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_validate_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "validate", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_subcommand_requires_a_subcommand() {
+        let r = Cli::try_parse_from(["gitim", "flow"]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn flow_create_requires_name() {
+        let r = Cli::try_parse_from(["gitim", "flow", "create", "release"]);
         assert!(r.is_err());
     }
 }
