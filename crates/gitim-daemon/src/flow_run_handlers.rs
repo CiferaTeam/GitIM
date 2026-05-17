@@ -316,7 +316,12 @@ pub async fn handle_flow_node_set(
     let (a_name, a_email) = state.author_for(&author);
     let commit_id = match state.git_storage.add_and_commit_only_as(
         &path_str,
-        &format!("flow run: node {} → {:?} @{}", node_id, new_status, author),
+        &format!(
+            "flow run: node {} → {} @{}",
+            node_id,
+            new_status.as_str(),
+            author
+        ),
         Some((&a_name, &a_email)),
     ) {
         Ok(id) => id,
@@ -326,12 +331,12 @@ pub async fn handle_flow_node_set(
     let _ = state.event_tx.send(Event::FlowRunNodeUpdated {
         run_id: run.run_id.clone(),
         node_id: node_id.clone(),
-        status: format!("{:?}", new_status).to_lowercase(),
+        status: new_status.as_str().to_string(),
     });
     if run.status.is_terminal() {
         let _ = state.event_tx.send(Event::FlowRunCompleted {
             run_id: run.run_id.clone(),
-            status: format!("{:?}", run.status).to_lowercase(),
+            status: run.status.as_str().to_string(),
         });
     }
     state.push_notify.notify_one();

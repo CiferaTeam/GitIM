@@ -81,6 +81,15 @@ impl RunStatus {
             RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
         )
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::InProgress => "in_progress",
+            RunStatus::Done => "done",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +108,16 @@ impl NodeStatus {
             self,
             NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped
         )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeStatus::Pending => "pending",
+            NodeStatus::InProgress => "in_progress",
+            NodeStatus::Done => "done",
+            NodeStatus::Failed => "failed",
+            NodeStatus::Skipped => "skipped",
+        }
     }
 }
 
@@ -320,6 +339,38 @@ updated_at: 2026-05-17T11:15:00Z
         ] {
             let err = validate_node_transition(*f, *t).unwrap_err();
             assert!(matches!(err, FlowRunError::InvalidTransition { .. }));
+        }
+    }
+
+    #[test]
+    fn test_status_as_str_matches_serde() {
+        // Critical: event wire format relies on as_str() == serde representation
+        for s in [
+            NodeStatus::Pending,
+            NodeStatus::InProgress,
+            NodeStatus::Done,
+            NodeStatus::Failed,
+            NodeStatus::Skipped,
+        ] {
+            let serde_str = serde_json::to_value(s)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(s.as_str(), serde_str, "NodeStatus::{:?} as_str mismatch", s);
+        }
+        for s in [
+            RunStatus::InProgress,
+            RunStatus::Done,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            let serde_str = serde_json::to_value(s)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(s.as_str(), serde_str, "RunStatus::{:?} as_str mismatch", s);
         }
     }
 
