@@ -205,7 +205,7 @@ async fn drive_session(
                                     // at this step. Result.usage (when it arrives) sums
                                     // across iterations — billing-correct but wrong as a
                                     // window denominator.
-                                    if usage.is_some() {
+                                    if usage.as_ref().is_some_and(usage_has_reported_tokens) {
                                         captured_usage = usage;
                                     }
                                     for event in events {
@@ -228,11 +228,12 @@ async fn drive_session(
                                 } => {
                                     saw_result = true;
                                     session_id = sid;
-                                    // Only fall back to result.usage when no assistant
-                                    // message surfaced per-iteration usage. Older CLI
-                                    // versions may omit usage on assistant events; newer
-                                    // ones always provide it and this branch is a no-op.
-                                    if captured_usage.is_none() {
+                                    // Fall back to result.usage when no assistant message
+                                    // surfaced real per-iteration usage. Some
+                                    // Anthropic-compatible endpoints emit zero-filled
+                                    // assistant usage placeholders and put real counts on
+                                    // the final result event.
+                                    if should_replace_captured_usage(&captured_usage, &result_usage) {
                                         captured_usage = result_usage;
                                     }
                                     info!(
@@ -348,6 +349,28 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("event channel full, dropping event");
     }
+}
+
+fn should_replace_captured_usage(
+    captured_usage: &Option<ProviderUsage>,
+    candidate_usage: &Option<ProviderUsage>,
+) -> bool {
+    captured_usage
+        .as_ref()
+        .is_none_or(|usage| !usage_has_reported_tokens(usage))
+        && candidate_usage
+            .as_ref()
+            .is_some_and(usage_has_reported_tokens)
+}
+
+fn usage_has_reported_tokens(usage: &ProviderUsage) -> bool {
+    usage.input_tokens.unwrap_or(0) > 0
+        || usage.output_tokens.unwrap_or(0) > 0
+        || usage.cache_read_tokens.unwrap_or(0) > 0
+        || usage.cache_creation_tokens.unwrap_or(0) > 0
+        || usage.context_tokens.unwrap_or(0) > 0
+        || usage.context_window_tokens.unwrap_or(0) > 0
+        || usage.used_percent.is_some_and(|pct| pct > 0.0)
 }
 
 fn build_auto_approve_response(request_id: &str, input: &Value) -> Value {
@@ -749,5 +772,102 @@ mod usage_parse_tests {
             panic!("expected Result variant");
         };
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn zero_usage_assistant_event_does_not_block_result_usage_fallback() {
+        // Some Anthropic-compatible Claude Code backends emit a zero-filled
+        // assistant usage placeholder, then put the real token counts on the
+        // final result event.
+        let assistant_line = r#"{
+            "type": "assistant",
+            "session_id": "sess-glm",
+            "message": {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                }
+            }
+        }"#;
+        let result_line = r#"{
+            "type": "result",
+            "session_id": "sess-glm",
+            "result": "ok",
+            "is_error": false,
+            "usage": {
+                "input_tokens": 51512,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 7,
+                "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                },
+                "service_tier": "standard"
+            }
+        }"#;
+
+        let ParsedMessage::AssistantEvents {
+            usage: assistant_usage,
+            ..
+        } = parse_line(assistant_line).expect("assistant line should parse")
+        else {
+            panic!("expected AssistantEvents variant");
+        };
+        assert!(
+            !usage_has_reported_tokens(assistant_usage.as_ref().expect("usage is present")),
+            "zero placeholder should not count as provider usage"
+        );
+
+        let mut captured_usage = None;
+        if assistant_usage
+            .as_ref()
+            .is_some_and(usage_has_reported_tokens)
+        {
+            captured_usage = assistant_usage;
+        }
+
+        let ParsedMessage::Result {
+            usage: result_usage,
+            ..
+        } = parse_line(result_line).expect("result line should parse")
+        else {
+            panic!("expected Result variant");
+        };
+        assert!(should_replace_captured_usage(
+            &captured_usage,
+            &result_usage
+        ));
+        if should_replace_captured_usage(&captured_usage, &result_usage) {
+            captured_usage = result_usage;
+        }
+
+        let usage = captured_usage.expect("result usage should be captured");
+        assert_eq!(usage.input_tokens, Some(51_512));
+        assert_eq!(usage.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn nonzero_assistant_usage_stays_authoritative_over_result_usage() {
+        let assistant_usage = Some(ProviderUsage {
+            input_tokens: Some(1),
+            output_tokens: Some(34),
+            cache_read_tokens: Some(59_560),
+            cache_creation_tokens: Some(325),
+            ..ProviderUsage::default()
+        });
+        let result_usage = Some(ProviderUsage {
+            input_tokens: Some(120_000),
+            output_tokens: Some(80),
+            cache_read_tokens: Some(60_000),
+            cache_creation_tokens: Some(500),
+            ..ProviderUsage::default()
+        });
+
+        assert!(!should_replace_captured_usage(
+            &assistant_usage,
+            &result_usage
+        ));
     }
 }

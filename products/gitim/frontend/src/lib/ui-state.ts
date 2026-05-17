@@ -1,13 +1,20 @@
+export type UsageBreakdown = "provider" | "handler";
+
 export interface UiState {
   channel: string | null;
   boardHandler: string | null;
   cardsShowArchived: boolean;
+  /** Drives the grouping dimension of `WorkspaceUsageHeader`'s breakdown
+   *  row. Persisted per workspace so a 30-agent workspace and a 3-agent
+   *  workspace can each settle on their own preferred view. */
+  usageBreakdown: UsageBreakdown;
 }
 
 export const DEFAULT_UI_STATE: UiState = {
   channel: null,
   boardHandler: null,
   cardsShowArchived: false,
+  usageBreakdown: "provider",
 };
 
 const UI_STATE_STORAGE_PREFIX = "gitim-ui-state:";
@@ -32,6 +39,10 @@ export function readUiState(workspaceKey: string | null): UiState {
         typeof obj.cardsShowArchived === "boolean"
           ? obj.cardsShowArchived
           : DEFAULT_UI_STATE.cardsShowArchived,
+      usageBreakdown:
+        obj.usageBreakdown === "provider" || obj.usageBreakdown === "handler"
+          ? obj.usageBreakdown
+          : DEFAULT_UI_STATE.usageBreakdown,
     };
   } catch {
     return { ...DEFAULT_UI_STATE };

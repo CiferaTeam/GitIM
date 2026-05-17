@@ -2,7 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use gitim_runtime::model_catalog::{
     list_provider_models_with_overrides, parse_codex_debug_models, parse_opencode_models,
-    ModelCatalogOverrides,
+    parse_pi_models, ModelCatalogOverrides,
 };
 
 fn make_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -44,6 +44,37 @@ fn opencode_parser_reads_provider_model_lines() {
     );
 }
 
+#[test]
+fn pi_parser_reads_table_rows_as_provider_model_ids() {
+    let input = r#"
+provider     model               context  max-out  thinking  images
+deepseek     deepseek-chat       64K      8.2K     no        no
+kimi-coding  kimi-for-coding     262.1K   32.8K    yes       yes
+mass         astron-code-latest  200K     32K      yes       yes
+kimi-coding  kimi-for-coding     262.1K   32.8K    yes       yes
+"#;
+
+    let models = parse_pi_models(input);
+
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "deepseek/deepseek-chat",
+            "kimi-coding/kimi-for-coding",
+            "mass/astron-code-latest"
+        ]
+    );
+    assert_eq!(models[0].label, "deepseek/deepseek-chat");
+}
+
+#[test]
+fn pi_parser_returns_empty_when_no_table_rows_exist() {
+    let models = parse_pi_models("No models available. Configure an API key.\n");
+
+    assert!(models.is_empty());
+}
+
 #[tokio::test]
 async fn codex_catalog_invokes_debug_models_and_exposes_fallbacks() {
     let tmp = tempfile::tempdir().unwrap();
@@ -80,6 +111,94 @@ JSON
     assert!(result.supports_custom);
     assert_eq!(result.models.len(), 1);
     assert_eq!(result.models[0].id, "gpt-5.5");
+    assert!(
+        result.error.is_none(),
+        "unexpected error: {:?}",
+        result.error
+    );
+}
+
+#[tokio::test]
+async fn pi_catalog_invokes_list_models_and_exposes_fallbacks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture = tmp.path().join("argv.txt");
+    let script = make_script(
+        tmp.path(),
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "{}"
+cat <<'TABLE'
+provider     model               context  max-out  thinking  images
+kimi-coding  kimi-for-coding     262.1K   32.8K    yes       yes
+mass         astron-code-latest  200K     32K      yes       yes
+TABLE
+"#,
+            capture.display()
+        ),
+    );
+
+    let result = list_provider_models_with_overrides(
+        "pi",
+        ModelCatalogOverrides {
+            pi_bin: Some(script.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(capture).unwrap().trim(),
+        "--list-models"
+    );
+    assert_eq!(result.provider, "pi");
+    assert_eq!(result.source, "pi_list_models");
+    assert!(result.supports_default);
+    assert!(result.supports_custom);
+    assert_eq!(result.models[0].id, "kimi-coding/kimi-for-coding");
+    assert_eq!(result.models[1].id, "mass/astron-code-latest");
+    assert!(
+        result.error.is_none(),
+        "unexpected error: {:?}",
+        result.error
+    );
+}
+
+#[tokio::test]
+async fn pi_catalog_reads_models_from_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture = tmp.path().join("argv.txt");
+    let script = make_script(
+        tmp.path(),
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "{}"
+cat >&2 <<'TABLE'
+provider     model                   context  max-out  thinking  images
+minimax-cn   MiniMax-M2.7-highspeed  204.8K   131.1K   yes       no
+TABLE
+"#,
+            capture.display()
+        ),
+    );
+
+    let result = list_provider_models_with_overrides(
+        "pi",
+        ModelCatalogOverrides {
+            pi_bin: Some(script.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(capture).unwrap().trim(),
+        "--list-models"
+    );
+    assert_eq!(result.provider, "pi");
+    assert_eq!(result.source, "pi_list_models");
+    assert!(result.supports_default);
+    assert!(result.supports_custom);
+    assert_eq!(result.models[0].id, "minimax-cn/MiniMax-M2.7-highspeed");
     assert!(
         result.error.is_none(),
         "unexpected error: {:?}",

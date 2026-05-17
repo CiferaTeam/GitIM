@@ -6,6 +6,7 @@ use std::time::Duration;
 
 const DEFAULT_BIN_CODEX: &str = "codex";
 const DEFAULT_BIN_OPENCODE: &str = "opencode";
+const DEFAULT_BIN_PI: &str = "pi";
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +30,7 @@ pub struct ModelCatalogResult {
 pub struct ModelCatalogOverrides {
     pub codex_bin: Option<String>,
     pub opencode_bin: Option<String>,
+    pub pi_bin: Option<String>,
 }
 
 #[async_trait]
@@ -63,14 +65,15 @@ pub async fn list_provider_models_with_overrides(
             .list_models()
             .await
         }
-        "pi" => fallback_catalog(
-            "pi",
-            "pi_custom_model",
-            true,
-            true,
-            Some("provider/model or model".to_string()),
-            None,
-        ),
+        "pi" => {
+            PiCatalog {
+                bin: overrides
+                    .pi_bin
+                    .unwrap_or_else(|| DEFAULT_BIN_PI.to_string()),
+            }
+            .list_models()
+            .await
+        }
         "claude" => fallback_catalog(
             "claude",
             "claude_custom_model",
@@ -166,6 +169,38 @@ impl ModelCatalogProvider for OpenCodeCatalog {
     }
 }
 
+struct PiCatalog {
+    bin: String,
+}
+
+#[async_trait]
+impl ModelCatalogProvider for PiCatalog {
+    async fn list_models(&self) -> ModelCatalogResult {
+        match run_catalog_command_output(&self.bin, &["--list-models"]).await {
+            Ok(output) => {
+                let combined = format!("{}\n{}", output.stdout, output.stderr);
+                fallback_catalog(
+                    "pi",
+                    "pi_list_models",
+                    true,
+                    true,
+                    Some("provider/model or model".to_string()),
+                    None,
+                )
+                .with_models(parse_pi_models(&combined))
+            }
+            Err(error) => fallback_catalog(
+                "pi",
+                "pi_list_models",
+                true,
+                true,
+                Some("provider/model or model".to_string()),
+                Some(error),
+            ),
+        }
+    }
+}
+
 impl ModelCatalogResult {
     fn with_models(mut self, models: Vec<ModelOption>) -> Self {
         self.models = models;
@@ -242,7 +277,56 @@ pub fn parse_opencode_models(stdout: &str) -> Vec<ModelOption> {
     out
 }
 
+pub fn parse_pi_models(stdout: &str) -> Vec<ModelOption> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("No models") {
+            continue;
+        }
+
+        let columns: Vec<_> = line.split_whitespace().collect();
+        if columns.len() < 6 {
+            continue;
+        }
+
+        let provider = columns[0];
+        let model = columns[1];
+        if provider == "provider" && model == "model" {
+            continue;
+        }
+
+        let id = format!("{provider}/{model}");
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+
+        out.push(ModelOption {
+            label: id.clone(),
+            id,
+        });
+    }
+
+    out
+}
+
 async fn run_catalog_command(bin: &str, args: &[&str]) -> Result<String, String> {
+    run_catalog_command_output(bin, args)
+        .await
+        .map(|output| output.stdout)
+}
+
+struct CatalogCommandOutput {
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_catalog_command_output(
+    bin: &str,
+    args: &[&str],
+) -> Result<CatalogCommandOutput, String> {
     let mut child = tokio::process::Command::new(bin);
     child
         .args(args)
@@ -273,5 +357,8 @@ async fn run_catalog_command(bin: &str, args: &[&str]) -> Result<String, String>
         return Err(msg);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(CatalogCommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
