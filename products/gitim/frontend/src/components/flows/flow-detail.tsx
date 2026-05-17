@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useFlowStore } from "@/hooks/use-flow-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { FlowDocument } from "@/lib/types";
@@ -10,8 +11,15 @@ import { FlowDAG } from "./flow-dag";
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
 
-export function FlowDetail({ doc }: { doc: FlowDocument }) {
+export function FlowDetail({
+  doc,
+  onDeleted,
+}: {
+  doc: FlowDocument;
+  onDeleted?: () => void;
+}) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const setSelectedSlug = useFlowStore((s) => s.setSelectedSlug);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
 
@@ -24,9 +32,12 @@ export function FlowDetail({ doc }: { doc: FlowDocument }) {
     setRemoving(false);
     if (!res.ok) {
       setRemoveError(res.error ?? "Failed to remove flow");
+      return;
     }
-    // The parent FlowsView will detect the missing slug on next refresh.
-    // Nothing else to do here — caller refreshes via its own subscription.
+    // Clear selection so the detail panel closes immediately, then
+    // refresh the list so the deleted flow disappears from the sidebar.
+    setSelectedSlug(null);
+    onDeleted?.();
   }
 
   return (

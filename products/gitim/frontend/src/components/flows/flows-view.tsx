@@ -201,6 +201,7 @@ export function FlowsView() {
           flows={flows}
           flow={selectedFlow}
           loading={detailState === "loading"}
+          onFlowDeleted={() => void refreshFlows()}
         />
       </div>
     </div>
@@ -324,10 +325,12 @@ function FlowDetailPanel({
   flows,
   flow,
   loading,
+  onFlowDeleted,
 }: {
   flows: FlowSummary[];
   flow: FlowDocument | null;
   loading: boolean;
+  onFlowDeleted: () => void;
 }) {
   if (!flow) {
     return (
@@ -341,5 +344,5 @@ function FlowDetailPanel({
     );
   }
 
-  return <FlowDetail doc={flow} />;
+  return <FlowDetail doc={flow} onDeleted={onFlowDeleted} />;
 }

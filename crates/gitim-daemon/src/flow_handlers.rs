@@ -67,7 +67,7 @@ pub async fn handle_flow_show(state: SharedState, slug: String) -> Response {
     let content = match std::fs::read_to_string(&abs) {
         Ok(c) => c,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Response::error(format!("flow not found: {}", slug));
+            return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
         }
         Err(e) => return Response::error(format!("failed to read flow: {}", e)),
     };
@@ -145,7 +145,7 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
     let trash_abs = state.repo_root.join(&trash_rel);
 
     if !abs.exists() {
-        return Response::error(format!("flow not found: {}", slug));
+        return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
     }
     if let Some(parent) = trash_abs.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
