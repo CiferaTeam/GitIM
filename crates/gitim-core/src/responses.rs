@@ -1263,7 +1263,7 @@ mod tests {
 use crate::flow::{FlowNode, NodeType};
 
 /// Lightweight summary of a flow, used in list views.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowSummary {
     pub slug: String,
     pub name: String,
@@ -1273,7 +1273,7 @@ pub struct FlowSummary {
 }
 
 /// Response payload for `Request::ListFlows`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListFlowsResponse {
     pub flows: Vec<FlowSummary>,
 }
@@ -1281,7 +1281,7 @@ pub struct ListFlowsResponse {
 /// One node entry in `ShowFlowResponse.nodes`. Typed projection of
 /// `FlowNode` — `signal` and `exits` are v2 fields and omitted here
 /// intentionally; callers that need them read `raw_markdown`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowNodeSummary {
     pub id: String,
     #[serde(rename = "type")]
@@ -1300,7 +1300,7 @@ pub struct FlowNodeSummary {
 /// `nodes` gives the frontend a typed, render-ready node list.
 /// `raw_markdown` is the full source markdown so agents can read and
 /// rewrite the flow without a second IPC round trip.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShowFlowResponse {
     pub slug: String,
     pub name: String,
@@ -1326,7 +1326,7 @@ impl From<&FlowNode> for FlowNodeSummary {
 }
 
 /// Response payload for `Request::WriteFlow` (create or update).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WriteFlowResponse {
     pub slug: String,
     pub path: String,
@@ -1338,14 +1338,14 @@ pub struct WriteFlowResponse {
 /// One issue in `ValidateFlowResponse.items`.
 /// `kind` is `"error"` or `"warning"` — kept as `String` so the wire
 /// stays simple and frontend-friendly without coupling to an enum.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowValidationItem {
     pub kind: String,
     pub message: String,
 }
 
 /// Response payload for `Request::ValidateFlow`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidateFlowResponse {
     pub slug: String,
     pub ok: bool,
