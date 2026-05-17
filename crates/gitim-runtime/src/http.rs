@@ -2093,6 +2093,222 @@ async fn crons_timeline(
     .into_response()
 }
 
+// -- /workspaces/{slug}/im/flows --
+//
+// These routes proxy to the workspace's human-clone daemon for flow management.
+// Read endpoints (list / show / validate) return raw JSON bodies — the frontend
+// wraps them in `{ok: true, data}` via `cronRequest`. Write endpoints (create /
+// remove) use HTTP status codes for success/failure detection; the frontend
+// checks `res.ok` rather than the body `ok` field.
+//
+// Error mapping: daemon-side `error_code: "not_found"` → HTTP 404. Other
+// daemon errors travel through `ErrorBody` with the error_code preserved.
+
+fn flow_client_error_to_response(err: gitim_client::ClientError) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use gitim_client::ClientError;
+    match err {
+        ClientError::Api {
+            ref message,
+            code: Some(ref code),
+        } if code == "not_found" => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ErrorBody::with_code(message.clone(), code.clone())),
+        )
+            .into_response(),
+        ClientError::Api { message, code } => {
+            let body = match code {
+                Some(c) => ErrorBody::with_code(message, c),
+                None => ErrorBody::new(message),
+            };
+            Json(body).into_response()
+        }
+        other => Json(ErrorBody::new(other.to_string())).into_response(),
+    }
+}
+
+/// Extract the `data` field from a successful `ApiResponse` and return it
+/// as a raw JSON body. The frontend's `cronRequest` wraps this in
+/// `{ok: true, data: body}` on the client side.
+fn flow_raw_data_response(
+    result: Result<gitim_client::ApiResponse, gitim_client::ClientError>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match result {
+        Ok(resp) if resp.ok => {
+            let data = resp.data.unwrap_or(serde_json::Value::Null);
+            Json(data).into_response()
+        }
+        Ok(resp) => {
+            let body = match resp.error_code {
+                Some(ref code) if code == "not_found" => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(ErrorBody::with_code(
+                        resp.error.unwrap_or_default(),
+                        code.clone(),
+                    )),
+                )
+                    .into_response(),
+                Some(c) => {
+                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)).into_response()
+                }
+                None => Json(ErrorBody::new(resp.error.unwrap_or_default())).into_response(),
+            };
+            body
+        }
+        Err(e) => flow_client_error_to_response(e),
+    }
+}
+
+async fn flows_list(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    flow_raw_data_response(client.flow_list().await)
+}
+
+async fn flows_show(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    flow_raw_data_response(client.flow_show(&flow_slug).await)
+}
+
+#[derive(Deserialize)]
+struct FlowCreateRequest {
+    slug: String,
+    name: String,
+    description: String,
+}
+
+async fn flows_create(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<FlowCreateRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client
+        .flow_create(&req.slug, &req.name, &req.description)
+        .await
+    {
+        Ok(resp) if resp.ok => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(resp) => {
+            let body = match resp.error_code {
+                Some(ref code) if code == "not_found" => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(ErrorBody::with_code(
+                        resp.error.unwrap_or_default(),
+                        code.clone(),
+                    )),
+                )
+                    .into_response(),
+                Some(c) => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+                )
+                    .into_response(),
+                None => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
+                )
+                    .into_response(),
+            };
+            body
+        }
+        Err(e) => {
+            let status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            (status, Json(ErrorBody::new(e.to_string()))).into_response()
+        }
+    }
+}
+
+async fn flows_remove(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client.flow_remove(&flow_slug).await {
+        Ok(resp) if resp.ok => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(resp) => {
+            let body = match resp.error_code {
+                Some(ref code) if code == "not_found" => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(ErrorBody::with_code(
+                        resp.error.unwrap_or_default(),
+                        code.clone(),
+                    )),
+                )
+                    .into_response(),
+                Some(c) => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+                )
+                    .into_response(),
+                None => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
+                )
+                    .into_response(),
+            };
+            body
+        }
+        Err(e) => {
+            let status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            (status, Json(ErrorBody::new(e.to_string()))).into_response()
+        }
+    }
+}
+
+async fn flows_validate(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    flow_raw_data_response(client.flow_validate(&flow_slug).await)
+}
+
 // -- /agents/add --
 
 #[derive(Deserialize)]
@@ -5328,6 +5544,16 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/crons/{name}", get(crons_show))
         .route("/crons/{name}/runs", get(crons_runs_list))
         .route("/crons/{name}/runs/{ts}", get(crons_run_body))
+        // Flow routes — list/show/validate return raw JSON (cronRequest pattern);
+        // create/remove use HTTP status codes for success/failure detection.
+        // Fixed-prefix `validate` route must come before `/{slug}` to avoid
+        // axum matching the literal word as a flow slug.
+        .route("/im/flows", get(flows_list).post(flows_create))
+        .route("/im/flows/{flow_slug}/validate", get(flows_validate))
+        .route(
+            "/im/flows/{flow_slug}",
+            get(flows_show).delete(flows_remove),
+        )
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
