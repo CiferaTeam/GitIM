@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 
 use crate::api::{Event, Response};
+use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::flow::{
     flow_path, parse_flow_markdown, parse_flow_markdown_with_warnings, stringify_flow_markdown,
@@ -98,6 +99,9 @@ pub async fn handle_flow_create(
         Ok(s) => s,
         Err(e) => return Response::error(format!("invalid slug: {}", e)),
     };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     let rel = flow_path(&slug);
     let abs = state.repo_root.join(&rel);
     if abs.exists() {
@@ -128,6 +132,9 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
         Ok(s) => s,
         Err(e) => return Response::error(format!("invalid slug: {}", e)),
     };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
     let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
     let rel = flow_path(&slug);
     let abs = state.repo_root.join(&rel);

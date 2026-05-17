@@ -199,3 +199,97 @@ async fn flow_create_invalid_slug_rejected() {
     );
     assert!(r.error.is_some(), "expected error message for invalid slug");
 }
+
+/// Depart a user by moving their meta.yaml to archive/users/ and committing,
+/// mirroring what handle_depart_user does under the hood.
+fn depart_user_fs(root: &Path, handler: &str) {
+    let archive_dir = root.join("archive").join("users");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    let src = root.join("users").join(format!("{}.meta.yaml", handler));
+    let dst = archive_dir.join(format!("{}.meta.yaml", handler));
+    std::fs::rename(&src, &dst).unwrap();
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "commit",
+            "-m",
+            &format!("archive: depart user @{}", handler),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn flow_create_rejected_for_departed_user() {
+    let (_tmp, state) = setup().await;
+
+    // Depart lewis before attempting to create a flow.
+    depart_user_fs(&state.repo_root, "lewis");
+
+    let r = gitim_daemon::flow_handlers::handle_flow_create(
+        state.clone(),
+        "my-flow".into(),
+        "My Flow".into(),
+        "A test flow".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(
+        !r.ok,
+        "departed user should not be able to create a flow, got ok=true with data: {:?}",
+        r.data
+    );
+    assert!(
+        r.error.as_deref().unwrap_or("").contains("departed"),
+        "expected 'departed' in error message, got: {:?}",
+        r.error
+    );
+}
+
+#[tokio::test]
+async fn flow_remove_rejected_for_departed_user() {
+    let (_tmp, state) = setup().await;
+
+    // Create a flow as lewis while still active.
+    let r = gitim_daemon::flow_handlers::handle_flow_create(
+        state.clone(),
+        "to-remove".into(),
+        "To Remove".into(),
+        "Will be rejected".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "flow_create pre-condition failed: {:?}", r.error);
+
+    // Now depart lewis.
+    depart_user_fs(&state.repo_root, "lewis");
+
+    // Attempt to remove the flow as the departed user — must be rejected.
+    let r = gitim_daemon::flow_handlers::handle_flow_remove(
+        state.clone(),
+        "to-remove".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(
+        !r.ok,
+        "departed user should not be able to remove a flow, got ok=true with data: {:?}",
+        r.data
+    );
+    assert!(
+        r.error.as_deref().unwrap_or("").contains("departed"),
+        "expected 'departed' in error message, got: {:?}",
+        r.error
+    );
+
+    // Verify the flow still exists (not deleted).
+    let flow_path = state
+        .repo_root
+        .join("flows")
+        .join("to-remove")
+        .join("index.md");
+    assert!(
+        flow_path.exists(),
+        "flow should still exist after rejected remove"
+    );
+}
