@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router"
 import { Loader2 } from "lucide-react";
 import { BoardsView } from "./components/boards/boards-view";
 import { FlowsView } from "./components/flows/flows-view";
+import { RunDetail } from "./components/flows/run-detail";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
@@ -1000,6 +1001,9 @@ export default function App() {
             )}
             {mode === "remote" && (
               <Route path="/flows" element={<FlowsView />} />
+            )}
+            {mode === "remote" && (
+              <Route path="/runs/:runId" element={<RunDetail />} />
             )}
             <Route path="/docs" element={<DocsPage />} />
             {mode === "local" && (
