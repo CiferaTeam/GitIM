@@ -7,7 +7,7 @@ pub use types::{
 
 pub mod parser;
 
-pub use parser::{parse_flow_markdown, stringify_flow_markdown};
+pub use parser::{parse_flow_markdown, parse_flow_markdown_with_warnings, stringify_flow_markdown};
 
 // The following submodules and re-exports will be added in Tasks 4-5:
 // pub mod validator;
