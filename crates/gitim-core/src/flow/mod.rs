@@ -5,8 +5,10 @@ pub use types::{
     NodeType,
 };
 
-// The following submodules and re-exports will be added in Tasks 3-5:
-// pub mod parser;
+pub mod parser;
+
+pub use parser::{parse_flow_markdown, stringify_flow_markdown};
+
+// The following submodules and re-exports will be added in Tasks 4-5:
 // pub mod validator;
-// pub use parser::{parse_flow_markdown, stringify_flow_markdown};
 // pub use validator::{validate_flow_document, validate_flow_for_storage};
