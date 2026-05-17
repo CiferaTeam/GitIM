@@ -64,6 +64,9 @@ pub enum Event {
     #[serde(rename = "board_updated")]
     BoardUpdated { handler: String },
 
+    #[serde(rename = "flow_changed")]
+    FlowChanged { slug: String },
+
     #[serde(rename = "channel_unarchived")]
     ChannelUnarchived {
         channel: String,
@@ -398,6 +401,27 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
+
+    // -- Flow triggers --
+    #[serde(rename = "flow_list")]
+    FlowList,
+    #[serde(rename = "flow_show")]
+    FlowShow { slug: String },
+    #[serde(rename = "flow_create")]
+    FlowCreate {
+        slug: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_remove")]
+    FlowRemove {
+        slug: String,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_validate")]
+    FlowValidate { slug: String },
 
     // -- Cron triggers --
     //
