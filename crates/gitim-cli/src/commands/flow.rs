@@ -126,7 +126,7 @@ pub async fn cmd_flow_create(
                 commit
             };
             println!(
-                "created flow `{}` (0 nodes)\npath: {}\ncommit: {}\nnext: edit flows/{}/index.md to add nodes",
+                "已创建 flow `{}` (0 个节点)\n路径: {}\ncommit: {}\n下一步: 编辑 flows/{}/index.md 加节点",
                 slug_out, path, commit_short, slug_out,
             );
         }),
@@ -140,7 +140,7 @@ pub async fn cmd_flow_create(
 pub async fn cmd_flow_remove(client: &GitimClient, mode: &OutputMode, slug: &str) {
     match client.flow_remove(slug).await {
         Ok(resp) => print_or_exit(resp, mode, |_data| {
-            println!("deleted flow `{}` (moved to .trash/)", slug);
+            println!("已删除 flow `{}` (移至 .trash/)", slug);
         }),
         Err(e) => {
             eprintln!("Error: {e}");
@@ -161,6 +161,9 @@ pub async fn cmd_flow_validate(client: &GitimClient, mode: &OutputMode, slug: &s
                 let msg = it["message"].as_str().unwrap_or("");
                 let marker = if kind == "error" { "x" } else { "!" };
                 println!("  {} [{}] {}", marker, kind, msg);
+            }
+            if !ok {
+                process::exit(2);
             }
         }),
         Err(e) => {
