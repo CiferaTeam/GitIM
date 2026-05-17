@@ -2121,9 +2121,13 @@ fn flow_client_error_to_response(err: gitim_client::ClientError) -> axum::respon
                 Some(c) => ErrorBody::with_code(message, c),
                 None => ErrorBody::new(message),
             };
-            Json(body).into_response()
+            (axum::http::StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
         }
-        other => Json(ErrorBody::new(other.to_string())).into_response(),
+        other => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::new(other.to_string())),
+        )
+            .into_response(),
     }
 }
 
@@ -2149,10 +2153,16 @@ fn flow_raw_data_response(
                     )),
                 )
                     .into_response(),
-                Some(c) => {
-                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)).into_response()
-                }
-                None => Json(ErrorBody::new(resp.error.unwrap_or_default())).into_response(),
+                Some(c) => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+                )
+                    .into_response(),
+                None => (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
+                )
+                    .into_response(),
             };
             body
         }
