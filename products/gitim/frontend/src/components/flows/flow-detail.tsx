@@ -1,10 +1,11 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { useFlowStore } from "@/hooks/use-flow-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
-import type { FlowDocument } from "@/lib/types";
+import type { FlowDocument, FlowRunSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { FlowDAG } from "./flow-dag";
@@ -22,6 +23,26 @@ export function FlowDetail({
   const setSelectedSlug = useFlowStore((s) => s.setSelectedSlug);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [recentRuns, setRecentRuns] = useState<FlowRunSummary[]>([]);
+
+  useEffect(() => {
+    if (!activeSlug) return;
+    let cancelled = false;
+    client
+      .listFlowRuns(activeSlug, { slug: doc.slug })
+      .then((res) => {
+        if (!cancelled)
+          setRecentRuns(
+            res.ok && res.data ? res.data.runs.slice(0, 10) : [],
+          );
+      })
+      .catch(() => {
+        if (!cancelled) setRecentRuns([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSlug, doc.slug]);
 
   async function handleRemove() {
     if (!activeSlug) return;
@@ -153,6 +174,28 @@ export function FlowDetail({
                     </div>
                   )}
                 </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Recent runs */}
+        {recentRuns.length > 0 && (
+          <section>
+            <h3 className="mb-2 text-sm font-semibold">Recent runs</h3>
+            <div className="space-y-1">
+              {recentRuns.map((r) => (
+                <Link
+                  key={r.run_id}
+                  to={`/runs/${r.run_id}`}
+                  className="block px-3 py-1.5 rounded hover:bg-muted text-sm font-mono"
+                >
+                  <span>{r.run_id}</span>
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    [{r.status}] · {r.nodes_done}/{r.node_count} nodes · #
+                    {r.channel}
+                  </span>
+                </Link>
               ))}
             </div>
           </section>

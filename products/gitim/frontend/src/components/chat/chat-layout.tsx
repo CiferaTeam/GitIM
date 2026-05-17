@@ -15,6 +15,7 @@ import { ChannelCardDrawer } from "../cards/channel-card-drawer";
 import { MobileSidebarDrawer } from "../mobile/mobile-sidebar-drawer";
 import { MobileThreadOverlay } from "../mobile/mobile-thread-overlay";
 import { MobileActionSheet } from "../mobile/mobile-action-sheet";
+import { ChannelActiveRuns } from "../flows/channel-active-runs";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
@@ -592,6 +593,9 @@ export function ChatLayout() {
           </div>
         )}
 
+        {currentChannel && currentChannelData?.kind === "channel" && (
+          <ChannelActiveRuns channel={currentChannel} />
+        )}
         <MessageList
           messages={messages}
           scopeKey={currentChannel}
