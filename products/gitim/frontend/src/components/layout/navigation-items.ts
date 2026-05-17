@@ -2,6 +2,7 @@ import {
   Bot,
   CalendarClock,
   ClipboardList,
+  GitFork,
   LayoutGrid,
   MessageSquare,
   type LucideIcon,
@@ -28,6 +29,7 @@ const navItems: NavigationItem[] = [
   { to: "/cards", label: "Cards", icon: LayoutGrid },
   { to: "/boards", label: "Boards", icon: ClipboardList },
   { to: "/crons", label: "周期任务", icon: CalendarClock, requiresRuntime: true, mobileHidden: true },
+  { to: "/flows", label: "Flows", icon: GitFork, requiresRuntime: true, mobileHidden: true },
 ];
 
 export function getVisibleNavigationItems(
