@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useFlowStore } from "@/hooks/use-flow-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
@@ -26,6 +27,11 @@ export function FlowsView() {
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+
+  const [newSlug, setNewSlug] = useState("");
+  const [newName, setNewName] = useState("");
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const activeSlugRef = useRef(activeSlug);
   const listRequestIdRef = useRef(0);
@@ -89,6 +95,21 @@ export function FlowsView() {
     },
     [activeSlug, setFlows, setSelectedFlow],
   );
+
+  const handleCreate = useCallback(async () => {
+    if (!activeSlug || !newSlug || !newName) return;
+    setCreateSubmitting(true);
+    setCreateError(null);
+    const res = await client.createFlow(activeSlug, newSlug, newName, "");
+    setCreateSubmitting(false);
+    if (!res.ok) {
+      setCreateError(res.error ?? "Failed to create flow");
+      return;
+    }
+    setNewSlug("");
+    setNewName("");
+    await refreshFlows();
+  }, [activeSlug, newSlug, newName, refreshFlows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -161,37 +182,108 @@ export function FlowsView() {
         </div>
       )}
 
-      {flows.length === 0 && listState !== "loading" ? (
-        <EmptyFlows />
-      ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] overflow-hidden md:grid-cols-[18rem_1fr] md:grid-rows-1">
-          <FlowList
-            flows={flows}
-            selectedSlug={selectedSlug}
-            onSelect={setSelectedSlug}
-          />
-          <FlowDetailPanel
-            flow={selectedFlow}
-            loading={detailState === "loading"}
-          />
-        </div>
-      )}
+      <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] overflow-hidden md:grid-cols-[18rem_1fr] md:grid-rows-1">
+        <FlowSidebar
+          flows={flows}
+          loading={listState === "loading"}
+          selectedSlug={selectedSlug}
+          onSelect={setSelectedSlug}
+          newSlug={newSlug}
+          newName={newName}
+          onNewSlugChange={setNewSlug}
+          onNewNameChange={setNewName}
+          createSubmitting={createSubmitting}
+          createError={createError}
+          onClearCreateError={() => setCreateError(null)}
+          onCreate={() => void handleCreate()}
+        />
+        <FlowDetailPanel
+          flows={flows}
+          flow={selectedFlow}
+          loading={detailState === "loading"}
+        />
+      </div>
     </div>
   );
 }
 
-function FlowList({
+function FlowSidebar({
   flows,
+  loading,
   selectedSlug,
   onSelect,
+  newSlug,
+  newName,
+  onNewSlugChange,
+  onNewNameChange,
+  createSubmitting,
+  createError,
+  onClearCreateError,
+  onCreate,
 }: {
   flows: FlowSummary[];
+  loading: boolean;
   selectedSlug: string | null;
   onSelect: (slug: string) => void;
+  newSlug: string;
+  newName: string;
+  onNewSlugChange: (v: string) => void;
+  onNewNameChange: (v: string) => void;
+  createSubmitting: boolean;
+  createError: string | null;
+  onClearCreateError: () => void;
+  onCreate: () => void;
 }) {
+  const canCreate = newSlug.trim().length > 0 && newName.trim().length > 0;
+
   return (
-    <aside className="border-b border-border md:border-b-0 md:border-r">
-      <div className="flex gap-2 overflow-x-auto px-4 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
+    <aside className="flex flex-col border-b border-border md:border-b-0 md:border-r">
+      <div className="border-b border-border px-3 py-3">
+        <p className="mb-2 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          New flow
+        </p>
+        <div className="space-y-1.5">
+          <Input
+            placeholder="slug (e.g. release)"
+            value={newSlug}
+            onChange={(e) => {
+              onClearCreateError();
+              onNewSlugChange(e.target.value);
+            }}
+            disabled={createSubmitting}
+            className="h-8 text-sm"
+          />
+          <Input
+            placeholder="name"
+            value={newName}
+            onChange={(e) => {
+              onClearCreateError();
+              onNewNameChange(e.target.value);
+            }}
+            disabled={createSubmitting}
+            className="h-8 text-sm"
+          />
+          {createError && (
+            <p className="text-xs text-destructive">{createError}</p>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            className="w-full"
+            disabled={!canCreate || createSubmitting}
+            onClick={onCreate}
+          >
+            {createSubmitting ? "Creating..." : "+ Create"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 gap-2 overflow-x-auto px-3 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
+        {flows.length === 0 && !loading && (
+          <p className="text-xs text-muted-foreground">
+            No flows yet — create one above.
+          </p>
+        )}
         {flows.map((flow) => {
           const selected = flow.slug === selectedSlug;
           return (
@@ -229,30 +321,25 @@ function FlowList({
 }
 
 function FlowDetailPanel({
+  flows,
   flow,
   loading,
 }: {
+  flows: FlowSummary[];
   flow: FlowDocument | null;
   loading: boolean;
 }) {
   if (!flow) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-        {loading ? "Loading flow..." : "Select a flow to view its template"}
+        {loading
+          ? "Loading flow..."
+          : flows.length === 0
+            ? "Create your first flow using the form on the left"
+            : "Select a flow to view its template"}
       </div>
     );
   }
 
   return <FlowDetail doc={flow} />;
-}
-
-function EmptyFlows() {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-      <p className="text-base font-medium">No flows yet</p>
-      <p className="max-w-sm text-sm text-muted-foreground">
-        Flows appear here after they have been created in this workspace.
-      </p>
-    </div>
-  );
 }
