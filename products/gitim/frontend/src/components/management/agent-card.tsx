@@ -19,10 +19,14 @@ import { relativeTime, statusBadge } from "./agent-status";
 
 function statusBarColor(status: AgentStatus) {
   switch (status) {
-    case "running": return "bg-success";
-    case "idle": return "bg-warning";
-    case "error": return "bg-destructive";
-    case "offline": return "bg-text-muted";
+    case "running":
+      return "bg-success";
+    case "idle":
+      return "bg-warning";
+    case "error":
+      return "bg-destructive";
+    case "offline":
+      return "bg-text-muted";
   }
 }
 
@@ -33,9 +37,26 @@ function initials(name: string) {
 function avatarColor(name: string) {
   const hues = [210, 150, 30, 280, 340, 190, 45, 260];
   let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  for (let i = 0; i < name.length; i++)
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
   const hue = hues[Math.abs(hash) % hues.length];
   return `hsl(${hue} 70% 55%)`;
+}
+
+function agentModelLabel(agent: Agent) {
+  if (agent.provider === "hermes" && agent.llmModel) {
+    return agent.llmProvider
+      ? `${agent.llmProvider} / ${agent.llmModel}`
+      : agent.llmModel;
+  }
+  return (
+    agent.model ??
+    (agent.provider === "opencode" ||
+    agent.provider === "pi" ||
+    agent.provider === "hermes"
+      ? "default"
+      : "—")
+  );
 }
 
 interface AgentCardProps {
@@ -79,7 +100,9 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
         }}
       >
         {/* Status bar */}
-        <div className={`absolute top-0 left-0 right-0 h-1 ${statusBarColor(agent.status)}`} />
+        <div
+          className={`absolute top-0 left-0 right-0 h-1 ${statusBarColor(agent.status)}`}
+        />
 
         <CardHeader className="pb-2 pt-5">
           <div className="flex items-center justify-between gap-3">
@@ -91,13 +114,14 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
                 {initials(agent.name || agent.id)}
               </div>
               <div className="min-w-0">
-                <span className="font-semibold text-lg truncate block">{agent.name}</span>
-                <span className="text-xs text-text-muted truncate block">
-                  {agent.provider ?? "—"} ·{" "}
-                  {agent.model ??
-                    (agent.provider === "opencode" || agent.provider === "pi" || agent.provider === "hermes"
-                      ? "default"
-                      : "—")}
+                <span className="font-semibold text-lg truncate block">
+                  {agent.name}
+                </span>
+                <span
+                  className="text-xs text-text-muted truncate block"
+                  title={`${agent.provider ?? "—"} · ${agentModelLabel(agent)}`}
+                >
+                  {agent.provider ?? "—"} · {agentModelLabel(agent)}
                 </span>
                 {agent.status === "error" && (
                   <p className="text-xs text-destructive truncate">
@@ -131,17 +155,26 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
         </CardContent>
 
         {!readOnly && (
-          <CardFooter className="gap-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
+          <CardFooter
+            className="gap-2 flex-wrap"
+            onClick={(e) => e.stopPropagation()}
+          >
             <Button
               variant={isRunning ? "outline" : "default"}
               size="sm"
               onClick={handleToggle}
-              className={isRunning ? "border-border-strong hover:bg-surface-hover" : ""}
+              className={
+                isRunning ? "border-border-strong hover:bg-surface-hover" : ""
+              }
             >
               {isRunning ? (
-                <><Pause className="size-3.5 mr-1" /> Stop</>
+                <>
+                  <Pause className="size-3.5 mr-1" /> Stop
+                </>
               ) : (
-                <><Play className="size-3.5 mr-1" /> Start</>
+                <>
+                  <Play className="size-3.5 mr-1" /> Start
+                </>
               )}
             </Button>
             <Button

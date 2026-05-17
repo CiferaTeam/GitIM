@@ -20,6 +20,7 @@ pub mod prompts;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
+const CLEAN_SHUTDOWN_GRACE: Duration = Duration::from_millis(750);
 const EVENT_CHANNEL_BUFFER: usize = 256;
 
 pub struct HermesProvider {
@@ -256,7 +257,7 @@ async fn drive_session(
     // restores that fast-fail behavior for the shared-reader topology.
     let reader_acp = Arc::clone(&acp);
     let reader_event_tx = event_tx.clone();
-    let reader_handle = tokio::spawn(async move {
+    let mut reader_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
             match reader.next_line().await {
@@ -382,10 +383,16 @@ async fn drive_session(
 
     // ── Post-loop cleanup ──
 
-    // Signal end-of-input to hermes so it shuts the session cleanly; for
-    // timeout / abort we kill outright instead.
+    let mut killed_for_cleanup = false;
+
+    // Signal end-of-input to hermes so it can shut the session cleanly; for
+    // timeout / abort we kill outright instead. Some Hermes ACP versions stay
+    // alive as a server after the prompt response even when stdin is closed,
+    // so the reader drain below has a short grace window rather than waiting
+    // until the outer 20 minute task timeout.
     if final_status == ExecStatus::Timeout || final_status == ExecStatus::Aborted {
         let _ = child.start_kill();
+        killed_for_cleanup = true;
     } else {
         acp.close_stdin().await;
     }
@@ -397,7 +404,24 @@ async fn drive_session(
     // sample the final output. After this await, no further `handle_line`
     // calls happen and the accumulator is stable — a single read is
     // sufficient.
-    let _ = reader_handle.await;
+    if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
+        .await
+        .is_err()
+    {
+        debug!(
+            pid,
+            ?CLEAN_SHUTDOWN_GRACE,
+            "hermes kept stdout open after prompt; killing ACP server"
+        );
+        let _ = child.start_kill();
+        killed_for_cleanup = true;
+        if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
+            .await
+            .is_err()
+        {
+            reader_handle.abort();
+        }
+    }
 
     let output = acp.collected_output().await;
 
@@ -411,7 +435,11 @@ async fn drive_session(
 
     if final_status != ExecStatus::Timeout {
         match child.wait().await {
-            Ok(status) if !status.success() && final_status == ExecStatus::Completed => {
+            Ok(status)
+                if !status.success()
+                    && final_status == ExecStatus::Completed
+                    && !killed_for_cleanup =>
+            {
                 final_status = ExecStatus::Failed;
                 final_error = Some(format!("hermes exited with status: {status}"));
             }

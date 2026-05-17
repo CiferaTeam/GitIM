@@ -18,6 +18,9 @@ const PROVIDER_CLASSES: Record<ProviderId, string> = {
   pi: "bg-blue-500/15 text-blue-400 border border-blue-500/30 hover:bg-blue-500/20",
   hermes:
     "bg-pink-500/15 text-pink-400 border border-pink-500/30 hover:bg-pink-500/20",
+  cursor:
+    "bg-slate-500/15 text-slate-300 border border-slate-500/30 hover:bg-slate-500/20",
+  kimi: "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20",
 };
 
 export function ProviderBadge({ provider }: ProviderBadgeProps) {

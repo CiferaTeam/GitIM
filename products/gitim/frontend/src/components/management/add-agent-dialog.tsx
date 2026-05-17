@@ -83,10 +83,15 @@ export function AddAgentDialog() {
   const CUSTOM_MODEL_VALUE = "__custom__";
   const PROVIDER_CUSTOM_MODEL_VALUE = "__provider_custom__";
   const selectedProviderModel =
-    model === PROVIDER_CUSTOM_MODEL_VALUE ? providerCustomModelInput.trim() : model;
-  // Effective model to pass to API: custom input overrides the select value
-  const effectiveModel =
-    llmModel === CUSTOM_MODEL_VALUE ? customModelInput : llmModel;
+    model === PROVIDER_CUSTOM_MODEL_VALUE
+      ? providerCustomModelInput.trim()
+      : model;
+  // Effective model to pass to API: when runtime model discovery fails, the
+  // visible field is the custom model input even though no custom sentinel was
+  // selected from a model list.
+  const hermesCustomModelActive =
+    llmModel === CUSTOM_MODEL_VALUE || llmModelsError !== null;
+  const effectiveModel = hermesCustomModelActive ? customModelInput : llmModel;
   const hermesLlmOverride = getHermesLlmOverride(llmProvider, effectiveModel);
   const selectedLlmProvider = llmProvider || HERMES_DEFAULT_LLM_PROVIDER;
   const hermesLlmUsesDefault = isHermesDefaultLlmProvider(selectedLlmProvider);
@@ -116,7 +121,11 @@ export function AddAgentDialog() {
   }, [provider]);
 
   useEffect(() => {
-    if (!provider || provider === "hermes" || !PROVIDERS[provider].runtimeModels) {
+    if (
+      !provider ||
+      provider === "hermes" ||
+      !PROVIDERS[provider].runtimeModels
+    ) {
       providerModelFetchSeq.current += 1;
       setProviderModelCatalog(null);
       setProviderModelsLoading(false);
@@ -276,321 +285,353 @@ export function AddAgentDialog() {
       </Button>
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent>
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-w-xl">
+          <DialogHeader className="shrink-0 pr-8">
             <DialogTitle>Add Agent</DialogTitle>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="agent-provider">
-                Provider
-              </label>
-              <select
-                id="agent-provider"
-                value={provider}
-                onChange={(e) => {
-                  setProvider(e.target.value as ProviderId | "");
-                  setModel("");
-                  setProviderCustomModelInput("");
-                  setProviderModelCatalog(null);
-                  setProviderModelsLoading(false);
-                  // Clear any prior provisioning failure — the previous
-                  // diagnostic is no longer relevant once the provider changes.
-                  setSubmitError(null);
-                  setDetailsOpen(false);
-                }}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <option value="">— Select provider —</option>
-                {PROVIDER_IDS.map((id) => (
-                  <option key={id} value={id}>
-                    {PROVIDERS[id].label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {submitError?.preflight && (
-              <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
-                <div className="flex flex-col gap-1">
-                  <p className="font-medium text-destructive">
-                    {preflightKindLabel(submitError.preflight.error_kind)}
-                  </p>
-                  <p className="text-destructive/90">{submitError.error}</p>
-                </div>
-                <div className="flex flex-wrap gap-1.5 text-xs">
-                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
-                    provider: {submitError.preflight.provider}
-                  </span>
-                  {submitError.preflight.model_used && (
-                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
-                      model: {submitError.preflight.model_used}
-                    </span>
-                  )}
-                  {submitError.preflight.version && (
-                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
-                      version: {submitError.preflight.version}
-                    </span>
-                  )}
-                </div>
-                {submitError.preflight.output_preview && (
-                  <div className="space-y-1">
-                    <button
-                      type="button"
-                      className="text-xs text-muted-foreground hover:underline"
-                      onClick={() => setDetailsOpen((v) => !v)}
-                    >
-                      {detailsOpen ? "Hide details" : "Show details"}
-                    </button>
-                    {detailsOpen && (
-                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-2 font-mono text-xs text-muted-foreground">
-                        {submitError.preflight.output_preview}
-                      </pre>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="agent-name">
-                Name
-              </label>
-              <Input
-                id="agent-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Code Reviewer"
-                required
-              />
-              {handler && !validationError && (
-                <p className="text-xs text-muted-foreground">
-                  Handler: <code>{handler}</code>
-                </p>
-              )}
-              {validationError && (
-                <p className="text-xs text-destructive">{validationError}</p>
-              )}
-            </div>
-
-            {provider === "hermes" ? (
+          <form
+            onSubmit={handleSubmit}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
               <div className="space-y-1.5">
-                <label className="text-sm font-medium">Model</label>
-                <p className="text-xs text-muted-foreground">
-                  Hermes uses the default model from <code>hermes setup</code>{" "}
-                  unless an override is selected below.
-                </p>
-              </div>
-            ) : providerInfo ? (
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium" htmlFor="agent-model">
-                  Model
+                <label className="text-sm font-medium" htmlFor="agent-provider">
+                  Provider
                 </label>
                 <select
-                  id="agent-model"
-                  value={model}
+                  id="agent-provider"
+                  value={provider}
                   onChange={(e) => {
-                    setModel(e.target.value);
-                    if (e.target.value !== PROVIDER_CUSTOM_MODEL_VALUE) {
-                      setProviderCustomModelInput("");
-                    }
+                    setProvider(e.target.value as ProviderId | "");
+                    setModel("");
+                    setProviderCustomModelInput("");
+                    setProviderModelCatalog(null);
+                    setProviderModelsLoading(false);
+                    // Clear any prior provisioning failure — the previous
+                    // diagnostic is no longer relevant once the provider changes.
+                    setSubmitError(null);
+                    setDetailsOpen(false);
                   }}
-                  disabled={!provider}
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  {resolvedProviderModels?.supportsDefault && (
-                    <option value="">Use CLI default</option>
-                  )}
-                  {!resolvedProviderModels?.supportsDefault && (
-                    <option value="">— Select model —</option>
-                  )}
-                  {availableModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
+                  <option value="">— Select provider —</option>
+                  {PROVIDER_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {PROVIDERS[id].label}
                     </option>
                   ))}
-                  {resolvedProviderModels?.supportsCustom && (
-                    <option value={PROVIDER_CUSTOM_MODEL_VALUE}>Custom…</option>
-                  )}
                 </select>
-                {providerModelsLoading && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="size-3 animate-spin" />
-                    Loading runtime models…
+              </div>
+
+              {submitError?.preflight && (
+                <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+                  <div className="flex flex-col gap-1">
+                    <p className="font-medium text-destructive">
+                      {preflightKindLabel(submitError.preflight.error_kind)}
+                    </p>
+                    <p className="text-destructive/90">{submitError.error}</p>
                   </div>
-                )}
-                {providerModelCatalog?.error && (
+                  <div className="flex flex-wrap gap-1.5 text-xs">
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                      provider: {submitError.preflight.provider}
+                    </span>
+                    {submitError.preflight.model_used && (
+                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                        model: {submitError.preflight.model_used}
+                      </span>
+                    )}
+                    {submitError.preflight.version && (
+                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground">
+                        version: {submitError.preflight.version}
+                      </span>
+                    )}
+                  </div>
+                  {submitError.preflight.output_preview && (
+                    <div className="space-y-1">
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:underline"
+                        onClick={() => setDetailsOpen((v) => !v)}
+                      >
+                        {detailsOpen ? "Hide details" : "Show details"}
+                      </button>
+                      {detailsOpen && (
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-2 font-mono text-xs text-muted-foreground">
+                          {submitError.preflight.output_preview}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="agent-name">
+                  Name
+                </label>
+                <Input
+                  id="agent-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Code Reviewer"
+                  required
+                />
+                {handler && !validationError && (
                   <p className="text-xs text-muted-foreground">
-                    Runtime models unavailable; default and custom values still work.
+                    Handler: <code>{handler}</code>
                   </p>
                 )}
-                {model === PROVIDER_CUSTOM_MODEL_VALUE && (
-                  <Input
-                    value={providerCustomModelInput}
-                    onChange={(e) => setProviderCustomModelInput(e.target.value)}
-                    placeholder={resolvedProviderModels?.customHint ?? "model id"}
-                  />
+                {validationError && (
+                  <p className="text-xs text-destructive">{validationError}</p>
                 )}
               </div>
-            ) : null}
 
-            {provider === "hermes" && (
-              <div className="space-y-3 rounded-md border border-input p-3">
-                <p className="text-sm font-medium">Hermes LLM</p>
-
+              {provider === "hermes" ? (
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium" htmlFor="hermes-llm-provider">
-                    LLM Provider
-                  </label>
-                  <div className="space-y-1.5">
-                    <select
-                      id="hermes-llm-provider"
-                      value={selectedLlmProvider}
-                      onChange={(e) => setLlmProvider(e.target.value)}
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value={HERMES_DEFAULT_LLM_PROVIDER}>
-                        Default profile
-                      </option>
-                      {llmProviders.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </select>
-                    {llmProvidersLoading && (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Loader2 className="size-3 animate-spin" />
-                        Loading providers…
-                      </div>
-                    )}
-                    <p className="text-xs text-muted-foreground">
-                      Default profile uses the model configured by{" "}
-                      <code>hermes setup</code>.
-                    </p>
-                  </div>
+                  <label className="text-sm font-medium">Model</label>
+                  <p className="text-xs text-muted-foreground">
+                    Hermes uses the default model from <code>hermes setup</code>{" "}
+                    unless an override is selected below.
+                  </p>
                 </div>
-
-                {llmProvider && !hermesLlmUsesDefault && (
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium" htmlFor="hermes-llm-model">
-                      LLM Model
-                    </label>
-                    {llmModelsLoading ? (
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Loader2 className="size-4 animate-spin" />
-                        Loading models…
-                      </div>
-                    ) : llmModelsError !== null || llmModel === CUSTOM_MODEL_VALUE ? (
-                      <>
-                        {llmModelsError !== null && llmModel !== CUSTOM_MODEL_VALUE && (
-                          <p className="text-xs text-destructive">{llmModelsError}</p>
-                        )}
-                        <Input
-                          id="hermes-llm-model"
-                          value={customModelInput}
-                          onChange={(e) => setCustomModelInput(e.target.value)}
-                          placeholder="e.g. gpt-4o or custom-model-id"
-                        />
-                        {llmModel === CUSTOM_MODEL_VALUE && (
-                          <button
-                            type="button"
-                            className="text-xs text-muted-foreground hover:underline"
-                            onClick={() => {
-                              setLlmModel("");
-                              setCustomModelInput("");
-                            }}
-                          >
-                            ← Back to model list
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      <div className="flex items-start gap-2">
-                        <select
-                          id="hermes-llm-model"
-                          value={llmModel}
-                          onChange={(e) => setLlmModel(e.target.value)}
-                          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        >
-                          <option value="">— Select model —</option>
-                          {llmModels.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.label}
-                            </option>
-                          ))}
-                          <option value={CUSTOM_MODEL_VALUE}>Custom…</option>
-                        </select>
-                      </div>
+              ) : providerInfo ? (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor="agent-model">
+                    Model
+                  </label>
+                  <select
+                    id="agent-model"
+                    value={model}
+                    onChange={(e) => {
+                      setModel(e.target.value);
+                      if (e.target.value !== PROVIDER_CUSTOM_MODEL_VALUE) {
+                        setProviderCustomModelInput("");
+                      }
+                    }}
+                    disabled={!provider}
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {resolvedProviderModels?.supportsDefault && (
+                      <option value="">Use CLI default</option>
                     )}
+                    {!resolvedProviderModels?.supportsDefault && (
+                      <option value="">— Select model —</option>
+                    )}
+                    {availableModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                    {resolvedProviderModels?.supportsCustom && (
+                      <option value={PROVIDER_CUSTOM_MODEL_VALUE}>
+                        Custom…
+                      </option>
+                    )}
+                  </select>
+                  {providerModelsLoading && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-3 animate-spin" />
+                      Loading runtime models…
+                    </div>
+                  )}
+                  {providerModelCatalog?.error && (
+                    <p className="text-xs text-muted-foreground">
+                      Runtime models unavailable; default and custom values
+                      still work.
+                    </p>
+                  )}
+                  {model === PROVIDER_CUSTOM_MODEL_VALUE && (
+                    <Input
+                      value={providerCustomModelInput}
+                      onChange={(e) =>
+                        setProviderCustomModelInput(e.target.value)
+                      }
+                      placeholder={
+                        resolvedProviderModels?.customHint ?? "model id"
+                      }
+                    />
+                  )}
+                </div>
+              ) : null}
+
+              {provider === "hermes" && (
+                <div className="space-y-3 rounded-md border border-input p-3">
+                  <p className="text-sm font-medium">Hermes LLM</p>
+
+                  <div className="space-y-1.5">
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="hermes-llm-provider"
+                    >
+                      LLM Provider
+                    </label>
+                    <div className="space-y-1.5">
+                      <select
+                        id="hermes-llm-provider"
+                        value={selectedLlmProvider}
+                        onChange={(e) => setLlmProvider(e.target.value)}
+                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        <option value={HERMES_DEFAULT_LLM_PROVIDER}>
+                          Default profile
+                        </option>
+                        {llmProviders.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                      {llmProvidersLoading && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Loader2 className="size-3 animate-spin" />
+                          Loading providers…
+                        </div>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Default profile uses the model configured by{" "}
+                        <code>hermes setup</code>.
+                      </p>
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="agent-introduction">
-                Introduction <span className="text-text-muted font-normal">(optional)</span>
-              </label>
-              <Textarea
-                id="agent-introduction"
-                rows={2}
-                value={introduction}
-                onChange={(e) =>
-                  setIntroduction(e.target.value.slice(0, MAX_INTRODUCTION_LEN))
-                }
-                maxLength={MAX_INTRODUCTION_LEN}
-                placeholder="Short blurb shown on the agent card. Not fed to the LLM."
-              />
-              <p className="text-xs text-text-muted text-right">
-                {introduction.length} / {MAX_INTRODUCTION_LEN}
-              </p>
-            </div>
+                  {llmProvider && !hermesLlmUsesDefault && (
+                    <div className="space-y-1.5">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="hermes-llm-model"
+                      >
+                        LLM Model
+                      </label>
+                      {llmModelsLoading ? (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <Loader2 className="size-4 animate-spin" />
+                          Loading models…
+                        </div>
+                      ) : llmModelsError !== null ||
+                        llmModel === CUSTOM_MODEL_VALUE ? (
+                        <>
+                          {llmModelsError !== null &&
+                            llmModel !== CUSTOM_MODEL_VALUE && (
+                              <p className="text-xs text-destructive">
+                                {llmModelsError}
+                              </p>
+                            )}
+                          <Input
+                            id="hermes-llm-model"
+                            value={customModelInput}
+                            onChange={(e) =>
+                              setCustomModelInput(e.target.value)
+                            }
+                            placeholder="e.g. gpt-4o or custom-model-id"
+                          />
+                          {llmModel === CUSTOM_MODEL_VALUE && (
+                            <button
+                              type="button"
+                              className="text-xs text-muted-foreground hover:underline"
+                              onClick={() => {
+                                setLlmModel("");
+                                setCustomModelInput("");
+                              }}
+                            >
+                              ← Back to model list
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <div className="flex items-start gap-2">
+                          <select
+                            id="hermes-llm-model"
+                            value={llmModel}
+                            onChange={(e) => setLlmModel(e.target.value)}
+                            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          >
+                            <option value="">— Select model —</option>
+                            {llmModels.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.label}
+                              </option>
+                            ))}
+                            <option value={CUSTOM_MODEL_VALUE}>Custom…</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="agent-prompt">
-                System Prompt
-              </label>
-              <Textarea
-                id="agent-prompt"
-                rows={4}
-                value={systemPrompt}
-                onChange={(e) => setSystemPrompt(e.target.value)}
-                className="max-h-[40vh] overflow-y-auto"
-                placeholder="Describe the agent's role and behavior…"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">
-                Environment Variables
-              </label>
-              <EnvVarsEditor value={envVars} onChange={setEnvVars} />
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                htmlFor="agent-join-general"
-                className="flex items-start gap-2 text-sm cursor-pointer"
-              >
-                <input
-                  id="agent-join-general"
-                  type="checkbox"
-                  checked={joinGeneral}
-                  onChange={(e) => setJoinGeneral(e.target.checked)}
-                  className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="agent-introduction"
+                >
+                  Introduction{" "}
+                  <span className="text-text-muted font-normal">
+                    (optional)
+                  </span>
+                </label>
+                <Textarea
+                  id="agent-introduction"
+                  rows={2}
+                  value={introduction}
+                  onChange={(e) =>
+                    setIntroduction(
+                      e.target.value.slice(0, MAX_INTRODUCTION_LEN),
+                    )
+                  }
+                  maxLength={MAX_INTRODUCTION_LEN}
+                  placeholder="Short blurb shown on the agent card. Not fed to the LLM."
                 />
-                <span className="font-medium">
-                  Auto-join #general channel
-                </span>
-              </label>
-              <p className="text-xs text-text-muted pl-6">
-                Uncheck if this agent should only post in specific channels.
-              </p>
+                <p className="text-xs text-text-muted text-right">
+                  {introduction.length} / {MAX_INTRODUCTION_LEN}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="agent-prompt">
+                  System Prompt
+                </label>
+                <Textarea
+                  id="agent-prompt"
+                  rows={4}
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  className="max-h-[40vh] overflow-y-auto"
+                  placeholder="Describe the agent's role and behavior…"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Environment Variables
+                </label>
+                <EnvVarsEditor value={envVars} onChange={setEnvVars} />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="agent-join-general"
+                  className="flex items-start gap-2 text-sm cursor-pointer"
+                >
+                  <input
+                    id="agent-join-general"
+                    type="checkbox"
+                    checked={joinGeneral}
+                    onChange={(e) => setJoinGeneral(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
+                  />
+                  <span className="font-medium">
+                    Auto-join #general channel
+                  </span>
+                </label>
+                <p className="text-xs text-text-muted pl-6">
+                  Uncheck if this agent should only post in specific channels.
+                </p>
+              </div>
             </div>
 
-            <DialogFooter>
+            <DialogFooter className="mt-4 shrink-0 border-t border-border pt-4">
               <Button
                 type="button"
                 variant="outline"
