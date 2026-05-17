@@ -706,6 +706,33 @@ pub async fn preflight_opencode_with_config(
             );
         }
     };
+    let git_init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmpdir.path())
+        .output();
+    match git_init {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return PreflightResult::failure(
+                "opencode",
+                ErrorKind::Other,
+                format!(
+                    "failed to initialize opencode preflight git repo: {}",
+                    stderr.trim()
+                ),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+        Err(e) => {
+            return PreflightResult::failure(
+                "opencode",
+                ErrorKind::Other,
+                format!("failed to run git init for opencode preflight: {e}"),
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    }
 
     let config_content = serde_json::json!({
         "agent": {

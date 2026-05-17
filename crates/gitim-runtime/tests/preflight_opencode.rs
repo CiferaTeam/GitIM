@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
+#[cfg(unix)]
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use gitim_runtime::preflight::{
     preflight_opencode, preflight_opencode_with, preflight_opencode_with_config, ErrorKind,
@@ -133,6 +135,41 @@ async fn opencode_with_config_model_override_reaches_subprocess() {
     assert!(
         err.contains("--model") && err.contains("openai/gpt-test"),
         "model override not reflected in opencode argv: {err}"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn opencode_with_config_runs_inside_git_worktree() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let script = tmp.path().join("require-git-worktree.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "not in git worktree" >&2
+  exit 7
+}
+printf '%s\n' '{"type":"text","part":{"text":"GITIM_OK"}}'
+"#,
+    )
+    .expect("write script");
+    let mut perms = fs::metadata(&script)
+        .expect("script metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let result = preflight_opencode_with_config(
+        script.to_str().unwrap(),
+        Duration::from_secs(5),
+        PreflightOverrides::default(),
+    )
+    .await;
+
+    assert!(
+        result.available,
+        "preflight should run fake opencode inside a git worktree, got {result:?}"
     );
 }
 
