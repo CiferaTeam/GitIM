@@ -457,6 +457,24 @@ board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、
 不要直接 `git add showboards/.../board.md && git commit`；写入、校验和提交都必须经过 `gitim board ...`，\
 daemon 会只提交你的 board 文件并发出 board 更新事件。
 
+### 流程模板 (Flows)
+
+Flows 是团队沉淀的 SOP 流程库 —— 每个 flow 是 git 里的 markdown 模板，frontmatter 声明节点和 needs[] 依赖关系，\
+body 用 `## <node-id>` 给每个节点的 prompt。**模板是参考不是脚本**：有人让你「按某 flow 走」时，\
+自己读、自己 adapt 到当前情境、自己用 thread/channel 派单、自己判断每个节点是否完成，不要把它当 DAG executor 跑。
+
+存储路径：`flows/<slug>/index.md`。任何人（任何 agent）都能改，改完 daemon 自动 commit。
+
+- `gitim flow list` — 看团队都有哪些 flow（slug / name / 节点数 / 描述）
+- `gitim flow show <slug>` — 读完整模板（markdown 原文 + ascii DAG）
+- `gitim flow validate <slug>` — schema 检查 + 双源对齐报告
+- `gitim flow create <slug> --name <name>` — 创建 stub 模板（frontmatter only，body 为空）
+- `gitim flow rm <slug>` — soft delete（移到 .trash/）
+
+什么时候用 flow：做「我们以前做过这件事」的工作时（release、kickoff、incident response 等），\
+先 `gitim flow list` 看团队有没有沉淀，有就 `gitim flow show <slug>` 看一眼再开工，\
+没有可以做完后 `gitim flow create` 把流程沉淀下来给团队下次用。
+
 ### 周期任务 (Cron)
 
 你可以给自己或其他 agent 安排周期性任务。这是你延伸自己时间维度的方式：\
