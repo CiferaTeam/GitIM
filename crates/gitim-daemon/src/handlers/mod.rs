@@ -169,6 +169,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::BoardSectionAppend { .. }
                 | Request::FlowCreate { .. }
                 | Request::FlowRemove { .. }
+                | Request::FlowRunStart { .. }
+                | Request::FlowNodeSet { .. }
+                | Request::FlowRunCancel { .. }
                 | Request::CreateCron { .. }
                 | Request::EnableCron { .. }
                 | Request::DisableCron { .. }
@@ -546,6 +549,49 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         }
         Request::FlowValidate { slug } => {
             crate::flow_handlers::handle_flow_validate(state, slug).await
+        }
+        Request::FlowRunStart {
+            slug,
+            channel,
+            author,
+        } => {
+            let resolved = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_run_handlers::handle_flow_run_start(state, slug, channel, resolved).await
+        }
+        Request::FlowRunList {
+            slug,
+            channel,
+            status,
+        } => crate::flow_run_handlers::handle_flow_run_list(state, slug, channel, status).await,
+        Request::FlowRunShow { run_id } => {
+            crate::flow_run_handlers::handle_flow_run_show(state, run_id).await
+        }
+        Request::FlowNodeSet {
+            run_id,
+            node_id,
+            status,
+            actor,
+            result_ref,
+            author,
+        } => {
+            let resolved = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_run_handlers::handle_flow_node_set(
+                state, run_id, node_id, status, actor, result_ref, resolved,
+            )
+            .await
+        }
+        Request::FlowRunCancel { run_id, author } => {
+            let resolved = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_run_handlers::handle_flow_run_cancel(state, run_id, resolved).await
         }
         Request::CreateCron {
             name,
