@@ -102,6 +102,90 @@ impl NodeStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowRunNode {
+    pub id: String,
+    pub status: NodeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowRun {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub flow_slug: String,
+    pub channel: String,
+    pub started_at: String,
+    pub started_by: String,
+    pub status: RunStatus,
+    pub nodes: Vec<FlowRunNode>,
+    pub updated_at: String,
+}
+
+#[derive(Error, Debug)]
+pub enum FlowRunError {
+    #[error("invalid run id: {0}")]
+    InvalidRunId(#[from] RunIdError),
+    #[error("yaml parse: {0}")]
+    YamlParse(String),
+    #[error("schema mismatch: expected schema_version 1, got {0}")]
+    SchemaVersion(u32),
+    #[error("unknown node id `{0}`")]
+    UnknownNodeId(String),
+    #[error("invalid status transition: {from:?} → {to:?}")]
+    InvalidTransition { from: NodeStatus, to: NodeStatus },
+    #[error("run is terminal ({status:?}); refuse to mutate")]
+    RunTerminal { status: RunStatus },
+}
+
+pub fn run_path(slug: &str, run_id: &RunId) -> std::path::PathBuf {
+    std::path::PathBuf::from("flows")
+        .join(slug)
+        .join("runs")
+        .join(run_id.as_str())
+        .join("state.yaml")
+}
+
+pub fn parse_run_state(content: &str) -> Result<FlowRun, FlowRunError> {
+    let run: FlowRun =
+        serde_yaml::from_str(content).map_err(|e| FlowRunError::YamlParse(e.to_string()))?;
+    if run.schema_version != 1 {
+        return Err(FlowRunError::SchemaVersion(run.schema_version));
+    }
+    Ok(run)
+}
+
+pub fn stringify_run_state(run: &FlowRun) -> Result<String, FlowRunError> {
+    serde_yaml::to_string(run).map_err(|e| FlowRunError::YamlParse(e.to_string()))
+}
+
+/// 5-state machine: pending → in_progress → done|failed|skipped.
+/// pending → done|failed|skipped 直接跳也允许(adjacent skip)。
+/// Once terminal, no further changes.
+pub fn validate_node_transition(from: NodeStatus, to: NodeStatus) -> Result<(), FlowRunError> {
+    if from == to {
+        return Ok(()); // no-op allowed
+    }
+    use NodeStatus::*;
+    let allowed = match from {
+        Pending => matches!(to, InProgress | Done | Failed | Skipped),
+        InProgress => matches!(to, Done | Failed | Skipped),
+        Done | Failed | Skipped => false, // terminal
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(FlowRunError::InvalidTransition { from, to })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +246,99 @@ mod tests {
         assert_eq!(json, "\"in_progress\"");
         let json = serde_json::to_string(&NodeStatus::Pending).unwrap();
         assert_eq!(json, "\"pending\"");
+    }
+
+    #[test]
+    fn test_run_path() {
+        let id = RunId::new("20260517T103045-a1b2c3").unwrap();
+        assert_eq!(
+            run_path("release", &id),
+            std::path::PathBuf::from("flows/release/runs/20260517T103045-a1b2c3/state.yaml")
+        );
+    }
+
+    #[test]
+    fn test_parse_round_trip() {
+        let yaml = r#"schema_version: 1
+run_id: 20260517T103045-a1b2c3
+flow_slug: release
+channel: release-discuss
+started_at: 2026-05-17T10:30:45Z
+started_by: lewis
+status: in_progress
+nodes:
+  - id: changelog
+    status: done
+    actor: alice
+    started_at: 2026-05-17T10:31:00Z
+    completed_at: 2026-05-17T11:15:00Z
+  - id: e2e
+    status: pending
+updated_at: 2026-05-17T11:15:00Z
+"#;
+        let run = parse_run_state(yaml).unwrap();
+        assert_eq!(run.run_id, "20260517T103045-a1b2c3");
+        assert_eq!(run.nodes.len(), 2);
+        assert_eq!(run.nodes[0].status, NodeStatus::Done);
+        assert_eq!(run.nodes[0].actor.as_deref(), Some("alice"));
+        assert_eq!(run.nodes[1].status, NodeStatus::Pending);
+        let back = stringify_run_state(&run).unwrap();
+        let again = parse_run_state(&back).unwrap();
+        assert_eq!(again, run);
+    }
+
+    #[test]
+    fn test_parse_schema_version_mismatch() {
+        let yaml = "schema_version: 2\nrun_id: 20260517T103045-a1b2c3\nflow_slug: r\nchannel: c\nstarted_at: x\nstarted_by: l\nstatus: in_progress\nnodes: []\nupdated_at: x\n";
+        let err = parse_run_state(yaml).unwrap_err();
+        assert!(matches!(err, FlowRunError::SchemaVersion(2)));
+    }
+
+    #[test]
+    fn test_validate_transition_forward() {
+        use NodeStatus::*;
+        assert!(validate_node_transition(Pending, InProgress).is_ok());
+        assert!(validate_node_transition(Pending, Done).is_ok());
+        assert!(validate_node_transition(Pending, Skipped).is_ok());
+        assert!(validate_node_transition(InProgress, Done).is_ok());
+        assert!(validate_node_transition(InProgress, Failed).is_ok());
+        assert!(validate_node_transition(InProgress, Skipped).is_ok());
+        // no-op
+        assert!(validate_node_transition(Done, Done).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transition_backward_rejected() {
+        use NodeStatus::*;
+        for (f, t) in &[
+            (InProgress, Pending),
+            (Done, Pending),
+            (Done, InProgress),
+            (Done, Failed),
+            (Failed, Done),
+            (Skipped, Done),
+        ] {
+            let err = validate_node_transition(*f, *t).unwrap_err();
+            assert!(matches!(err, FlowRunError::InvalidTransition { .. }));
+        }
+    }
+
+    #[test]
+    fn test_skip_optional_fields_serialize() {
+        let node = FlowRunNode {
+            id: "n".into(),
+            status: NodeStatus::Pending,
+            actor: None,
+            started_at: None,
+            completed_at: None,
+            result_ref: None,
+        };
+        let yaml = serde_yaml::to_string(&node).unwrap();
+        assert!(yaml.contains("id: n"), "yaml={yaml}");
+        assert!(yaml.contains("status: pending"), "yaml={yaml}");
+        assert!(!yaml.contains("actor"), "yaml={yaml}");
+        assert!(!yaml.contains("started_at"), "yaml={yaml}");
+        assert!(!yaml.contains("completed_at"), "yaml={yaml}");
+        assert!(!yaml.contains("result_ref"), "yaml={yaml}");
     }
 }
