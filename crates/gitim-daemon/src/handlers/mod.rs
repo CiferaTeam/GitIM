@@ -167,6 +167,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::BoardSet { .. }
                 | Request::BoardSectionSet { .. }
                 | Request::BoardSectionAppend { .. }
+                | Request::FlowCreate { .. }
+                | Request::FlowRemove { .. }
                 | Request::CreateCron { .. }
                 | Request::EnableCron { .. }
                 | Request::DisableCron { .. }
@@ -513,6 +515,37 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 value,
             )
             .await
+        }
+        Request::FlowList => crate::flow_handlers::handle_flow_list(state).await,
+        Request::FlowShow { slug } => crate::flow_handlers::handle_flow_show(state, slug).await,
+        Request::FlowCreate {
+            slug,
+            name,
+            description,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_handlers::handle_flow_create(
+                state,
+                slug,
+                name,
+                description,
+                resolved_author,
+            )
+            .await
+        }
+        Request::FlowRemove { slug, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_handlers::handle_flow_remove(state, slug, resolved_author).await
+        }
+        Request::FlowValidate { slug } => {
+            crate::flow_handlers::handle_flow_validate(state, slug).await
         }
         Request::CreateCron {
             name,
