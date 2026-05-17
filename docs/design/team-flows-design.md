@@ -276,8 +276,33 @@ v1 schema 已经为这些留位,**v2 不需要 schema 迁移**。
 
 ---
 
-## 开放问题(实现阶段再回答)
+## 实现决策(2026-05-17 brainstorm 收口)
 
-- WebUI mermaid.js 是新增 dep 还是用现有渲染库?(看 `products/gitim/frontend/package.json` 决定)
-- daemon 文件 watcher 已有 channels/ 监听,加 flows/ 是否需要单独配置?(查现有 watcher 实现决定)
-- `flows.show()` 返回 markdown 原文时,是否要在 server 端先做一次 validation pass、把 warn/error 一并塞进响应?(初步倾向:不,agent 自己读,validate 是单独 API)
+### v1 scope = Phase 1 完整一次 ship
+
+不切 v0a/v0b。`gitim-core::flow` types + parser + validator → `gitim-daemon::flow_handlers` + watcher 接入 → `gitim-cli` flow 子命令 → WebUI Flows tab → provider system prompt 增量,**同一个 PR 走完**。预计 3-5 天。
+
+### WebUI 渲染栈:mermaid.js + react-markdown
+
+前端目前零 markdown / 零 graph 依赖。两个都新增,lazy-import 到 Flows tab,不污染主 bundle:
+
+- `mermaid.js` 渲染 DAG。理由:能直接吃 design 里 `A -->|ok| B` 的 label 语法,v2 加 conditional exit 时不用换库;~500KB 但 lazy load
+- `react-markdown` 渲染节点 prompt body
+- CLI 端独立走 ascii art,**不**复用 mermaid 输出
+
+### `flows.show()` 不混 validation
+
+`flows.show(slug)` 只返 markdown 原文。validation 走独立 `flows.validate(slug)` API。Agent 默认信任 source,需要校验时显式 call —— show 不为没人看的字段付 server 端 parse cost。
+
+### 复用基线(board/channel 既有模式)
+
+下表是 plan 阶段会落地的复用点,**不是新决策**,是把已有模式映射到 flow:
+
+| 层 | 复用什么 |
+|---|---|
+| `gitim-core::flow::types` | `ChannelName` newtype + `Result<Self, Err>` constructor(slug 校验) |
+| `gitim-daemon::flow_handlers` | `state.commit_lock` → `std::fs::write` → `git_storage.add_and_commit_only_as(path, msg, author)` 单文件 commit;成功后 `event_tx.send(...)` + `push_notify.notify_one()` |
+| watcher | 复用现有 daemon workspace watcher,加 `flows/` 路径(plan 阶段 verify watcher 是否 generic 到能直接加路径,还是要加注册点) |
+| CLI | clap `Commands::Flow { command: FlowCommands }` enum + `commands/flow.rs` 模块 + `cmd_*` async fn,输出 `OutputMode::Human \| Json` |
+| 前端 | `components/flows/flows-view.tsx` + `hooks/use-flow-store.ts`(zustand)+ `lib/client.ts` 加 `listFlows/getFlow/...` |
+| Provider prompt | `default_gitim_api()`(`crates/gitim-agent-provider/src/prompts.rs`)里 Boards 段后新增 Flows 段 |
