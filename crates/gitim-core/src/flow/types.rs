@@ -129,6 +129,8 @@ pub enum FlowError {
     SchemaVersion(u32),
     #[error("slug in frontmatter ({frontmatter}) != path slug ({path})")]
     SlugMismatch { frontmatter: String, path: String },
+    #[error("invalid node id `{id}`: {reason}")]
+    InvalidNodeId { id: String, reason: String },
     #[error("duplicate node id: {0}")]
     DuplicateNodeId(String),
     #[error("node {node} references unknown id in needs: {missing}")]

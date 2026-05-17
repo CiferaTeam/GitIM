@@ -3,6 +3,29 @@ use crate::flow::types::{FlowDocument, FlowError, FlowNode, FlowSlug, FlowWarnin
 const MAX_FILE_SIZE: usize = 256 * 1024;
 const MAX_NODE_COUNT: usize = 50;
 
+/// Validate a node ID: a-z, 0-9, `-`, `_`; length 1-39;
+/// no leading/trailing hyphen; no consecutive hyphens.
+fn validate_node_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("must not be empty".into());
+    }
+    if id.len() > 39 {
+        return Err(format!("exceeds 39 characters (len={})", id.len()));
+    }
+    for ch in id.chars() {
+        if !matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_') {
+            return Err(format!("contains invalid character {:?}", ch));
+        }
+    }
+    if id.starts_with('-') || id.ends_with('-') {
+        return Err("must not start or end with hyphen".into());
+    }
+    if id.contains("--") {
+        return Err("must not contain consecutive hyphens".into());
+    }
+    Ok(())
+}
+
 pub fn validate_flow_document(doc: &FlowDocument, slug_in_path: &str) -> Result<(), FlowError> {
     FlowSlug::new(&doc.meta.slug).map_err(FlowError::InvalidSlug)?;
     FlowSlug::new(slug_in_path).map_err(FlowError::InvalidSlug)?;
@@ -12,6 +35,15 @@ pub fn validate_flow_document(doc: &FlowDocument, slug_in_path: &str) -> Result<
             frontmatter: doc.meta.slug.clone(),
             path: slug_in_path.to_string(),
         });
+    }
+
+    for n in &doc.meta.nodes {
+        if let Err(reason) = validate_node_id(&n.id) {
+            return Err(FlowError::InvalidNodeId {
+                id: n.id.clone(),
+                reason,
+            });
+        }
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -254,5 +286,47 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| matches!(w, FlowWarning::TooManyNodes { .. })));
+    }
+
+    #[test]
+    fn test_node_id_invalid_chars() {
+        // space in node id → InvalidNodeId
+        let d = doc_with_nodes(vec![node("bad name", &[])]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        assert!(
+            matches!(&err, FlowError::InvalidNodeId { id, .. } if id == "bad name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_node_id_uppercase_rejected() {
+        let d = doc_with_nodes(vec![node("UPPER", &[])]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        assert!(
+            matches!(&err, FlowError::InvalidNodeId { id, .. } if id == "UPPER"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_node_id_empty_rejected() {
+        let d = doc_with_nodes(vec![node("", &[])]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        assert!(
+            matches!(&err, FlowError::InvalidNodeId { id, .. } if id.is_empty()),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_node_id_too_long() {
+        let long_id = "a".repeat(40);
+        let d = doc_with_nodes(vec![node(&long_id, &[])]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        assert!(
+            matches!(&err, FlowError::InvalidNodeId { .. }),
+            "unexpected error: {err}"
+        );
     }
 }
