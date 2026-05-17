@@ -80,8 +80,23 @@ fn split_body_sections(body: &str) -> std::collections::BTreeMap<String, String>
     sections
 }
 
-pub fn stringify_flow_markdown(_doc: &FlowDocument) -> Result<String, FlowError> {
-    todo!("implemented in Task 4")
+pub fn stringify_flow_markdown(doc: &FlowDocument) -> Result<String, FlowError> {
+    let frontmatter =
+        serde_yaml::to_string(&doc.meta).map_err(|e| FlowError::YamlParse(e.to_string()))?;
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(frontmatter.trim_end());
+    out.push_str("\n---\n");
+    for node in &doc.meta.nodes {
+        out.push_str("\n## ");
+        out.push_str(&node.id);
+        out.push_str("\n\n");
+        if !node.prompt.is_empty() {
+            out.push_str(node.prompt.trim());
+            out.push('\n');
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -179,6 +194,37 @@ nodes:
                 .iter()
                 .any(|w| matches!(w, FlowWarning::OrphanBodySection(s) if s == "extra")),
             "warnings={warnings:?}",
+        );
+    }
+
+    #[test]
+    fn test_stringify_round_trip() {
+        let doc = parse_flow_markdown(SAMPLE).unwrap();
+        let rendered = stringify_flow_markdown(&doc).unwrap();
+        let parsed_back = parse_flow_markdown(&rendered).unwrap();
+        assert_eq!(parsed_back.meta.slug, doc.meta.slug);
+        assert_eq!(parsed_back.meta.nodes.len(), doc.meta.nodes.len());
+        for (a, b) in parsed_back.meta.nodes.iter().zip(doc.meta.nodes.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.node_type, b.node_type);
+            assert_eq!(a.owner, b.owner);
+            assert_eq!(a.needs, b.needs);
+            assert_eq!(a.prompt.trim(), b.prompt.trim());
+        }
+    }
+
+    #[test]
+    fn test_stringify_excludes_prompt_from_frontmatter() {
+        let doc = parse_flow_markdown(SAMPLE).unwrap();
+        let rendered = stringify_flow_markdown(&doc).unwrap();
+        let (frontmatter_block, _body) = rendered
+            .strip_prefix("---\n")
+            .unwrap()
+            .split_once("\n---\n")
+            .unwrap();
+        assert!(
+            !frontmatter_block.contains("prompt:"),
+            "frontmatter should not contain prompt field\n{frontmatter_block}",
         );
     }
 }
