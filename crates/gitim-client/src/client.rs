@@ -709,6 +709,39 @@ impl GitimClient {
         )
         .await
     }
+
+    pub async fn flow_list(&self) -> Result<ApiResponse, ClientError> {
+        self.request("flow_list", json!({})).await
+    }
+
+    pub async fn flow_show(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_show", json!({ "slug": slug })).await
+    }
+
+    pub async fn flow_create(
+        &self,
+        slug: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "flow_create",
+            json!({
+                "slug": slug,
+                "name": name,
+                "description": description,
+            }),
+        )
+        .await
+    }
+
+    pub async fn flow_remove(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_remove", json!({ "slug": slug })).await
+    }
+
+    pub async fn flow_validate(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_validate", json!({ "slug": slug })).await
+    }
 }
 
 /// Decode a daemon response into a typed payload `T`. Used by the cron
