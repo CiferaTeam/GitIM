@@ -149,6 +149,145 @@ pub async fn cmd_flow_remove(client: &GitimClient, mode: &OutputMode, slug: &str
     }
 }
 
+pub async fn cmd_flow_run_start(
+    client: &GitimClient,
+    mode: &OutputMode,
+    slug: &str,
+    channel: &str,
+) {
+    match client.flow_run_start(slug, channel).await {
+        Ok(resp) => print_or_exit(resp, mode, |data| {
+            println!(
+                "已启动 flow run `{}` (flow={}, channel={})\ncommit: {}",
+                data["run_id"].as_str().unwrap_or(""),
+                data["flow_slug"].as_str().unwrap_or(""),
+                data["channel"].as_str().unwrap_or(""),
+                data["commit_id"].as_str().unwrap_or(""),
+            );
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_flow_runs(
+    client: &GitimClient,
+    mode: &OutputMode,
+    slug: Option<&str>,
+    channel: Option<&str>,
+    status: Option<&str>,
+) {
+    match client.flow_run_list(slug, channel, status).await {
+        Ok(resp) => print_or_exit(resp, mode, |data| {
+            let runs = data["runs"].as_array().cloned().unwrap_or_default();
+            if runs.is_empty() {
+                println!("(no runs)");
+                return;
+            }
+            for r in runs {
+                println!(
+                    "  {} {} [{:<11}] {}/{} nodes (channel={}, started_by={})",
+                    r["run_id"].as_str().unwrap_or(""),
+                    r["flow_slug"].as_str().unwrap_or(""),
+                    r["status"].as_str().unwrap_or(""),
+                    r["nodes_done"].as_u64().unwrap_or(0),
+                    r["node_count"].as_u64().unwrap_or(0),
+                    r["channel"].as_str().unwrap_or(""),
+                    r["started_by"].as_str().unwrap_or(""),
+                );
+            }
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_flow_run_show(client: &GitimClient, mode: &OutputMode, run_id: &str) {
+    match client.flow_run_show(run_id).await {
+        Ok(resp) => print_or_exit(resp, mode, |data| {
+            println!(
+                "run `{}` ({})\nflow: {}  channel: {}  by: {}\nstarted: {}  updated: {}\n",
+                data["run_id"].as_str().unwrap_or(""),
+                data["status"].as_str().unwrap_or(""),
+                data["flow_slug"].as_str().unwrap_or(""),
+                data["channel"].as_str().unwrap_or(""),
+                data["started_by"].as_str().unwrap_or(""),
+                data["started_at"].as_str().unwrap_or(""),
+                data["updated_at"].as_str().unwrap_or(""),
+            );
+            println!("Nodes:");
+            for n in data["nodes"].as_array().cloned().unwrap_or_default() {
+                let id = n["id"].as_str().unwrap_or("");
+                let st = n["status"].as_str().unwrap_or("");
+                let actor = n["actor"].as_str().unwrap_or("-");
+                let marker = match st {
+                    "done" => "o",
+                    "in_progress" => ">",
+                    "pending" => ".",
+                    "failed" => "x",
+                    "skipped" => "~",
+                    _ => "?",
+                };
+                println!("  {} [{:<11}] {}  @{}", marker, st, id, actor);
+            }
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_flow_node_set(
+    client: &GitimClient,
+    mode: &OutputMode,
+    run_id: &str,
+    node_id: &str,
+    status: &str,
+    actor: Option<&str>,
+    result_ref: Option<&str>,
+) {
+    match client
+        .flow_node_set(run_id, node_id, status, actor, result_ref)
+        .await
+    {
+        Ok(resp) => print_or_exit(resp, mode, |data| {
+            println!(
+                "已更新 node `{}` → {} (run={}, run_status={})\ncommit: {}",
+                data["node_id"].as_str().unwrap_or(""),
+                data["status"].as_str().unwrap_or(""),
+                data["run_id"].as_str().unwrap_or(""),
+                data["run_status"].as_str().unwrap_or(""),
+                data["commit_id"].as_str().unwrap_or(""),
+            );
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_flow_run_cancel(client: &GitimClient, mode: &OutputMode, run_id: &str) {
+    match client.flow_run_cancel(run_id).await {
+        Ok(resp) => print_or_exit(resp, mode, |data| {
+            println!(
+                "已取消 flow run `{}`\ncommit: {}",
+                data["run_id"].as_str().unwrap_or(""),
+                data["commit_id"].as_str().unwrap_or(""),
+            );
+        }),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_flow_validate(client: &GitimClient, mode: &OutputMode, slug: &str) {
     match client.flow_validate(slug).await {
         Ok(resp) => print_or_exit(resp, mode, |data| {

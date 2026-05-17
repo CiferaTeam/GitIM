@@ -584,6 +584,36 @@ enum FlowCommands {
     Rm { slug: String },
     /// Validate a flow template (schema + double-source alignment)
     Validate { slug: String },
+    /// Start a new flow run, bound to a channel
+    Start {
+        slug: String,
+        #[arg(long)]
+        channel: String,
+    },
+    /// List flow runs (filter by --slug / --channel / --status)
+    Runs {
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, help = "in_progress | done | failed | cancelled")]
+        status: Option<String>,
+    },
+    /// Show a flow run (DAG + per-node status)
+    RunShow { run_id: String },
+    /// Update a node's status in a run
+    NodeSet {
+        run_id: String,
+        node_id: String,
+        #[arg(long, help = "pending|in_progress|done|failed|skipped")]
+        status: String,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        result_ref: Option<String>,
+    },
+    /// Cancel an in-progress run (terminal state)
+    RunCancel { run_id: String },
 }
 
 #[tokio::main]
@@ -949,6 +979,47 @@ async fn main() {
             }
             FlowCommands::Validate { slug } => {
                 commands::flow::cmd_flow_validate(&client, &mode, &slug).await
+            }
+            FlowCommands::Start { slug, channel } => {
+                commands::flow::cmd_flow_run_start(&client, &mode, &slug, &channel).await
+            }
+            FlowCommands::Runs {
+                slug,
+                channel,
+                status,
+            } => {
+                commands::flow::cmd_flow_runs(
+                    &client,
+                    &mode,
+                    slug.as_deref(),
+                    channel.as_deref(),
+                    status.as_deref(),
+                )
+                .await
+            }
+            FlowCommands::RunShow { run_id } => {
+                commands::flow::cmd_flow_run_show(&client, &mode, &run_id).await
+            }
+            FlowCommands::NodeSet {
+                run_id,
+                node_id,
+                status,
+                actor,
+                result_ref,
+            } => {
+                commands::flow::cmd_flow_node_set(
+                    &client,
+                    &mode,
+                    &run_id,
+                    &node_id,
+                    &status,
+                    actor.as_deref(),
+                    result_ref.as_deref(),
+                )
+                .await
+            }
+            FlowCommands::RunCancel { run_id } => {
+                commands::flow::cmd_flow_run_cancel(&client, &mode, &run_id).await
             }
         },
     }
