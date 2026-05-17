@@ -389,3 +389,50 @@ export function nowTimestamp(): string {
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
   );
 }
+
+// --- Flow types (mirrors gitim-core::flow::types + responses) ---
+
+export type NodeType =
+  | "agent_mention"
+  | "channel_thread"
+  | "human_review"
+  | "wait_for_signal";
+
+export interface FlowNodeSummary {
+  id: string;
+  type: NodeType;
+  owner?: string;
+  participants?: string[];
+  needs?: string[];
+  prompt: string;
+}
+
+export interface FlowSummary {
+  slug: string;
+  name: string;
+  description: string;
+  node_count: number;
+  updated_at?: string;
+}
+
+export interface FlowDocument {
+  slug: string;
+  name: string;
+  description: string;
+  created_by: string;
+  created_at: string;
+  updated_at?: string;
+  nodes: FlowNodeSummary[];
+  raw_markdown: string;
+}
+
+export interface FlowValidationItem {
+  kind: "error" | "warning";
+  message: string;
+}
+
+export interface FlowValidationResult {
+  slug: string;
+  ok: boolean;
+  items: FlowValidationItem[];
+}
