@@ -1257,3 +1257,97 @@ mod tests {
         assert_eq!(r, back);
     }
 }
+
+// -- Flow responses --
+
+use crate::flow::{FlowNode, NodeType};
+
+/// Lightweight summary of a flow, used in list views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowSummary {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub node_count: usize,
+    pub updated_at: Option<String>,
+}
+
+/// Response payload for `Request::ListFlows`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListFlowsResponse {
+    pub flows: Vec<FlowSummary>,
+}
+
+/// One node entry in `ShowFlowResponse.nodes`. Typed projection of
+/// `FlowNode` — `signal` and `exits` are v2 fields and omitted here
+/// intentionally; callers that need them read `raw_markdown`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowNodeSummary {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: NodeType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+    pub prompt: String,
+}
+
+/// Response payload for `Request::ShowFlow`.
+///
+/// `nodes` gives the frontend a typed, render-ready node list.
+/// `raw_markdown` is the full source markdown so agents can read and
+/// rewrite the flow without a second IPC round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShowFlowResponse {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub nodes: Vec<FlowNodeSummary>,
+    pub raw_markdown: String,
+}
+
+impl From<&FlowNode> for FlowNodeSummary {
+    fn from(n: &FlowNode) -> Self {
+        Self {
+            id: n.id.clone(),
+            node_type: n.node_type.clone(),
+            owner: n.owner.clone(),
+            participants: n.participants.clone(),
+            needs: n.needs.clone(),
+            prompt: n.prompt.clone(),
+        }
+    }
+}
+
+/// Response payload for `Request::WriteFlow` (create or update).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteFlowResponse {
+    pub slug: String,
+    pub path: String,
+    /// Same push-outcome conventions as `WriteBoardResponse::status`.
+    pub status: String,
+    pub commit_id: String,
+}
+
+/// One issue in `ValidateFlowResponse.items`.
+/// `kind` is `"error"` or `"warning"` — kept as `String` so the wire
+/// stays simple and frontend-friendly without coupling to an enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowValidationItem {
+    pub kind: String,
+    pub message: String,
+}
+
+/// Response payload for `Request::ValidateFlow`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateFlowResponse {
+    pub slug: String,
+    pub ok: bool,
+    pub items: Vec<FlowValidationItem>,
+}
