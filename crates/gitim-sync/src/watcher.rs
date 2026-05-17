@@ -6,6 +6,7 @@ use tracing::info;
 pub enum FileEvent {
     ThreadModified(String),
     MetaModified(String),
+    FlowModified(String),
 }
 
 pub async fn watch_repo(
@@ -24,6 +25,7 @@ pub async fn watch_repo(
 
     let channels_dir = repo_root.join("channels");
     let dm_dir = repo_root.join("dm");
+    let flows_dir = repo_root.join("flows");
 
     if channels_dir.exists() {
         watcher.watch(&channels_dir, RecursiveMode::NonRecursive)?;
@@ -31,13 +33,33 @@ pub async fn watch_repo(
     if dm_dir.exists() {
         watcher.watch(&dm_dir, RecursiveMode::NonRecursive)?;
     }
+    if flows_dir.exists() {
+        watcher.watch(&flows_dir, RecursiveMode::Recursive)?;
+    }
 
     info!("file watcher started");
 
+    let repo_root = repo_root.to_path_buf();
     tokio::spawn(async move {
         let _watcher = watcher;
         while let Some(event) = notify_rx.recv().await {
             for path in event.paths {
+                let rel = match path.strip_prefix(&repo_root) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => continue,
+                };
+                let comps: Vec<_> = rel.components().collect();
+
+                if comps.first().and_then(|c| c.as_os_str().to_str()) == Some("flows") {
+                    if let Some(slug_comp) = comps.get(1) {
+                        if let Some(slug) = slug_comp.as_os_str().to_str() {
+                            let _ = tx.send(FileEvent::FlowModified(slug.to_string())).await;
+                            continue;
+                        }
+                    }
+                    continue;
+                }
+
                 let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
                 if filename.ends_with(".thread") {
                     let name = filename.trim_end_matches(".thread").to_string();
