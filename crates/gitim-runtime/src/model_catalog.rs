@@ -90,6 +90,22 @@ pub async fn list_provider_models_with_overrides(
             None,
             Some("Hermes models are exposed through /hermes/llm providers routes".to_string()),
         ),
+        "cursor" => fallback_catalog(
+            "cursor",
+            "cursor_custom_model",
+            true,
+            true,
+            Some("model id accepted by cursor-agent --model".to_string()),
+            None,
+        ),
+        "kimi" => fallback_catalog(
+            "kimi",
+            "kimi_custom_model",
+            true,
+            true,
+            Some("model id accepted by kimi set_session_model".to_string()),
+            None,
+        ),
         other => fallback_catalog(
             other,
             "unknown_provider",

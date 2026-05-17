@@ -1,6 +1,13 @@
 // Detect pings a fixed cheap model in the runtime (claude-haiku-4-5 / gpt-5.4-mini),
 // not the user's selected model — so a green check verifies CLI availability, not model availability.
-export type ProviderId = "claude" | "codex" | "opencode" | "pi" | "hermes";
+export type ProviderId =
+  | "claude"
+  | "codex"
+  | "opencode"
+  | "pi"
+  | "hermes"
+  | "cursor"
+  | "kimi";
 
 export type PreflightErrorKind = "not_installed" | "timeout" | "other";
 
@@ -147,6 +154,30 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     models: [],
     modelOptional: true,
   },
+  cursor: {
+    label: "Cursor",
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "model id accepted by cursor-agent --model",
+    models: [],
+    modelOptional: true,
+  },
+  kimi: {
+    label: "Kimi",
+    supportsDefaultModel: true,
+    supportsCustomModel: true,
+    customModelHint: "model id accepted by kimi set_session_model",
+    models: [],
+    modelOptional: true,
+  },
 };
 
-export const PROVIDER_IDS: ProviderId[] = ["claude", "codex", "opencode", "pi", "hermes"];
+export const PROVIDER_IDS: ProviderId[] = [
+  "claude",
+  "codex",
+  "opencode",
+  "pi",
+  "hermes",
+  "cursor",
+  "kimi",
+];

@@ -2144,7 +2144,7 @@ async fn agents_add(
     // `mock` is permitted because E2E tests (agent-interaction.spec.ts)
     // provision an agent with provider=mock.
     match req.provider.as_str() {
-        "claude" | "codex" | "opencode" | "pi" | "hermes" | "mock" => {}
+        "claude" | "codex" | "opencode" | "pi" | "hermes" | "cursor" | "kimi" | "mock" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -4316,12 +4316,12 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
         let provider_raw = me["provider"].as_str();
         let provider_error = match provider_raw {
             None => Some(format!(
-                "Missing \"provider\" in {}. Add \"provider\": \"claude\", \"codex\", \"opencode\", \"pi\", or \"hermes\" to the file and restart the runtime.",
+                "Missing \"provider\" in {}. Add \"provider\": \"claude\", \"codex\", \"opencode\", \"pi\", \"hermes\", \"cursor\", or \"kimi\" to the file and restart the runtime.",
                 me_path.display()
             )),
-            Some(p) if p != "claude" && p != "codex" && p != "opencode" && p != "pi" && p != "hermes" => {
+            Some(p) if p != "claude" && p != "codex" && p != "opencode" && p != "pi" && p != "hermes" && p != "cursor" && p != "kimi" => {
                 Some(format!(
-                    "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", \"opencode\", \"pi\", or \"hermes\".",
+                    "Unsupported provider \"{}\" in {}. Expected \"claude\", \"codex\", \"opencode\", \"pi\", \"hermes\", \"cursor\", or \"kimi\".",
                     p,
                     me_path.display()
                 ))
@@ -4510,6 +4510,14 @@ async fn preflight_handler(
                 None,
             )
             .await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        "cursor" => {
+            let result = crate::preflight::preflight_cursor().await;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        "kimi" => {
+            let result = crate::preflight::preflight_kimi().await;
             (StatusCode::OK, Json(result)).into_response()
         }
         _ => (
