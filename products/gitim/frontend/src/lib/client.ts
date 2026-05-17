@@ -24,10 +24,14 @@ import type {
   FleetAgentSnapshot,
   FleetNodeStatus,
   FlowDocument,
+  FlowRunDetail,
+  FlowRunSummary,
   FlowSummary,
   FlowValidationResult,
   Message,
+  NodeStatus,
   PollResponse,
+  RunStatus,
   WorkspaceSummary,
 } from "./types";
 import type {
@@ -1798,6 +1802,112 @@ export async function validateFlow(
   return cronRequest<FlowValidationResult>(
     `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}/validate`,
   );
+}
+
+export async function startFlowRun(
+  workspaceSlug: string,
+  flowSlug: string,
+  channel: string,
+): Promise<ApiResponse<{ run_id: string; flow_slug: string; channel: string; commit_id: string }>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/flows/${encodeURIComponent(flowSlug)}/runs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listFlowRuns(
+  workspaceSlug: string,
+  opts: { slug?: string; channel?: string; status?: RunStatus } = {},
+): Promise<ApiResponse<{ runs: FlowRunSummary[] }>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  const qs = new URLSearchParams();
+  if (opts.slug) qs.set("slug", opts.slug);
+  if (opts.channel) qs.set("channel", opts.channel);
+  if (opts.status) qs.set("status", opts.status);
+  const url = `${wsBase(workspaceSlug)}/im/runs${qs.toString() ? "?" + qs : ""}`;
+  return cronRequest<{ runs: FlowRunSummary[] }>(url);
+}
+
+export async function getFlowRun(
+  workspaceSlug: string,
+  runId: string,
+): Promise<ApiResponse<FlowRunDetail>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  return cronRequest<FlowRunDetail>(
+    `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+export async function updateFlowNode(
+  workspaceSlug: string,
+  runId: string,
+  nodeId: string,
+  payload: { status: NodeStatus; actor?: string; result_ref?: string },
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function cancelFlowRun(
+  workspaceSlug: string,
+  runId: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}`,
+      { method: "DELETE" },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export async function startAgent(slug: string, id: string): Promise<ApiResponse> {
