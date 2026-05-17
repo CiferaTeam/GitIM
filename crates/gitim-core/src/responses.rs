@@ -1260,7 +1260,7 @@ mod tests {
 
 // -- Flow responses --
 
-use crate::flow::{FlowNode, NodeType};
+use crate::flow::{FlowNode, FlowRun, FlowRunNode, NodeStatus, NodeType, RunStatus};
 
 /// Lightweight summary of a flow, used in list views.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1350,4 +1350,111 @@ pub struct ValidateFlowResponse {
     pub slug: String,
     pub ok: bool,
     pub items: Vec<FlowValidationItem>,
+}
+
+// -- Flow run responses --
+
+/// Response payload for `Request::StartFlowRun`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartFlowRunResponse {
+    pub run_id: String,
+    pub flow_slug: String,
+    pub channel: String,
+    pub path: String,
+    pub commit_id: String,
+}
+
+/// Lightweight summary of a flow run, used in list views.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowRunSummary {
+    pub run_id: String,
+    pub flow_slug: String,
+    pub channel: String,
+    pub status: RunStatus,
+    pub started_by: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub node_count: usize,
+    pub nodes_done: usize,
+}
+
+/// Response payload for `Request::ListFlowRuns`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListFlowRunsResponse {
+    pub runs: Vec<FlowRunSummary>,
+}
+
+/// One node entry in `ShowFlowRunResponse.nodes`. Typed projection of
+/// `FlowRunNode` — optional fields use `skip_serializing_if` to keep the
+/// wire minimal for pending nodes where most fields are absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowRunNodeSummary {
+    pub id: String,
+    pub status: NodeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<String>,
+}
+
+impl From<&FlowRunNode> for FlowRunNodeSummary {
+    fn from(n: &FlowRunNode) -> Self {
+        Self {
+            id: n.id.clone(),
+            status: n.status,
+            actor: n.actor.clone(),
+            started_at: n.started_at.clone(),
+            completed_at: n.completed_at.clone(),
+            result_ref: n.result_ref.clone(),
+        }
+    }
+}
+
+/// Response payload for `Request::ShowFlowRun`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShowFlowRunResponse {
+    pub run_id: String,
+    pub flow_slug: String,
+    pub channel: String,
+    pub started_at: String,
+    pub started_by: String,
+    pub status: RunStatus,
+    pub updated_at: String,
+    pub nodes: Vec<FlowRunNodeSummary>,
+}
+
+impl From<&FlowRun> for ShowFlowRunResponse {
+    fn from(r: &FlowRun) -> Self {
+        Self {
+            run_id: r.run_id.clone(),
+            flow_slug: r.flow_slug.clone(),
+            channel: r.channel.clone(),
+            started_at: r.started_at.clone(),
+            started_by: r.started_by.clone(),
+            status: r.status,
+            updated_at: r.updated_at.clone(),
+            nodes: r.nodes.iter().map(FlowRunNodeSummary::from).collect(),
+        }
+    }
+}
+
+/// Response payload for `Request::UpdateFlowNode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateFlowNodeResponse {
+    pub run_id: String,
+    pub node_id: String,
+    pub status: NodeStatus,
+    pub run_status: RunStatus,
+    pub commit_id: String,
+}
+
+/// Response payload for `Request::CancelFlowRun`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CancelFlowRunResponse {
+    pub run_id: String,
+    pub commit_id: String,
 }
