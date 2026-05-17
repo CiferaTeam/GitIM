@@ -136,48 +136,61 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
         return resp;
     }
     let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
-    let rel = flow_path(&slug);
-    let abs = state.repo_root.join(&rel);
-    let trash_rel = std::path::PathBuf::from(".trash")
-        .join("flows")
-        .join(slug.as_str())
-        .join("index.md");
-    let trash_abs = state.repo_root.join(&trash_rel);
 
-    if !abs.exists() {
+    // Move the entire flows/<slug>/ directory (including any runs/ subtree) to
+    // .trash/flows/<slug>/. Previously only index.md was moved, leaving orphan
+    // runs that flow_run_list could still enumerate.
+    let slug_dir = state.repo_root.join("flows").join(slug.as_str());
+    let trash_parent = state.repo_root.join(".trash").join("flows");
+    let trash_dir = trash_parent.join(slug.as_str());
+
+    if !slug_dir.exists() {
         return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
     }
-    if let Some(parent) = trash_abs.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return Response::error(format!("failed to create trash dir: {}", e));
+    if let Err(e) = std::fs::create_dir_all(&trash_parent) {
+        return Response::error(format!("failed to create trash dir: {}", e));
+    }
+    // Remove existing trash entry if any (re-creating same slug after a previous remove).
+    if trash_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&trash_dir) {
+            return Response::error(format!("failed to clear existing trash entry: {}", e));
         }
     }
-    if let Err(e) = std::fs::rename(&abs, &trash_abs) {
-        return Response::error(format!("failed to move to trash: {}", e));
+    if let Err(e) = std::fs::rename(&slug_dir, &trash_dir) {
+        return Response::error(format!("failed to move flow to trash: {}", e));
     }
-    let _ = std::fs::remove_dir(state.repo_root.join("flows").join(slug.as_str()));
 
-    let from = rel.to_string_lossy().to_string();
-    let to = trash_rel.to_string_lossy().to_string();
+    let from_dir = format!("flows/{}", slug.as_str());
+    let to_dir = format!(".trash/flows/{}", slug.as_str());
     let (author_name, author_email) = state.author_for(&author);
 
-    // PORTABILITY: git_storage only exposes single-file commit. We commit both
-    // paths in two commits; trash commit is best-effort.
-    let commit_id_from = match state.git_storage.add_and_commit_only_as(
-        &from,
+    // Two-commit pattern (matches v1): first stage the deletion of the source
+    // tree, then stage the new trash tree. `add_and_commit_as` takes multiple
+    // paths so both directions land in one commit each.
+    let commit_id_from = match state.git_storage.add_and_commit_as(
+        &[&from_dir],
         &format!("flow: remove {} @{}", slug, author),
         Some((&author_name, &author_email)),
     ) {
-        Ok(c) => c,
+        Ok(()) => {
+            // grab HEAD after the deletion commit
+            match state.git_storage.rev_parse("HEAD") {
+                Ok(id) => id,
+                Err(e) => return Response::error(format!("rev_parse after remove commit: {}", e)),
+            }
+        }
         Err(e) => return Response::error(format!("flow remove (delete) commit failed: {}", e)),
     };
-    let commit_id = match state.git_storage.add_and_commit_only_as(
-        &to,
+    let commit_id = match state.git_storage.add_and_commit_as(
+        &[&to_dir],
         &format!("flow: trash {} @{}", slug, author),
         Some((&author_name, &author_email)),
     ) {
-        Ok(c) => c,
-        Err(_) => commit_id_from, // best-effort; if trash commit fails, primary delete is still recorded
+        Ok(()) => match state.git_storage.rev_parse("HEAD") {
+            Ok(id) => id,
+            Err(_) => commit_id_from.clone(),
+        },
+        Err(_) => commit_id_from, // best-effort; primary deletion already recorded
     };
 
     let _ = state.event_tx.send(Event::FlowChanged {

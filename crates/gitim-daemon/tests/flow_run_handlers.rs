@@ -299,6 +299,113 @@ async fn run_cancel_then_node_set_rejected() {
     );
 }
 
+/// Setup variant: creates a flow with *no* nodes (the default stub state).
+async fn setup_zero_node() -> (TempDir, Arc<AppState>) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init"]);
+    git(root, &["config", "user.name", "test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+
+    std::fs::create_dir_all(root.join(".gitim")).unwrap();
+    std::fs::create_dir_all(root.join("users")).unwrap();
+    std::fs::create_dir_all(root.join("channels")).unwrap();
+    std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
+    std::fs::write(
+        root.join("users/lewis.meta.yaml"),
+        "display_name: Lewis\nrole: dev\nintroduction: hi\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("channels/release-discuss.meta.yaml"),
+        "name: release-discuss\ndisplay_name: Release\nintroduction: x\nmembers: [lewis]\ncreated_at: 2026-05-17T10:00:00Z\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("channels/release-discuss.thread"), "").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init"]);
+
+    let (event_tx, _) = broadcast::channel::<Event>(64);
+    let state = Arc::new(AppState::new(
+        root.to_path_buf(),
+        make_config(),
+        event_tx,
+        Some("lewis".to_string()),
+    ));
+    {
+        let mut users = state.users.write().await;
+        *users = vec!["lewis".to_string()];
+    }
+
+    // Create a flow with no nodes (empty nodes list — the default stub state).
+    let flow_dir = root.join("flows").join("empty");
+    std::fs::create_dir_all(&flow_dir).unwrap();
+    let template_yaml = "---\nschema_version: 1\nslug: empty\nname: Empty\ndescription: zero nodes\ncreated_by: lewis\ncreated_at: 20260517T100000Z\nupdated_at: 20260517T100000Z\nnodes: []\n---\n";
+    std::fs::write(flow_dir.join("index.md"), template_yaml).unwrap();
+    git(root, &["add", "flows/empty/index.md"]);
+    git(root, &["commit", "-m", "add empty flow"]);
+
+    (tmp, state)
+}
+
+#[tokio::test]
+async fn run_start_with_zero_node_template_auto_completes() {
+    let (_dir, state) = setup_zero_node().await;
+    let r = gitim_daemon::flow_run_handlers::handle_flow_run_start(
+        state.clone(),
+        "empty".into(),
+        "release-discuss".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "start: {:?}", r.error);
+    let run_id = r.data.unwrap()["run_id"].as_str().unwrap().to_string();
+
+    // show should immediately report done (no nodes to execute)
+    let r = gitim_daemon::flow_run_handlers::handle_flow_run_show(state.clone(), run_id).await;
+    assert!(r.ok, "show failed: {:?}", r.error);
+    assert_eq!(
+        r.data.unwrap()["status"],
+        "done",
+        "zero-node run should start as done"
+    );
+}
+
+#[tokio::test]
+async fn flow_remove_cleans_up_runs() {
+    let (_dir, state) = setup().await;
+
+    // start a run
+    let r = gitim_daemon::flow_run_handlers::handle_flow_run_start(
+        state.clone(),
+        "release".into(),
+        "release-discuss".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "run start failed: {:?}", r.error);
+    let run_id = r.data.unwrap()["run_id"].as_str().unwrap().to_string();
+
+    // remove the flow
+    let r = gitim_daemon::flow_handlers::handle_flow_remove(
+        state.clone(),
+        "release".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "flow remove: {:?}", r.error);
+
+    // run should no longer be reachable
+    let r =
+        gitim_daemon::flow_run_handlers::handle_flow_run_show(state.clone(), run_id.clone()).await;
+    assert!(!r.ok, "show should fail after flow remove");
+
+    // list should return 0 runs (orphan runs/ tree is gone with the flow dir)
+    let r = gitim_daemon::flow_run_handlers::handle_flow_run_list(state, None, None, None).await;
+    let runs = r.data.unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(runs.len(), 0, "runs list should be empty after flow remove");
+}
+
 #[tokio::test]
 async fn run_list_filters_by_channel() {
     let (_tmp, state) = setup().await;

@@ -82,6 +82,13 @@ pub async fn handle_flow_run_start(
         })
         .collect();
 
+    // A flow with no nodes completes immediately — there's nothing to execute.
+    let initial_status = if nodes.is_empty() {
+        RunStatus::Done
+    } else {
+        RunStatus::InProgress
+    };
+
     let run = FlowRun {
         schema_version: 1,
         run_id: run_id.to_string(),
@@ -89,7 +96,7 @@ pub async fn handle_flow_run_start(
         channel: channel.to_string(),
         started_at: now.clone(),
         started_by: author.clone(),
-        status: RunStatus::InProgress,
+        status: initial_status,
         nodes,
         updated_at: now,
     };
@@ -101,6 +108,12 @@ pub async fn handle_flow_run_start(
                 flow_slug: c.flow_slug.clone(),
                 channel: c.channel.clone(),
             });
+            if initial_status == RunStatus::Done {
+                let _ = state.event_tx.send(Event::FlowRunCompleted {
+                    run_id: c.run_id.clone(),
+                    status: RunStatus::Done.as_str().to_string(),
+                });
+            }
             state.push_notify.notify_one();
             Response::success(
                 serde_json::to_value(StartFlowRunResponse {
