@@ -36,6 +36,25 @@ async fn send(router: axum::Router, method: &str, uri: &str) -> (StatusCode, Val
     (status, json)
 }
 
+async fn send_json(
+    router: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
+}
+
 fn inject_human_workspace(
     state: &SharedRuntimeState,
     slug: &str,
@@ -256,6 +275,75 @@ async fn validate_flow_missing_returns_404() {
         env.router,
         "GET",
         "/workspaces/test-ws/im/flows/ghost/validate",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body.get("error_code").and_then(|v| v.as_str()),
+        Some("not_found")
+    );
+}
+
+// -- flow runs --
+
+#[tokio::test]
+async fn flow_run_start_returns_run_id() {
+    let env = setup();
+    set(
+        &env.table,
+        "flow_run_start",
+        json!({
+            "ok": true,
+            "data": {
+                "run_id": "20260518T120000-deadbe",
+                "flow_slug": "release",
+                "channel": "release-discuss",
+                "status": "pending"
+            }
+        }),
+    )
+    .await;
+
+    let (status, body) = send_json(
+        env.router,
+        "POST",
+        "/workspaces/test-ws/im/flows/release/runs",
+        json!({"channel": "release-discuss"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.get("run_id").and_then(|v| v.as_str()),
+        Some("20260518T120000-deadbe")
+    );
+    assert_eq!(
+        body.get("flow_slug").and_then(|v| v.as_str()),
+        Some("release")
+    );
+    assert_eq!(
+        body.get("channel").and_then(|v| v.as_str()),
+        Some("release-discuss")
+    );
+}
+
+#[tokio::test]
+async fn flow_run_show_for_unknown_run_returns_404() {
+    let env = setup();
+    set(
+        &env.table,
+        "flow_run_show",
+        json!({
+            "ok": false,
+            "error": "run not found",
+            "error_code": "not_found"
+        }),
+    )
+    .await;
+
+    let (status, body) = send(
+        env.router,
+        "GET",
+        "/workspaces/test-ws/im/runs/20260518T120000-deadbe",
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);

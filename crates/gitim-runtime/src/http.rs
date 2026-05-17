@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::{
     extract::State,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use futures::stream::{Stream, StreamExt};
@@ -2317,6 +2317,140 @@ async fn flows_validate(
         Err(j) => return j,
     };
     flow_raw_data_response(client.flow_validate(&flow_slug).await)
+}
+
+/// Like `flow_raw_data_response` but for write endpoints: returns the `data`
+/// field on success (or `{}` if absent), 404 for `not_found`, 422 for other
+/// errors. Used by run-start, node-set, and run-cancel.
+fn flow_write_response(resp: gitim_client::ApiResponse) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if resp.ok {
+        let data = resp.data.unwrap_or(serde_json::json!({}));
+        (axum::http::StatusCode::OK, Json(data)).into_response()
+    } else if resp.error_code.as_deref() == Some("not_found") {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ErrorBody::with_code(
+                resp.error.unwrap_or_default(),
+                resp.error_code.unwrap_or_default(),
+            )),
+        )
+            .into_response()
+    } else {
+        (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorBody::with_code(
+                resp.error.unwrap_or_default(),
+                resp.error_code.unwrap_or_default(),
+            )),
+        )
+            .into_response()
+    }
+}
+
+// -- /workspaces/{slug}/im/flows/{slug}/runs  and  /workspaces/{slug}/im/runs --
+
+async fn flows_run_start(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug)): axum::extract::Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(channel) = body.get("channel").and_then(|v| v.as_str()) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new("missing 'channel'")),
+        )
+            .into_response();
+    };
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client.flow_run_start(&flow_slug, channel).await {
+        Ok(resp) => flow_write_response(resp),
+        Err(e) => flow_client_error_to_response(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RunListQuery {
+    slug: Option<String>,
+    channel: Option<String>,
+    status: Option<String>,
+}
+
+async fn flows_run_list(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<RunListQuery>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    flow_raw_data_response(
+        client
+            .flow_run_list(
+                params.slug.as_deref(),
+                params.channel.as_deref(),
+                params.status.as_deref(),
+            )
+            .await,
+    )
+}
+
+async fn flows_run_show(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, run_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    flow_raw_data_response(client.flow_run_show(&run_id).await)
+}
+
+async fn flows_node_set(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, run_id, node_id)): axum::extract::Path<(String, String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(status) = body.get("status").and_then(|v| v.as_str()) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new("missing 'status'")),
+        )
+            .into_response();
+    };
+    let actor = body.get("actor").and_then(|v| v.as_str());
+    let result_ref = body.get("result_ref").and_then(|v| v.as_str());
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client
+        .flow_node_set(&run_id, &node_id, status, actor, result_ref)
+        .await
+    {
+        Ok(resp) => flow_write_response(resp),
+        Err(e) => flow_client_error_to_response(e),
+    }
+}
+
+async fn flows_run_cancel(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, run_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match client.flow_run_cancel(&run_id).await {
+        Ok(resp) => flow_write_response(resp),
+        Err(e) => flow_client_error_to_response(e),
+    }
 }
 
 // -- /agents/add --
@@ -5564,6 +5698,13 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
             "/im/flows/{flow_slug}",
             get(flows_show).delete(flows_remove),
         )
+        .route("/im/flows/{flow_slug}/runs", post(flows_run_start))
+        .route("/im/runs", get(flows_run_list))
+        .route(
+            "/im/runs/{run_id}",
+            get(flows_run_show).delete(flows_run_cancel),
+        )
+        .route("/im/runs/{run_id}/nodes/{node_id}", patch(flows_node_set))
         .route("/agents", get(agents_list))
         .route("/agents/events", get(agents_events))
         .route("/agents/add", post(agents_add))
