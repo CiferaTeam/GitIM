@@ -226,6 +226,23 @@ fn gitim_api_exposes_board_commands() {
 }
 
 #[test]
+fn gitim_api_exposes_flow_commands() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("### 流程模板 (Flows)"));
+    assert!(api.contains("gitim flow list"));
+    assert!(api.contains("gitim flow show"));
+    assert!(api.contains("gitim flow validate"));
+    assert!(api.contains("gitim flow create"));
+    assert!(api.contains("gitim flow rm"));
+}
+
+#[test]
 fn gitim_api_exposes_message_body_markers() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
