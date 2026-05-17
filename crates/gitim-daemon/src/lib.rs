@@ -4,6 +4,7 @@ pub mod card_handlers;
 pub mod cron_engine;
 pub mod cron_paths;
 pub mod error;
+pub mod flow_handlers;
 pub mod handlers;
 pub mod http;
 pub mod identity;
