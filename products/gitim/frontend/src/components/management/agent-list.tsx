@@ -9,7 +9,14 @@ import { AddAgentDialog } from "./add-agent-dialog";
 import { AgentCard } from "./agent-card";
 import { ArchivedAgentCard } from "./archived-agent-card";
 import { WorkspaceUsageHeader } from "./workspace-usage-header";
-import { Archive, Bot, Search, Server, SlidersHorizontal } from "lucide-react";
+import {
+  Archive,
+  Bot,
+  ChevronDown,
+  Search,
+  Server,
+  SlidersHorizontal,
+} from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -78,7 +85,7 @@ export function AgentList() {
     remoteStatuses,
     visibleRemoteStatuses,
   );
-  const hasFleetContext = remoteSnapshots.length > 0 || remoteStatuses.length > 0;
+  const hasFleetUsageContext = remoteSnapshots.length > 0;
 
   // The status filter is meaningless for archived rows (runtime metadata is
   // gone), so we only filter archived by free-text query against the
@@ -168,7 +175,7 @@ export function AgentList() {
 
       <WorkspaceUsageHeader
         agents={allAgentsForUsage}
-        label={hasFleetContext ? "Fleet Usage" : "Workspace Usage"}
+        label={hasFleetUsageContext ? "Fleet Usage" : "Workspace Usage"}
       />
 
       {filteredAgents.length > 0 && (
@@ -176,7 +183,7 @@ export function AgentList() {
           title="Local"
           subtitle="This node"
           agents={filteredAgents}
-          showUsage={hasFleetContext}
+          showUsage={hasFleetUsageContext}
         >
           {filteredAgents.map((agent) => (
             <AgentCard key={agent.id} agent={agent} />
@@ -285,6 +292,11 @@ function AgentNodeSection({
   showUsage = false,
   children,
 }: AgentNodeSectionProps) {
+  const [usageExpanded, setUsageExpanded] = useState(false);
+  const hasUsageData = agents.some((agent) => agent.usageSummary);
+  const canShowUsage = showUsage && hasUsageData;
+  const usageToggleLabel = `${usageExpanded ? "Hide" : "Show"} ${title} usage details`;
+
   return (
     <section className="mb-6">
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -299,12 +311,30 @@ function AgentNodeSection({
                 {agents.length}
               </Badge>
               {status && nodeStatusBadge(status)}
+              {canShowUsage && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-xs"
+                  aria-label={usageToggleLabel}
+                  aria-expanded={usageExpanded}
+                  title={usageToggleLabel}
+                  onClick={() => setUsageExpanded((expanded) => !expanded)}
+                  className="border-border-strong text-text-secondary hover:bg-surface-hover"
+                >
+                  <ChevronDown
+                    className={`size-3 transition-transform ${
+                      usageExpanded ? "rotate-180" : ""
+                    }`}
+                  />
+                </Button>
+              )}
             </div>
             <p className="truncate text-xs text-text-muted">{subtitle}</p>
           </div>
         </div>
       </div>
-      {showUsage && (
+      {canShowUsage && usageExpanded && (
         <WorkspaceUsageHeader
           agents={agents}
           label={`${title} Usage`}
