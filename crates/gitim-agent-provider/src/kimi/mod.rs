@@ -21,9 +21,11 @@
 //! Reference: `multica/server/pkg/agent/kimi.go` (Go).
 //!
 //! Provider trait flags (and why they differ from `Provider`'s defaults):
-//! - `reports_usage()` is **overridden to `false`** — Kimi Code 1.44 ACP
-//!   `session/prompt` responses return `stopReason` but no `usage` block, and
-//!   the observed stream does not emit `usage_update` notifications.
+//! - `reports_usage()` stays `true` — Kimi Code 1.44 ACP prompt responses
+//!   omit standard usage, so the provider derives a local estimate from
+//!   `~/.kimi/sessions/*/<session_id>/context*.jsonl` `_usage.token_count`
+//!   entries. The estimate is recorded as cache-read style input plus
+//!   context-window occupancy.
 //! - `self_managed_context()` stays `false` (default written explicitly
 //!   here) — unlike hermes there is no in-loop compression, so the runtime
 //!   owns the `[[RESET]]` channel + `[系统通知]` occupancy preamble, same
@@ -31,10 +33,12 @@
 //! - All `prompt_*` defaults inherit unchanged — there is no SOUL.md /
 //!   MEMORY.md self-managed memory model on kimi.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -52,6 +56,7 @@ const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
 const EVENT_CHANNEL_BUFFER: usize = 256;
 const IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY: Duration = Duration::from_secs(15);
 const IDLE_COMPLETE_AFTER_TOOL_USE: Duration = Duration::from_secs(75);
+const KIMI_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const HOST_TURN_COMPLETION_NOTE: &str = "\
 Host turn completion note: after completing the requested tool or GitIM action, \
 finish this ACP turn by replying exactly `done` in this provider response. \
@@ -69,12 +74,11 @@ impl KimiProvider {
 
 #[async_trait]
 impl Provider for KimiProvider {
-    /// Kimi's ACP stream does not currently expose token counts. The runtime
-    /// still counts turns and can use its local estimate for the session
-    /// occupancy HUD, but it must not render zero provider tokens as if Kimi
-    /// had reported them.
+    /// Kimi's ACP stream omits standard usage. The provider reads Kimi's
+    /// local session context counter after each completed prompt and records
+    /// that window-sized input estimate as cache-read style usage.
     fn reports_usage(&self) -> bool {
-        false
+        true
     }
 
     /// Kimi has no in-loop compression like hermes. Runtime owns the
@@ -146,6 +150,7 @@ impl Provider for KimiProvider {
         let user_text = format!("{base_user_text}\n\n---\n\n{HOST_TURN_COMPLETION_NOTE}");
         let resume_token = opts.resume_token.clone();
         let model = opts.model.clone();
+        let kimi_home = kimi_home_from_env(&self.config.env);
         let cwd_str = opts
             .cwd
             .as_ref()
@@ -177,6 +182,7 @@ impl Provider for KimiProvider {
                 user_text,
                 resume_token,
                 model,
+                kimi_home,
                 cwd_str,
             )
             .await;
@@ -253,6 +259,7 @@ async fn drive_session(
     user_text: String,
     resume_token: Option<String>,
     model: Option<String>,
+    kimi_home: Option<PathBuf>,
     cwd_str: String,
 ) {
     let start = Instant::now();
@@ -559,6 +566,13 @@ async fn drive_session(
         }
     }
 
+    if final_status == ExecStatus::Completed {
+        if let Some(local_usage) = read_kimi_local_context_usage(kimi_home.as_deref(), &session_id)
+        {
+            attach_kimi_local_usage(&mut latest_usage, local_usage);
+        }
+    }
+
     let duration = start.elapsed();
     info!(pid, ?final_status, ?duration, "kimi finished");
 
@@ -585,6 +599,116 @@ async fn drive_session(
         },
         usage: latest_usage,
     });
+}
+
+fn kimi_home_from_env(provider_env: &std::collections::HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(dir) = provider_env.get("KIMI_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    if let Ok(dir) = std::env::var("KIMI_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".kimi"))
+}
+
+fn attach_kimi_local_usage(latest_usage: &mut Option<ProviderUsage>, local_usage: ProviderUsage) {
+    let usage = latest_usage.get_or_insert_with(ProviderUsage::default);
+    if usage.cache_read_tokens.is_none() {
+        usage.cache_read_tokens = local_usage.cache_read_tokens;
+    }
+    usage.context_tokens = local_usage.context_tokens;
+    usage.context_window_tokens = local_usage.context_window_tokens;
+}
+
+fn read_kimi_local_context_usage(
+    kimi_home: Option<&Path>,
+    session_id: &str,
+) -> Option<ProviderUsage> {
+    let kimi_home = kimi_home?;
+    let session_dir = find_kimi_session_dir(&kimi_home.join("sessions"), session_id)?;
+    let mut files = kimi_context_files(&session_dir);
+    files.sort_by_key(|path| kimi_context_file_index(path).unwrap_or(0));
+    for path in files.iter().rev() {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(usage) = scan_kimi_context_usage(&content) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn find_kimi_session_dir(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    for workspace in read_subdirs(sessions_dir) {
+        let candidate = workspace.join(session_id);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    out.sort();
+    out
+}
+
+fn kimi_context_files(session_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(session_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| kimi_context_file_index(p).is_some())
+        .collect()
+}
+
+fn kimi_context_file_index(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    if name == "context.jsonl" {
+        return Some(0);
+    }
+    let rest = name.strip_prefix("context_")?.strip_suffix(".jsonl")?;
+    rest.parse().ok()
+}
+
+fn scan_kimi_context_usage(content: &str) -> Option<ProviderUsage> {
+    for line in content.lines().rev() {
+        if let Some(usage) = parse_kimi_context_usage_line(line) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn parse_kimi_context_usage_line(line: &str) -> Option<ProviderUsage> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("role")?.as_str()? != "_usage" {
+        return None;
+    }
+    let token_count = v.get("token_count")?.as_u64()?;
+    Some(ProviderUsage {
+        cache_read_tokens: Some(token_count),
+        context_tokens: Some(token_count),
+        context_window_tokens: Some(KIMI_CONTEXT_WINDOW_TOKENS),
+        ..Default::default()
+    })
 }
 
 async fn watch_idle_completion(
@@ -774,10 +898,91 @@ mod tests {
     #[test]
     fn provider_trait_flags() {
         let p = KimiProvider::new(ProviderConfig::default());
-        assert!(!p.reports_usage());
+        assert!(p.reports_usage());
         assert!(!p.usage_is_cumulative());
         // self_managed_context overridden to false (runtime owns
         // [[RESET]] / occupancy preamble, unlike hermes).
         assert!(!p.self_managed_context());
+    }
+
+    #[test]
+    fn parses_local_context_usage_as_cache_read_estimate() {
+        let usage = parse_kimi_context_usage_line(r#"{"role":"_usage","token_count":25695}"#)
+            .expect("usage");
+
+        assert_eq!(usage.cache_read_tokens, Some(25_695));
+        assert_eq!(usage.context_tokens, Some(25_695));
+        assert_eq!(
+            usage.context_window_tokens,
+            Some(KIMI_CONTEXT_WINDOW_TOKENS)
+        );
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn reads_latest_local_context_usage_for_session() {
+        let root = std::env::temp_dir().join(format!(
+            "gitim-kimi-usage-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_id = "c7c8556e-9fa6-4f90-8992-2a9d1c614bf3";
+        let session_dir = root
+            .join("sessions")
+            .join("workspace-hash")
+            .join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("context.jsonl"),
+            r#"{"role":"_usage","token_count":1000}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("context_1.jsonl"),
+            r#"{"role":"_usage","token_count":2000}"#,
+        )
+        .unwrap();
+
+        let usage = read_kimi_local_context_usage(Some(&root), session_id).expect("usage");
+        assert_eq!(usage.cache_read_tokens, Some(2_000));
+        assert_eq!(usage.context_tokens, Some(2_000));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_when_latest_context_file_has_no_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "gitim-kimi-usage-fallback-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_id = "384aef86-486f-4aa1-ad11-9c49987b25eb";
+        let session_dir = root
+            .join("sessions")
+            .join("workspace-hash")
+            .join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("context_1.jsonl"),
+            r#"{"role":"_usage","token_count":3000}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("context_2.jsonl"),
+            r#"{"role":"assistant","content":"done"}"#,
+        )
+        .unwrap();
+
+        let usage = read_kimi_local_context_usage(Some(&root), session_id).expect("usage");
+        assert_eq!(usage.cache_read_tokens, Some(3_000));
+        assert_eq!(usage.context_tokens, Some(3_000));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

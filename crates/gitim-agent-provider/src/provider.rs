@@ -136,8 +136,8 @@ pub fn create(
 /// the provider id from `.gitim/me.json` is available.
 pub fn provider_reports_usage(provider_type: &str) -> Result<bool, ProviderError> {
     match provider_type {
-        "gemini" | "kimi" | "openclaw" => Ok(false),
-        "claude" | "codex" | "hermes" | "mock" | "cursor" | "opencode" | "pi" => Ok(true),
+        "gemini" | "openclaw" => Ok(false),
+        "claude" | "codex" | "hermes" | "mock" | "cursor" | "kimi" | "opencode" | "pi" => Ok(true),
         _ => Err(ProviderError::UnknownProvider(provider_type.to_string())),
     }
 }

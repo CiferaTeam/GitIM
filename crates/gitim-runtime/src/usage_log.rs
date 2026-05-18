@@ -581,7 +581,7 @@ mod tests {
         let initial = AgentUsageLog {
             version: 1,
             handler: "kim".into(),
-            provider: "kimi".into(),
+            provider: "openclaw".into(),
             model: "".into(),
             provider_reports_usage: true,
             first_seen: "2026-05-09T12:00:00Z".into(),
@@ -594,7 +594,7 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_string(&initial).unwrap()).unwrap();
 
-        let loaded = AgentUsageLog::load_or_default(dir.path(), "kim", "kimi", "", false);
+        let loaded = AgentUsageLog::load_or_default(dir.path(), "kim", "openclaw", "", false);
         assert!(!loaded.provider_reports_usage);
         assert_eq!(loaded.totals.turns, 2);
     }

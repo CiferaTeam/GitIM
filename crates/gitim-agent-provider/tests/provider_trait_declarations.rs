@@ -69,9 +69,9 @@ fn hermes_reports_session_cumulative_and_self_manages_context() {
 }
 
 #[test]
-fn kimi_does_not_report_usage() {
+fn kimi_reports_local_context_usage_estimate() {
     let p = KimiProvider::new(cfg());
-    assert!(!p.reports_usage());
+    assert!(p.reports_usage());
     assert!(!p.usage_is_cumulative());
 }
 
@@ -109,9 +109,9 @@ fn static_reports_usage_helper_matches_provider_declarations() {
     assert!(provider_reports_usage("codex").unwrap());
     assert!(provider_reports_usage("hermes").unwrap());
     assert!(provider_reports_usage("cursor").unwrap());
+    assert!(provider_reports_usage("kimi").unwrap());
     assert!(provider_reports_usage("opencode").unwrap());
     assert!(provider_reports_usage("pi").unwrap());
     assert!(!provider_reports_usage("gemini").unwrap());
-    assert!(!provider_reports_usage("kimi").unwrap());
     assert!(!provider_reports_usage("openclaw").unwrap());
 }
