@@ -177,11 +177,13 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 
 ## Pre-commit hook
 
-新 clone 后跑一次:
+新 clone 后,**在主 checkout 下**跑一次(不要在 worktree 里跑;symlink 会指向 worktree 路径,worktree 删了 hook 就坏):
 
 ```bash
 scripts/install-hooks.sh
 ```
+
+在 worktree 里测试 hook 可加 `--force` 强制安装。
 
 会把 `scripts/hooks/pre-commit` symlink 到 git-common-dir 的 hooks 目录(worktree-safe,一次装所有 worktree 共享)。每次 `git commit` 自动跑:
 
