@@ -4,6 +4,7 @@ use crate::state::SharedState;
 const INDEXER_DISABLED_MSG: &str =
     "search index disabled for this clone (set indexer.enabled=true in .gitim/config.yaml and restart daemon)";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_search(
     state: SharedState,
     query: Option<String>,

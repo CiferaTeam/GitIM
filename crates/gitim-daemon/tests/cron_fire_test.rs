@@ -170,12 +170,12 @@ async fn fire_already_exists_no_op() {
     let (_tmp, state, spec) = setup_with_spec("daily", "hi", None).await;
     let ts = Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap();
 
-    let _ = fire(&state, build_request("daily", &spec, ts))
+    fire(&state, build_request("daily", &spec, ts))
         .await
         .unwrap();
     let after_first = count_commits(&state.repo_root);
 
-    let _ = fire(&state, build_request("daily", &spec, ts))
+    fire(&state, build_request("daily", &spec, ts))
         .await
         .unwrap();
     let after_second = count_commits(&state.repo_root);

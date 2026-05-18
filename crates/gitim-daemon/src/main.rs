@@ -1,5 +1,4 @@
-#![deny(warnings)]
-#![allow(dead_code)]
+#![allow(dead_code, clippy::print_stdout, clippy::print_stderr)]
 
 use std::sync::Arc;
 use tokio::sync::broadcast;

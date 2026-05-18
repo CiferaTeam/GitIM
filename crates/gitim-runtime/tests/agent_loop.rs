@@ -1,3 +1,6 @@
+// Integration test — eprintln! used for test diagnostics.
+#![allow(clippy::print_stderr)]
+
 mod common;
 
 use gitim_runtime::agent_loop::detect_steering_trigger;
@@ -392,7 +395,6 @@ fn snapshot_billing_only_provider_falls_back_to_estimate() {
             cache_creation_tokens: None,
             context_tokens: Some(0),
             context_window_tokens: Some(0),
-            ..Default::default()
         }),
         11_185,
         Some(200_000),

@@ -65,6 +65,7 @@ pub async fn verify_token(token: &str, api_base: &str) -> Result<(), GithubError
 ///   - accounts with "Keep my email addresses private" set (the default
 ///     for new accounts), which keeps /user.email null regardless of
 ///     what the PAT is allowed to read
+///
 /// The noreply form is always verified on the account so the contribution
 /// graph still credits the user, and it requires no PAT scope at all.
 ///

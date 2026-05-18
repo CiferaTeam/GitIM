@@ -45,8 +45,8 @@ pub async fn handle_send(
     // branch — but the DM check has no meta.yaml to reach for, so we stat
     // the archived thread file directly. Resolve the canonical sorted-pair
     // stem via dm_filename so we never rely on caller ordering.
-    if channel.starts_with("dm:") {
-        let parts: Vec<&str> = channel[3..].split(',').collect();
+    if let Some(dm_rest) = channel.strip_prefix("dm:") {
+        let parts: Vec<&str> = dm_rest.split(',').collect();
         if parts.len() == 2 {
             // Both handlers must parse; resolve_thread_path below will produce
             // a clean error for malformed input. Skip the archive stat in that
@@ -105,8 +105,8 @@ pub async fn handle_send(
     let new_content = format_message(next_line, point_to, &handler, &now, &body);
 
     // Compute allowed_senders based on channel type
-    let allowed_senders: Vec<String> = if channel.starts_with("dm:") {
-        let participants: Vec<String> = channel[3..].split(',').map(|s| s.to_string()).collect();
+    let allowed_senders: Vec<String> = if let Some(dm_rest) = channel.strip_prefix("dm:") {
+        let participants: Vec<String> = dm_rest.split(',').map(|s| s.to_string()).collect();
         // Check both DM participants are registered users
         for p in &participants {
             if !user_list.contains(p) {

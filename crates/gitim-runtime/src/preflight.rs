@@ -1624,10 +1624,10 @@ pub async fn preflight_kimi_with_config(
             // need to parse all the variants here — any non-empty
             // `text` field under the `update.content` tree counts as
             // "the model is producing output".
-            if v.get("method").and_then(|m| m.as_str()) == Some("session/update") {
-                if find_text_chunk(&v) {
-                    return Ok(line.to_string());
-                }
+            if v.get("method").and_then(|m| m.as_str()) == Some("session/update")
+                && find_text_chunk(&v)
+            {
+                return Ok(line.to_string());
             }
         }
     };

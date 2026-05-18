@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::path::Path;
 use std::sync::Mutex;
 

@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 //! `gitim update` CLI orchestrator.
 //!
 //! All download / extract / replace logic lives in `gitim-updater`. This file

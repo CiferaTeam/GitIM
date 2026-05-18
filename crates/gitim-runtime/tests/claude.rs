@@ -1,3 +1,6 @@
+// Integration test — eprintln! used for test diagnostics.
+#![allow(clippy::print_stderr)]
+
 mod common;
 
 use common::short_tempdir;

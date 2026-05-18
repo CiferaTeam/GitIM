@@ -1,3 +1,6 @@
+//! CLI subcommands output to stdout/stderr by design.
+//! CliError has a large variant by necessity (holds preflight details).
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::result_large_err)]
 //! Shared infrastructure for the `gitim-runtime` one-shot CLI.
 //!
 //! Subcommand handlers (status, list-agents, add-agent, etc. — landing in

@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use gitim_client::ApiResponse;
 
 pub enum OutputMode {

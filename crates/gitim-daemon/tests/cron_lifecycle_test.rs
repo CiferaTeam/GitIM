@@ -135,10 +135,9 @@ fn git_status_clean(root: &std::path::Path) -> String {
 #[tokio::test]
 async fn disable_then_enable_roundtrip() {
     let (_tmp, state) = setup_test_repo().await;
-    create_cron(state.clone(), "weekly")
-        .await
-        .error
-        .map(|e| panic!("{}", e));
+    if let Some(e) = create_cron(state.clone(), "weekly").await.error {
+        panic!("{}", e);
+    }
 
     // Created enabled.
     let spec = read_spec(&state, "weekly");

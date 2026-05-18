@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 pub mod agent;
 pub mod agent_loop;
 pub mod background;

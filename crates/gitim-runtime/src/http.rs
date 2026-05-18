@@ -509,6 +509,7 @@ fn human_not_initialized() -> axum::response::Response {
     Json(ErrorBody::new("human daemon not initialized")).into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn with_workspace_snapshot<F, R>(
     state: &SharedRuntimeState,
     slug: &str,
@@ -522,6 +523,7 @@ where
     Ok(f(ctx))
 }
 
+#[allow(clippy::result_large_err)]
 fn with_workspace_mut<F, R>(
     state: &SharedRuntimeState,
     slug: &str,
@@ -598,6 +600,7 @@ fn human_repo_path(ctx: &crate::workspace::WorkspaceContext) -> Option<PathBuf> 
 
 // -- IM helpers --
 
+#[allow(clippy::result_large_err)]
 fn human_client(
     state: &SharedRuntimeState,
     slug: &str,
@@ -795,7 +798,7 @@ async fn im_poll(
     WorkspaceSlug(slug): WorkspaceSlug,
     Json(req): Json<PollRequest>,
 ) -> axum::response::Response {
-    let repo_root = match with_workspace_snapshot(&state, &slug, |ctx| human_repo_path(ctx)) {
+    let repo_root = match with_workspace_snapshot(&state, &slug, human_repo_path) {
         Ok(Some(p)) => p,
         Ok(None) => return human_not_initialized(),
         Err(r) => return r,
@@ -1070,6 +1073,7 @@ async fn im_update_card(
 /// CLI's `read_my_handler` — returns a structured JSON error the route can
 /// short-circuit on when the workspace isn't provisioned or the file is
 /// unreadable.
+#[allow(clippy::result_large_err)]
 fn human_handler(
     state: &SharedRuntimeState,
     slug: &str,
@@ -3302,10 +3306,10 @@ async fn agents_patch(
     // malformed payload doesn't leave the rest of the patch half-applied.
     // Empty / null both clear the field; the daemon will write "" to the
     // YAML on our behalf.
-    let introduction_patch: Option<String> = match &req.introduction {
-        None => None,
-        Some(opt) => Some(opt.clone().unwrap_or_default()),
-    };
+    let introduction_patch: Option<String> = req
+        .introduction
+        .as_ref()
+        .map(|opt| opt.clone().unwrap_or_default());
     if let Some(intro) = introduction_patch.as_deref() {
         if intro.len() > MAX_INTRODUCTION_LEN {
             return (
@@ -3642,6 +3646,7 @@ async fn agents_remove(
 ///      "depart complete". A daemon RPC failure short-circuits steps
 ///      4-7; the user retries and the daemon resumes from the first
 ///      incomplete phase
+///
 ///   4-7. delegate to [`cleanup_agent_runtime_side`]: kill daemon, rm -rf
 ///        clone, best-effort hermes profile delete, drop from `ctx.agents`,
 ///        broadcast `AgentActivityEvent::burned` SSE
@@ -5268,8 +5273,7 @@ async fn list_hermes_llm_models(
     }
 
     // Step 3 & 4: unknown or unreachable custom provider → 400.
-    let msg = if provider_id.starts_with("custom:") {
-        let name = &provider_id["custom:".len()..];
+    let msg = if let Some(name) = provider_id.strip_prefix("custom:") {
         format!("custom provider '{name}' not found in config.yaml")
     } else {
         format!("unknown provider id '{provider_id}'")

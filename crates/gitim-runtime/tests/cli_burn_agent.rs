@@ -9,7 +9,7 @@
 //! interesting bit:
 //!   * `hard=false` → `POST /workspaces/{slug}/agents/burn` (archive protocol)
 //!   * `hard=true`  → `POST /workspaces/{slug}/agents/remove` with
-//!                    `hard_delete: true` (quiet local-only delete)
+//!     `hard_delete: true` (quiet local-only delete)
 //!
 //! The pure `build_burn_request` helper has unit-test coverage in
 //! `cmd_burn_agent::tests`. These integration tests verify the *dispatched*

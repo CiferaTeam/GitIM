@@ -116,8 +116,8 @@ pub(super) fn resolve_thread_path(
     use gitim_core::dm::dm_filename;
     use gitim_core::types::{ChannelName, Handler};
 
-    if channel.starts_with("dm:") {
-        let parts: Vec<&str> = channel[3..].split(',').collect();
+    if let Some(dm_rest) = channel.strip_prefix("dm:") {
+        let parts: Vec<&str> = dm_rest.split(',').collect();
         if parts.len() != 2 {
             return Err(Response::error("DM format must be dm:handler1,handler2"));
         }

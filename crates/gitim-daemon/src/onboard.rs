@@ -811,6 +811,7 @@ mod tests {
 
     /// 3 bots onboard concurrently to the same repo, then each sends a message.
     /// Regardless of ordering, all 3 should succeed.
+    #[allow(clippy::print_stdout)]
     #[tokio::test]
     async fn three_bots_concurrent_onboard_and_send() {
         let tmp = tempfile::tempdir().unwrap();

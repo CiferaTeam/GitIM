@@ -7,6 +7,26 @@ version = "0.8.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[workspace.lints.rust]
+unused = { level = "deny", priority = -1 }
+deprecated = "deny"
+nonstandard_style = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# 纪律 lint(deny — bug / 草稿残留)
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# 纪律 lint(warn — 测试中合理,生产代码 review;后续逐步 deny)
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::process;
 
 use gitim_client::GitimClient;

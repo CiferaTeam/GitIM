@@ -248,18 +248,24 @@ mod tests {
 
     #[test]
     fn cursor_error_text_precedence() {
-        let mut evt = CursorStreamEvent::default();
-        evt.error_msg = Some("primary".to_string());
-        evt.detail = Some("fallback".to_string());
+        let evt = CursorStreamEvent {
+            error_msg: Some("primary".to_string()),
+            detail: Some("fallback".to_string()),
+            ..CursorStreamEvent::default()
+        };
         assert_eq!(cursor_error_text(&evt), "primary");
 
-        let mut evt = CursorStreamEvent::default();
-        evt.detail = Some("fallback".to_string());
-        evt.result_text = Some("third".to_string());
+        let evt = CursorStreamEvent {
+            detail: Some("fallback".to_string()),
+            result_text: Some("third".to_string()),
+            ..CursorStreamEvent::default()
+        };
         assert_eq!(cursor_error_text(&evt), "fallback");
 
-        let mut evt = CursorStreamEvent::default();
-        evt.result_text = Some("only".to_string());
+        let evt = CursorStreamEvent {
+            result_text: Some("only".to_string()),
+            ..CursorStreamEvent::default()
+        };
         assert_eq!(cursor_error_text(&evt), "only");
 
         let evt = CursorStreamEvent::default();
