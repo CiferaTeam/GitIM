@@ -1,4 +1,4 @@
-import { useRef, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useRef, useEffect, useLayoutEffect, useMemo, useState, type RefObject } from "react";
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
 import { MessageSquare, Hash } from "lucide-react";
@@ -17,6 +17,10 @@ interface MessageListProps {
   emptyHint?: string;
   /** Custom empty-state hint when scope is null. */
   noScopeHint?: string;
+  /** Optional external ref to the scroll container. When provided, the parent
+   *  can drive scroll behavior (e.g. the jump-to-latest button). When omitted,
+   *  an internal ref is used so existing tests stay green. */
+  scrollRef?: RefObject<HTMLDivElement | null>;
 
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
@@ -36,6 +40,12 @@ interface MessageListProps {
  *  Anything beyond this is regarded as still browsing the current page. */
 const SCROLL_TOP_THRESHOLD_PX = 50;
 
+/** How close to the bottom counts as "user is still pinned to latest" when
+ *  deciding whether a new appended message should drag them down. Matches
+ *  useScrollAtBottom's default so the jump-button visibility and the
+ *  auto-scroll decision agree. */
+const SCROLL_BOTTOM_THRESHOLD_PX = 80;
+
 export function MessageList({
   messages,
   scopeKey,
@@ -54,8 +64,10 @@ export function MessageList({
   onUserProfileClick,
   onActionSheet,
   onLoadOlder,
+  scrollRef: externalScrollRef,
 }: MessageListProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const internalScrollRef = useRef<HTMLDivElement>(null);
+  const scrollRef = externalScrollRef ?? internalScrollRef;
   // Track first line number, list length, and pre-mutation scrollHeight so we
   // can distinguish prepend (older history arrived at the head) from append
   // (anything growing the list — new live message, pending placeholder, poll
@@ -132,8 +144,21 @@ export function MessageList({
     // Length-based detection catches all three; line-number-based detection
     // would miss the pending case and the user's outbound message would
     // scroll off-screen.
+    //
+    // Only drag the user to the bottom if they were already pinned there;
+    // if they've scrolled up to read history, let the new message accumulate
+    // off-screen and surface the jump-to-latest button instead. Outbound
+    // pending messages always win — pressing Enter is an explicit "I want
+    // to see what I just sent" signal.
     if (newLength > prevLength) {
-      el.scrollTop = newScrollHeight;
+      const wasAtBottom =
+        prevScrollHeight === 0 || // first render with messages → snap to latest
+        prevScrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+      const lastMsg = messages[messages.length - 1];
+      const isOutbound = !!lastMsg?._pendingId;
+      if (wasAtBottom || isOutbound) {
+        el.scrollTop = newScrollHeight;
+      }
     }
   }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);
 

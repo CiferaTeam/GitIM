@@ -141,6 +141,21 @@ function stubScrollHeight(el: HTMLElement, value: number) {
   });
 }
 
+function stubClientHeight(el: HTMLElement, value: number) {
+  Object.defineProperty(el, "clientHeight", {
+    value,
+    configurable: true,
+  });
+}
+
+function stubScrollTop(el: HTMLElement, value: number) {
+  Object.defineProperty(el, "scrollTop", {
+    value,
+    writable: true,
+    configurable: true,
+  });
+}
+
 async function rerender(
   root: Root,
   props: Parameters<typeof MessageList>[0],
@@ -239,6 +254,59 @@ describe("MessageList scroll position on message mutations", () => {
 
     // Pending append MUST auto-scroll to the bottom, otherwise the user's
     // outbound message vanishes off-screen until the round-trip lands.
+    expect(scroll.scrollTop).toBe(800);
+  });
+
+  it("does NOT pull the user down when they've scrolled up and a non-outbound message arrives", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(10, "a"), msg(11, "b"), msg(12, "c")],
+      600,
+    );
+    // Simulate the user has scrolled up to read history. clientHeight is set
+    // so the wasAtBottom calc reads as "not at bottom": 600 - 100 - 400 = 100 > 80.
+    stubScrollTop(scroll, 100);
+    stubClientHeight(scroll, 400);
+    stubScrollHeight(scroll, 800);
+
+    await rerender(r, {
+      ...baseProps,
+      messages: [msg(10, "a"), msg(11, "b"), msg(12, "c"), msg(13, "d")],
+    });
+
+    // scrollTop must stay where the user left it — the jump-to-latest button
+    // will surface and they can opt in to seeing the new message.
+    expect(scroll.scrollTop).toBe(100);
+  });
+
+  it("pulls the user down even when scrolled up if the new message is outbound (pending)", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(10, "a"), msg(11, "b"), msg(12, "c")],
+      600,
+    );
+    // User scrolled up, same "not at bottom" geometry as the case above.
+    stubScrollTop(scroll, 100);
+    stubClientHeight(scroll, 400);
+    stubScrollHeight(scroll, 800);
+
+    await rerender(r, {
+      ...baseProps,
+      messages: [msg(10, "a"), msg(11, "b"), msg(12, "c"), pendingMsg()],
+    });
+
+    // Pressing Send is an explicit "I want to see what I just sent" signal,
+    // so the outbound branch wins over the scrolled-up state.
     expect(scroll.scrollTop).toBe(800);
   });
 
