@@ -4,10 +4,13 @@
 //! Reference: multica/server/pkg/agent/cursor.go (the Go decoder this is
 //! translated from).
 //!
-//! Provider semantics (defaults — no trait method overrides needed):
+//! Provider semantics:
 //! - `reports_usage() = true`   — cursor emits `step_finish` + `result` usage
 //! - `usage_is_cumulative() = false` — `result.usage` is one-turn total since
 //!   `execute()` only ever runs a single prompt turn
+//! - context-window occupancy is not provider-reported; Cursor token usage is
+//!   accounting-only across internal model calls, so the runtime estimator
+//!   drives the HUD
 //! - `self_managed_context() = false` — runtime owns the `[[RESET]]` channel
 //!   and occupancy preamble, same as claude/codex
 
@@ -113,7 +116,7 @@ impl Provider for CursorProvider {
 /// Build the argv vector for a one-shot `cursor-agent` invocation.
 /// Reference: multica/server/pkg/agent/cursor.go:397-422.
 ///
-/// Shape: `chat -p <merged_prompt> --output-format stream-json --yolo
+/// Shape: `--print --output-format stream-json --yolo
 ///   [--workspace <cwd>] [--model <m>] [--resume <id>]`
 ///
 /// `merged_prompt` = `system_prompt + "\n\n---\n\n" + prompt` when
@@ -125,9 +128,7 @@ pub(crate) fn build_args(prompt: &str, opts: &ExecOptions) -> Vec<String> {
         _ => prompt.to_string(),
     };
     let mut args = vec![
-        "chat".to_string(),
-        "-p".to_string(),
-        merged_prompt,
+        "--print".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--yolo".to_string(),
@@ -144,6 +145,7 @@ pub(crate) fn build_args(prompt: &str, opts: &ExecOptions) -> Vec<String> {
         args.push("--resume".to_string());
         args.push(resume.clone());
     }
+    args.push(merged_prompt);
     args
 }
 
@@ -263,6 +265,25 @@ async fn drive_session(
                                         output: evt.output.clone().unwrap_or_default(),
                                     });
                                 }
+                                "tool_call" => match evt.subtype.as_deref() {
+                                    Some("started") => {
+                                        if let Some(event) = cursor_tool_call_started(&evt) {
+                                            try_send_event(&event_tx, event);
+                                        }
+                                    }
+                                    Some("completed") => {
+                                        if let Some(event) = cursor_tool_call_completed(&evt) {
+                                            try_send_event(&event_tx, event);
+                                        }
+                                    }
+                                    _ => {
+                                        debug!(
+                                            pid,
+                                            subtype = ?evt.subtype,
+                                            "ignored cursor tool_call event"
+                                        );
+                                    }
+                                },
                                 "result" => {
                                     saw_result = true;
                                     // is_error or subtype="error" → fail-status.
@@ -500,6 +521,117 @@ fn handle_assistant_message(
     }
 }
 
+fn cursor_tool_call_started(evt: &CursorStreamEvent) -> Option<Event> {
+    let call_id = cursor_tool_call_id(evt);
+    let tool_call = evt.tool_call.as_ref()?;
+
+    if let Some(shell) = tool_call.get("shellToolCall") {
+        let args = shell.get("args").unwrap_or(&serde_json::Value::Null);
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let mut input = serde_json::Map::new();
+        if !command.is_empty() {
+            input.insert(
+                "command".to_string(),
+                serde_json::Value::String(command.to_string()),
+            );
+        }
+        if let Some(cwd) = args.get("workingDirectory").and_then(|v| v.as_str()) {
+            if !cwd.is_empty() {
+                input.insert(
+                    "workingDirectory".to_string(),
+                    serde_json::Value::String(cwd.to_string()),
+                );
+            }
+        }
+        if let Some(timeout) = args.get("timeout").and_then(|v| v.as_i64()) {
+            input.insert(
+                "timeout".to_string(),
+                serde_json::Value::Number(timeout.into()),
+            );
+        }
+        if input.is_empty() {
+            return None;
+        }
+        return Some(Event::ToolUse {
+            tool: "Bash".to_string(),
+            call_id,
+            input: serde_json::Value::Object(input),
+        });
+    }
+
+    let obj = tool_call.as_object()?;
+    let (raw_name, payload) = obj.iter().next()?;
+    Some(Event::ToolUse {
+        tool: cursor_tool_name(raw_name),
+        call_id,
+        input: payload.clone(),
+    })
+}
+
+fn cursor_tool_call_completed(evt: &CursorStreamEvent) -> Option<Event> {
+    let call_id = cursor_tool_call_id(evt);
+    let tool_call = evt.tool_call.as_ref()?;
+
+    if let Some(shell) = tool_call.get("shellToolCall") {
+        return Some(Event::ToolResult {
+            call_id,
+            output: cursor_shell_tool_output(shell),
+        });
+    }
+
+    Some(Event::ToolResult {
+        call_id,
+        output: tool_call.to_string(),
+    })
+}
+
+fn cursor_tool_call_id(evt: &CursorStreamEvent) -> String {
+    evt.call_id
+        .clone()
+        .or_else(|| evt.tool_id.clone())
+        .unwrap_or_default()
+}
+
+fn cursor_tool_name(raw: &str) -> String {
+    if raw == "shellToolCall" {
+        return "Bash".to_string();
+    }
+    raw.strip_suffix("ToolCall").unwrap_or(raw).to_string()
+}
+
+fn cursor_shell_tool_output(shell: &serde_json::Value) -> String {
+    let Some(result) = shell.get("result") else {
+        return String::new();
+    };
+
+    if let Some(success) = result.get("success") {
+        if let Some(output) = success.get("interleavedOutput").and_then(|v| v.as_str()) {
+            if !output.is_empty() {
+                return output.to_string();
+            }
+        }
+
+        let stdout = success.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        let stderr = success.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+        if stdout.is_empty() {
+            return stderr.to_string();
+        }
+        if stderr.is_empty() {
+            return stdout.to_string();
+        }
+        return format!("{stdout}\n{stderr}");
+    }
+
+    if let Some(error) = result.get("error") {
+        if let Some(message) = error.as_str() {
+            return message.to_string();
+        }
+        return error.to_string();
+    }
+
+    result.to_string()
+}
+
 fn cursor_to_provider_usage(u: &CursorUsage) -> ProviderUsage {
     ProviderUsage {
         input_tokens: Some(u.input_tokens),
@@ -507,8 +639,12 @@ fn cursor_to_provider_usage(u: &CursorUsage) -> ProviderUsage {
         used_percent: None,
         cache_read_tokens: Some(u.cache_read_input_tokens),
         cache_creation_tokens: None,
-        context_tokens: None,
-        context_window_tokens: None,
+        // Cursor's result usage is a billing/accounting total across internal
+        // agent model calls, not current prompt occupancy. Mark the context
+        // window unavailable so compute_snapshot falls back to the runtime
+        // estimator while still accumulating token usage.
+        context_tokens: Some(0),
+        context_window_tokens: Some(0),
     }
 }
 
@@ -519,6 +655,8 @@ fn accumulate_step_usage(acc: &mut ProviderUsage, part: &CursorStepFinishPart) {
     acc.input_tokens = Some(acc.input_tokens.unwrap_or(0) + input);
     acc.output_tokens = Some(acc.output_tokens.unwrap_or(0) + output);
     acc.cache_read_tokens = Some(acc.cache_read_tokens.unwrap_or(0) + cache_read);
+    acc.context_tokens = Some(0);
+    acc.context_window_tokens = Some(0);
 }
 
 // ── Cursor stream-json internal types ──
@@ -580,14 +718,7 @@ mod tests {
         let args = build_args("hi", &ExecOptions::default());
         assert_eq!(
             args,
-            vec![
-                "chat",
-                "-p",
-                "hi",
-                "--output-format",
-                "stream-json",
-                "--yolo"
-            ]
+            vec!["--print", "--output-format", "stream-json", "--yolo", "hi",]
         );
     }
 
@@ -598,7 +729,7 @@ mod tests {
             ..Default::default()
         };
         let args = build_args("hi", &opts);
-        assert_eq!(args[2], "sys\n\n---\n\nhi");
+        assert_eq!(args.last().map(String::as_str), Some("sys\n\n---\n\nhi"));
     }
 
     #[test]
@@ -608,7 +739,7 @@ mod tests {
             ..Default::default()
         };
         let args = build_args("hi", &opts);
-        assert_eq!(args[2], "hi");
+        assert_eq!(args.last().map(String::as_str), Some("hi"));
     }
 
     #[test]
@@ -625,6 +756,62 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--model", "claude-sonnet-4-6"]));
         assert!(args.windows(2).any(|w| w == ["--resume", "sess-abc"]));
+    }
+
+    #[test]
+    fn maps_real_cursor_shell_tool_call_started_to_bash() {
+        let evt = parse_event(
+            r#"{"type":"tool_call","subtype":"started","call_id":"tool-1","tool_call":{"shellToolCall":{"args":{"command":"printf ok","workingDirectory":"/tmp","timeout":30000},"description":"Print ok"}}}"#,
+        )
+        .unwrap();
+
+        let event = cursor_tool_call_started(&evt).unwrap();
+        match event {
+            Event::ToolUse {
+                tool,
+                call_id,
+                input,
+            } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(call_id, "tool-1");
+                assert_eq!(input["command"], "printf ok");
+                assert_eq!(input["workingDirectory"], "/tmp");
+                assert_eq!(input["timeout"], 30000);
+            }
+            _ => panic!("expected tool use"),
+        }
+    }
+
+    #[test]
+    fn maps_real_cursor_shell_tool_call_completed_to_tool_result() {
+        let evt = parse_event(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"tool-1","tool_call":{"shellToolCall":{"result":{"success":{"stdout":"ok","stderr":"","interleavedOutput":"ok","exitCode":0}}}}}"#,
+        )
+        .unwrap();
+
+        let event = cursor_tool_call_completed(&evt).unwrap();
+        match event {
+            Event::ToolResult { call_id, output } => {
+                assert_eq!(call_id, "tool-1");
+                assert_eq!(output, "ok");
+            }
+            _ => panic!("expected tool result"),
+        }
+    }
+
+    #[test]
+    fn result_usage_marks_context_window_unavailable() {
+        let usage = cursor_to_provider_usage(&CursorUsage {
+            input_tokens: 109_725,
+            output_tokens: 888,
+            cache_read_input_tokens: 31_840,
+        });
+
+        assert_eq!(usage.input_tokens, Some(109_725));
+        assert_eq!(usage.output_tokens, Some(888));
+        assert_eq!(usage.cache_read_tokens, Some(31_840));
+        assert_eq!(usage.context_tokens, Some(0));
+        assert_eq!(usage.context_window_tokens, Some(0));
     }
 
     #[test]

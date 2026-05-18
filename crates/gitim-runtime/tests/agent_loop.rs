@@ -378,6 +378,39 @@ fn snapshot_cumulative_provider_with_huge_input_falls_back_to_estimate() {
 }
 
 #[test]
+fn snapshot_billing_only_provider_falls_back_to_estimate() {
+    // Cursor reports billing totals across all internal model calls in one
+    // agent step. That is correct for the daily usage bucket, but it can be
+    // far larger than the live context window after a few tool calls.
+    let snap = compute_snapshot(
+        "sess-cursor",
+        Some(&ProviderUsage {
+            input_tokens: Some(109_725),
+            output_tokens: Some(888),
+            used_percent: None,
+            cache_read_tokens: Some(0),
+            cache_creation_tokens: None,
+            context_tokens: Some(0),
+            context_window_tokens: Some(0),
+            ..Default::default()
+        }),
+        11_185,
+        Some(200_000),
+        false,
+        "2026-05-17T16:20:49Z",
+    )
+    .expect("snapshot");
+
+    assert!(
+        (snap.used_percent - 5.59).abs() < 0.05,
+        "got {}, want ~5.59",
+        snap.used_percent
+    );
+    assert!(matches!(snap.source, UsageSource::RuntimeEstimated));
+    assert!(snap.input_tokens.is_none());
+}
+
+#[test]
 fn snapshot_cumulative_provider_still_honors_explicit_used_percent() {
     // Even when usage_is_cumulative=true, an explicit `used_percent` from
     // the provider stays authoritative — that field is computed by the

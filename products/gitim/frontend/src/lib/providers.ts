@@ -156,6 +156,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   },
   cursor: {
     label: "Cursor",
+    runtimeModels: true,
     supportsDefaultModel: true,
     supportsCustomModel: true,
     customModelHint: "model id accepted by cursor-agent --model",

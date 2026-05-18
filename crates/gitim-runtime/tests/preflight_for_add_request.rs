@@ -172,6 +172,55 @@ async fn claude_dispatch_passes_env_and_model_overrides() {
     );
 }
 
+// ─── cursor dispatch ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cursor_dispatch_uses_print_stream_json_and_passes_env_model() {
+    let tmp = TempDir::new().unwrap();
+    let capture = tmp.path().join("argv.txt");
+    let script = make_capture_script(
+        tmp.path(),
+        "fake_cursor.sh",
+        &capture,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        &["CURSOR_TEST_KEY"],
+    );
+
+    let mut env = HashMap::new();
+    env.insert("CURSOR_TEST_KEY".to_string(), "cursor-env-here".to_string());
+
+    let overrides = PreflightDispatchOverrides {
+        cursor_bin: Some(script.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
+    let result = preflight_for_add_request_with_overrides(
+        "cursor",
+        Some(&env),
+        Some("composer-2-fast"),
+        None,
+        None,
+        overrides,
+    )
+    .await;
+
+    assert!(result.available, "preflight should succeed, got {result:?}");
+    assert_eq!(result.provider, "cursor");
+    assert_eq!(result.model_used.as_deref(), Some("composer-2-fast"));
+
+    let captured = std::fs::read_to_string(&capture).unwrap();
+    assert!(
+        captured.contains(
+            "ARGV=--print --output-format stream-json --yolo --model composer-2-fast say hi"
+        ),
+        "expected current cursor-agent print argv, got: {captured}"
+    );
+    assert!(
+        captured.contains("CURSOR_TEST_KEY=cursor-env-here"),
+        "expected env override at child env, got: {captured}"
+    );
+}
+
 // ─── hermes dispatch ────────────────────────────────────────────────────────
 
 #[tokio::test]

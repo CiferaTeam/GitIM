@@ -29,6 +29,11 @@ pub struct CursorStreamEvent {
     pub tool_id: Option<String>,
     #[serde(default)]
     pub parameters: Option<Value>,
+    /// For real cursor-agent `tool_call` envelopes.
+    #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
+    pub tool_call: Option<Value>,
     /// For `tool_result` standalone envelopes.
     #[serde(default)]
     pub output: Option<String>,
@@ -52,14 +57,19 @@ pub struct CursorStreamEvent {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct CursorUsage {
-    #[serde(default)]
+    #[serde(default, alias = "inputTokens")]
     pub input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, alias = "outputTokens")]
     pub output_tokens: u64,
     /// Note: multica uses `cached_input_tokens` here (cursor.go:325), not
     /// `cache_read_input_tokens`. Accept both names for resilience — the
     /// rename is documented in cursor.go but the field name may drift.
-    #[serde(default, alias = "cached_input_tokens")]
+    #[serde(
+        default,
+        alias = "cached_input_tokens",
+        alias = "cacheReadTokens",
+        alias = "cache_read_tokens"
+    )]
     pub cache_read_input_tokens: u64,
 }
 
@@ -165,12 +175,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_real_tool_call_envelope() {
+        let e = parse_event(
+            r#"{"type":"tool_call","subtype":"started","call_id":"t1","tool_call":{"shellToolCall":{"args":{"command":"printf ok"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(e.r#type, "tool_call");
+        assert_eq!(e.subtype.as_deref(), Some("started"));
+        assert_eq!(e.call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            e.tool_call
+                .unwrap()
+                .get("shellToolCall")
+                .unwrap()
+                .get("args")
+                .unwrap()
+                .get("command")
+                .unwrap(),
+            "printf ok"
+        );
+    }
+
+    #[test]
     fn parses_result_with_usage() {
         let e = parse_event(
             r#"{"type":"result","session_id":"s1","usage":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":20},"model":"claude-sonnet-4-6"}"#,
         )
         .unwrap();
         assert_eq!(e.session_id.as_deref(), Some("s1"));
+        let u = e.usage.unwrap();
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn parses_result_with_cursor_camel_case_usage() {
+        let e = parse_event(
+            r#"{"type":"result","session_id":"s1","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":20},"model":"Composer 2 Fast"}"#,
+        )
+        .unwrap();
+
         let u = e.usage.unwrap();
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.output_tokens, 50);

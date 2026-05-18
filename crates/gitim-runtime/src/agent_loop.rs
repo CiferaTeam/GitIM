@@ -1276,6 +1276,8 @@ pub fn compute_snapshot(
             (pu.context_tokens, pu.context_window_tokens)
         {
             if context_window == 0 {
+                // Some providers, currently Cursor, report useful accounting
+                // tokens but no meaningful live context-window signal.
                 return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
             }
             (

@@ -1700,7 +1700,7 @@ pub async fn preflight_kimi() -> PreflightResult {
 ///
 /// Flow:
 /// 1. Spawn `cursor-agent --version` to capture the version string (best-effort).
-/// 2. Spawn `cursor-agent chat -p "say hi" --output-format stream-json --yolo
+/// 2. Spawn `cursor-agent --print --output-format stream-json --yolo "say hi"
 ///    [--model <m>]`, read stdout line-by-line for the first `assistant` /
 ///    `text` / `result` event; kill on first hit.
 /// 3. Bail with the appropriate [`ErrorKind`] on missing binary / timeout /
@@ -1755,9 +1755,7 @@ pub async fn preflight_cursor_with_config(
 
     // 2. Spawn the real hello.
     let mut cmd = TokioCommand::new(bin);
-    cmd.arg("chat")
-        .arg("-p")
-        .arg("say hi")
+    cmd.arg("--print")
         .arg("--output-format")
         .arg("stream-json")
         .arg("--yolo")
@@ -1767,6 +1765,7 @@ pub async fn preflight_cursor_with_config(
     if let Some(ref m) = overrides.model_override {
         cmd.arg("--model").arg(m);
     }
+    cmd.arg("say hi");
     if let Some(env) = &overrides.env_override {
         cmd.envs(env);
     }

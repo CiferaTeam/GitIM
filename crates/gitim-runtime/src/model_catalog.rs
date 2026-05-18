@@ -7,6 +7,7 @@ use std::time::Duration;
 const DEFAULT_BIN_CODEX: &str = "codex";
 const DEFAULT_BIN_OPENCODE: &str = "opencode";
 const DEFAULT_BIN_PI: &str = "pi";
+const DEFAULT_BIN_CURSOR: &str = "cursor-agent";
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub struct ModelCatalogOverrides {
     pub codex_bin: Option<String>,
     pub opencode_bin: Option<String>,
     pub pi_bin: Option<String>,
+    pub cursor_bin: Option<String>,
 }
 
 #[async_trait]
@@ -74,6 +76,15 @@ pub async fn list_provider_models_with_overrides(
             .list_models()
             .await
         }
+        "cursor" => {
+            CursorCatalog {
+                bin: overrides
+                    .cursor_bin
+                    .unwrap_or_else(|| DEFAULT_BIN_CURSOR.to_string()),
+            }
+            .list_models()
+            .await
+        }
         "claude" => fallback_catalog(
             "claude",
             "claude_custom_model",
@@ -89,14 +100,6 @@ pub async fn list_provider_models_with_overrides(
             false,
             None,
             Some("Hermes models are exposed through /hermes/llm providers routes".to_string()),
-        ),
-        "cursor" => fallback_catalog(
-            "cursor",
-            "cursor_custom_model",
-            true,
-            true,
-            Some("model id accepted by cursor-agent --model".to_string()),
-            None,
         ),
         "kimi" => fallback_catalog(
             "kimi",
@@ -217,6 +220,35 @@ impl ModelCatalogProvider for PiCatalog {
     }
 }
 
+struct CursorCatalog {
+    bin: String,
+}
+
+#[async_trait]
+impl ModelCatalogProvider for CursorCatalog {
+    async fn list_models(&self) -> ModelCatalogResult {
+        match run_catalog_command(&self.bin, &["models"]).await {
+            Ok(stdout) => fallback_catalog(
+                "cursor",
+                "cursor_models",
+                true,
+                true,
+                Some("model id accepted by cursor-agent --model".to_string()),
+                None,
+            )
+            .with_models(parse_cursor_models(&stdout)),
+            Err(error) => fallback_catalog(
+                "cursor",
+                "cursor_models",
+                true,
+                true,
+                Some("model id accepted by cursor-agent --model".to_string()),
+                Some(error),
+            ),
+        }
+    }
+}
+
 impl ModelCatalogResult {
     fn with_models(mut self, models: Vec<ModelOption>) -> Self {
         self.models = models;
@@ -322,6 +354,38 @@ pub fn parse_pi_models(stdout: &str) -> Vec<ModelOption> {
         out.push(ModelOption {
             label: id.clone(),
             id,
+        });
+    }
+
+    out
+}
+
+pub fn parse_cursor_models(stdout: &str) -> Vec<ModelOption> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line == "Available models"
+            || line.starts_with("Tip:")
+            || line.starts_with("No models")
+        {
+            continue;
+        }
+
+        let Some((id, label)) = line.split_once(" - ") else {
+            continue;
+        };
+        let id = id.trim();
+        let label = label.trim();
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+
+        out.push(ModelOption {
+            id: id.to_string(),
+            label: label.to_string(),
         });
     }
 

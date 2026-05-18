@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::ClientError;
 
-const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_millis(5000);
+const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const STALE_FILES: &[&str] = &["gitim.pid", "gitim.sock", "gitim.port", "gitim.lock"];
