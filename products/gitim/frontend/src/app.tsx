@@ -23,9 +23,12 @@ import { useIsMobile } from "./hooks/use-media-query";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type {
   Agent,
+  ApiResponse,
   BoardSummary,
   Card,
   Channel,
+  FleetAgentSnapshot,
+  FleetNodeStatus,
   Message,
   PollChange,
 } from "./lib/types";
@@ -39,6 +42,12 @@ import { Toaster, toast } from "sonner";
 
 const POLL_INTERVAL_MS = 3000;
 const LOCAL_POLL_INTERVAL_MS = 7000;
+
+type AgentSnapshotResponses = {
+  agentsRes: ApiResponse<{ agents: Agent[] }>;
+  fleetAgentsRes: ApiResponse<{ agents: FleetAgentSnapshot[] }>;
+  fleetStatusRes: ApiResponse<{ nodes: FleetNodeStatus[] }>;
+};
 
 // Consecutive connectivity failures (fetch-level) before we flip the
 // header dot red. At 3s cadence, 3 fails ≈ 9s of unreachability.
@@ -206,6 +215,10 @@ export default function App() {
   const channelsRef = useRef<Channel[]>([]);
   const activeSlugRef = useRef<string | null>(null);
   const locationPathRef = useRef(location.pathname);
+  const agentSnapshotRequestRef = useRef<{
+    workspaceKey: string;
+    promise: Promise<AgentSnapshotResponses | null>;
+  } | null>(null);
 
   // Transport failures: fetch throws because the runtime port is gone.
   const consecutiveTransportFailuresRef = useRef(0);
@@ -275,6 +288,48 @@ export default function App() {
     }
   }, [setConnected, setConnectionStatus]);
 
+  const fetchAgentSnapshots = useCallback(
+    (slug: string, workspaceKey: string): Promise<AgentSnapshotResponses | null> => {
+      if (mode !== "remote") return Promise.resolve(null);
+
+      const inFlight = agentSnapshotRequestRef.current;
+      if (inFlight?.workspaceKey === workspaceKey) return inFlight.promise;
+
+      const promise = Promise.all([
+        client.listAgents(slug) as Promise<ApiResponse<{ agents: Agent[] }>>,
+        client.listFleetAgents(),
+        client.listFleetStatus(),
+      ])
+        .then(([agentsRes, fleetAgentsRes, fleetStatusRes]) => ({
+          agentsRes,
+          fleetAgentsRes,
+          fleetStatusRes,
+        }))
+        .finally(() => {
+          if (agentSnapshotRequestRef.current?.promise === promise) {
+            agentSnapshotRequestRef.current = null;
+          }
+        });
+
+      agentSnapshotRequestRef.current = { workspaceKey, promise };
+      return promise;
+    },
+    [mode],
+  );
+
+  const applyAgentSnapshots = useCallback(
+    (snapshot: AgentSnapshotResponses | null) => {
+      if (!snapshot) return;
+      const { agentsRes, fleetAgentsRes, fleetStatusRes } = snapshot;
+      if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents);
+      if (fleetAgentsRes.ok && fleetAgentsRes.data)
+        setFleetAgents(fleetAgentsRes.data.agents);
+      if (fleetStatusRes.ok && fleetStatusRes.data)
+        setFleetStatuses(fleetStatusRes.data.nodes);
+    },
+    [setAgents, setFleetAgents, setFleetStatuses],
+  );
+
   const reloadActiveWorkspaceState = useCallback(
     async (
       slug: string,
@@ -298,9 +353,7 @@ export default function App() {
         meRes,
         channelsRes,
         usersRes,
-        agentsRes,
-        fleetAgentsRes,
-        fleetStatusRes,
+        agentSnapshot,
         cardsRes,
         boardsRes,
         archivedCardsRes,
@@ -308,15 +361,7 @@ export default function App() {
         client.me(slug),
         client.channels(slug),
         client.users(slug),
-        mode === "remote"
-          ? client.listAgents(slug)
-          : Promise.resolve({ ok: true, data: { agents: [] } }),
-        mode === "remote"
-          ? client.listFleetAgents()
-          : Promise.resolve({ ok: true, data: { agents: [] } }),
-        mode === "remote"
-          ? client.listFleetStatus()
-          : Promise.resolve({ ok: true, data: { nodes: [] } }),
+        fetchAgentSnapshots(slug, workspaceKey),
         client.listCards(slug),
         client.listBoards(slug),
         client.listArchivedCards(slug),
@@ -328,7 +373,7 @@ export default function App() {
           meRes,
           channelsRes,
           usersRes,
-          agentsRes,
+          ...(agentSnapshot ? [agentSnapshot.agentsRes] : []),
           cardsRes,
           boardsRes,
           archivedCardsRes,
@@ -425,11 +470,7 @@ export default function App() {
       if (meRes.ok && meRes.data) setCurrentUser(meRes.data.handler as string);
       if (channelsRes.ok && channelsRes.data) setChannels(nextChannels);
       if (usersRes.ok && usersRes.data) setUsers(usersRes.data.users as string[]);
-      if (agentsRes.ok && agentsRes.data) setAgents(agentsRes.data.agents as Agent[]);
-      if (fleetAgentsRes.ok && fleetAgentsRes.data)
-        setFleetAgents(fleetAgentsRes.data.agents);
-      if (fleetStatusRes.ok && fleetStatusRes.data)
-        setFleetStatuses(fleetStatusRes.data.nodes);
+      applyAgentSnapshots(agentSnapshot);
       if (cardsRes.ok && cardsRes.data) {
         const cards = cardsRes.data.cards as Card[];
         if (options.preserveSelection) {
@@ -472,7 +513,7 @@ export default function App() {
         meRes.ok &&
         channelsRes.ok &&
         usersRes.ok &&
-        agentsRes.ok &&
+        (agentSnapshot === null || agentSnapshot.agentsRes.ok) &&
         cardsRes.ok &&
         boardsRes.ok &&
         archivedCardsRes.ok &&
@@ -482,14 +523,12 @@ export default function App() {
       );
     },
     [
-      mode,
+      applyAgentSnapshots,
+      fetchAgentSnapshots,
       refreshAfterActiveUnavailable,
       setCurrentUser,
       setChannels,
       setUsers,
-      setAgents,
-      setFleetAgents,
-      setFleetStatuses,
       setCards,
       mergeCards,
       setArchivedCards,
@@ -725,24 +764,6 @@ export default function App() {
         }
       }
 
-      if (mode === "remote") {
-        const [agentsRes, fleetAgentsRes, fleetStatusRes] = await Promise.all([
-          client.listAgents(slug),
-          client.listFleetAgents(),
-          client.listFleetStatus(),
-        ]);
-        if (!isCurrentPollTarget()) return;
-        if (agentsRes.ok && agentsRes.data) {
-          setAgents(agentsRes.data.agents as Agent[]);
-        }
-        if (fleetAgentsRes.ok && fleetAgentsRes.data) {
-          setFleetAgents(fleetAgentsRes.data.agents);
-        }
-        if (fleetStatusRes.ok && fleetStatusRes.data) {
-          setFleetStatuses(fleetStatusRes.data.nodes);
-        }
-      }
-
       // Periodically refresh the roster so DM/Create-Channel pickers see
       // agents that were provisioned mid-session (on this or another clone).
       // Initial `client.users` ran once during init; without a refresh the
@@ -777,9 +798,6 @@ export default function App() {
     invalidateArchivedChannelsView,
     markDmArchived,
     markDmUnarchived,
-    setAgents,
-    setFleetAgents,
-    setFleetStatuses,
     setUsers,
     setBoards,
     setSelectedBoard,
@@ -940,6 +958,43 @@ export default function App() {
     markTransportUnavailable,
     reloadActiveWorkspaceState,
     runPoll,
+  ]);
+
+  useEffect(() => {
+    const isManagementRoute =
+      location.pathname === "/management" ||
+      location.pathname.startsWith("/management/");
+    if (!isManagementRoute) return;
+    if (mode !== "remote" || !activeSlug || !activeWorkspaceIdentity) return;
+    if (workspaceRef.current !== activeWorkspaceIdentity) return;
+
+    let cancelled = false;
+    fetchAgentSnapshots(activeSlug, activeWorkspaceIdentity)
+      .then((snapshot) => {
+        if (
+          cancelled ||
+          activeSlug !== activeSlugRef.current ||
+          activeWorkspaceIdentity !== workspaceRef.current
+        ) {
+          return;
+        }
+        applyAgentSnapshots(snapshot);
+      })
+      .catch(() => {
+        if (!cancelled) markTransportUnavailable();
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSlug,
+    activeWorkspaceIdentity,
+    applyAgentSnapshots,
+    fetchAgentSnapshots,
+    location.pathname,
+    markTransportUnavailable,
+    mode,
   ]);
 
   // /docs is a standalone reference — let it render regardless of workspace

@@ -28,6 +28,7 @@ describe("getVisibleNavigationItems", () => {
       "Cards",
       "Boards",
       "周期任务",
+      "Flows",
     ]);
   });
 

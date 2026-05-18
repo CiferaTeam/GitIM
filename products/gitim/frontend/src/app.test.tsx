@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useLocation } from "react-router";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import type { Message } from "./lib/types";
 
 const mocks = vi.hoisted(() => ({
@@ -119,6 +119,14 @@ vi.mock("./components/crons/cron-calendar", () => ({
   CronCalendar: () => null,
 }));
 
+vi.mock("./components/flows/flows-view", () => ({
+  FlowsView: () => null,
+}));
+
+vi.mock("./components/flows/run-detail", () => ({
+  RunDetail: () => null,
+}));
+
 vi.mock("./components/management/agent-detail", () => ({
   AgentDetail: () => null,
 }));
@@ -144,6 +152,18 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 function LocationProbe({ onPath }: { onPath: (path: string) => void }) {
   const location = useLocation();
   onPath(location.pathname);
+  return null;
+}
+
+function NavigationProbe({
+  onNavigate,
+}: {
+  onNavigate: (navigate: (to: string) => void) => void;
+}) {
+  const navigate = useNavigate();
+  onNavigate((to) => {
+    navigate(to);
+  });
   return null;
 }
 
@@ -339,5 +359,68 @@ describe("App card thread toasts", () => {
     });
 
     expect(currentPath).toBe("/cards/general/card-123456789");
+  });
+
+  it("does not refresh local or fleet agents on every poll tick", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    expect(mocks.client.listAgents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.listFleetAgents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.listFleetStatus).toHaveBeenCalledTimes(1);
+
+    mocks.client.listAgents.mockClear();
+    mocks.client.listFleetAgents.mockClear();
+    mocks.client.listFleetStatus.mockClear();
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    expect(mocks.client.poll).toHaveBeenCalled();
+    expect(mocks.client.listAgents).not.toHaveBeenCalled();
+    expect(mocks.client.listFleetAgents).not.toHaveBeenCalled();
+    expect(mocks.client.listFleetStatus).not.toHaveBeenCalled();
+  });
+
+  it("refreshes local and fleet agents when entering management", async () => {
+    let navigateTo: (to: string) => void = () => {};
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <NavigationProbe onNavigate={(navigate) => { navigateTo = navigate; }} />
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    mocks.client.listAgents.mockClear();
+    mocks.client.listFleetAgents.mockClear();
+    mocks.client.listFleetStatus.mockClear();
+
+    await act(async () => {
+      navigateTo("/management");
+      await flushPromises();
+    });
+
+    expect(mocks.client.listAgents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.listFleetAgents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.listFleetStatus).toHaveBeenCalledTimes(1);
   });
 });

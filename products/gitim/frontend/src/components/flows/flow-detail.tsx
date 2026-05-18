@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { useFlowStore } from "@/hooks/use-flow-store";
@@ -8,9 +8,10 @@ import * as client from "@/lib/client";
 import type { FlowDocument, FlowRunSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { FlowDAG } from "./flow-dag";
-
 const ReactMarkdown = lazy(() => import("react-markdown"));
+const FlowDAG = lazy(() =>
+  import("./flow-dag").then((m) => ({ default: m.FlowDAG })),
+);
 
 export function FlowDetail({
   doc,
@@ -126,7 +127,15 @@ export function FlowDetail({
         <section>
           <h3 className="mb-2 text-sm font-semibold">DAG</h3>
           <div className="rounded-md border border-border bg-card p-4 overflow-x-auto">
-            <FlowDAG nodes={doc.nodes} />
+            <Suspense
+              fallback={
+                <div className="text-xs text-muted-foreground">
+                  Loading diagram...
+                </div>
+              }
+            >
+              <FlowDAG nodes={doc.nodes} />
+            </Suspense>
           </div>
         </section>
 

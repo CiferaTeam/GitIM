@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import { listFlowRuns } from "@/lib/client";
