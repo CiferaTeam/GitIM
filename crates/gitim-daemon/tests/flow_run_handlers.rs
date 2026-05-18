@@ -446,3 +446,22 @@ async fn run_list_filters_by_channel() {
     let runs = r.data.unwrap()["runs"].as_array().unwrap().clone();
     assert_eq!(runs.len(), 0, "expected 0 runs for unknown channel");
 }
+
+#[tokio::test]
+async fn run_list_rejects_invalid_status_filter() {
+    let (_tmp, state) = setup().await;
+    let r = gitim_daemon::flow_run_handlers::handle_flow_run_list(
+        state,
+        None,
+        None,
+        Some("donee".into()),
+    )
+    .await;
+    assert!(!r.ok, "expected error, got: {:?}", r.data);
+    assert_eq!(r.error_code.as_deref(), Some("invalid_status"));
+    assert!(
+        r.error.as_deref().unwrap_or("").contains("invalid status"),
+        "expected 'invalid status' in error: {:?}",
+        r.error
+    );
+}

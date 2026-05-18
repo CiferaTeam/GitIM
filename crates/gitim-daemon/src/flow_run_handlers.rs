@@ -136,6 +136,22 @@ pub async fn handle_flow_run_list(
     channel_filter: Option<String>,
     status_filter: Option<String>,
 ) -> Response {
+    let status_filter_parsed = match status_filter.as_deref() {
+        None => None,
+        Some("in_progress") => Some(RunStatus::InProgress),
+        Some("done") => Some(RunStatus::Done),
+        Some("failed") => Some(RunStatus::Failed),
+        Some("cancelled") => Some(RunStatus::Cancelled),
+        Some(other) => {
+            return Response::error_with_code(
+                format!(
+                    "invalid status: {} (expected in_progress|done|failed|cancelled)",
+                    other
+                ),
+                "invalid_status",
+            );
+        }
+    };
     let flows_root = state.repo_root.join("flows");
     let mut summaries = Vec::new();
     if !flows_root.exists() {
@@ -182,14 +198,7 @@ pub async fn handle_flow_run_list(
                     continue;
                 }
             }
-            if let Some(ref st) = status_filter {
-                let want = match st.as_str() {
-                    "in_progress" => RunStatus::InProgress,
-                    "done" => RunStatus::Done,
-                    "failed" => RunStatus::Failed,
-                    "cancelled" => RunStatus::Cancelled,
-                    _ => continue,
-                };
+            if let Some(want) = status_filter_parsed {
                 if run.status != want {
                     continue;
                 }
