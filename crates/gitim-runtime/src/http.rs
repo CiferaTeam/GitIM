@@ -2147,29 +2147,26 @@ fn flow_raw_data_response(
             let data = resp.data.unwrap_or(serde_json::Value::Null);
             Json(data).into_response()
         }
-        Ok(resp) => {
-            let body = match resp.error_code {
-                Some(ref code) if code == "not_found" => (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(ErrorBody::with_code(
-                        resp.error.unwrap_or_default(),
-                        code.clone(),
-                    )),
-                )
-                    .into_response(),
-                Some(c) => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
-                )
-                    .into_response(),
-                None => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
-                )
-                    .into_response(),
-            };
-            body
-        }
+        Ok(resp) => match resp.error_code {
+            Some(ref code) if code == "not_found" => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(ErrorBody::with_code(
+                    resp.error.unwrap_or_default(),
+                    code.clone(),
+                )),
+            )
+                .into_response(),
+            Some(c) => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+            )
+                .into_response(),
+            None => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::new(resp.error.unwrap_or_default())),
+            )
+                .into_response(),
+        },
         Err(e) => flow_client_error_to_response(e),
     }
 }
@@ -2226,29 +2223,26 @@ async fn flows_create(
         .await
     {
         Ok(resp) if resp.ok => Json(serde_json::json!({ "ok": true })).into_response(),
-        Ok(resp) => {
-            let body = match resp.error_code {
-                Some(ref code) if code == "not_found" => (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(ErrorBody::with_code(
-                        resp.error.unwrap_or_default(),
-                        code.clone(),
-                    )),
-                )
-                    .into_response(),
-                Some(c) => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
-                )
-                    .into_response(),
-                None => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
-                )
-                    .into_response(),
-            };
-            body
-        }
+        Ok(resp) => match resp.error_code {
+            Some(ref code) if code == "not_found" => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(ErrorBody::with_code(
+                    resp.error.unwrap_or_default(),
+                    code.clone(),
+                )),
+            )
+                .into_response(),
+            Some(c) => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+            )
+                .into_response(),
+            None => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::new(resp.error.unwrap_or_default())),
+            )
+                .into_response(),
+        },
         Err(e) => {
             let status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
             (status, Json(ErrorBody::new(e.to_string()))).into_response()
@@ -2274,29 +2268,26 @@ async fn flows_remove(
     };
     match client.flow_remove(&flow_slug).await {
         Ok(resp) if resp.ok => Json(serde_json::json!({ "ok": true })).into_response(),
-        Ok(resp) => {
-            let body = match resp.error_code {
-                Some(ref code) if code == "not_found" => (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(ErrorBody::with_code(
-                        resp.error.unwrap_or_default(),
-                        code.clone(),
-                    )),
-                )
-                    .into_response(),
-                Some(c) => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
-                )
-                    .into_response(),
-                None => (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorBody::new(resp.error.unwrap_or_default())),
-                )
-                    .into_response(),
-            };
-            body
-        }
+        Ok(resp) => match resp.error_code {
+            Some(ref code) if code == "not_found" => (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(ErrorBody::with_code(
+                    resp.error.unwrap_or_default(),
+                    code.clone(),
+                )),
+            )
+                .into_response(),
+            Some(c) => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::with_code(resp.error.unwrap_or_default(), c)),
+            )
+                .into_response(),
+            None => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::new(resp.error.unwrap_or_default())),
+            )
+                .into_response(),
+        },
         Err(e) => {
             let status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
             (status, Json(ErrorBody::new(e.to_string()))).into_response()
