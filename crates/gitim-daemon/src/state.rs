@@ -53,6 +53,19 @@ pub struct AppState {
     pub is_admin: AtomicBool,
     pub is_guest: AtomicBool,
     pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
+    /// Parsed `gitim.epoch.yaml` for this repo, refreshed on daemon boot and
+    /// after every sync cycle. `None` covers both "file does not exist"
+    /// (legacy repos predating snapshot pack — treated as Active) and
+    /// "daemon hasn't refreshed yet".
+    ///
+    /// Wrapped in `std::sync::RwLock` to match `github_email` / `index`
+    /// pattern: readers don't need an async context, writers are the boot
+    /// path + sync_loop's `on_synced` callback (both sync code).
+    ///
+    /// Phase A is read-only awareness — Subtask C will consume `is_redirected`
+    /// to gate write paths; Subtask D will expose `epoch_status_snapshot`
+    /// through the status API.
+    pub epoch_status: std::sync::RwLock<Option<gitim_core::epoch::EpochFile>>,
     /// Epoch seconds of last client connection. Used by idle watchdog.
     pub last_client_activity: AtomicU64,
     /// Latched by sync_loop when 3 consecutive auth failures trip the circuit.
@@ -114,6 +127,7 @@ impl AppState {
             is_admin: AtomicBool::new(false),
             is_guest: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
+            epoch_status: std::sync::RwLock::new(None),
             last_client_activity: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -143,6 +157,60 @@ impl AppState {
             .and_then(|g| g.clone())
             .unwrap_or_else(|| format!("{}@gitim", handler));
         (handler.to_string(), email)
+    }
+
+    /// Read `<repo_root>/gitim.epoch.yaml` and store the result in
+    /// `self.epoch_status`. Called once at daemon boot and once per
+    /// successful sync cycle.
+    ///
+    /// File-not-found is a normal state (legacy repos and freshly cloned
+    /// pre-pack workspaces both have no epoch file) — the lock is cleared
+    /// to `None` and `Ok(())` returned. Parse / validate errors propagate
+    /// as `Err(String)` so the caller can log without us deciding the
+    /// daemon's tolerance for a malformed file.
+    pub fn refresh_epoch_status(&self) -> Result<(), String> {
+        let path = self.repo_root.join("gitim.epoch.yaml");
+        let parsed = match gitim_core::epoch::EpochFile::load_from_path(&path) {
+            Ok(file) => Some(file),
+            Err(gitim_core::epoch::EpochError::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(e) => {
+                return Err(format!("failed to load {}: {}", path.display(), e));
+            }
+        };
+        let mut guard = self
+            .epoch_status
+            .write()
+            .map_err(|e| format!("epoch_status lock poisoned: {}", e))?;
+        *guard = parsed;
+        Ok(())
+    }
+
+    /// True iff the last refresh observed a redirected epoch file. `None`
+    /// (no file / not yet refreshed) and Active both return false — Phase A
+    /// only treats explicit `status: redirected` as a write-block signal.
+    pub fn is_redirected(&self) -> bool {
+        match self.epoch_status.read() {
+            Ok(g) => matches!(
+                g.as_ref(),
+                Some(file) if file.status == gitim_core::epoch::EpochStatus::Redirected
+            ),
+            // Poisoned lock means a previous writer panicked mid-refresh.
+            // Safer to report "not redirected" than to claim redirected on a
+            // corrupted state and stall writes — Subtask C's gate will hit
+            // the same branch on its own read.
+            Err(_) => false,
+        }
+    }
+
+    /// Snapshot the current epoch state for status-API consumers (Subtask D).
+    /// Cloning is cheap (`EpochFile` is plain data) and lets the caller hold
+    /// the value across an await without touching the lock again.
+    pub fn epoch_status_snapshot(&self) -> Option<gitim_core::epoch::EpochFile> {
+        self.epoch_status.read().ok().and_then(|g| g.clone())
     }
 
     /// Open (or rebuild) the search index at `.gitim/index.db`.
@@ -323,6 +391,18 @@ impl AppState {
                                 *users = fresh;
                             }
                         }
+                    }
+
+                    // Re-read gitim.epoch.yaml after every successful sync.
+                    // A remote-published redirect (Phase B's coordinator
+                    // writes this) becomes visible to this daemon on the
+                    // next cycle; Subtask C's write gate consumes the
+                    // updated state. Done before the index block because
+                    // that block has several early-return paths (disabled
+                    // indexer, no diff to apply, etc.) and the refresh
+                    // must happen on every cycle regardless.
+                    if let Err(e) = synced_state.refresh_epoch_status() {
+                        tracing::warn!("on_synced: epoch status refresh failed: {}", e);
                     }
 
                     // update index after each sync cycle

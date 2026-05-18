@@ -128,6 +128,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("index initialization failed (search unavailable): {}", e);
     }
 
+    // Load gitim.epoch.yaml once at boot so the daemon knows whether this
+    // repo is on an active or redirected epoch. Missing file is normal
+    // (legacy repos, fresh clones predating snapshot pack); parse failures
+    // are logged but do not abort startup — Subtask C's write gate would
+    // simply treat the state as Active until the next sync cycle reads a
+    // valid file.
+    if let Err(e) = app_state.refresh_epoch_status() {
+        tracing::warn!("epoch status refresh on boot failed: {}", e);
+    }
+
     // Reconcile any legacy orphan cards from pre-Task-3.x archive_channel
     // implementations that only moved channel meta+thread, leaving
     // channels/<ch>/cards/ behind. This is a one-shot boot-time migration;
