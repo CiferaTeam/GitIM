@@ -14,10 +14,11 @@ import {
   aggregateWorkspaceUsage,
   bucketTokenTotal,
   useWorkspaceUsage,
+  type UsageBreakdownEntry,
 } from "@/hooks/use-workspace-usage";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import type { Agent } from "@/lib/types";
+import type { Agent, UsageBucket } from "@/lib/types";
 
 interface WorkspaceUsageHeaderProps {
   agents?: Agent[];
@@ -82,20 +83,24 @@ export function WorkspaceUsageHeader({
   const todayTokens = bucketTokenTotal(usage.today);
   const sparklineValues = usage.byDay.map((d) => bucketTokenTotal(d.bucket));
 
-  const entries =
+  const entries: UsageEntry[] =
     breakdown === "provider"
       ? usage.byProvider.map((e) => ({
           key: e.provider,
           label: e.provider,
           bucket: e.bucket,
+          today: e.today,
           providerReportsUsage: e.providerReportsUsage,
         }))
       : usage.byHandler.map((e) => ({
           key: e.handler,
           label: e.handler,
           bucket: e.bucket,
+          today: e.today,
           providerReportsUsage: e.providerReportsUsage,
         }));
+  const todayEntries = sortEntries(entries, (entry) => entry.today);
+  const totalEntries = sortEntries(entries, (entry) => entry.bucket);
 
   function selectBreakdown(next: UsageBreakdown) {
     setBreakdown(next);
@@ -104,21 +109,27 @@ export function WorkspaceUsageHeader({
 
   return (
     <section
-      className={`${className} rounded-lg border border-border-soft bg-card/40 px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between`}
+      className={`${className} rounded-lg border border-border-soft bg-card/40 px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between`}
     >
-      <div className="flex flex-col gap-1 min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="text-xs uppercase tracking-wide text-text-muted">
           {label}
         </div>
-        <div className="flex items-baseline gap-2">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-xs uppercase tracking-wide text-primary">
+            近日
+          </span>
           <span className="text-xl font-mono text-foreground">
-            {formatTokens(totalTokens)}
+            今日 {formatTokens(todayTokens)}
           </span>
           <span className="text-sm text-text-secondary">
-            累计 · 今日 {formatTokens(todayTokens)} · 今日 {usage.today.turns} turns
+            {usage.today.turns} turns
           </span>
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-text-muted">
+        <div
+          data-testid="workspace-usage-today"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-text-muted"
+        >
           <div
             role="group"
             aria-label="Usage breakdown grouping"
@@ -137,18 +148,25 @@ export function WorkspaceUsageHeader({
               Handler
             </BreakdownButton>
           </div>
-          {entries.map(({ key, label: l, bucket, providerReportsUsage }) => (
-            <span key={key}>
-              {l}{" "}
-              {providerReportsUsage
-                ? formatTokens(bucketTokenTotal(bucket))
-                : `— · ${bucket.turns}t`}
-            </span>
+          {todayEntries.map((entry) => (
+            <BreakdownMetric key={entry.key} entry={entry} bucket={entry.today} />
+          ))}
+        </div>
+        <div
+          data-testid="workspace-usage-total"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-soft/80 pt-2 text-xs font-mono text-text-faint"
+        >
+          <span className="font-sans text-xs text-text-muted">
+            累计 {formatTokens(totalTokens)}
+          </span>
+          {totalEntries.map((entry) => (
+            <BreakdownMetric key={entry.key} entry={entry} bucket={entry.bucket} />
           ))}
         </div>
       </div>
       {sparklineValues.length > 0 && (
-        <div className="text-primary shrink-0">
+        <div className="flex shrink-0 flex-col items-start gap-1 text-primary lg:items-end">
+          <span className="text-xs font-medium text-text-muted">近 30 天</span>
           <svg
             width={180}
             height={36}
@@ -168,6 +186,40 @@ export function WorkspaceUsageHeader({
         </div>
       )}
     </section>
+  );
+}
+
+type UsageEntry = {
+  key: string;
+  label: string;
+} & UsageBreakdownEntry;
+
+function sortEntries(
+  entries: UsageEntry[],
+  bucketOf: (entry: UsageEntry) => UsageBucket,
+): UsageEntry[] {
+  return [...entries].sort((a, b) => {
+    const diff = bucketTokenTotal(bucketOf(b)) - bucketTokenTotal(bucketOf(a));
+    if (diff !== 0) return diff;
+    const turnDiff = bucketOf(b).turns - bucketOf(a).turns;
+    return turnDiff !== 0 ? turnDiff : a.label.localeCompare(b.label);
+  });
+}
+
+function BreakdownMetric({
+  entry,
+  bucket,
+}: {
+  entry: UsageEntry;
+  bucket: UsageBucket;
+}) {
+  return (
+    <span>
+      {entry.label}{" "}
+      {entry.providerReportsUsage
+        ? formatTokens(bucketTokenTotal(bucket))
+        : `— · ${bucket.turns}t`}
+    </span>
   );
 }
 

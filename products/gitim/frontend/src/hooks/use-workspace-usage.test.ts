@@ -84,6 +84,27 @@ describe("aggregateWorkspaceUsage", () => {
     expect(out.byProvider[1].bucket.input).toBe(50);
   });
 
+  it("groups both today and cumulative buckets by provider and handler", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("alice", "codex", summary(bucket(300, 0, 0, 0, 9), bucket(30, 0, 0, 0, 1))),
+      agent("bob", "codex", summary(bucket(100, 0, 0, 0, 4), bucket(40, 0, 0, 0, 2))),
+      agent("cara", "claude", summary(bucket(20, 0, 0, 0, 1), bucket(10, 0, 0, 0, 1))),
+    ]);
+
+    expect(out.byProvider.find((p) => p.provider === "codex")?.bucket).toEqual(
+      bucket(400, 0, 0, 0, 13),
+    );
+    expect(out.byProvider.find((p) => p.provider === "codex")?.today).toEqual(
+      bucket(70, 0, 0, 0, 3),
+    );
+    expect(out.byHandler.find((h) => h.handler === "bob")?.bucket).toEqual(
+      bucket(100, 0, 0, 0, 4),
+    );
+    expect(out.byHandler.find((h) => h.handler === "bob")?.today).toEqual(
+      bucket(40, 0, 0, 0, 2),
+    );
+  });
+
   it("merges by_day by date string when agents have different windows", () => {
     // Agent A only has 2026-05-09, agent B only has 2026-05-10. Output
     // must contain both dates with their respective buckets.

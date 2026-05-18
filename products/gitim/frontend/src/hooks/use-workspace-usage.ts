@@ -3,7 +3,11 @@ import type { Agent, UsageBucket, UsageDayEntry, UsageSummary } from "../lib/typ
 import { useAgentStore } from "./use-agent-store";
 
 export interface UsageBreakdownEntry {
+  /** Lifetime bucket for this provider/handler. Kept as `bucket` for the
+   *  existing UI/tests that already consume cumulative breakdowns. */
   bucket: UsageBucket;
+  /** Today's bucket for the same provider/handler grouping. */
+  today: UsageBucket;
   providerReportsUsage: boolean;
 }
 
@@ -124,6 +128,7 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
 function breakdownEntryForAgent(summary: UsageSummary | undefined): UsageBreakdownEntry {
   return {
     bucket: summary?.totals ?? { ...ZERO_BUCKET },
+    today: summary?.today ?? { ...ZERO_BUCKET },
     providerReportsUsage: summary?.providerReportsUsage ?? true,
   };
 }
@@ -131,6 +136,7 @@ function breakdownEntryForAgent(summary: UsageSummary | undefined): UsageBreakdo
 function mergeBreakdownEntries(entries: UsageBreakdownEntry[]): UsageBreakdownEntry {
   return {
     bucket: mergeBuckets(entries.map((e) => e.bucket)),
+    today: mergeBuckets(entries.map((e) => e.today)),
     providerReportsUsage: entries.some((e) => e.providerReportsUsage),
   };
 }
