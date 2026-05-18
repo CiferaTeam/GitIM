@@ -18,10 +18,12 @@ import { MobileActionSheet } from "../mobile/mobile-action-sheet";
 import { ChatHeader } from "./header";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
+import { ScrollToBottomButton } from "./scroll-to-bottom-button";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
 import { UserCard } from "./user-card";
 import { MESSAGES_PAGE_SIZE, computeLoadOlderSince } from "./pagination";
+import { useScrollAtBottom } from "../../hooks/use-scroll-at-bottom";
 
 /** "alice--lewis" → "dm:alice,lewis" */
 function toApiChannel(displayName: string): string {
@@ -58,6 +60,12 @@ function isCurrentWorkspaceRequest(slug: string, key: string | null): boolean {
 }
 
 export function ChatLayout() {
+  // Scroll container ref shared between MessageList (where it attaches) and
+  // useScrollAtBottom (where the jump-to-latest button reads its state).
+  const messageScrollRef = useRef<HTMLDivElement | null>(null);
+  const { atBottom: messagesAtBottom, scrollToBottom: scrollMessagesToBottom } =
+    useScrollAtBottom(messageScrollRef);
+
   const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -608,17 +616,24 @@ export function ChatLayout() {
           onUserProfileClick={handleUserProfileClick}
           onActionSheet={isMobile ? setActionSheetMessage : undefined}
           onLoadOlder={handleLoadOlder}
+          scrollRef={messageScrollRef}
         />
         {currentChannel && !isArchivedView && (
-          <InputArea
-            workspaceKey={workspaceKey}
-            scopeKey={currentChannel}
-            replyTo={replyTo}
-            onReplyToChange={setReplyTo}
-            mentionCandidates={mentionCandidates}
-            disabled={isGuest}
-            onSend={handleSend}
-          />
+          <div className="relative shrink-0">
+            <ScrollToBottomButton
+              visible={!messagesAtBottom}
+              onClick={() => scrollMessagesToBottom()}
+            />
+            <InputArea
+              workspaceKey={workspaceKey}
+              scopeKey={currentChannel}
+              replyTo={replyTo}
+              onReplyToChange={setReplyTo}
+              mentionCandidates={mentionCandidates}
+              disabled={isGuest}
+              onSend={handleSend}
+            />
+          </div>
         )}
       </div>
 
