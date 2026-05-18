@@ -16,7 +16,7 @@ mod types;
 pub(crate) mod util;
 
 pub use error::ProviderError;
-pub use provider::{create, Provider};
+pub use provider::{create, provider_reports_usage, Provider};
 pub use types::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, ProviderConfig, ProviderUsage,
     Session,

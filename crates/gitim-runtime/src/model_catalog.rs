@@ -1,13 +1,16 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const DEFAULT_BIN_CODEX: &str = "codex";
 const DEFAULT_BIN_OPENCODE: &str = "opencode";
 const DEFAULT_BIN_PI: &str = "pi";
 const DEFAULT_BIN_CURSOR: &str = "cursor-agent";
+const DEFAULT_BIN_KIMI: &str = "kimi";
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +36,7 @@ pub struct ModelCatalogOverrides {
     pub opencode_bin: Option<String>,
     pub pi_bin: Option<String>,
     pub cursor_bin: Option<String>,
+    pub kimi_bin: Option<String>,
 }
 
 #[async_trait]
@@ -101,14 +105,15 @@ pub async fn list_provider_models_with_overrides(
             None,
             Some("Hermes models are exposed through /hermes/llm providers routes".to_string()),
         ),
-        "kimi" => fallback_catalog(
-            "kimi",
-            "kimi_custom_model",
-            true,
-            true,
-            Some("model id accepted by kimi set_session_model".to_string()),
-            None,
-        ),
+        "kimi" => {
+            KimiCatalog {
+                bin: overrides
+                    .kimi_bin
+                    .unwrap_or_else(|| DEFAULT_BIN_KIMI.to_string()),
+            }
+            .list_models()
+            .await
+        }
         other => fallback_catalog(
             other,
             "unknown_provider",
@@ -243,6 +248,35 @@ impl ModelCatalogProvider for CursorCatalog {
                 true,
                 true,
                 Some("model id accepted by cursor-agent --model".to_string()),
+                Some(error),
+            ),
+        }
+    }
+}
+
+struct KimiCatalog {
+    bin: String,
+}
+
+#[async_trait]
+impl ModelCatalogProvider for KimiCatalog {
+    async fn list_models(&self) -> ModelCatalogResult {
+        match run_kimi_acp_model_catalog(&self.bin).await {
+            Ok(models) => fallback_catalog(
+                "kimi",
+                "kimi_acp_models",
+                true,
+                true,
+                Some("model id accepted by kimi set_session_model".to_string()),
+                None,
+            )
+            .with_models(models),
+            Err(error) => fallback_catalog(
+                "kimi",
+                "kimi_acp_models",
+                true,
+                true,
+                Some("model id accepted by kimi set_session_model".to_string()),
                 Some(error),
             ),
         }
@@ -390,6 +424,198 @@ pub fn parse_cursor_models(stdout: &str) -> Vec<ModelOption> {
     }
 
     out
+}
+
+pub fn parse_kimi_session_models(result: &Value) -> Vec<ModelOption> {
+    let Some(models) = result
+        .get("models")
+        .and_then(|m| m.get("availableModels"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let current = result
+        .get("models")
+        .and_then(|m| m.get("currentModelId"))
+        .and_then(Value::as_str);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for model in models {
+        let Some(id) = model.get("modelId").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.trim().is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(id);
+        let label = if current == Some(id) && !name.to_lowercase().contains("default") {
+            format!("{name} (default)")
+        } else {
+            name.to_string()
+        };
+        out.push(ModelOption {
+            id: id.to_string(),
+            label,
+        });
+    }
+    out
+}
+
+async fn run_kimi_acp_model_catalog(bin: &str) -> Result<Vec<ModelOption>, String> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "gitim-kimi-models-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("failed to create kimi model temp dir: {e}"))?;
+
+    let mut child = tokio::process::Command::new(bin);
+    child
+        .args(["--afk", "acp"])
+        .current_dir(&temp_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match child.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(format!("failed to spawn {bin}: {e}"));
+        }
+    };
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{bin} stdin unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{bin} stdout unavailable"))?;
+    let stderr = child.stderr.take();
+    let mut lines = BufReader::new(stdout).lines();
+
+    let result = async {
+        let _init = kimi_acp_request(
+            &mut stdin,
+            &mut lines,
+            0,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientInfo": {"name": "gitim-runtime", "version": "0.1.0"},
+                "clientCapabilities": {},
+            }),
+        )
+        .await?;
+        let session = kimi_acp_request(
+            &mut stdin,
+            &mut lines,
+            1,
+            "session/new",
+            json!({ "cwd": temp_dir.to_string_lossy(), "mcpServers": [] }),
+        )
+        .await?;
+        Ok::<Vec<ModelOption>, String>(parse_kimi_session_models(&session))
+    }
+    .await;
+
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    match result {
+        Ok(models) if models.is_empty() => {
+            let stderr_text = if let Some(stderr) = stderr {
+                read_stderr_tail(stderr).await
+            } else {
+                String::new()
+            };
+            if stderr_text.trim().is_empty() {
+                Err("kimi ACP session/new returned no models".to_string())
+            } else {
+                Err(format!(
+                    "kimi ACP session/new returned no models: {}",
+                    stderr_text.trim()
+                ))
+            }
+        }
+        other => other,
+    }
+}
+
+async fn kimi_acp_request(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    let mut payload =
+        serde_json::to_vec(&request).map_err(|e| format!("serialize {method}: {e}"))?;
+    payload.push(b'\n');
+    stdin
+        .write_all(&payload)
+        .await
+        .map_err(|e| format!("write {method}: {e}"))?;
+    let response = tokio::time::timeout(CATALOG_TIMEOUT, async {
+        loop {
+            let Some(line) = lines
+                .next_line()
+                .await
+                .map_err(|e| format!("read {method}: {e}"))?
+            else {
+                return Err(format!("{method}: kimi stdout ended"));
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v.get("id").and_then(Value::as_i64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = v.get("error") {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return Err(format!("{method}: {message}"));
+            }
+            return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "{method}: kimi ACP request exceeded {}ms",
+            CATALOG_TIMEOUT.as_millis()
+        )
+    })??;
+    Ok(response)
+}
+
+async fn read_stderr_tail(stderr: tokio::process::ChildStderr) -> String {
+    let mut lines = BufReader::new(stderr).lines();
+    let mut out = Vec::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        out.push(line);
+        if out.len() > 20 {
+            out.remove(0);
+        }
+    }
+    out.join("\n")
 }
 
 async fn run_catalog_command(bin: &str, args: &[&str]) -> Result<String, String> {

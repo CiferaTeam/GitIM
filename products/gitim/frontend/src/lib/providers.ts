@@ -165,6 +165,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   },
   kimi: {
     label: "Kimi",
+    runtimeModels: true,
     supportsDefaultModel: true,
     supportsCustomModel: true,
     customModelHint: "model id accepted by kimi set_session_model",

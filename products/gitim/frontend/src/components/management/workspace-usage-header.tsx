@@ -84,8 +84,18 @@ export function WorkspaceUsageHeader({
 
   const entries =
     breakdown === "provider"
-      ? usage.byProvider.map((e) => ({ key: e.provider, label: e.provider, bucket: e.bucket }))
-      : usage.byHandler.map((e) => ({ key: e.handler, label: e.handler, bucket: e.bucket }));
+      ? usage.byProvider.map((e) => ({
+          key: e.provider,
+          label: e.provider,
+          bucket: e.bucket,
+          providerReportsUsage: e.providerReportsUsage,
+        }))
+      : usage.byHandler.map((e) => ({
+          key: e.handler,
+          label: e.handler,
+          bucket: e.bucket,
+          providerReportsUsage: e.providerReportsUsage,
+        }));
 
   function selectBreakdown(next: UsageBreakdown) {
     setBreakdown(next);
@@ -127,9 +137,12 @@ export function WorkspaceUsageHeader({
               Handler
             </BreakdownButton>
           </div>
-          {entries.map(({ key, label: l, bucket }) => (
+          {entries.map(({ key, label: l, bucket, providerReportsUsage }) => (
             <span key={key}>
-              {l} {formatTokens(bucketTokenTotal(bucket))}
+              {l}{" "}
+              {providerReportsUsage
+                ? formatTokens(bucketTokenTotal(bucket))
+                : `— · ${bucket.turns}t`}
             </span>
           ))}
         </div>

@@ -2,6 +2,11 @@ import { useMemo } from "react";
 import type { Agent, UsageBucket, UsageDayEntry, UsageSummary } from "../lib/types";
 import { useAgentStore } from "./use-agent-store";
 
+export interface UsageBreakdownEntry {
+  bucket: UsageBucket;
+  providerReportsUsage: boolean;
+}
+
 /** Workspace-level rollup of all agents' usage_summary. Computed on the
  *  client because the runtime's GET /agents already returns each agent's
  *  full breakdown. Keeping this on the client side guarantees the workspace
@@ -10,12 +15,14 @@ export interface WorkspaceUsage {
   totals: UsageBucket;
   today: UsageBucket;
   byDay: UsageDayEntry[];
-  /** One entry per distinct provider across the workspace, including
-   *  providers whose agents have produced zero usage so far. */
-  byProvider: { provider: string; bucket: UsageBucket }[];
+  /** One entry per distinct provider across the workspace. Providers that
+   *  do not report token usage remain visible with providerReportsUsage=false
+   *  so the UI can render turns without implying zero tokens. */
+  byProvider: ({ provider: string } & UsageBreakdownEntry)[];
   /** One entry per agent (handler is unique per agent). Zero-usage agents
-   *  appear with a ZERO_BUCKET so the UI can render them as `0`. */
-  byHandler: { handler: string; bucket: UsageBucket }[];
+   *  appear with a ZERO_BUCKET; providers that do not report token usage
+   *  remain visible with providerReportsUsage=false. */
+  byHandler: ({ handler: string } & UsageBreakdownEntry)[];
   /** True only when at least one agent in the workspace has produced
    *  usage data. Lets components branch into a "no data yet" state. */
   hasData: boolean;
@@ -76,28 +83,31 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
   // an agent first seen mid-window — defensive).
   const byDay = mergeByDay(summaries.map((e) => e.summary.byDay));
 
-  // byProvider: enumerate every distinct provider across ALL agents, so a
-  // provider whose agents have produced zero so far still shows up as `0`.
-  const byProviderMap = new Map<string, UsageBucket[]>();
+  // byProvider: enumerate every distinct provider across ALL agents. A
+  // provider whose agents have produced zero token usage still shows up as
+  // `0`; a provider that does not report tokens shows up as turn-only data.
+  const byProviderMap = new Map<string, UsageBreakdownEntry[]>();
   for (const a of agents) {
+    const entry = breakdownEntryForAgent(a.usageSummary);
     const key = a.provider ?? "unknown";
     const arr = byProviderMap.get(key) ?? [];
-    arr.push(a.usageSummary?.totals ?? { ...ZERO_BUCKET });
+    arr.push(entry);
     byProviderMap.set(key, arr);
   }
   const byProvider = Array.from(byProviderMap.entries())
-    .map(([provider, buckets]) => ({
+    .map(([provider, entries]) => ({
       provider,
-      bucket: mergeBuckets(buckets),
+      ...mergeBreakdownEntries(entries),
     }))
     .sort(compareEntry((e) => e.provider));
 
-  // byHandler: one entry per agent (handler is unique). Zero-usage agents
-  // get ZERO_BUCKET so the UI can still list them.
+  // byHandler: one entry per agent. Zero-usage agents get ZERO_BUCKET so the
+  // UI can still list them; tokenless providers carry the same flag so the
+  // renderer can avoid showing a misleading `0`.
   const byHandler = agents
     .map((a) => ({
       handler: a.id,
-      bucket: a.usageSummary?.totals ?? { ...ZERO_BUCKET },
+      ...breakdownEntryForAgent(a.usageSummary),
     }))
     .sort(compareEntry((e) => e.handler));
 
@@ -111,7 +121,21 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
   };
 }
 
-function compareEntry<T extends { bucket: UsageBucket }>(
+function breakdownEntryForAgent(summary: UsageSummary | undefined): UsageBreakdownEntry {
+  return {
+    bucket: summary?.totals ?? { ...ZERO_BUCKET },
+    providerReportsUsage: summary?.providerReportsUsage ?? true,
+  };
+}
+
+function mergeBreakdownEntries(entries: UsageBreakdownEntry[]): UsageBreakdownEntry {
+  return {
+    bucket: mergeBuckets(entries.map((e) => e.bucket)),
+    providerReportsUsage: entries.some((e) => e.providerReportsUsage),
+  };
+}
+
+function compareEntry<T extends UsageBreakdownEntry>(
   labelOf: (e: T) => string,
 ) {
   return (a: T, b: T) => {

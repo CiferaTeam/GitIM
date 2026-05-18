@@ -2,8 +2,9 @@ use std::os::unix::fs::PermissionsExt;
 
 use gitim_runtime::model_catalog::{
     list_provider_models_with_overrides, parse_codex_debug_models, parse_cursor_models,
-    parse_opencode_models, parse_pi_models, ModelCatalogOverrides,
+    parse_kimi_session_models, parse_opencode_models, parse_pi_models, ModelCatalogOverrides,
 };
+use serde_json::json;
 
 fn make_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
     let path = dir.join("fake-cli.sh");
@@ -93,6 +94,33 @@ Tip: use --model <id> to switch.
     let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["auto", "composer-2-fast", "gpt-5.3-codex"]);
     assert_eq!(models[1].label, "Composer 2 Fast (default)");
+}
+
+#[test]
+fn kimi_parser_reads_acp_session_models_and_marks_current_default() {
+    let result = json!({
+        "models": {
+            "availableModels": [
+                {"modelId": "kimi-code/kimi-for-coding", "name": "kimi-for-coding"},
+                {"modelId": "kimi-code/kimi-for-coding,thinking", "name": "kimi-for-coding (thinking)"},
+                {"modelId": "kimi-code/kimi-for-coding", "name": "duplicate"}
+            ],
+            "currentModelId": "kimi-code/kimi-for-coding,thinking"
+        }
+    });
+
+    let models = parse_kimi_session_models(&result);
+
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "kimi-code/kimi-for-coding",
+            "kimi-code/kimi-for-coding,thinking"
+        ]
+    );
+    assert_eq!(models[0].label, "kimi-for-coding");
+    assert_eq!(models[1].label, "kimi-for-coding (thinking) (default)");
 }
 
 #[tokio::test]
@@ -252,6 +280,50 @@ printf '%s\n' 'kimi-for-coding/k2p6' 'moonshotai/kimi-k2-thinking'
     assert!(result.supports_default);
     assert!(result.supports_custom);
     assert_eq!(result.models[0].id, "kimi-for-coding/k2p6");
+    assert!(
+        result.error.is_none(),
+        "unexpected error: {:?}",
+        result.error
+    );
+}
+
+#[tokio::test]
+async fn kimi_catalog_invokes_acp_session_new_and_exposes_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture = tmp.path().join("argv.txt");
+    let script = make_script(
+        tmp.path(),
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "{}"
+IFS= read -r _init
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1}}}}'
+IFS= read -r _new
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"models":{{"availableModels":[{{"modelId":"kimi-code/kimi-for-coding","name":"kimi-for-coding"}},{{"modelId":"kimi-code/kimi-for-coding,thinking","name":"kimi-for-coding (thinking)"}}],"currentModelId":"kimi-code/kimi-for-coding,thinking"}},"sessionId":"sid"}}}}'
+"#,
+            capture.display()
+        ),
+    );
+
+    let result = list_provider_models_with_overrides(
+        "kimi",
+        ModelCatalogOverrides {
+            kimi_bin: Some(script.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(capture).unwrap().trim(),
+        "--afk acp"
+    );
+    assert_eq!(result.provider, "kimi");
+    assert_eq!(result.source, "kimi_acp_models");
+    assert!(result.supports_default);
+    assert!(result.supports_custom);
+    assert_eq!(result.models[0].id, "kimi-code/kimi-for-coding");
+    assert_eq!(result.models[1].id, "kimi-code/kimi-for-coding,thinking");
     assert!(
         result.error.is_none(),
         "unexpected error: {:?}",

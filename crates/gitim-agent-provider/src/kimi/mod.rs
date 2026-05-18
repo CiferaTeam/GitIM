@@ -21,11 +21,9 @@
 //! Reference: `multica/server/pkg/agent/kimi.go` (Go).
 //!
 //! Provider trait flags (and why they differ from `Provider`'s defaults):
-//! - `reports_usage()` stays `true` (default) — ACP `session/prompt` carries
-//!   a `usage` block.
-//! - `usage_is_cumulative()` is **overridden to `true`** — kimi reports
-//!   session-cumulative tokens just like hermes; runtime subtracts the
-//!   per-session baseline via `AgentState.last_session_usage`.
+//! - `reports_usage()` is **overridden to `false`** — Kimi Code 1.44 ACP
+//!   `session/prompt` responses return `stopReason` but no `usage` block, and
+//!   the observed stream does not emit `usage_update` notifications.
 //! - `self_managed_context()` stays `false` (default written explicitly
 //!   here) — unlike hermes there is no in-loop compression, so the runtime
 //!   owns the `[[RESET]]` channel + `[系统通知]` occupancy preamble, same
@@ -71,12 +69,12 @@ impl KimiProvider {
 
 #[async_trait]
 impl Provider for KimiProvider {
-    /// Kimi's ACP `session/prompt` response carries session-cumulative
-    /// token counts (same shape as hermes). The runtime subtracts the
-    /// per-session baseline stored in `AgentState.last_session_usage`
-    /// before adding to the daily bucket.
-    fn usage_is_cumulative(&self) -> bool {
-        true
+    /// Kimi's ACP stream does not currently expose token counts. The runtime
+    /// still counts turns and can use its local estimate for the session
+    /// occupancy HUD, but it must not render zero provider tokens as if Kimi
+    /// had reported them.
+    fn reports_usage(&self) -> bool {
+        false
     }
 
     /// Kimi has no in-loop compression like hermes. Runtime owns the
@@ -157,15 +155,11 @@ impl Provider for KimiProvider {
         let hooks = AcpHooks {
             tool_name_mapper: kimi_tool_name_from_title,
             accept_notification: None,
-            // Forward mid-stream `usage_update` notifications as
-            // `Event::Usage` so the runtime UI can render live token
-            // progress for kimi — hermes intentionally drops them
-            // because its `ExecResult.usage` comes from the prompt
-            // response and would risk double-counting; kimi's runtime
-            // accumulator handles the cumulative semantics correctly
-            // (baseline subtraction in `AgentState`), so live emit
-            // is safe and desired.
-            emit_live_usage: true,
+            // Kimi Code 1.44 does not emit ACP usage updates. Keep this off
+            // so a future protocol change does not accidentally create a
+            // live-only usage path while the provider still declares
+            // `reports_usage() == false`.
+            emit_live_usage: false,
         };
         let acp = Arc::new(AcpClient::new("kimi", stdin, hooks));
 
@@ -780,10 +774,8 @@ mod tests {
     #[test]
     fn provider_trait_flags() {
         let p = KimiProvider::new(ProviderConfig::default());
-        // reports_usage defaults to true (we don't override).
-        assert!(p.reports_usage());
-        // usage_is_cumulative overridden to true (ACP session-cumulative).
-        assert!(p.usage_is_cumulative());
+        assert!(!p.reports_usage());
+        assert!(!p.usage_is_cumulative());
         // self_managed_context overridden to false (runtime owns
         // [[RESET]] / occupancy preamble, unlike hermes).
         assert!(!p.self_managed_context());

@@ -2763,12 +2763,27 @@ fn read_user_introduction(repo_root: &Path, handler: &str) -> Option<String> {
 fn load_usage_summary_for_recovery(
     workspace: &Path,
     handler: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
 ) -> Option<crate::usage_log::UsageSummary> {
     let path = crate::usage_log::AgentUsageLog::path(workspace, handler);
     if !path.exists() {
         return None;
     }
-    let log = crate::usage_log::AgentUsageLog::load_or_default(workspace, handler, "", "", true);
+    let provider = provider.unwrap_or("");
+    let model = model.unwrap_or("");
+    let provider_reports_usage = if provider.is_empty() {
+        true
+    } else {
+        gitim_agent_provider::provider_reports_usage(provider).unwrap_or(true)
+    };
+    let log = crate::usage_log::AgentUsageLog::load_or_default(
+        workspace,
+        handler,
+        provider,
+        model,
+        provider_reports_usage,
+    );
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     Some(log.summary(&today))
 }
@@ -4331,6 +4346,12 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
 
         if let Some(msg) = provider_error {
             tracing::warn!("agent @{handler} recovered in error state: {msg}");
+            let usage_summary = load_usage_summary_for_recovery(
+                workspace,
+                &handler,
+                provider_raw,
+                model.as_deref(),
+            );
             let activity_tx = {
                 let s = state.lock().unwrap();
                 match s.workspaces.get(slug) {
@@ -4376,7 +4397,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                                 .and_then(|s| s.session_usage),
                             llm_provider: llm_provider_val.clone(),
                             llm_model: llm_model_val.clone(),
-                            usage_summary: load_usage_summary_for_recovery(workspace, &handler),
+                            usage_summary,
                             loop_handle: None,
                         },
                     );
@@ -4411,6 +4432,12 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
         }
 
         {
+            let usage_summary = load_usage_summary_for_recovery(
+                workspace,
+                &handler,
+                provider_raw,
+                model.as_deref(),
+            );
             let mut s = state.lock().unwrap();
             match s.workspaces.get_mut(slug) {
                 Some(ctx) => {
@@ -4435,7 +4462,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                                 .and_then(|s| s.session_usage),
                             llm_provider: llm_provider_val,
                             llm_model: llm_model_val,
-                            usage_summary: load_usage_summary_for_recovery(workspace, &handler),
+                            usage_summary,
                             loop_handle: None,
                         },
                     );

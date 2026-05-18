@@ -4,8 +4,8 @@
 
 use gitim_agent_provider::{
     claude::ClaudeProvider, codex::CodexProvider, gemini::GeminiProvider, hermes::HermesProvider,
-    mock::MockProvider, openclaw::OpenclawProvider, opencode::OpencodeProvider, pi::PiProvider,
-    Provider, ProviderConfig,
+    kimi::KimiProvider, mock::MockProvider, openclaw::OpenclawProvider, opencode::OpencodeProvider,
+    pi::PiProvider, provider_reports_usage, Provider, ProviderConfig,
 };
 
 fn cfg() -> ProviderConfig {
@@ -69,6 +69,13 @@ fn hermes_reports_session_cumulative_and_self_manages_context() {
 }
 
 #[test]
+fn kimi_does_not_report_usage() {
+    let p = KimiProvider::new(cfg());
+    assert!(!p.reports_usage());
+    assert!(!p.usage_is_cumulative());
+}
+
+#[test]
 fn gemini_does_not_report_usage() {
     let p = GeminiProvider::new(cfg());
     assert!(!p.reports_usage());
@@ -94,4 +101,17 @@ fn mock_setters_propagate_to_trait() {
         .with_usage_is_cumulative(true);
     assert!(!p.reports_usage());
     assert!(p.usage_is_cumulative());
+}
+
+#[test]
+fn static_reports_usage_helper_matches_provider_declarations() {
+    assert!(provider_reports_usage("claude").unwrap());
+    assert!(provider_reports_usage("codex").unwrap());
+    assert!(provider_reports_usage("hermes").unwrap());
+    assert!(provider_reports_usage("cursor").unwrap());
+    assert!(provider_reports_usage("opencode").unwrap());
+    assert!(provider_reports_usage("pi").unwrap());
+    assert!(!provider_reports_usage("gemini").unwrap());
+    assert!(!provider_reports_usage("kimi").unwrap());
+    assert!(!provider_reports_usage("openclaw").unwrap());
 }

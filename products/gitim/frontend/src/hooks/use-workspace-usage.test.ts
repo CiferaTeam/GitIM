@@ -10,9 +10,10 @@ function summary(
   totals: UsageBucket,
   today: UsageBucket,
   byDay: UsageDayEntry[] = [],
+  providerReportsUsage = true,
 ): UsageSummary {
   return {
-    providerReportsUsage: true,
+    providerReportsUsage,
     firstSeen: "2026-05-01T00:00:00Z",
     lastUpdated: "2026-05-10T12:00:00Z",
     totals,
@@ -157,6 +158,31 @@ describe("aggregateWorkspaceUsage", () => {
     ]);
     expect(out.byProvider.map((p) => p.provider)).toEqual(["codex", "claude"]);
     expect(out.byProvider.find((p) => p.provider === "claude")?.bucket.input).toBe(0);
+  });
+
+  it("keeps non-token-reporting providers visible as turn-only breakdowns", () => {
+    const out = aggregateWorkspaceUsage([
+      agent("alice", "codex", summary(bucket(100, 50, 0, 0, 1), bucket(40, 20, 0, 0, 1))),
+      agent(
+        "kimi",
+        "kimi",
+        summary(bucket(0, 0, 0, 0, 6), bucket(0, 0, 0, 0, 6), [], false),
+      ),
+    ]);
+
+    expect(out.hasData).toBe(true);
+    expect(out.totals.turns).toBe(7);
+    expect(out.today.turns).toBe(7);
+    expect(out.byProvider.map((p) => p.provider)).toEqual(["codex", "kimi"]);
+    expect(out.byProvider.find((p) => p.provider === "kimi")).toMatchObject({
+      providerReportsUsage: false,
+      bucket: bucket(0, 0, 0, 0, 6),
+    });
+    expect(out.byHandler.map((h) => h.handler)).toEqual(["alice", "kimi"]);
+    expect(out.byHandler.find((h) => h.handler === "kimi")).toMatchObject({
+      providerReportsUsage: false,
+      bucket: bucket(0, 0, 0, 0, 6),
+    });
   });
 
   it("returns empty byHandler when hasData=false (header stays hidden)", () => {

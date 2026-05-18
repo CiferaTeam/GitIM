@@ -43,7 +43,7 @@ function avatarColor(name: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
-function agentModelLabel(agent: Agent) {
+export function agentModelLabel(agent: Agent) {
   if (agent.provider === "hermes" && agent.llmModel) {
     return agent.llmProvider
       ? `${agent.llmProvider} / ${agent.llmModel}`
@@ -53,7 +53,9 @@ function agentModelLabel(agent: Agent) {
     agent.model ??
     (agent.provider === "opencode" ||
     agent.provider === "pi" ||
-    agent.provider === "hermes"
+    agent.provider === "hermes" ||
+    agent.provider === "cursor" ||
+    agent.provider === "kimi"
       ? "default"
       : "—")
   );
