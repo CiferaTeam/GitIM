@@ -3,12 +3,14 @@ import { create } from "zustand";
 import { mapBackendUsageSummary } from "../lib/client";
 import type {
   Agent,
+  AgentStatus,
   FleetAgentActivityEnvelope,
   FleetAgentSnapshot,
   FleetEventEnvelope,
   FleetNodeStatus,
   FleetNodeStatusEnvelope,
 } from "../lib/types";
+import { useAgentActivityStore } from "./use-agent-activity";
 import { useConnectionStore } from "./use-connection-store";
 import { useWorkspaceStore } from "./use-workspace-store";
 
@@ -108,11 +110,23 @@ export function applyFleetAgentActivityEvent(envelope: FleetAgentActivityEnvelop
     return;
   }
 
+  useAgentActivityStore
+    .getState()
+    .pushForKey(fleetActivityKey(nodeId, workspaceId, agentId), event);
+
   useFleetStore.getState().updateAgent(nodeId, workspaceId, agentId, {
     lastActivity: event.timestamp || envelope.received_at,
-    status: event.event_type === "error" ? "error" : "running",
+    status: statusForActivityEvent(event.event_type),
     errorMessage: event.event_type === "error" ? event.detail : undefined,
   });
+}
+
+export function fleetActivityKey(
+  nodeId: string,
+  workspaceId: string,
+  agentId: string,
+) {
+  return `fleet:${nodeId}\u0000${workspaceId}\u0000${agentId}`;
 }
 
 export function useFleetSSE(slug: string | null) {
@@ -194,13 +208,19 @@ function ensureInferredAgent(envelope: FleetAgentActivityEnvelope) {
     agent: {
       id: envelope.agent_id,
       name: envelope.agent_id,
-      status: "running",
+      status: statusForActivityEvent(envelope.event.event_type),
       systemPrompt: "",
       repoPath: "",
       lastActivity: envelope.event.timestamp || envelope.received_at,
       messagesProcessed: 0,
     },
   });
+}
+
+function statusForActivityEvent(eventType: string): AgentStatus {
+  if (eventType === "error") return "error";
+  if (eventType === "done" || eventType === "usage") return "idle";
+  return "running";
 }
 
 function mapFleetStatusEnvelope(envelope: FleetNodeStatusEnvelope): FleetNodeStatus {

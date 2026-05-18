@@ -1358,6 +1358,136 @@ function mapFleetNodeStatus(raw: Record<string, unknown>): FleetNodeStatus {
   };
 }
 
+interface RawFleetWorkspaceMapping {
+  remote_workspace_id?: string;
+  local_workspace_id?: string;
+  workspace_identity?: string;
+}
+
+interface RawFleetNodeEntry {
+  node_id?: string;
+  node_ip?: string;
+  node_name?: string;
+  base_url?: string;
+  workspaces?: unknown;
+  workspace_mappings?: unknown;
+}
+
+const FLEET_NODE_AGENT_FETCH_TIMEOUT_MS = 3000;
+
+function normalizeFleetWorkspaceMappings(
+  node: RawFleetNodeEntry,
+): RawFleetWorkspaceMapping[] {
+  if (Array.isArray(node.workspace_mappings) && node.workspace_mappings.length > 0) {
+    return node.workspace_mappings
+      .filter((entry): entry is Record<string, unknown> => {
+        return !!entry && typeof entry === "object";
+      })
+      .map((entry) => ({
+        remote_workspace_id: entry.remote_workspace_id as string | undefined,
+        local_workspace_id: entry.local_workspace_id as string | undefined,
+        workspace_identity: entry.workspace_identity as string | undefined,
+      }))
+      .filter((entry) => entry.remote_workspace_id || entry.local_workspace_id);
+  }
+
+  if (!Array.isArray(node.workspaces)) return [];
+  return node.workspaces
+    .filter((workspace): workspace is string => typeof workspace === "string")
+    .map((workspace) => ({
+      remote_workspace_id: workspace,
+      local_workspace_id: workspace,
+    }));
+}
+
+async function fetchJsonOrNull(url: string, timeoutMs: number): Promise<unknown | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function mapFallbackFleetAgentSnapshot(
+  node: RawFleetNodeEntry,
+  mapping: RawFleetWorkspaceMapping,
+  rawAgent: Record<string, unknown>,
+): FleetAgentSnapshot {
+  const remoteWorkspaceId =
+    mapping.remote_workspace_id ?? mapping.local_workspace_id ?? "";
+  const workspaceId =
+    mapping.local_workspace_id ?? mapping.remote_workspace_id ?? "";
+  return {
+    nodeId: node.node_id ?? "",
+    nodeIp: node.node_ip,
+    nodeName: node.node_name,
+    remoteWorkspaceId,
+    workspaceIdentity: mapping.workspace_identity,
+    workspaceId,
+    agent: mapBackendAgent(rawAgent),
+  };
+}
+
+async function listFleetAgentsViaNodes(): Promise<ApiResponse<{ agents: FleetAgentSnapshot[] }>> {
+  const nodesPayload = await fetchJsonOrNull(
+    `${baseUrl()}/fleet/nodes`,
+    FLEET_NODE_AGENT_FETCH_TIMEOUT_MS,
+  );
+  if (!nodesPayload || typeof nodesPayload !== "object") {
+    return { ok: false, error: "failed to list fleet nodes" };
+  }
+  if ((nodesPayload as { ok?: boolean }).ok === false) {
+    return { ok: false, error: "failed to list fleet nodes" };
+  }
+
+  const nodes = ((nodesPayload as { nodes?: unknown }).nodes ?? []) as unknown[];
+  const snapshots: FleetAgentSnapshot[] = [];
+  let expectedRequests = 0;
+  let successfulRequests = 0;
+
+  await Promise.all(
+    nodes
+      .filter((node): node is RawFleetNodeEntry => !!node && typeof node === "object")
+      .flatMap((node) => {
+        const base = typeof node.base_url === "string" ? node.base_url.replace(/\/+$/, "") : "";
+        if (!base) return [];
+        return normalizeFleetWorkspaceMappings(node).map(async (mapping) => {
+          const remoteWorkspaceId =
+            mapping.remote_workspace_id ?? mapping.local_workspace_id;
+          if (!remoteWorkspaceId) return;
+          expectedRequests += 1;
+          const payload = await fetchJsonOrNull(
+            `${base}/workspaces/${encodeURIComponent(remoteWorkspaceId)}/agents`,
+            FLEET_NODE_AGENT_FETCH_TIMEOUT_MS,
+          );
+          if (!payload || typeof payload !== "object") return;
+          const data = payload as { ok?: boolean; agents?: unknown };
+          if (data.ok === false || !Array.isArray(data.agents)) return;
+          successfulRequests += 1;
+          snapshots.push(
+            ...data.agents
+              .filter((agent): agent is Record<string, unknown> => {
+                return !!agent && typeof agent === "object";
+              })
+              .map((agent) => mapFallbackFleetAgentSnapshot(node, mapping, agent)),
+          );
+        });
+      }),
+  );
+
+  if (expectedRequests > 0 && successfulRequests === 0) {
+    return { ok: false, error: "failed to fetch agents from fleet nodes" };
+  }
+
+  return { ok: true, data: { agents: snapshots } };
+}
+
 /** Convert the runtime's snake_case `usage_summary` payload into the
  *  camelCase shape the React side expects. Defensive against missing or
  *  malformed nested objects so an older runtime cannot crash the UI. */
@@ -1432,6 +1562,10 @@ export async function listFleetAgents(): Promise<ApiResponse<{ agents: FleetAgen
   }
   try {
     const res = await fetch(`${baseUrl()}/fleet/agents`);
+    if (!res.ok) {
+      if (res.status === 404) return await listFleetAgentsViaNodes();
+      return { ok: false, error: `fleet agents failed: ${res.status}` };
+    }
     const data = await res.json();
     if (!data.ok) return data;
     const agents = ((data.agents ?? []) as Record<string, unknown>[]).map(

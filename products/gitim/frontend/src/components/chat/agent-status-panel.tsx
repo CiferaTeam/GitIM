@@ -2,6 +2,8 @@ import { List } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
+import { fleetActivityKey, useFleetStore } from "../../hooks/use-fleet-store";
+import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import type { Agent, AgentActivityEvent } from "../../lib/types";
 import { Button } from "../ui/button";
 import {
@@ -23,6 +25,13 @@ const STATUS_RANK: Record<string, number> = {
   idle: 1,
   offline: 0,
 };
+
+interface AgentStatusRow {
+  key: string;
+  agent: Agent;
+  activityKey: string;
+  sourceLabel?: string;
+}
 
 function latestActivity(
   agentId: string,
@@ -54,20 +63,23 @@ function usageFillValue(agent: Agent): string | null {
   return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
 }
 
-function compareAgentsByActivity(
+function compareRowsByActivity(
   activities: Record<string, AgentActivityEvent[]>,
-): (a: Agent, b: Agent) => number {
+): (a: AgentStatusRow, b: AgentStatusRow) => number {
   return (a, b) => {
     const byActivity =
-      activityTime(latestActivity(b.id, activities)) -
-      activityTime(latestActivity(a.id, activities));
+      activityTime(latestActivity(b.activityKey, activities)) -
+      activityTime(latestActivity(a.activityKey, activities));
     if (byActivity !== 0) return byActivity;
 
     const byStatus =
-      (STATUS_RANK[b.status] ?? 0) - (STATUS_RANK[a.status] ?? 0);
+      (STATUS_RANK[b.agent.status] ?? 0) - (STATUS_RANK[a.agent.status] ?? 0);
     if (byStatus !== 0) return byStatus;
 
-    return agentLabel(a).localeCompare(agentLabel(b));
+    return (
+      agentLabel(a.agent).localeCompare(agentLabel(b.agent)) ||
+      (a.sourceLabel ?? "").localeCompare(b.sourceLabel ?? "")
+    );
   };
 }
 
@@ -137,10 +149,12 @@ function UsageBadge({ agent }: { agent: Agent }) {
 function AgentRow({
   agent,
   activities,
+  sourceLabel,
   testId,
 }: {
   agent: Agent;
   activities: AgentActivityEvent[];
+  sourceLabel?: string;
   testId?: string;
 }) {
   const name = agentLabel(agent);
@@ -177,6 +191,14 @@ function AgentRow({
         <span className="text-xs font-medium text-text-secondary shrink-0">
           {name}
         </span>
+        {sourceLabel && (
+          <span
+            className="text-[10px] font-mono text-text-faint truncate shrink"
+            title={sourceLabel}
+          >
+            {sourceLabel}
+          </span>
+        )}
         {showError ? (
           <span className="text-[11px] font-mono text-error truncate">
             {agent.errorMessage ?? "unknown error"}
@@ -205,7 +227,7 @@ function AgentRow({
       >
         <div className="mb-1.5">
           <p className="text-[11px] font-semibold uppercase text-text-muted tracking-wider truncate">
-            {name} — Recent Activity
+            {sourceLabel ? `${name} @ ${sourceLabel}` : name} — Recent Activity
           </p>
           <UsageBadge agent={agent} />
         </div>
@@ -219,13 +241,35 @@ function AgentRow({
 
 export function AgentStatusPanel() {
   const agents = useAgentStore((s) => s.agents);
+  const fleetAgents = useFleetStore((s) => s.agents);
+  const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const activities = useAgentActivityStore((s) => s.activities);
 
-  if (agents.length === 0) return null;
+  const rows: AgentStatusRow[] = [
+    ...agents.map((agent) => ({
+      key: `local:${agent.id}`,
+      agent,
+      activityKey: agent.id,
+    })),
+    ...fleetAgents
+      .filter((snapshot) => snapshot.workspaceId === activeSlug)
+      .map((snapshot) => ({
+        key: `fleet:${snapshot.nodeId}:${snapshot.workspaceId}:${snapshot.agent.id}`,
+        agent: snapshot.agent,
+        activityKey: fleetActivityKey(
+          snapshot.nodeId,
+          snapshot.workspaceId,
+          snapshot.agent.id,
+        ),
+        sourceLabel: snapshot.nodeName ?? snapshot.nodeId,
+      })),
+  ];
 
-  const sortedAgents = [...agents].sort(compareAgentsByActivity(activities));
-  const previewAgents = sortedAgents.slice(0, PREVIEW_AGENT_LIMIT);
-  const hiddenCount = Math.max(0, sortedAgents.length - previewAgents.length);
+  if (rows.length === 0) return null;
+
+  const sortedRows = [...rows].sort(compareRowsByActivity(activities));
+  const previewRows = sortedRows.slice(0, PREVIEW_AGENT_LIMIT);
+  const hiddenCount = Math.max(0, sortedRows.length - previewRows.length);
 
   return (
     <div className="px-3 pt-3 pb-2 shrink-0">
@@ -258,15 +302,16 @@ export function AgentStatusPanel() {
                   Agents
                 </p>
                 <span className="text-[11px] font-mono text-text-faint">
-                  {sortedAgents.length}
+                  {sortedRows.length}
                 </span>
               </div>
               <div className="max-h-[calc(min(70vh,32rem)-3rem)] overflow-y-auto space-y-1.5 pr-1">
-                {sortedAgents.map((agent) => (
+                {sortedRows.map((row) => (
                   <AgentRow
-                    key={agent.id}
-                    agent={agent}
-                    activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
+                    key={row.key}
+                    agent={row.agent}
+                    activities={activities[row.activityKey] ?? EMPTY_ACTIVITIES}
+                    sourceLabel={row.sourceLabel}
                     testId="agent-full-row"
                   />
                 ))}
@@ -276,11 +321,12 @@ export function AgentStatusPanel() {
         )}
       </div>
       <div className="space-y-1.5">
-        {previewAgents.map((agent) => (
+        {previewRows.map((row) => (
           <AgentRow
-            key={agent.id}
-            agent={agent}
-            activities={activities[agent.id] ?? EMPTY_ACTIVITIES}
+            key={row.key}
+            agent={row.agent}
+            activities={activities[row.activityKey] ?? EMPTY_ACTIVITIES}
+            sourceLabel={row.sourceLabel}
             testId="agent-preview-row"
           />
         ))}

@@ -38,6 +38,8 @@ const testEnv = vi.hoisted(() => {
 
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { fleetActivityKey, useFleetStore } from "@/hooks/use-fleet-store";
+import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import type { Agent } from "@/lib/types";
 import { AgentStatusPanel } from "./agent-status-panel";
 
@@ -69,7 +71,23 @@ describe("AgentStatusPanel", () => {
   beforeEach(() => {
     testEnv.localStorage.clear();
     useAgentStore.setState({ agents: [], selectedAgentId: null });
+    useFleetStore.getState().resetForWorkspaceSwitch();
     useAgentActivityStore.setState({ activities: {}, lastSlug: null });
+    useWorkspaceStore.setState({
+      workspaces: [
+        {
+          slug: "room",
+          workspace_name: "Room",
+          path: "/tmp/room",
+          provider: "local",
+          initialized: true,
+        },
+      ],
+      activeSlug: "room",
+      loading: false,
+      error: null,
+      errorCode: null,
+    });
   });
 
   afterEach(() => {
@@ -99,5 +117,48 @@ describe("AgentStatusPanel", () => {
     expect(fill).not.toBeNull();
     expect(fill?.style.getPropertyValue("--agent-usage-fill")).toBe("47.5%");
     expect(fill?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("renders a remote fleet agent with its fleet activity", async () => {
+    useFleetStore.getState().setAgents([
+      {
+        nodeId: "mac-mini",
+        nodeName: "lewismac-mini",
+        workspaceId: "room",
+        remoteWorkspaceId: "room",
+        workspaceIdentity: "github.com/flame4/room",
+        agent: {
+          id: "glm51op",
+          name: "glm51op",
+          status: "idle",
+          systemPrompt: "",
+          repoPath: "",
+          messagesProcessed: 0,
+        },
+      },
+    ]);
+    useAgentActivityStore.getState().pushForKey(
+      fleetActivityKey("mac-mini", "room", "glm51op"),
+      {
+        agent_id: "glm51op",
+        workspace_id: "room",
+        event_type: "done",
+        detail: "done (18.5s)",
+        timestamp: "2026-05-18T11:19:35Z",
+      },
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentStatusPanel />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("glm51op");
+    expect(container.textContent).toContain("lewismac-mini");
+    expect(container.textContent).toContain("done (18.5s)");
   });
 });

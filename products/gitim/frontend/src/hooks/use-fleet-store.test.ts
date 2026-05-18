@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyFleetAgentActivityEvent, useFleetStore } from "./use-fleet-store";
+import { useAgentActivityStore } from "./use-agent-activity";
+import {
+  applyFleetAgentActivityEvent,
+  fleetActivityKey,
+  useFleetStore,
+} from "./use-fleet-store";
 import type { Agent, FleetAgentSnapshot } from "../lib/types";
 
 function agent(id: string): Agent {
@@ -28,6 +33,7 @@ function snapshot(nodeId: string, id: string): FleetAgentSnapshot {
 describe("useFleetStore", () => {
   beforeEach(() => {
     useFleetStore.getState().resetForWorkspaceSwitch();
+    useAgentActivityStore.getState().clear();
     useFleetStore.getState().setAgents([
       snapshot("node-a", "cfo"),
       snapshot("node-b", "cfo"),
@@ -107,5 +113,37 @@ describe("useFleetStore", () => {
     expect(agents).toHaveLength(1);
     expect(agents[0].nodeId).toBe("node-b");
     expect(agents[0].agent.id).toBe("cfo");
+  });
+
+  it("infers a remote agent from fleet activity and stores its event by node key", () => {
+    applyFleetAgentActivityEvent({
+      kind: "agent_activity",
+      node_id: "mac-mini",
+      node_name: "lewismac-mini",
+      remote_workspace_id: "room",
+      workspace_identity: "github.com/flame4/room",
+      workspace_id: "room",
+      agent_id: "glm51op",
+      received_at: "2026-05-18T11:19:35Z",
+      event: {
+        agent_id: "glm51op",
+        workspace_id: "room",
+        event_type: "done",
+        detail: "done (18.5s)",
+        timestamp: "2026-05-18T11:19:35Z",
+      },
+    });
+
+    const inferred = useFleetStore
+      .getState()
+      .agents.find((entry) => entry.agent.id === "glm51op");
+    expect(inferred?.nodeName).toBe("lewismac-mini");
+    expect(inferred?.agent.status).toBe("idle");
+
+    const events =
+      useAgentActivityStore.getState().activities[
+        fleetActivityKey("mac-mini", "room", "glm51op")
+      ];
+    expect(events?.[0]?.detail).toBe("done (18.5s)");
   });
 });

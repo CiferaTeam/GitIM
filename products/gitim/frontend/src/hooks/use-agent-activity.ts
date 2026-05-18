@@ -15,9 +15,20 @@ interface AgentActivityState {
   /** Slug the persisted activities belong to; used to invalidate on switch. */
   lastSlug: string | null;
   push: (event: AgentActivityEvent) => void;
+  pushForKey: (key: string, event: AgentActivityEvent) => void;
   /** If slug differs from lastSlug, wipe activities; always records lastSlug. */
   ensureSlug: (slug: string) => void;
   clear: () => void;
+}
+
+function pushActivity(
+  activities: Record<string, AgentActivityEvent[]>,
+  key: string,
+  event: AgentActivityEvent,
+) {
+  const prev = activities[key] ?? [];
+  const next = [event, ...prev].slice(0, MAX_EVENTS_PER_AGENT);
+  return { ...activities, [key]: next };
 }
 
 export const useAgentActivityStore = create<AgentActivityState>()(
@@ -27,9 +38,19 @@ export const useAgentActivityStore = create<AgentActivityState>()(
       lastSlug: null,
       push: (event) =>
         set((state) => {
-          const prev = state.activities[event.agent_id] ?? [];
-          const next = [event, ...prev].slice(0, MAX_EVENTS_PER_AGENT);
-          return { activities: { ...state.activities, [event.agent_id]: next } };
+          return {
+            activities: pushActivity(
+              state.activities,
+              event.agent_id,
+              event,
+            ),
+          };
+        }),
+      pushForKey: (key, event) =>
+        set((state) => {
+          return {
+            activities: pushActivity(state.activities, key, event),
+          };
         }),
       ensureSlug: (slug) =>
         set((state) =>
