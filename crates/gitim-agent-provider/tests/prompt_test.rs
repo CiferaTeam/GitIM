@@ -69,6 +69,8 @@ fn gitim_api_exposes_cron_commands() {
     assert!(api.contains("--schedule"), "missing --schedule flag");
     assert!(api.contains("--target"), "missing --target flag");
     assert!(api.contains("--prompt"), "missing --prompt flag");
+    assert!(api.contains("--prompt-file"), "missing --prompt-file flag");
+    assert!(api.contains("--timezone"), "missing timezone flag");
     assert!(api.contains("@self"), "missing @self target alias");
 
     // Schedule format coverage — 5-field cron + at least one alias so
@@ -83,6 +85,11 @@ fn gitim_api_exposes_cron_commands() {
 
     // Discoverability commands the agent needs to know exist.
     assert!(api.contains("gitim cron list"), "missing list command");
+    assert!(
+        api.contains("gitim cron history"),
+        "missing history command"
+    );
+    assert!(api.contains("gitim cron next"), "missing next command");
 }
 
 #[test]
@@ -203,6 +210,14 @@ fn gitim_api_exposes_card_and_archive_commands() {
     assert!(api.contains("gitim archive-channel"));
     assert!(api.contains("gitim unarchive-channel"));
     assert!(api.contains("gitim archived-channels"));
+
+    // Archive discovery commands
+    assert!(api.contains("gitim list-archived-dms"));
+    assert!(api.contains("gitim list-archived-users"));
+
+    // Channel/card archive relationship
+    assert!(api.contains("archive-channel 会连同该 channel 下的 cards 一起归档"));
+    assert!(api.contains("手动 `gitim card archive`"));
 }
 
 #[test]
@@ -241,6 +256,85 @@ fn gitim_api_exposes_message_body_markers() {
     assert!(api.contains("<#channel:L000042>"));
     assert!(api.contains("<~handler>"));
     assert!(api.contains("<!https://example.com|显示文本>"));
+}
+
+#[test]
+fn gitim_api_exposes_routing_rules() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("### 消息投递与路由"));
+    assert!(api.contains("recipients"));
+    assert!(api.contains("频道 creator"));
+    assert!(api.contains("父消息链上的作者"));
+    assert!(api.contains("协议 mention `<@handler>`"));
+    assert!(api.contains("裸 `@handler` 只是文本"));
+}
+
+#[test]
+fn gitim_api_exposes_search_index_guidance() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("search index disabled"));
+    assert!(api.contains("indexer.enabled=true"));
+    assert!(api.contains("不要直接改 `index.db`"));
+}
+
+#[test]
+fn gitim_api_exposes_runtime_management_cli() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("### Runtime 管理"));
+    assert!(api.contains("gitim-runtime status"));
+    assert!(api.contains("gitim-runtime runtime-id"));
+    assert!(api.contains("gitim-runtime workspaces"));
+    assert!(api.contains("gitim-runtime list-agents"));
+    assert!(api.contains("gitim-runtime preflight <provider>"));
+    assert!(api.contains("gitim-runtime add-agent"));
+    assert!(api.contains("--llm-provider"));
+    assert!(api.contains("gitim-runtime update-agent"));
+    assert!(api.contains("gitim-runtime burn-agent"));
+    assert!(api.contains(".gitim/bin/gitim-runtime"));
+    assert!(api.contains("preflight_detail"));
+    assert!(api.contains("退出码语义"));
+}
+
+#[test]
+fn gitim_api_exposes_fleet_runtime_management() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("Fleet 是 runtime"));
+    assert!(api.contains("gitim-runtime fleet list"));
+    assert!(api.contains("gitim-runtime fleet status"));
+    assert!(api.contains("gitim-runtime fleet add"));
+    assert!(api.contains("--base-url"));
+    assert!(api.contains("gitim-runtime fleet remove"));
+    assert!(api.contains("gitim-runtime fleet tunnel up"));
+    assert!(api.contains("--ssh-target"));
+    assert!(api.contains("--remote-port"));
+    assert!(api.contains("gitim-runtime fleet tunnel status"));
+    assert!(api.contains("gitim-runtime fleet tunnel down"));
+    assert!(api.contains("gitim-runtime add-agent --node <node-id>"));
+    assert!(api.contains("gitim-runtime burn-agent --node <node-id>"));
 }
 
 #[test]
