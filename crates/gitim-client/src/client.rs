@@ -709,6 +709,100 @@ impl GitimClient {
         )
         .await
     }
+
+    pub async fn flow_list(&self) -> Result<ApiResponse, ClientError> {
+        self.request("flow_list", json!({})).await
+    }
+
+    pub async fn flow_show(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_show", json!({ "slug": slug })).await
+    }
+
+    pub async fn flow_create(
+        &self,
+        slug: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "flow_create",
+            json!({
+                "slug": slug,
+                "name": name,
+                "description": description,
+            }),
+        )
+        .await
+    }
+
+    pub async fn flow_remove(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_remove", json!({ "slug": slug })).await
+    }
+
+    pub async fn flow_validate(&self, slug: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_validate", json!({ "slug": slug })).await
+    }
+
+    pub async fn flow_run_start(
+        &self,
+        slug: &str,
+        channel: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("flow_run_start", json!({"slug": slug, "channel": channel}))
+            .await
+    }
+
+    pub async fn flow_run_list(
+        &self,
+        slug: Option<&str>,
+        channel: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<ApiResponse, ClientError> {
+        let mut params = serde_json::Map::new();
+        if let Some(s) = slug {
+            params.insert("slug".into(), json!(s));
+        }
+        if let Some(c) = channel {
+            params.insert("channel".into(), json!(c));
+        }
+        if let Some(st) = status {
+            params.insert("status".into(), json!(st));
+        }
+        self.request("flow_run_list", serde_json::Value::Object(params))
+            .await
+    }
+
+    pub async fn flow_run_show(&self, run_id: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_run_show", json!({"run_id": run_id}))
+            .await
+    }
+
+    pub async fn flow_node_set(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        status: &str,
+        actor: Option<&str>,
+        result_ref: Option<&str>,
+    ) -> Result<ApiResponse, ClientError> {
+        let mut params = serde_json::Map::new();
+        params.insert("run_id".into(), json!(run_id));
+        params.insert("node_id".into(), json!(node_id));
+        params.insert("status".into(), json!(status));
+        if let Some(a) = actor {
+            params.insert("actor".into(), json!(a));
+        }
+        if let Some(r) = result_ref {
+            params.insert("result_ref".into(), json!(r));
+        }
+        self.request("flow_node_set", serde_json::Value::Object(params))
+            .await
+    }
+
+    pub async fn flow_run_cancel(&self, run_id: &str) -> Result<ApiResponse, ClientError> {
+        self.request("flow_run_cancel", json!({"run_id": run_id}))
+            .await
+    }
 }
 
 /// Decode a daemon response into a typed payload `T`. Used by the cron

@@ -389,3 +389,87 @@ export function nowTimestamp(): string {
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
   );
 }
+
+// --- Flow types (mirrors gitim-core::flow::types + responses) ---
+
+export type NodeType =
+  | "agent_mention"
+  | "channel_thread"
+  | "human_review"
+  | "wait_for_signal";
+
+export interface FlowNodeSummary {
+  id: string;
+  type: NodeType;
+  owner?: string;
+  participants?: string[];
+  needs?: string[];
+  prompt: string;
+}
+
+export interface FlowSummary {
+  slug: string;
+  name: string;
+  description: string;
+  node_count: number;
+  updated_at?: string;
+}
+
+export interface FlowDocument {
+  slug: string;
+  name: string;
+  description: string;
+  created_by: string;
+  created_at: string;
+  updated_at?: string;
+  nodes: FlowNodeSummary[];
+  raw_markdown: string;
+}
+
+export interface FlowValidationItem {
+  kind: "error" | "warning";
+  message: string;
+}
+
+export interface FlowValidationResult {
+  slug: string;
+  ok: boolean;
+  items: FlowValidationItem[];
+}
+
+// --- Flow run types (mirrors runtime flow_run responses) ---
+
+export type RunStatus = "in_progress" | "done" | "failed" | "cancelled";
+export type NodeStatus = "pending" | "in_progress" | "done" | "failed" | "skipped";
+
+export interface FlowRunSummary {
+  run_id: string;
+  flow_slug: string;
+  channel: string;
+  status: RunStatus;
+  started_by: string;
+  started_at: string;
+  updated_at: string;
+  node_count: number;
+  nodes_done: number;
+}
+
+export interface FlowRunNodeSummary {
+  id: string;
+  status: NodeStatus;
+  actor?: string;
+  started_at?: string;
+  completed_at?: string;
+  result_ref?: string;
+}
+
+export interface FlowRunDetail {
+  run_id: string;
+  flow_slug: string;
+  channel: string;
+  started_at: string;
+  started_by: string;
+  status: RunStatus;
+  updated_at: string;
+  nodes: FlowRunNodeSummary[];
+}

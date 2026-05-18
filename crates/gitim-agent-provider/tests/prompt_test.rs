@@ -241,6 +241,49 @@ fn gitim_api_exposes_board_commands() {
 }
 
 #[test]
+fn gitim_api_exposes_flow_commands() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("### 流程模板 (Flows)"));
+    assert!(api.contains("gitim flow list"));
+    assert!(api.contains("gitim flow show"));
+    assert!(api.contains("gitim flow validate"));
+    assert!(api.contains("gitim flow create"));
+    assert!(api.contains("gitim flow rm"));
+}
+
+fn test_context() -> PromptContext<'static> {
+    PromptContext {
+        handler: "bot",
+        model: None,
+    }
+}
+
+#[test]
+fn gitim_api_exposes_flow_run_commands() {
+    let ctx = test_context();
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let api = provider.prompt_gitim_api(&ctx);
+    assert!(api.contains("gitim flow start"), "missing flow start");
+    assert!(api.contains("gitim flow runs"), "missing flow runs");
+    assert!(api.contains("gitim flow run-show"), "missing flow run-show");
+    assert!(api.contains("gitim flow node-set"), "missing flow node-set");
+    assert!(
+        api.contains("gitim flow run-cancel"),
+        "missing flow run-cancel"
+    );
+    assert!(
+        api.contains("pending → in_progress → done"),
+        "missing state machine"
+    );
+}
+
+#[test]
 fn gitim_api_exposes_message_body_markers() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {

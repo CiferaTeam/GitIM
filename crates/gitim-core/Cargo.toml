@@ -12,6 +12,8 @@ thiserror.workspace = true
 chrono.workspace = true
 chrono-tz = { workspace = true }
 croner = { workspace = true }
+getrandom = "0.2"
+hex.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1"

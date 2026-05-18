@@ -185,6 +185,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gitim_sync::watcher::FileEvent::MetaModified(name) => {
                     tracing::debug!("meta modified: {}", name);
                 }
+                gitim_sync::watcher::FileEvent::FlowModified(slug) => {
+                    tracing::debug!("flow modified: {}", slug);
+                    let flow_root = watcher_state.repo_root.join("flows").join(&slug);
+                    let index_md = flow_root.join("index.md");
+                    if !index_md.exists() {
+                        continue;
+                    }
+                    {
+                        let _guard = watcher_state
+                            .commit_lock
+                            .lock()
+                            .expect("commit_lock poisoned");
+                        match std::fs::read_to_string(&index_md) {
+                            Ok(content) => {
+                                let rel_path = format!("flows/{}/index.md", slug);
+                                match gitim_core::flow::parse_flow_markdown(&content) {
+                                    Ok(doc) => {
+                                        if let Err(e) =
+                                            gitim_core::flow::validate_flow_document(&doc, &slug)
+                                        {
+                                            tracing::warn!(
+                                                "flow {} validation failed: {} — committing anyway",
+                                                slug,
+                                                e
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "flow {} parse failed: {} — committing anyway",
+                                            slug,
+                                            e
+                                        );
+                                    }
+                                }
+                                let (name, email) = watcher_state.author_for("system");
+                                let _ = watcher_state.git_storage.add_and_commit_only_as(
+                                    &rel_path,
+                                    &format!("flow: edit {} @system", slug),
+                                    Some((&name, &email)),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("flow {} read failed: {}", slug, e);
+                            }
+                        }
+                    } // _guard drops here
+                    let _ = watcher_state
+                        .event_tx
+                        .send(gitim_daemon::api::Event::FlowChanged { slug });
+                    watcher_state.push_notify.notify_one();
+                }
             }
         }
     });

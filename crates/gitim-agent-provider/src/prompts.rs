@@ -485,6 +485,36 @@ board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、
 不要直接 `git add showboards/.../board.md && git commit`；写入、校验和提交都必须经过 `gitim board ...`，\
 daemon 会只提交你的 board 文件并发出 board 更新事件。
 
+### 流程模板 (Flows)
+
+Flows 是团队沉淀的 SOP 流程库 —— 每个 flow 是 git 里的 markdown 模板，frontmatter 声明节点和 needs[] 依赖关系，\
+body 用 `## <node-id>` 给每个节点的 prompt。**模板是参考不是脚本**：有人让你「按某 flow 走」时，\
+自己读、自己 adapt 到当前情境、自己用 thread/channel 派单、自己判断每个节点是否完成，不要把它当 DAG executor 跑。
+
+存储路径：`flows/<slug>/index.md`。任何人（任何 agent）都能改，改完 daemon 自动 commit。
+
+- `gitim flow list` — 看团队都有哪些 flow（slug / name / 节点数 / 描述）
+- `gitim flow show <slug>` — 读完整模板（markdown 原文 + ascii DAG）
+- `gitim flow validate <slug>` — schema 检查 + 双源对齐报告
+- `gitim flow create <slug> --name <name>` — 创建 stub 模板（frontmatter only，body 为空）
+- `gitim flow rm <slug>` — soft delete（移到 .trash/）
+
+什么时候用 flow：做「我们以前做过这件事」的工作时（release、kickoff、incident response 等），\
+先 `gitim flow list` 看团队有没有沉淀，有就 `gitim flow show <slug>` 看一眼再开工，\
+没有可以做完后 `gitim flow create` 把流程沉淀下来给团队下次用。
+
+触发一个 flow：
+  1. `gitim flow start <slug> --channel <当前 channel>` —— 拿到 `run_id`，记下来
+  2. 整个 run 期间在消息里带上 run_id（或 ref 当前 thread），让别人 / 你自己未来能找回
+  3. 开始一个节点：`gitim flow node-set <run_id> <node-id> --status in_progress --actor <handler>`
+  4. 节点完成：`--status done`（成功 / 失败：`failed` + 在 thread 里讲原因 / 跳过：`skipped`）
+  5. 不记得当前 channel 里有哪些活的 run：`gitim flow runs --channel <ch> --status in_progress`
+  6. 想看整个 run 现在啥样：`gitim flow run-show <run_id>` —— DAG + 各节点 status + actor
+  7. 终止：所有 node 都到终态（done/failed/skipped），run 会自动 done（全 done/skipped）或 failed（任一 failed）。不可恢复要起新 run。
+  8. 强制取消：`gitim flow run-cancel <run_id>`（只对未终态 run 有效）
+
+状态机：`pending → in_progress → done | failed | skipped`。**只前向，不回退**。run.status 走 `in_progress → done | failed | cancelled`，同样只前向。
+
 ### 周期任务 (Cron)
 
 你可以给自己或其他 agent 安排周期性任务。这是你延伸自己时间维度的方式：\

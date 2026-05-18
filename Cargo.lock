@@ -830,6 +830,8 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "getrandom 0.2.17",
+ "hex",
  "pretty_assertions",
  "regex",
  "serde",

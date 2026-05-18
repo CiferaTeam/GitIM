@@ -243,6 +243,12 @@ enum Commands {
         #[command(subcommand)]
         command: CronCommands,
     },
+
+    /// Flow template commands
+    Flow {
+        #[command(subcommand)]
+        command: FlowCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -558,6 +564,56 @@ enum CronCommands {
         /// Cron job name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum FlowCommands {
+    /// List all flow templates
+    List,
+    /// Show a flow template (markdown + ascii DAG)
+    Show { slug: String },
+    /// Create a stub flow template
+    Create {
+        slug: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Soft-delete a flow template (move to .trash/)
+    Rm { slug: String },
+    /// Validate a flow template (schema + double-source alignment)
+    Validate { slug: String },
+    /// Start a new flow run, bound to a channel
+    Start {
+        slug: String,
+        #[arg(long)]
+        channel: String,
+    },
+    /// List flow runs (filter by --slug / --channel / --status)
+    Runs {
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, help = "in_progress | done | failed | cancelled")]
+        status: Option<String>,
+    },
+    /// Show a flow run (DAG + per-node status)
+    RunShow { run_id: String },
+    /// Update a node's status in a run
+    NodeSet {
+        run_id: String,
+        node_id: String,
+        #[arg(long, help = "pending|in_progress|done|failed|skipped")]
+        status: String,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        result_ref: Option<String>,
+    },
+    /// Cancel an in-progress run (terminal state)
+    RunCancel { run_id: String },
 }
 
 #[tokio::main]
@@ -908,6 +964,64 @@ async fn main() {
             }
             CronCommands::Next { name } => commands::cron::cmd_next(&client, &mode, &name).await,
         },
+        Commands::Flow { command } => match command {
+            FlowCommands::List => commands::flow::cmd_flow_list(&client, &mode).await,
+            FlowCommands::Show { slug } => {
+                commands::flow::cmd_flow_show(&client, &mode, &slug).await
+            }
+            FlowCommands::Create {
+                slug,
+                name,
+                description,
+            } => commands::flow::cmd_flow_create(&client, &mode, &slug, &name, &description).await,
+            FlowCommands::Rm { slug } => {
+                commands::flow::cmd_flow_remove(&client, &mode, &slug).await
+            }
+            FlowCommands::Validate { slug } => {
+                commands::flow::cmd_flow_validate(&client, &mode, &slug).await
+            }
+            FlowCommands::Start { slug, channel } => {
+                commands::flow::cmd_flow_run_start(&client, &mode, &slug, &channel).await
+            }
+            FlowCommands::Runs {
+                slug,
+                channel,
+                status,
+            } => {
+                commands::flow::cmd_flow_runs(
+                    &client,
+                    &mode,
+                    slug.as_deref(),
+                    channel.as_deref(),
+                    status.as_deref(),
+                )
+                .await
+            }
+            FlowCommands::RunShow { run_id } => {
+                commands::flow::cmd_flow_run_show(&client, &mode, &run_id).await
+            }
+            FlowCommands::NodeSet {
+                run_id,
+                node_id,
+                status,
+                actor,
+                result_ref,
+            } => {
+                commands::flow::cmd_flow_node_set(
+                    &client,
+                    &mode,
+                    &run_id,
+                    &node_id,
+                    &status,
+                    actor.as_deref(),
+                    result_ref.as_deref(),
+                )
+                .await
+            }
+            FlowCommands::RunCancel { run_id } => {
+                commands::flow::cmd_flow_run_cancel(&client, &mode, &run_id).await
+            }
+        },
     }
 }
 
@@ -1227,6 +1341,65 @@ mod tests {
     #[test]
     fn cron_subcommand_requires_a_subcommand() {
         let r = Cli::try_parse_from(["gitim", "cron"]);
+        assert!(r.is_err());
+    }
+
+    // -- flow subcommand parsing --------------------------------------------
+
+    #[test]
+    fn flow_list_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "list"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_show_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "show", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_create_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "create", "release", "--name", "Release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_create_with_description_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "flow",
+            "create",
+            "release",
+            "--name",
+            "Release",
+            "--description",
+            "monthly release flow",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_rm_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "rm", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_validate_parses() {
+        let r = Cli::try_parse_from(["gitim", "flow", "validate", "release"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn flow_subcommand_requires_a_subcommand() {
+        let r = Cli::try_parse_from(["gitim", "flow"]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn flow_create_requires_name() {
+        let r = Cli::try_parse_from(["gitim", "flow", "create", "release"]);
         assert!(r.is_err());
     }
 }

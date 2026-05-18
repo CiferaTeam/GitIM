@@ -23,8 +23,15 @@ import type {
   CronTimelineResponse,
   FleetAgentSnapshot,
   FleetNodeStatus,
+  FlowDocument,
+  FlowRunDetail,
+  FlowRunSummary,
+  FlowSummary,
+  FlowValidationResult,
   Message,
+  NodeStatus,
   PollResponse,
+  RunStatus,
   WorkspaceSummary,
 } from "./types";
 import type {
@@ -1830,6 +1837,208 @@ export async function unarchiveUser(
       { method: "POST" },
     );
     return await res.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// --- Flow API: runtime HTTP (all scoped to a workspace) ---
+//
+// Wire contract mirrors the cron API: the daemon/runtime returns raw typed
+// JSON bodies on success (no `{ok}` wrapper), so we reuse `cronRequest` to
+// normalise them into `ApiResponse`. Failure paths return `ErrorBody` with
+// `{ok: false, error, error_code?}` as usual.
+//
+// Endpoints sit under `${wsBase(slug)}/im/flows` to stay consistent with
+// the `/im/*` namespace already used for channels, boards, and cards.
+// Browser (local) mode has no flow engine — these short-circuit to a
+// friendly error rather than hitting an unreachable URL.
+
+const FLOW_LOCAL_UNAVAILABLE: ApiResponse<never> = {
+  ok: false,
+  error: "Flow management requires the gitim runtime (not available in browser mode).",
+  error_code: "runtime_required",
+};
+
+export async function listFlows(
+  slug: string,
+): Promise<ApiResponse<{ flows: FlowSummary[] }>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  return cronRequest<{ flows: FlowSummary[] }>(`${wsBase(slug)}/im/flows`);
+}
+
+export async function getFlow(
+  slug: string,
+  flowSlug: string,
+): Promise<ApiResponse<FlowDocument>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  return cronRequest<FlowDocument>(
+    `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}`,
+  );
+}
+
+export async function createFlow(
+  slug: string,
+  flowSlug: string,
+  name: string,
+  description: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(`${wsBase(slug)}/im/flows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: flowSlug, name, description }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function removeFlow(
+  slug: string,
+  flowSlug: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}`,
+      { method: "DELETE" },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function validateFlow(
+  slug: string,
+  flowSlug: string,
+): Promise<ApiResponse<FlowValidationResult>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  return cronRequest<FlowValidationResult>(
+    `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}/validate`,
+  );
+}
+
+export async function startFlowRun(
+  workspaceSlug: string,
+  flowSlug: string,
+  channel: string,
+): Promise<ApiResponse<{ run_id: string; flow_slug: string; channel: string; commit_id: string }>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/flows/${encodeURIComponent(flowSlug)}/runs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function listFlowRuns(
+  workspaceSlug: string,
+  opts: { slug?: string; channel?: string; status?: RunStatus } = {},
+): Promise<ApiResponse<{ runs: FlowRunSummary[] }>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  const qs = new URLSearchParams();
+  if (opts.slug) qs.set("slug", opts.slug);
+  if (opts.channel) qs.set("channel", opts.channel);
+  if (opts.status) qs.set("status", opts.status);
+  const url = `${wsBase(workspaceSlug)}/im/runs${qs.toString() ? "?" + qs : ""}`;
+  return cronRequest<{ runs: FlowRunSummary[] }>(url);
+}
+
+export async function getFlowRun(
+  workspaceSlug: string,
+  runId: string,
+): Promise<ApiResponse<FlowRunDetail>> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  return cronRequest<FlowRunDetail>(
+    `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+export async function updateFlowNode(
+  workspaceSlug: string,
+  runId: string,
+  nodeId: string,
+  payload: { status: NodeStatus; actor?: string; result_ref?: string },
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function cancelFlowRun(
+  workspaceSlug: string,
+  runId: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}`,
+      { method: "DELETE" },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

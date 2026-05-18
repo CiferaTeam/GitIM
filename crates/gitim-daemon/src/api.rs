@@ -64,6 +64,24 @@ pub enum Event {
     #[serde(rename = "board_updated")]
     BoardUpdated { handler: String },
 
+    #[serde(rename = "flow_changed")]
+    FlowChanged { slug: String },
+
+    #[serde(rename = "flow_run_started")]
+    FlowRunStarted {
+        run_id: String,
+        flow_slug: String,
+        channel: String,
+    },
+    #[serde(rename = "flow_run_node_updated")]
+    FlowRunNodeUpdated {
+        run_id: String,
+        node_id: String,
+        status: String,
+    },
+    #[serde(rename = "flow_run_completed")]
+    FlowRunCompleted { run_id: String, status: String },
+
     #[serde(rename = "channel_unarchived")]
     ChannelUnarchived {
         channel: String,
@@ -396,6 +414,61 @@ pub enum Request {
         section: String,
         value: String,
         #[serde(default)]
+        author: Option<String>,
+    },
+
+    // -- Flow triggers --
+    #[serde(rename = "flow_list")]
+    FlowList,
+    #[serde(rename = "flow_show")]
+    FlowShow { slug: String },
+    #[serde(rename = "flow_create")]
+    FlowCreate {
+        slug: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_remove")]
+    FlowRemove {
+        slug: String,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_validate")]
+    FlowValidate { slug: String },
+
+    #[serde(rename = "flow_run_start")]
+    FlowRunStart {
+        slug: String,
+        channel: String,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_run_list")]
+    FlowRunList {
+        #[serde(default)]
+        slug: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+    },
+    #[serde(rename = "flow_run_show")]
+    FlowRunShow { run_id: String },
+    #[serde(rename = "flow_node_set")]
+    FlowNodeSet {
+        run_id: String,
+        node_id: String,
+        status: String,
+        #[serde(default)]
+        actor: Option<String>,
+        #[serde(default)]
+        result_ref: Option<String>,
+        author: Option<String>,
+    },
+    #[serde(rename = "flow_run_cancel")]
+    FlowRunCancel {
+        run_id: String,
         author: Option<String>,
     },
 
