@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 //! `gitim cron` subcommands.
 //!
 //! Each command shells out to a daemon RPC via `GitimClient`; the typed
@@ -179,12 +177,11 @@ pub async fn cmd_list(client: &GitimClient, mode: &OutputMode) {
                     .unwrap_or(0)
                     .max(6);
                 println!(
-                    "{:<name_w$}  {:<sched_w$}  {:<target_w$}  {:<8}  {}",
+                    "{:<name_w$}  {:<sched_w$}  {:<target_w$}  {:<8}  NEXT FIRE",
                     "NAME",
                     "SCHEDULE",
                     "TARGET",
                     "ENABLED",
-                    "NEXT FIRE",
                     name_w = name_w,
                     sched_w = sched_w,
                     target_w = target_w,

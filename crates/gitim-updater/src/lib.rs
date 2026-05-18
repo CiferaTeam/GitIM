@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 //! gitim-updater: shared core for GitIM self-update.
 //!
 //! Pure helpers (version parsing, platform detection, URL formatting) sit

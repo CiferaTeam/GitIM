@@ -130,7 +130,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
 
     let mut channel_membership: HashMap<String, bool> = HashMap::new();
     if !skip_filter {
-        for (path, _) in &diff {
+        for path in diff.keys() {
             let path_str = path.to_string_lossy();
             if let Some(ch_name) = extract_channel(&path_str) {
                 if channel_membership.contains_key(&ch_name) {
@@ -147,7 +147,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                         } else {
                             current_user_snapshot
                                 .as_ref()
-                                .map_or(false, |me| meta.members.contains(me))
+                                .is_some_and(|me| meta.members.contains(me))
                         }
                     } else {
                         true
@@ -214,11 +214,8 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                             if parsed.entries.is_empty() {
                                 continue;
                             }
-                            let entries: Vec<serde_json::Value> = parsed
-                                .entries
-                                .iter()
-                                .map(|entry| entry_to_json(entry))
-                                .collect();
+                            let entries: Vec<serde_json::Value> =
+                                parsed.entries.iter().map(entry_to_json).collect();
                             changes.push(gitim_core::responses::PollChange {
                                 channel: card_key,
                                 kind: "card_thread".to_string(),
@@ -408,11 +405,8 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             if parsed.entries.is_empty() {
                 continue;
             }
-            let entries: Vec<serde_json::Value> = parsed
-                .entries
-                .iter()
-                .map(|entry| entry_to_json(entry))
-                .collect();
+            let entries: Vec<serde_json::Value> =
+                parsed.entries.iter().map(entry_to_json).collect();
             changes.push(gitim_core::responses::PollChange {
                 channel: format!("cron:{}", cron_name),
                 kind: "cron_thread".to_string(),
@@ -454,10 +448,11 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         };
 
         // Channel membership filter
-        if kind == "channel" && !skip_filter {
-            if !channel_membership.get(&channel).copied().unwrap_or(true) {
-                continue;
-            }
+        if kind == "channel"
+            && !skip_filter
+            && !channel_membership.get(&channel).copied().unwrap_or(true)
+        {
+            continue;
         }
 
         // DM visibility filter — skip DMs not involving current user
@@ -516,8 +511,8 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
 ///     (channel owner + parent-chain ancestors + explicit mentions)
 ///   - kind == "dm"      → recipients = sorted [member_a, member_b]
 ///   - other kinds       → no recipients (broadcast fallback applies
-///                         on the runtime side; preserves prior
-///                         behavior for card_thread / cron_thread)
+///     on the runtime side; preserves prior
+///     behavior for card_thread / cron_thread)
 ///
 /// Event entries (join/leave/etc.) never carry recipients regardless
 /// of kind — routing is per-message and events are workspace-wide.

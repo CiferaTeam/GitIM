@@ -1,3 +1,4 @@
+#![allow(clippy::print_stderr)]
 //! End-to-end test for the full `POST /agents/add` + hermes profile flow.
 //!
 //! This test exercises the complete happy path against the real `hermes`

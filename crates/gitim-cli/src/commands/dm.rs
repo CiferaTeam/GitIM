@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::{fs, process};
 
 use gitim_client::GitimClient;

@@ -1,4 +1,5 @@
-#![deny(warnings)]
+// gitim-cli is a terminal program; printing to stdout/stderr is the interface.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod commands;
 mod output;

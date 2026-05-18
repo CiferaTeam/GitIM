@@ -324,6 +324,7 @@ impl GitimClient {
         self.request("poll", json!({ "since": since })).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn search(
         &self,
         query: Option<&str>,

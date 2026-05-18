@@ -78,3 +78,6 @@ http-body-util = "0.1"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 xattr = "1"
+
+[lints]
+workspace = true

@@ -1,3 +1,4 @@
+#![allow(clippy::print_stderr)]
 //! HTTP integration tests for the runtime's cron read endpoints.
 //!
 //! Same pattern as `http_im.rs`: a fake Unix-socket daemon answers method-

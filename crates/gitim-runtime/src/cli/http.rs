@@ -317,9 +317,8 @@ async fn process_response(resp: reqwest::Response) -> Result<serde_json::Value, 
 ///
 /// Decision order:
 /// 1. Try parse body as JSON. If parse fails:
-///      a. status 4xx/5xx → `HttpStatus` (status decides exit class)
-///      b. status 2xx → `Parse` (the runtime should always return JSON;
-///         a 200 with non-JSON is a protocol bug worth surfacing)
+///    a. status 4xx/5xx → `HttpStatus` (status decides exit class)
+///    b. status 2xx → `Parse` (runtime should always return JSON; 200 with non-JSON is a protocol bug)
 /// 2. Body parsed and contains `error_code` → `ResponseErrorCode`
 ///    (regardless of HTTP status — `error_code` is the canonical signal
 ///    per Architecture §1, including 5xx + structured code → permanent).

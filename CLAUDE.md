@@ -175,6 +175,27 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 
 2026-04 首次跑 4-target cross-compile dry-run 时,发现 `agent_loop.rs` 用了 `floor_char_boundary` (nightly-only),maintainer 的 nightly dev 环境下编得过,切 stable 秒挂。这类"无意 leak"只有在项目强制 stable 时才能早发现。
 
+## Pre-commit hook
+
+新 clone 后,**在主 checkout 下**跑一次(不要在 worktree 里跑;symlink 会指向 worktree 路径,worktree 删了 hook 就坏):
+
+```bash
+scripts/install-hooks.sh
+```
+
+在 worktree 里测试 hook 可加 `--force` 强制安装。
+
+会把 `scripts/hooks/pre-commit` symlink 到 git-common-dir 的 hooks 目录(worktree-safe,一次装所有 worktree 共享)。每次 `git commit` 自动跑:
+
+1. `cargo fmt --all -- --check` — 不通过则拒绝 commit
+2. `cargo clippy --workspace --all-targets --no-deps --locked` — error 则拒绝 commit
+
+冷启 30s+,sccache 增量秒级。
+
+紧急逃生(慎用):`git commit --no-verify`。
+
+Lint 规则在根 `Cargo.toml` 的 `[workspace.lints]` 单点维护(`clippy::all = deny`、`dbg_macro` / `print_stdout` / `todo` / `unimplemented` = deny、`unwrap_used` / `expect_used` / `panic` = warn)。新 crate 加进 workspace 时,在它的 `Cargo.toml` 末尾加 `[lints]\nworkspace = true` 继承。
+
 ## 测试
 
 ```bash

@@ -296,7 +296,7 @@ async fn run_sync_phase() -> Result<(UpdateJob, tempfile::TempDir, PathBuf), Upd
     );
     gitim_updater::install_update(&base, &latest_tag, &platform, tmp.path())
         .await
-        .map_err(|e| map_updater_error(e))?;
+        .map_err(map_updater_error)?;
 
     // 6. Verify the archive carries all three binaries. Missing any one means
     //    the tarball was packed wrong and we refuse to touch disk.

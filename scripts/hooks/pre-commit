@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce cargo fmt + cargo clippy on the whole workspace.
+# Install via: scripts/install-hooks.sh
+# Bypass (emergency only): git commit --no-verify
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "==> cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+  echo
+  echo "ERROR: cargo fmt found unformatted code. Run 'cargo fmt --all' and re-stage."
+  exit 1
+fi
+
+echo "==> cargo clippy --workspace --all-targets --no-deps --locked"
+if ! cargo clippy --workspace --all-targets --no-deps --locked; then
+  echo
+  echo "ERROR: cargo clippy failed. Fix the errors above (or use --no-verify in emergencies)."
+  echo "       If the error mentions Cargo.lock, run 'cargo update' first."
+  exit 1
+fi

@@ -17,3 +17,6 @@ serde_yaml.workspace = true
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

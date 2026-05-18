@@ -1264,9 +1264,8 @@ mod tests {
         .await;
         assert!(resp.ok, "read should succeed: {:?}", resp.error);
         let data = resp.data.unwrap();
-        assert_eq!(
-            data["archived"].as_bool().unwrap(),
-            false,
+        assert!(
+            !data["archived"].as_bool().unwrap(),
             "active card should have archived=false"
         );
     }
@@ -1312,9 +1311,8 @@ mod tests {
             resp.error
         );
         let data = resp.data.unwrap();
-        assert_eq!(
+        assert!(
             data["archived"].as_bool().unwrap(),
-            true,
             "archived card should have archived=true"
         );
         let entries = data["entries"].as_array().unwrap();

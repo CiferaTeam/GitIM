@@ -148,6 +148,7 @@ impl Provider for CodexProvider {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_session(
     mut child: tokio::process::Child,
     stdout: tokio::process::ChildStdout,
@@ -970,6 +971,7 @@ mod rollout_tests {
     /// failed rollout jsonl and run `cargo test -- --ignored` to confirm
     /// the scanner extracts a useful message. Skipped by default because
     /// it depends on a local file path.
+    #[allow(clippy::print_stderr)]
     #[test]
     #[ignore]
     fn scan_rollout_content_on_real_fixture() {

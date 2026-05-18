@@ -37,7 +37,7 @@ fn slow_mock_config() -> ProviderConfig {
     config
 }
 
-fn live_usage_mock_config(codex_home: &PathBuf) -> ProviderConfig {
+fn live_usage_mock_config(codex_home: &std::path::Path) -> ProviderConfig {
     let mut config = mock_config();
     config.env.insert(
         "MOCK_CODEX_WRITE_ROLLOUT_USAGE".to_string(),

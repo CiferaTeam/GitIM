@@ -343,7 +343,7 @@ mod tests {
     fn infer_ignores_malformed_me_json() {
         let tmp = tempfile::tempdir().unwrap();
         let human = tmp.path().join("human");
-        std::fs::create_dir_all(&human.join(".gitim")).unwrap();
+        std::fs::create_dir_all(human.join(".gitim")).unwrap();
         std::fs::write(human.join(".gitim/me.json"), "{not json").unwrap();
         let (h, d) = infer_local_human_identity(&human);
         assert_eq!(h, "human");

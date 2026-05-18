@@ -213,7 +213,7 @@ async fn send_with_remote_returns_pushed() {
         "with remote + sync, status should be pushed"
     );
     assert!(
-        data["commit_id"].as_str().map_or(false, |s| !s.is_empty()),
+        data["commit_id"].as_str().is_some_and(|s| !s.is_empty()),
         "commit_id should be non-empty"
     );
     assert_eq!(data["line_number"], 1);
@@ -312,7 +312,7 @@ async fn push_conflict_still_succeeds() {
         "should still push successfully after conflict resolution"
     );
     assert!(
-        data["commit_id"].as_str().map_or(false, |s| !s.is_empty()),
+        data["commit_id"].as_str().is_some_and(|s| !s.is_empty()),
         "commit_id should be non-empty"
     );
 

@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -259,30 +257,32 @@ impl Index {
         // 扫描 channels/
         let channels_dir = repo_root.join("channels");
         if channels_dir.exists() {
-            for entry in std::fs::read_dir(&channels_dir).into_iter().flatten() {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".thread") {
-                        let channel_name = name.trim_end_matches(".thread");
-                        match std::fs::read_to_string(entry.path()) {
-                            Ok(content) => {
-                                let parsed = match parse_thread(&content) {
-                                    Ok(f) => f,
-                                    Err(e) => {
-                                        warn!("index rebuild: skip {}: {}", name, e);
-                                        continue;
-                                    }
-                                };
-                                Self::insert_messages(
-                                    &tx,
-                                    channel_name,
-                                    "channel",
-                                    &parsed.messages(),
-                                )?;
-                                total += parsed.messages().len();
-                            }
-                            Err(e) => warn!("index rebuild: skip {}: {}", name, e),
+            for entry in std::fs::read_dir(&channels_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".thread") {
+                    let channel_name = name.trim_end_matches(".thread");
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(content) => {
+                            let parsed = match parse_thread(&content) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("index rebuild: skip {}: {}", name, e);
+                                    continue;
+                                }
+                            };
+                            Self::insert_messages(
+                                &tx,
+                                channel_name,
+                                "channel",
+                                &parsed.messages(),
+                            )?;
+                            total += parsed.messages().len();
                         }
+                        Err(e) => warn!("index rebuild: skip {}: {}", name, e),
                     }
                 }
             }
@@ -291,25 +291,23 @@ impl Index {
         // 扫描 dm/
         let dm_dir = repo_root.join("dm");
         if dm_dir.exists() {
-            for entry in std::fs::read_dir(&dm_dir).into_iter().flatten() {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".thread") {
-                        let channel_name = name.trim_end_matches(".thread");
-                        match std::fs::read_to_string(entry.path()) {
-                            Ok(content) => {
-                                let parsed = match parse_thread(&content) {
-                                    Ok(f) => f,
-                                    Err(e) => {
-                                        warn!("index rebuild: skip {}: {}", name, e);
-                                        continue;
-                                    }
-                                };
-                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
-                                total += parsed.messages().len();
-                            }
-                            Err(e) => warn!("index rebuild: skip {}: {}", name, e),
+            for entry in std::fs::read_dir(&dm_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".thread") {
+                    let channel_name = name.trim_end_matches(".thread");
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(content) => {
+                            let parsed = match parse_thread(&content) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("index rebuild: skip {}: {}", name, e);
+                                    continue;
+                                }
+                            };
+                            Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
+                            total += parsed.messages().len();
                         }
+                        Err(e) => warn!("index rebuild: skip {}: {}", name, e),
                     }
                 }
             }
@@ -434,30 +432,32 @@ impl Index {
         // 扫描 channels/
         let channels_dir = repo_root.join("channels");
         if channels_dir.exists() {
-            for entry in std::fs::read_dir(&channels_dir).into_iter().flatten() {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".thread") {
-                        let channel_name = name.trim_end_matches(".thread");
-                        match std::fs::read_to_string(entry.path()) {
-                            Ok(content) => {
-                                let parsed = match parse_thread(&content) {
-                                    Ok(f) => f,
-                                    Err(e) => {
-                                        warn!("index reindex: skip {}: {}", name, e);
-                                        continue;
-                                    }
-                                };
-                                Self::insert_messages(
-                                    &tx,
-                                    channel_name,
-                                    "channel",
-                                    &parsed.messages(),
-                                )?;
-                                total += parsed.messages().len();
-                            }
-                            Err(e) => warn!("index reindex: skip {}: {}", name, e),
+            for entry in std::fs::read_dir(&channels_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".thread") {
+                    let channel_name = name.trim_end_matches(".thread");
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(content) => {
+                            let parsed = match parse_thread(&content) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("index reindex: skip {}: {}", name, e);
+                                    continue;
+                                }
+                            };
+                            Self::insert_messages(
+                                &tx,
+                                channel_name,
+                                "channel",
+                                &parsed.messages(),
+                            )?;
+                            total += parsed.messages().len();
                         }
+                        Err(e) => warn!("index reindex: skip {}: {}", name, e),
                     }
                 }
             }
@@ -466,25 +466,23 @@ impl Index {
         // 扫描 dm/
         let dm_dir = repo_root.join("dm");
         if dm_dir.exists() {
-            for entry in std::fs::read_dir(&dm_dir).into_iter().flatten() {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".thread") {
-                        let channel_name = name.trim_end_matches(".thread");
-                        match std::fs::read_to_string(entry.path()) {
-                            Ok(content) => {
-                                let parsed = match parse_thread(&content) {
-                                    Ok(f) => f,
-                                    Err(e) => {
-                                        warn!("index reindex: skip {}: {}", name, e);
-                                        continue;
-                                    }
-                                };
-                                Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
-                                total += parsed.messages().len();
-                            }
-                            Err(e) => warn!("index reindex: skip {}: {}", name, e),
+            for entry in std::fs::read_dir(&dm_dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".thread") {
+                    let channel_name = name.trim_end_matches(".thread");
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(content) => {
+                            let parsed = match parse_thread(&content) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    warn!("index reindex: skip {}: {}", name, e);
+                                    continue;
+                                }
+                            };
+                            Self::insert_messages(&tx, channel_name, "dm", &parsed.messages())?;
+                            total += parsed.messages().len();
                         }
+                        Err(e) => warn!("index reindex: skip {}: {}", name, e),
                     }
                 }
             }

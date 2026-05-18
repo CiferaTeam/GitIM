@@ -240,8 +240,10 @@ mod tests {
     fn post_reset_pending_roundtrips() {
         let dir = TempDir::new().expect("tempdir");
         std::fs::create_dir_all(dir.path().join(".gitim")).expect("mkdir");
-        let mut state = AgentState::default();
-        state.post_reset_pending = true;
+        let state = AgentState {
+            post_reset_pending: true,
+            ..AgentState::default()
+        };
         state.save(dir.path()).expect("save");
         let loaded = AgentState::load(dir.path()).expect("load");
         assert!(loaded.post_reset_pending);

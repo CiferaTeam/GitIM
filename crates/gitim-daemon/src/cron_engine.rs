@@ -720,9 +720,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("spec.yaml"),
-            format!(
-                "version: 1\nschedule: \"30 2 * * *\"\ntimezone: \"America/Los_Angeles\"\ntarget: alice\nprompt: dst\nenabled: true\ncreated_by: alice\ncreated_at: \"2026-03-08T00:00:00Z\"\n"
-            ),
+            "version: 1\nschedule: \"30 2 * * *\"\ntimezone: \"America/Los_Angeles\"\ntarget: alice\nprompt: dst\nenabled: true\ncreated_by: alice\ncreated_at: \"2026-03-08T00:00:00Z\"\n",
         )
         .unwrap();
         // Now = UTC 10:01 (= LA 03:01 PDT), one minute after the

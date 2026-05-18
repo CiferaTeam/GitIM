@@ -78,8 +78,10 @@ async fn test_preflight_kimi_set_model_failure_fails() {
         "fixture missing: {script:?} — did you chmod +x?"
     );
 
-    let mut overrides = PreflightOverrides::default();
-    overrides.model_override = Some("bogus-model".to_string());
+    let overrides = PreflightOverrides {
+        model_override: Some("bogus-model".to_string()),
+        ..PreflightOverrides::default()
+    };
 
     let result =
         preflight_kimi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
