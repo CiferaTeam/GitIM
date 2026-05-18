@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -89,13 +90,9 @@ pub struct AcpClient {
     next_id: Mutex<i64>,
     pending: Mutex<HashMap<i64, oneshot::Sender<JsonRpcResponse>>>,
     /// Tracks tool calls between their `tool_call` and `tool_call_update`
-    /// notifications. Reserved for future argument-streaming ACP servers
-    /// (kiro) — hermes and kimi receive complete `rawInput` on the
-    /// `tool_call` notification, so v1 keeps the map allocated but never
-    /// inserts or removes. When a real consumer arrives, populate it in
-    /// `dispatch_parsed` and read it in the new consumer's branch; the
-    /// `#[allow(dead_code)]` comes off naturally.
-    #[allow(dead_code)]
+    /// notifications. Hermes usually sends complete `rawInput` up front;
+    /// Kimi streams argument JSON across `tool_call_update` frames, so we
+    /// buffer until completion before emitting the UI-facing `ToolUse`.
     pending_tools: Mutex<HashMap<String, PendingToolCall>>,
     /// Cumulative usage observed via `session/update` notifications during
     /// the current `execute()`. The final `session/prompt` response carries
@@ -107,6 +104,15 @@ pub struct AcpClient {
     /// concatenated in arrival order. Drained by the driver via
     /// `collected_output` at session end to populate `ExecResult.output`.
     text_accumulator: Mutex<String>,
+    /// Last point at which the agent emitted user-visible terminal activity:
+    /// assistant text or a completed tool result. Kimi can occasionally omit
+    /// the final `session/prompt` response after tool-only turns; its driver
+    /// uses this timestamp as a bounded completion fallback.
+    terminal_activity_at: Mutex<Option<Instant>>,
+    /// Last emitted tool invocation. Kimi can fail to stream the completed
+    /// tool update even though the tool ran; its driver uses this as a more
+    /// conservative idle fallback with a longer grace period.
+    tool_use_at: Mutex<Option<Instant>>,
     /// Session id assigned by `session/new` or `session/resume`. Cached so
     /// `handle_line` can embed it in `Event::Usage` without the driver
     /// passing it in for every line.
@@ -124,16 +130,14 @@ pub enum JsonRpcResponse {
 
 /// State a single tool call carries between its initiating `tool_call`
 /// notification and the matching `tool_call_update` completion. Crate-
-/// private — kept on the [`AcpClient`] type only as a placeholder for
-/// future argument-streaming ACP servers (see the field doc on
-/// [`AcpClient::pending_tools`]). The struct is never instantiated in
-/// v1, so an `#[allow(dead_code)]` masks the unused-struct warning;
-/// once a real consumer constructs it, that attribute comes off.
+/// private because callers only need the normalized `Event::ToolUse` /
+/// `Event::ToolResult` stream.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct PendingToolCall {
     pub tool: String,
-    pub input: Value,
+    pub input: Option<Value>,
+    pub args_text: String,
+    pub emitted: bool,
 }
 
 /// Terminal outcome of `session/prompt` — captures the stop_reason and
@@ -160,6 +164,8 @@ impl AcpClient {
             pending_tools: Mutex::new(HashMap::new()),
             usage: Mutex::new(ProviderUsage::default()),
             text_accumulator: Mutex::new(String::new()),
+            terminal_activity_at: Mutex::new(None),
+            tool_use_at: Mutex::new(None),
             current_session_id: Mutex::new(None),
             hooks,
         }
@@ -369,6 +375,15 @@ impl AcpClient {
             }
         };
 
+        if v.get("id").is_some()
+            && v.get("method").is_some()
+            && v.get("result").is_none()
+            && v.get("error").is_none()
+        {
+            self.handle_agent_request(&v).await;
+            return;
+        }
+
         if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
             // Response — route to the pending sender, if any.
             let sender = self.pending.lock().await.remove(&id);
@@ -413,6 +428,54 @@ impl AcpClient {
         self.dispatch_parsed(parsed, event_tx).await;
     }
 
+    async fn handle_agent_request(&self, v: &Value) {
+        let id = v.get("id").cloned().unwrap_or(Value::Null);
+        let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let response = match method {
+            "session/request_permission" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "outcome": {
+                        "outcome": "selected",
+                        "optionId": "approve_for_session",
+                    },
+                },
+            }),
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("method not found: {method}"),
+                },
+            }),
+        };
+
+        match serde_json::to_vec(&response) {
+            Ok(mut payload) => {
+                payload.push(b'\n');
+                let mut stdin = self.stdin.lock().await;
+                if let Err(e) = stdin.write_all(&payload).await {
+                    warn!(
+                        provider = self.provider_name,
+                        method,
+                        error = %e,
+                        "failed to reply to ACP agent request"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    provider = self.provider_name,
+                    method,
+                    error = %e,
+                    "failed to serialize ACP agent-request response"
+                );
+            }
+        }
+    }
+
     /// Drain the accumulated usage snapshot at session end. Hermes today
     /// prefers the `session/prompt` response value over this accumulator
     /// (mid-stream `usage_update` is dropped per `drive_session`), but
@@ -426,6 +489,19 @@ impl AcpClient {
     /// `ExecResult.output`.
     pub async fn collected_output(&self) -> String {
         self.text_accumulator.lock().await.clone()
+    }
+
+    /// Last assistant text or completed tool-result timestamp observed during
+    /// this process lifetime. Kimi uses this to avoid 20-minute hangs when its
+    /// ACP server performs the requested action but never resolves the prompt
+    /// request.
+    pub async fn last_terminal_activity_at(&self) -> Option<Instant> {
+        *self.terminal_activity_at.lock().await
+    }
+
+    /// Last tool invocation timestamp observed during this process lifetime.
+    pub async fn last_tool_use_at(&self) -> Option<Instant> {
+        *self.tool_use_at.lock().await
     }
 
     /// Flush and close the underlying stdin handle. The provider sees EOF
@@ -460,6 +536,7 @@ impl AcpClient {
     async fn dispatch_parsed(&self, parsed: ParsedNotification, event_tx: &mpsc::Sender<Event>) {
         match parsed {
             ParsedNotification::Text { content } => {
+                *self.terminal_activity_at.lock().await = Some(Instant::now());
                 self.text_accumulator.lock().await.push_str(&content);
                 try_send_event(event_tx, Event::Text { content });
             }
@@ -470,26 +547,69 @@ impl AcpClient {
                 tool,
                 call_id,
                 input,
+                args_text,
             } => {
-                // `pending_tools` deliberately not populated — hermes/kimi
-                // receive full `rawInput` on the `tool_call` notification
-                // and don't need to buffer arguments across stream events.
-                // The map stays on `AcpClient` as the design's plug point
-                // for future argument-streaming ACP servers (kiro).
                 let mapped = (self.hooks.tool_name_mapper)(&tool);
-                try_send_event(
-                    event_tx,
-                    Event::ToolUse {
-                        tool: mapped,
+                if let Some(input) = input.clone() {
+                    self.pending_tools.lock().await.insert(
+                        call_id.clone(),
+                        PendingToolCall {
+                            tool: mapped.clone(),
+                            input: Some(input.clone()),
+                            args_text,
+                            emitted: true,
+                        },
+                    );
+                    *self.tool_use_at.lock().await = Some(Instant::now());
+                    try_send_event(
+                        event_tx,
+                        Event::ToolUse {
+                            tool: mapped,
+                            call_id,
+                            input,
+                        },
+                    );
+                } else {
+                    self.pending_tools.lock().await.insert(
                         call_id,
-                        input,
-                    },
-                );
+                        PendingToolCall {
+                            tool: mapped,
+                            input: None,
+                            args_text,
+                            emitted: false,
+                        },
+                    );
+                }
             }
-            ParsedNotification::ToolResult {
+            ParsedNotification::ToolCallUpdate {
+                tool,
                 call_id,
-                output: tool_output,
+                status,
+                input,
+                output,
+                args_text,
             } => {
+                if status != "completed" && status != "failed" {
+                    if let Some(pending) = self.pending_tools.lock().await.get_mut(&call_id) {
+                        if !pending.emitted && !args_text.is_empty() {
+                            pending.args_text = args_text;
+                        }
+                    }
+                    return;
+                }
+
+                let pending = self.pending_tools.lock().await.remove(&call_id);
+                self.emit_deferred_tool_use(
+                    event_tx,
+                    &call_id,
+                    pending,
+                    tool,
+                    input,
+                    args_text.clone(),
+                )
+                .await;
+                let tool_output = output.unwrap_or(args_text);
+                *self.terminal_activity_at.lock().await = Some(Instant::now());
                 try_send_event(
                     event_tx,
                     Event::ToolResult {
@@ -524,6 +644,56 @@ impl AcpClient {
             }
         }
     }
+
+    async fn emit_deferred_tool_use(
+        &self,
+        event_tx: &mpsc::Sender<Event>,
+        call_id: &str,
+        pending: Option<PendingToolCall>,
+        update_tool: String,
+        update_input: Option<Value>,
+        update_args_text: String,
+    ) {
+        if pending.as_ref().is_some_and(|p| p.emitted) {
+            return;
+        }
+
+        let tool = pending
+            .as_ref()
+            .map(|p| p.tool.clone())
+            .unwrap_or_else(|| (self.hooks.tool_name_mapper)(&update_tool));
+        let input = pending
+            .as_ref()
+            .and_then(|p| p.input.clone())
+            .or(update_input)
+            .or_else(|| {
+                pending
+                    .as_ref()
+                    .and_then(|p| parse_tool_args_json(&p.args_text))
+            })
+            .or_else(|| parse_tool_args_json(&update_args_text))
+            .unwrap_or_else(|| Value::Object(Default::default()));
+
+        try_send_event(
+            event_tx,
+            Event::ToolUse {
+                tool,
+                call_id: call_id.to_string(),
+                input,
+            },
+        );
+        *self.tool_use_at.lock().await = Some(Instant::now());
+    }
+}
+
+fn parse_tool_args_json(args_text: &str) -> Option<Value> {
+    let trimmed = args_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .or_else(|| Some(json!({ "text": trimmed })))
 }
 
 fn extract_session_id(v: &Value) -> Option<String> {
@@ -645,5 +815,103 @@ mod tests {
 
         // Drain the reader so the test exits cleanly.
         let _ = timeout(Duration::from_secs(1), reader).await;
+    }
+
+    #[tokio::test]
+    async fn auto_approves_agent_permission_request() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut child = TokioCommand::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("cat must be on PATH");
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let client = AcpClient::new("test", stdin, test_hooks());
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(8);
+
+        client
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"ses_1","options":[{"optionId":"approve_for_session","kind":"allow_always"}]}}"#,
+                &event_tx,
+            )
+            .await;
+
+        let mut lines = BufReader::new(stdout).lines();
+        let line = timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("permission reply should be written")
+            .expect("stdout read")
+            .expect("cat should echo one line");
+        let v: Value = serde_json::from_str(&line).expect("reply must be JSON");
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(v["result"]["outcome"]["optionId"], "approve_for_session");
+
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn defers_kimi_streaming_tool_use_until_args_are_complete() {
+        let mut child = TokioCommand::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("cat must be on PATH");
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        let client = AcpClient::new("test", stdin, test_hooks());
+        let (event_tx, mut event_rx) = mpsc::channel::<Event>(8);
+
+        client
+            .handle_line(
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-kimi-1","title":"Shell","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":""}}]}}}"#,
+                &event_tx,
+            )
+            .await;
+        assert!(event_rx.try_recv().is_err());
+
+        client
+            .handle_line(
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-kimi-1","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"{\"command\":\"echo hi\"}"}}]}}}"#,
+                &event_tx,
+            )
+            .await;
+        assert!(event_rx.try_recv().is_err());
+
+        client
+            .handle_line(
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-kimi-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"hi\n"}}]}}}"#,
+                &event_tx,
+            )
+            .await;
+
+        match event_rx.recv().await.expect("tool use event") {
+            Event::ToolUse {
+                tool,
+                call_id,
+                input,
+            } => {
+                assert_eq!(tool, "Shell");
+                assert_eq!(call_id, "tc-kimi-1");
+                assert_eq!(input["command"], "echo hi");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        match event_rx.recv().await.expect("tool result event") {
+            Event::ToolResult { call_id, output } => {
+                assert_eq!(call_id, "tc-kimi-1");
+                assert_eq!(output, "hi\n");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        let _ = child.start_kill();
+        let _ = child.wait().await;
     }
 }

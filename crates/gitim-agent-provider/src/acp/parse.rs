@@ -27,10 +27,18 @@ pub enum ParsedNotification {
     ToolCall {
         tool: String,
         call_id: String,
-        input: Value,
+        input: Option<Value>,
+        args_text: String,
     },
-    /// Tool result (completed or failed).
-    ToolResult { call_id: String, output: String },
+    /// Tool invocation progress / completion.
+    ToolCallUpdate {
+        tool: String,
+        call_id: String,
+        status: String,
+        input: Option<Value>,
+        output: Option<String>,
+        args_text: String,
+    },
     /// Mid-session token usage push. Hermes emits these as
     /// `sessionUpdate: "usage_update"` with camelCase fields, separately
     /// from the snake_case usage on the final session/prompt response.
@@ -94,41 +102,120 @@ pub fn parse_notification(params: &Value) -> Option<ParsedNotification> {
         }
         "tool_call" => {
             let call_id = update.get("toolCallId")?.as_str()?.to_string();
-            let title = update.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let tool = title
-                .split(':')
-                .next()
-                .unwrap_or("unknown")
-                .trim()
-                .to_string();
-            let input = update
-                .get("rawInput")
-                .cloned()
-                .unwrap_or(Value::Object(Default::default()));
+            let tool = extract_tool_name(update);
+            let input = extract_tool_input(update);
+            let args_text = extract_tool_content_text(update);
             Some(ParsedNotification::ToolCall {
                 tool,
                 call_id,
                 input,
+                args_text,
             })
         }
         "tool_call_update" => {
             let status = update.get("status")?.as_str()?;
-            if status != "completed" && status != "failed" {
-                return None;
-            }
             let call_id = update.get("toolCallId")?.as_str()?.to_string();
-            let output = update
-                .get("rawOutput")
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
-            Some(ParsedNotification::ToolResult { call_id, output })
+            let tool = extract_tool_name(update);
+            let input = extract_tool_input(update);
+            let output = extract_tool_output(update);
+            let args_text = extract_tool_content_text(update);
+            Some(ParsedNotification::ToolCallUpdate {
+                tool,
+                call_id,
+                status: status.to_string(),
+                input,
+                output,
+                args_text,
+            })
         }
         "usage_update" => parse_acp_usage(update.get("usage")?).map(ParsedNotification::Usage),
         _ => None,
     }
+}
+
+fn extract_tool_name(update: &Value) -> String {
+    let raw = update
+        .get("title")
+        .or_else(|| update.get("name"))
+        .or_else(|| update.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    raw.split(':')
+        .next()
+        .unwrap_or("unknown")
+        .trim()
+        .to_string()
+}
+
+fn extract_tool_input(update: &Value) -> Option<Value> {
+    ["rawInput", "input", "parameters"]
+        .iter()
+        .find_map(|key| update.get(*key).cloned())
+}
+
+fn extract_tool_output(update: &Value) -> Option<String> {
+    update
+        .get("rawOutput")
+        .or_else(|| update.get("output"))
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+}
+
+fn extract_tool_content_text(update: &Value) -> String {
+    let Some(blocks) = update.get("content").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+
+    let mut pieces = Vec::new();
+    for block in blocks {
+        let kind = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "content" => {
+                if let Some(text) = block
+                    .get("content")
+                    .and_then(|v| v.get("text"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !text.is_empty() {
+                        pieces.push(text.to_string());
+                    }
+                }
+            }
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        pieces.push(text.to_string());
+                    }
+                }
+            }
+            "diff" => {
+                let path = block.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() {
+                    continue;
+                }
+                let old_len = block
+                    .get("oldText")
+                    .and_then(|v| v.as_str())
+                    .map(str::len)
+                    .unwrap_or(0);
+                let new_len = block
+                    .get("newText")
+                    .and_then(|v| v.as_str())
+                    .map(str::len)
+                    .unwrap_or(0);
+                let summary = if old_len == 0 {
+                    format!("--- {path}\n+++ {path}\n(new file, {new_len} bytes)")
+                } else {
+                    format!("--- {path}\n+++ {path}\n(edited: {old_len} -> {new_len} bytes)")
+                };
+                pieces.push(summary);
+            }
+            _ => {}
+        }
+    }
+    pieces.join("\n")
 }
 
 /// Map an ACP `usage` object to the provider-agnostic [`ProviderUsage`].
@@ -250,9 +337,15 @@ mod tests {
         });
         let msg = parse_notification(&params).unwrap();
         match msg {
-            ParsedNotification::ToolCall { tool, call_id, .. } => {
+            ParsedNotification::ToolCall {
+                tool,
+                call_id,
+                input,
+                ..
+            } => {
                 assert_eq!(tool, "terminal");
                 assert_eq!(call_id, "tc-1");
+                assert_eq!(input, Some(json!({"command": "ls -la"})));
             }
             _ => panic!("expected ToolCall"),
         }
@@ -269,21 +362,45 @@ mod tests {
         });
         let msg = parse_notification(&params).unwrap();
         match msg {
-            ParsedNotification::ToolResult { call_id, output } => {
+            ParsedNotification::ToolCallUpdate {
+                call_id,
+                output,
+                status,
+                ..
+            } => {
                 assert_eq!(call_id, "tc-1");
-                assert_eq!(output, "file1.rs\nfile2.rs");
+                assert_eq!(status, "completed");
+                assert_eq!(output.as_deref(), Some("file1.rs\nfile2.rs"));
             }
-            _ => panic!("expected ToolResult"),
+            _ => panic!("expected ToolCallUpdate"),
         }
     }
 
     #[test]
-    fn parse_tool_call_update_pending_returns_none() {
+    fn parse_tool_call_update_pending_is_kept_for_streamed_args() {
         let params = json!({
             "sessionId": "s-1",
-            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "pending"}
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-1",
+                "status": "pending",
+                "content": [{"type": "content", "content": {"type": "text", "text": "{\"command\":\"echo hi\"}"}}]
+            }
         });
-        assert!(parse_notification(&params).is_none());
+        let msg = parse_notification(&params).unwrap();
+        match msg {
+            ParsedNotification::ToolCallUpdate {
+                call_id,
+                status,
+                args_text,
+                ..
+            } => {
+                assert_eq!(call_id, "tc-1");
+                assert_eq!(status, "pending");
+                assert_eq!(args_text, "{\"command\":\"echo hi\"}");
+            }
+            _ => panic!("expected ToolCallUpdate"),
+        }
     }
 
     #[test]

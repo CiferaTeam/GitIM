@@ -4,6 +4,7 @@ use std::process;
 
 use gitim_client::GitimClient;
 
+use super::normalize_channel_arg;
 use crate::output::OutputMode;
 
 pub async fn cmd_send(
@@ -14,6 +15,7 @@ pub async fn cmd_send(
     author: Option<&str>,
     reply_to: Option<u64>,
 ) {
+    let channel = normalize_channel_arg(channel);
     match client.send(channel, body, author, reply_to).await {
         Ok(resp) => {
             if !resp.ok {
@@ -49,6 +51,7 @@ pub async fn cmd_read(
     limit: Option<u64>,
     since: Option<u64>,
 ) {
+    let channel = normalize_channel_arg(channel);
     match client.read(channel, limit, since).await {
         Ok(resp) => {
             let code = mode.print(&resp);
@@ -60,5 +63,17 @@ pub async fn cmd_read(
             eprintln!("Error: {e}");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_channel_arg;
+
+    #[test]
+    fn channel_arguments_accept_display_hash_prefix() {
+        assert_eq!(normalize_channel_arg("#general"), "general");
+        assert_eq!(normalize_channel_arg("general"), "general");
+        assert_eq!(normalize_channel_arg("#"), "#");
     }
 }

@@ -1364,7 +1364,7 @@ pub async fn preflight_hermes() -> PreflightResult {
 /// 1. `kimi --version` to capture the version string (best-effort; failure
 ///    here only emits `None` for version — the spawn at step 3 is what
 ///    actually catches `not_installed`).
-/// 2. Spawn `kimi acp` with the agent's env injected.
+/// 2. Spawn `kimi --afk acp` with the agent's env injected.
 /// 3. Drive a minimal ACP session:
 ///    `initialize → session/new → (session/set_model if model set) →
 ///    session/prompt("say hi")`, then read stdout until the first
@@ -1387,9 +1387,9 @@ pub async fn preflight_hermes() -> PreflightResult {
 ///   where preflight blocks add-agent because of a provider-side
 ///   refactor. ~50 lines of write/read here is cheaper than the
 ///   coupling tax.
-/// - `kimi acp` ignores `--yolo` / `--auto-approve` (root-command flags);
-///   permission auto-approval is the daemon side's job and not relevant
-///   for preflight (which never gets to a tool call).
+/// - `--afk` must be passed before the `acp` subcommand. It matches the
+///   runtime provider's headless mode and also avoids tool-only turns
+///   lingering when the model has no user-facing final text to add.
 pub async fn preflight_kimi_with_config(
     bin: &str,
     timeout: Duration,
@@ -1420,11 +1420,12 @@ pub async fn preflight_kimi_with_config(
                 .and_then(|l| l.split_whitespace().last().map(|t| t.to_string()))
         });
 
-    // 2. Spawn `kimi acp` with the agent's env vars injected (so the
+    // 2. Spawn `kimi --afk acp` with the agent's env vars injected (so the
     //    preflight exercises the same credentials the agent will run
     //    under).
     let mut cmd = TokioCommand::new(bin);
-    cmd.arg("acp")
+    cmd.arg("--afk")
+        .arg("acp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

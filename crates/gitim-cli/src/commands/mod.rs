@@ -27,6 +27,13 @@ pub(super) fn get_repo_root() -> std::path::PathBuf {
     }
 }
 
+pub(super) fn normalize_channel_arg(channel: &str) -> &str {
+    channel
+        .strip_prefix('#')
+        .filter(|name| !name.is_empty())
+        .unwrap_or(channel)
+}
+
 pub(super) fn read_my_handler(repo_root: &Path) -> String {
     let me_path = repo_root.join(".gitim/me.json");
     let contents = match fs::read_to_string(&me_path) {

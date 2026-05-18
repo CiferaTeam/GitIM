@@ -4,9 +4,10 @@
 //! JSON-RPC protocol as hermes via `kimi acp`. This provider is hermes
 //! with three swapped knobs:
 //!
-//! 1. The spawn target is `kimi acp` and `HERMES_YOLO_MODE` is **not**
-//!    injected — kimi's `acp` subcommand has no auto-approve flag; the
-//!    daemon side handles permission auto-approval.
+//! 1. The spawn target is `kimi --afk acp` and `HERMES_YOLO_MODE` is
+//!    **not** injected. The root `--afk` flag tells Kimi this is a
+//!    headless run; the daemon still handles explicit ACP permission
+//!    requests as a backstop.
 //! 2. When `ExecOptions::model` is non-empty the driver calls
 //!    `session/set_model` after `session/new` / `session/resume` and
 //!    before the first `session/prompt`. Failure fails the task — we
@@ -38,7 +39,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -51,6 +52,12 @@ use crate::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
 const EVENT_CHANNEL_BUFFER: usize = 256;
+const IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY: Duration = Duration::from_secs(15);
+const IDLE_COMPLETE_AFTER_TOOL_USE: Duration = Duration::from_secs(75);
+const HOST_TURN_COMPLETION_NOTE: &str = "\
+Host turn completion note: after completing the requested tool or GitIM action, \
+finish this ACP turn by replying exactly `done` in this provider response. \
+Do not send that `done` message to GitIM unless the user explicitly asked for it.";
 
 pub struct KimiProvider {
     config: ProviderConfig,
@@ -94,12 +101,13 @@ impl Provider for KimiProvider {
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
         let mut cmd = Command::new(&exec_path);
-        // `kimi acp` takes no flags — `--yolo` / `--auto-approve` are root
-        // command flags that the `acp` subcommand ignores. Daemon-side
-        // permission auto-approval lives in the shared ACP client's
-        // request_permission handler (multica/hermes.go pattern). No
-        // HERMES_YOLO_MODE injection — kimi doesn't read it.
-        cmd.arg("acp")
+        // `--afk` is a root flag, so it must come before the `acp`
+        // subcommand. It puts Kimi in headless mode: AskUserQuestion is
+        // auto-dismissed and tool calls are treated as unattended. We still
+        // reply to `session/request_permission` inside the ACP client because
+        // Kimi 1.44 emits that request even in AFK mode.
+        cmd.arg("--afk")
+            .arg("acp")
             .stdout(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -133,10 +141,11 @@ impl Provider for KimiProvider {
         // SOUL.md inside the profile dir instead, which is why hermes'
         // build_prompt_payload ignores opts.system_prompt — that path is
         // not appropriate for kimi.)
-        let user_text = match opts.system_prompt.as_deref() {
+        let base_user_text = match opts.system_prompt.as_deref() {
             Some(sp) if !sp.is_empty() => format!("{sp}\n\n---\n\n{prompt}"),
             _ => prompt.to_string(),
         };
+        let user_text = format!("{base_user_text}\n\n---\n\n{HOST_TURN_COMPLETION_NOTE}");
         let resume_token = opts.resume_token.clone();
         let model = opts.model.clone();
         let cwd_str = opts
@@ -428,16 +437,54 @@ async fn drive_session(
     let prompt_sid = session_id.clone();
     let prompt_text = user_text.clone();
 
-    let prompt_outcome = tokio::time::timeout(timeout, async {
+    enum PromptWait {
+        Finished(Result<crate::acp::PromptOutcome, ProviderError>),
+        Cancelled,
+        Timeout,
+        IdleComplete,
+    }
+
+    let (idle_complete_tx, mut idle_complete_rx) = watch::channel(false);
+    let idle_watch_cancel = CancellationToken::new();
+    let idle_watch_cancel_inner = idle_watch_cancel.clone();
+    let idle_watch_acp = Arc::clone(&acp);
+    let idle_watch_handle = tokio::spawn(async move {
+        watch_idle_completion(
+            idle_watch_acp,
+            idle_complete_tx,
+            idle_watch_cancel_inner,
+            pid,
+        )
+        .await;
+    });
+
+    let prompt_future = prompt_acp.prompt(&prompt_sid, &prompt_text);
+    tokio::pin!(prompt_future);
+    let timeout_sleep = tokio::time::sleep(timeout);
+    tokio::pin!(timeout_sleep);
+
+    let prompt_outcome = loop {
         tokio::select! {
-            r = prompt_acp.prompt(&prompt_sid, &prompt_text) => Some(r),
-            _ = cancel_token.cancelled() => None,
+            r = &mut prompt_future => break PromptWait::Finished(r),
+            _ = cancel_token.cancelled() => break PromptWait::Cancelled,
+            _ = &mut timeout_sleep => break PromptWait::Timeout,
+            r = idle_complete_rx.changed() => {
+                if r.is_ok() && *idle_complete_rx.borrow() {
+                    break PromptWait::IdleComplete;
+                }
+            },
         }
-    })
-    .await;
+    };
+    idle_watch_cancel.cancel();
+    idle_watch_handle.abort();
 
     match prompt_outcome {
-        Ok(Some(Ok(outcome))) => {
+        PromptWait::Finished(Ok(outcome)) => {
+            info!(
+                pid,
+                stop_reason = %outcome.stop_reason,
+                "kimi prompt response received"
+            );
             // Kimi reports `stopReason: "cancelled"` when the agent
             // itself aborted the prompt (e.g. user interrupted via
             // ACP's cancel channel). Surface that distinctly so the
@@ -451,30 +498,38 @@ async fn drive_session(
             }
             latest_usage = outcome.usage;
         }
-        Ok(Some(Err(e))) => {
+        PromptWait::Finished(Err(e)) => {
             final_status = ExecStatus::Failed;
             final_error = Some(e.to_string());
         }
-        Ok(None) => {
+        PromptWait::Cancelled => {
             info!(pid, "cancelled by steering");
             final_status = ExecStatus::Aborted;
             final_error = Some("cancelled by steering".to_string());
         }
-        Err(_) => {
+        PromptWait::Timeout => {
             final_status = ExecStatus::Timeout;
             final_error = Some(format!("kimi timed out after {timeout:?}"));
+        }
+        PromptWait::IdleComplete => {
+            info!(
+                pid,
+                terminal_idle_after = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
+                tool_idle_after = ?IDLE_COMPLETE_AFTER_TOOL_USE,
+                "kimi prompt response idle-completed after provider activity"
+            );
         }
     }
 
     // ── Post-loop cleanup ──
 
-    // Signal end-of-input to kimi so it shuts the session cleanly; for
-    // timeout / abort we kill outright instead.
-    if final_status == ExecStatus::Timeout || final_status == ExecStatus::Aborted {
-        let _ = child.start_kill();
-    } else {
-        acp.close_stdin().await;
-    }
+    // Kimi's ACP server is a session server: after `session/prompt`
+    // resolves it keeps the stdio process alive waiting for the next
+    // request. GitIM launches one provider process per agent turn, so the
+    // correct cleanup is to stop this child explicitly instead of waiting
+    // for a natural EOF exit.
+    let killed_for_shutdown = true;
+    let _ = child.start_kill();
 
     // Drain the reader so trailing notifications (if any) make it into
     // the text accumulator before we sample the final output. After
@@ -494,7 +549,11 @@ async fn drive_session(
 
     if final_status != ExecStatus::Timeout {
         match child.wait().await {
-            Ok(status) if !status.success() && final_status == ExecStatus::Completed => {
+            Ok(status)
+                if !status.success()
+                    && final_status == ExecStatus::Completed
+                    && !killed_for_shutdown =>
+            {
                 final_status = ExecStatus::Failed;
                 final_error = Some(format!("kimi exited with status: {status}"));
             }
@@ -532,6 +591,68 @@ async fn drive_session(
         },
         usage: latest_usage,
     });
+}
+
+async fn watch_idle_completion(
+    acp: Arc<AcpClient>,
+    complete: watch::Sender<bool>,
+    cancel: CancellationToken,
+    pid: u32,
+) {
+    info!(
+        pid,
+        terminal_idle_after = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
+        tool_idle_after = ?IDLE_COMPLETE_AFTER_TOOL_USE,
+        "kimi idle completion watchdog started"
+    );
+    let mut activity_logged = false;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+
+        let terminal_idle = acp
+            .last_terminal_activity_at()
+            .await
+            .map(|last| last.elapsed());
+        let tool_idle = acp.last_tool_use_at().await.map(|last| last.elapsed());
+
+        if !activity_logged && (terminal_idle.is_some() || tool_idle.is_some()) {
+            info!(
+                pid,
+                terminal_idle = ?terminal_idle,
+                tool_idle = ?tool_idle,
+                "kimi idle completion watchdog observed provider activity"
+            );
+            activity_logged = true;
+        }
+
+        if let Some(idle) = terminal_idle {
+            if idle >= IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY {
+                info!(
+                    pid,
+                    idle = ?idle,
+                    threshold = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
+                    "kimi idle completion watchdog reached terminal idle threshold"
+                );
+                let _ = complete.send(true);
+                break;
+            }
+        }
+        if let Some(idle) = tool_idle {
+            if idle >= IDLE_COMPLETE_AFTER_TOOL_USE {
+                info!(
+                    pid,
+                    idle = ?idle,
+                    threshold = ?IDLE_COMPLETE_AFTER_TOOL_USE,
+                    "kimi idle completion watchdog reached tool idle threshold"
+                );
+                let _ = complete.send(true);
+                break;
+            }
+        }
+    }
 }
 
 /// Helper to send ExecResult on the result oneshot when the driver
