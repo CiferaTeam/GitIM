@@ -9,6 +9,25 @@ pub enum FileEvent {
     FlowModified(String),
 }
 
+/// Returns the flow slug if `rel` is exactly `flows/<slug>/index.md`, otherwise `None`.
+///
+/// Run-state writes (`flows/<slug>/runs/<run_id>/state.yaml`) and any other
+/// descendant paths are intentionally excluded so they do not trigger spurious
+/// FlowModified events.
+pub(crate) fn flow_template_slug(rel: &Path) -> Option<&str> {
+    let comps: Vec<_> = rel.components().collect();
+    if comps.len() != 3 {
+        return None;
+    }
+    if comps[0].as_os_str() != "flows" {
+        return None;
+    }
+    if comps[2].as_os_str() != "index.md" {
+        return None;
+    }
+    comps[1].as_os_str().to_str()
+}
+
 pub async fn watch_repo(
     repo_root: &Path,
     tx: mpsc::Sender<FileEvent>,
@@ -48,15 +67,9 @@ pub async fn watch_repo(
                     Ok(r) => r.to_path_buf(),
                     Err(_) => continue,
                 };
-                let comps: Vec<_> = rel.components().collect();
 
-                if comps.first().and_then(|c| c.as_os_str().to_str()) == Some("flows") {
-                    if let Some(slug_comp) = comps.get(1) {
-                        if let Some(slug) = slug_comp.as_os_str().to_str() {
-                            let _ = tx.send(FileEvent::FlowModified(slug.to_string())).await;
-                            continue;
-                        }
-                    }
+                if let Some(slug) = flow_template_slug(&rel) {
+                    let _ = tx.send(FileEvent::FlowModified(slug.to_string())).await;
                     continue;
                 }
 
@@ -73,4 +86,56 @@ pub async fn watch_repo(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flow_template_slug;
+    use std::path::Path;
+
+    #[test]
+    fn flow_index_md_matches() {
+        assert_eq!(
+            flow_template_slug(Path::new("flows/release/index.md")),
+            Some("release")
+        );
+        assert_eq!(
+            flow_template_slug(Path::new("flows/my-cool-flow/index.md")),
+            Some("my-cool-flow")
+        );
+    }
+
+    #[test]
+    fn flow_run_state_file_does_not_emit_flow_modified() {
+        // v1.5 run state writes must NOT match — this is the regression guard.
+        assert_eq!(
+            flow_template_slug(Path::new(
+                "flows/release/runs/20260518T100000-abc123/state.yaml"
+            )),
+            None
+        );
+        // Any other descendant beyond the 3-component template path.
+        assert_eq!(
+            flow_template_slug(Path::new(
+                "flows/release/runs/20260518T100000-abc123/log.txt"
+            )),
+            None
+        );
+        // A sibling file that is not index.md.
+        assert_eq!(
+            flow_template_slug(Path::new("flows/release/README.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn non_flow_paths_do_not_match() {
+        assert_eq!(
+            flow_template_slug(Path::new("channels/general.thread")),
+            None
+        );
+        assert_eq!(flow_template_slug(Path::new("flows")), None);
+        assert_eq!(flow_template_slug(Path::new("flows/release")), None);
+        assert_eq!(flow_template_slug(Path::new("")), None);
+    }
 }
