@@ -95,8 +95,8 @@ export interface Message {
   timestamp: string; // 20260317T120000Z
   body: string;
   /**
-   * Ephemeral delivery target list attached by live poll responses. This is
-   * not written into Git and may be absent after a refresh/history read.
+   * Ephemeral delivery target list computed by daemon read/poll responses.
+   * This is not written into Git.
    */
   recipients?: string[];
   event_type?: string;

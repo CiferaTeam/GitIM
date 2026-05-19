@@ -154,6 +154,67 @@ async fn poll_attaches_recipients_to_channel_message_entries() {
     assert_eq!(r2, vec!["alice".to_string(), "charlie".to_string()]);
 }
 
+/// Historical reads must carry the same recipients enrichment as live poll
+/// entries, otherwise the UI can only show delivery targets for messages that
+/// happened to arrive while the page was open.
+#[tokio::test]
+async fn read_attaches_recipients_to_channel_message_entries() {
+    let (_tmp, state, _cursor) = setup_repo().await;
+    let root = state.repo_root.clone();
+
+    std::fs::write(
+        root.join("channels/general.meta.yaml"),
+        "display_name: General\n\
+         created_by: alice\n\
+         created_at: 2026-05-17T00:00:00Z\n\
+         introduction: ''\n\
+         members:\n  - alice\n  - bob\n  - charlie\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260517T100000Z] hello\n\
+         [L000002][P000001][@bob][20260517T100100Z] hi <@charlie>\n",
+    )
+    .unwrap();
+
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "add channel"]);
+
+    let read_resp = handle_request(
+        Request::Read {
+            channel: "general".to_string(),
+            limit: None,
+            since: None,
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(read_resp.ok, "read failed: {:?}", read_resp.error);
+
+    let data = read_resp.data.unwrap();
+    let entries = data["entries"].as_array().unwrap();
+    let recipients: Vec<Vec<String>> = entries
+        .iter()
+        .map(|entry| {
+            entry["recipients"]
+                .as_array()
+                .expect("message entry should carry recipients")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(
+        recipients,
+        vec![
+            vec!["alice".to_string()],
+            vec!["alice".to_string(), "charlie".to_string()],
+        ]
+    );
+}
+
 /// DM messages bypass the 3-rule policy: recipients is always the sorted
 /// member pair derived from the filename stem.
 #[tokio::test]

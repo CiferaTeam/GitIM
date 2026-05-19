@@ -1,5 +1,5 @@
 use crate::api::Response;
-use crate::handlers::{entry_to_json, resolve_thread_path};
+use crate::handlers::{enrich_entries_with_recipients, resolve_thread_path};
 use crate::state::SharedState;
 
 use gitim_core::parser::parse_thread;
@@ -92,8 +92,19 @@ pub async fn handle_read(
         }
     }
 
-    let entries: Vec<serde_json::Value> =
-        entries.iter().map(|entry| entry_to_json(entry)).collect();
+    let kind = if channel.starts_with("dm:") {
+        "dm"
+    } else {
+        "channel"
+    };
+    let path_str = if kind == "dm" {
+        format!("dm/{}.thread", name)
+    } else {
+        format!("channels/{}.thread", name)
+    };
+    let selected_entries: Vec<ThreadEntry> = entries.into_iter().cloned().collect();
+    let entries =
+        enrich_entries_with_recipients(&selected_entries, kind, &name, &path_str, &state.repo_root);
 
     let payload = gitim_core::responses::ReadResponse {
         channel,
@@ -404,7 +415,7 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
     }
 
     // Collect the root entry and all descendants (entries pointing to it, recursively)
-    let mut thread_entries: Vec<serde_json::Value> = Vec::new();
+    let mut thread_entries: Vec<ThreadEntry> = Vec::new();
     let mut stack = vec![root_line];
     let mut visited = std::collections::HashSet::new();
 
@@ -414,7 +425,7 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
         }
         for entry in &file.entries {
             if entry.line_number() == target || entry.point_to() == target {
-                thread_entries.push(entry_to_json(entry));
+                thread_entries.push(entry.clone());
                 if entry.line_number() != target {
                     stack.push(entry.line_number());
                 }
@@ -423,15 +434,18 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
     }
 
     // Sort by line number
-    thread_entries.sort_by(|a, b| {
-        a["line_number"]
-            .as_u64()
-            .unwrap()
-            .cmp(&b["line_number"].as_u64().unwrap())
-    });
+    thread_entries.sort_by_key(|entry| entry.line_number());
 
     // Deduplicate (an entry could match both by line_number and point_to)
-    thread_entries.dedup_by(|a, b| a["line_number"] == b["line_number"]);
+    thread_entries.dedup_by_key(|entry| entry.line_number());
+    let path_str = format!("channels/{}.thread", channel);
+    let thread_entries = enrich_entries_with_recipients(
+        &thread_entries,
+        "channel",
+        &channel,
+        &path_str,
+        &state.repo_root,
+    );
 
     let payload = gitim_core::responses::GetThreadResponse {
         channel,

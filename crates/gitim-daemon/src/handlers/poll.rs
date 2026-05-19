@@ -516,7 +516,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
 ///
 /// Event entries (join/leave/etc.) never carry recipients regardless
 /// of kind — routing is per-message and events are workspace-wide.
-fn enrich_entries_with_recipients(
+pub(super) fn enrich_entries_with_recipients(
     entries: &[ThreadEntry],
     kind: &str,
     channel: &str,
