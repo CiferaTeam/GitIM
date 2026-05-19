@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { ApiResponse, Message } from "../../lib/types";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { computeDraftRecipients } from "../../lib/recipient-preview";
+import type { ApiResponse, Channel, Message } from "../../lib/types";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
-import { CornerDownLeft, SendHorizontal, X } from "lucide-react";
+import { CornerDownLeft, SendHorizontal, UserCheck, X } from "lucide-react";
 
 interface InputAreaProps {
   /** Workspace identity from workspaceIdentity(mode, activeWorkspace). */
@@ -15,6 +16,9 @@ interface InputAreaProps {
   replyTo: Message | null;
   onReplyToChange: (msg: Message | null) => void;
   mentionCandidates: string[];
+  recipientChannel?: Channel | null;
+  messages?: Message[];
+  currentUser?: string | null;
   disabled?: boolean;
   onSend: (body: string, pointTo: number) => Promise<ApiResponse>;
   placeholder?: string;
@@ -42,6 +46,9 @@ export function InputArea({
   replyTo,
   onReplyToChange,
   mentionCandidates,
+  recipientChannel,
+  messages = [],
+  currentUser,
   disabled,
   onSend,
   placeholder,
@@ -58,6 +65,22 @@ export function InputArea({
   const activeScopeRef = useRef({ workspaceKey, scopeKey });
   activeScopeRef.current = { workspaceKey, scopeKey };
   const isMobile = useIsMobile();
+  const draftRecipients = useMemo(
+    () =>
+      computeDraftRecipients({
+        body: text,
+        channel: recipientChannel,
+        replyTo,
+        messages,
+      }),
+    [text, recipientChannel, replyTo, messages],
+  );
+  const displayedRecipients = useMemo(() => {
+    const current = currentUser?.trim();
+    return current
+      ? draftRecipients.filter((recipient) => recipient !== current)
+      : draftRecipients;
+  }, [draftRecipients, currentUser]);
 
   // Restore draft when scope changes
   useEffect(() => {
@@ -247,6 +270,32 @@ export function InputArea({
           </div>
         )}
       </div>
+
+      {text.trim().length > 0 && (
+        <div
+          data-recipient-preview
+          className="mt-2 flex min-h-6 flex-wrap items-center gap-1.5 text-[11px] leading-none text-text-muted"
+        >
+          <span className="inline-flex items-center gap-1 text-text-faint">
+            <UserCheck className="size-3" />
+            Routes to
+          </span>
+          {displayedRecipients.length > 0 ? (
+            displayedRecipients.map((recipient) => (
+              <span
+                key={recipient}
+                className="inline-flex h-6 items-center rounded-md border border-border/80 bg-surface/40 px-2 font-mono text-[10px] text-text-muted"
+              >
+                @{recipient}
+              </span>
+            ))
+          ) : (
+            <span className="inline-flex h-6 items-center rounded-md border border-warning/30 bg-warning/10 px-2 font-medium text-warning">
+              no one else
+            </span>
+          )}
+        </div>
+      )}
 
       {error && (
         <p className="mt-1.5 text-xs text-destructive flex items-center gap-1">

@@ -430,6 +430,7 @@ export async function channels(): Promise<ApiResponse> {
     kind: string;
     unreadCount: number;
     members: string[];
+    created_by?: string;
   }> = [];
 
   for (const [name, meta] of s.channels) {
@@ -444,6 +445,7 @@ export async function channels(): Promise<ApiResponse> {
       kind: isDm ? "dm" : "channel",
       unreadCount: 0,
       members: meta.members,
+      ...(isDm ? {} : { created_by: meta.created_by }),
     });
   }
 

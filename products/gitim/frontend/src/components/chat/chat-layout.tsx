@@ -651,6 +651,9 @@ export function ChatLayout() {
               replyTo={replyTo}
               onReplyToChange={setReplyTo}
               mentionCandidates={mentionCandidates}
+              recipientChannel={currentChannelData}
+              messages={messages}
+              currentUser={currentUser}
               disabled={isGuest}
               onSend={handleSend}
             />

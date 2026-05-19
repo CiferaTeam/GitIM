@@ -155,6 +155,7 @@ describe("ChatLayout all mention send", () => {
           unreadCount: 0,
           hasMention: false,
           members: ["lewis", "alice", "bob"],
+          created_by: "lewis",
         },
       ],
       archivedChannels: [],
@@ -212,5 +213,25 @@ describe("ChatLayout all mention send", () => {
       "lewis",
       0,
     );
+  });
+
+  it("previews routed recipients before sending", async () => {
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const textarea = document.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "<@alice> please review");
+      await Promise.resolve();
+    });
+
+    const preview = document.querySelector("[data-recipient-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.textContent).toContain("@alice");
+    expect(preview?.textContent).not.toContain("@bob");
   });
 });

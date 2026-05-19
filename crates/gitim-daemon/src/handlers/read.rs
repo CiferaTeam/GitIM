@@ -126,15 +126,16 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                 let fname = entry.file_name().to_string_lossy().to_string();
                 if fname.ends_with(".meta.yaml") {
                     let name = fname.trim_end_matches(".meta.yaml").to_string();
-                    let members: Vec<String> = std::fs::read_to_string(entry.path())
+                    let meta = std::fs::read_to_string(entry.path())
                         .ok()
-                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
-                        .map(|m| m.members)
-                        .unwrap_or_default();
+                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok());
+                    let members = meta.as_ref().map(|m| m.members.clone()).unwrap_or_default();
+                    let created_by = meta.map(|m| m.created_by);
                     channels.push(ChannelSummary {
                         name,
                         kind: "channel".to_string(),
                         members,
+                        created_by,
                     });
                 }
             }
@@ -154,6 +155,7 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                         name,
                         kind: "dm".to_string(),
                         members,
+                        created_by: None,
                     });
                 }
             }
@@ -192,15 +194,16 @@ pub async fn handle_list_archived_channels(
                     if !needle.is_empty() && !name.to_ascii_lowercase().starts_with(&needle) {
                         continue;
                     }
-                    let members: Vec<String> = std::fs::read_to_string(entry.path())
+                    let meta = std::fs::read_to_string(entry.path())
                         .ok()
-                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok())
-                        .map(|m| m.members)
-                        .unwrap_or_default();
+                        .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok());
+                    let members = meta.as_ref().map(|m| m.members.clone()).unwrap_or_default();
+                    let created_by = meta.map(|m| m.created_by);
                     channels.push(ChannelSummary {
                         name,
                         kind: "archived_channel".to_string(),
                         members,
+                        created_by,
                     });
                 }
             }

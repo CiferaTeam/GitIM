@@ -67,6 +67,8 @@ pub struct ChannelSummary {
     /// Currently `"channel"`, `"dm"`, or `"archived_channel"`.
     pub kind: String,
     pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 /// Response payload for `Request::ListChannels` and
@@ -704,6 +706,7 @@ mod tests {
                 name: "general".to_string(),
                 kind: "channel".to_string(),
                 members: vec!["alice".to_string(), "bob".to_string()],
+                created_by: Some("alice".to_string()),
             }],
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -711,6 +714,10 @@ mod tests {
         let first = arr[0].as_object().unwrap();
         assert_eq!(first.get("name").and_then(|v| v.as_str()), Some("general"));
         assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("channel"));
+        assert_eq!(
+            first.get("created_by").and_then(|v| v.as_str()),
+            Some("alice"),
+        );
         assert_eq!(
             first
                 .get("members")

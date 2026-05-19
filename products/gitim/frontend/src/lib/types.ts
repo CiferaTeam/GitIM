@@ -113,6 +113,7 @@ export interface Channel {
   unreadCount: number;
   hasMention: boolean;
   members: string[];
+  created_by?: string | null;
 }
 
 export interface UserInfo {
