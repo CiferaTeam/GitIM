@@ -129,6 +129,24 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(receipt?.textContent).toContain("@lewis");
     expect(receipt?.textContent).toContain("@flame4");
   });
+
+  it("filters the current human user from acknowledgement recipients", async () => {
+    const rendered = await renderList({
+      currentUser: "lewis",
+      messages: [
+        {
+          ...msg(1, "需要确认一下通知范围"),
+          recipients: ["lewis", "flame4"],
+        },
+      ],
+    });
+    root = rendered.root;
+
+    const receipt = rendered.container.querySelector("[data-message-receipt]");
+    expect(receipt?.textContent).toContain("🫡");
+    expect(receipt?.textContent).not.toContain("@lewis");
+    expect(receipt?.textContent).toContain("@flame4");
+  });
 });
 
 // ---------------------------------------------------------------------------

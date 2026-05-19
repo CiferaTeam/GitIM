@@ -7,6 +7,7 @@ import { MessageBody } from "./message-body";
 
 interface MessageItemProps {
   message: Message;
+  currentUser?: string | null;
   replyTarget: Message | null;
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
@@ -40,13 +41,14 @@ function avatarColor(name: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
-function deliveryRecipients(message: Message): string[] {
+function deliveryRecipients(message: Message, currentUser?: string | null): string[] {
   if (message._status === "sending") return [];
   const seen = new Set<string>();
   const recipients: string[] = [];
+  const current = currentUser?.trim();
   for (const recipient of message.recipients ?? []) {
     const handler = recipient.trim();
-    if (!handler || seen.has(handler)) continue;
+    if (!handler || handler === current || seen.has(handler)) continue;
     seen.add(handler);
     recipients.push(handler);
   }
@@ -55,6 +57,7 @@ function deliveryRecipients(message: Message): string[] {
 
 export function MessageItem({
   message,
+  currentUser,
   replyTarget,
   onReply,
   onShowThread,
@@ -82,7 +85,7 @@ export function MessageItem({
     };
   }, []);
   const isFailed = message._status === "failed";
-  const recipients = deliveryRecipients(message);
+  const recipients = deliveryRecipients(message, currentUser);
 
   function handleClick() {
     if (isPending) return;

@@ -373,6 +373,7 @@ export function CardDetail() {
 
       <MessageList
         messages={messages}
+        currentUser={currentUser}
         scopeKey={scopeKey}
         replyTo={replyTo}
         highlightLine={highlightLine}

@@ -622,6 +622,7 @@ export function ChatLayout() {
         )}
         <MessageList
           messages={messages}
+          currentUser={currentUser}
           scopeKey={currentChannel}
           replyTo={replyTo}
           highlightLine={highlightLine}

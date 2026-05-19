@@ -5,6 +5,7 @@ import { MessageSquare, Hash } from "lucide-react";
 
 interface MessageListProps {
   messages: Message[];
+  currentUser?: string | null;
   /** Identifier for the current scope (channel name, card path, etc.).
    *  null = no scope selected — show "select a channel" empty state. */
   scopeKey: string | null;
@@ -48,6 +49,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 
 export function MessageList({
   messages,
+  currentUser,
   scopeKey,
   replyTo,
   highlightLine,
@@ -273,6 +275,7 @@ export function MessageList({
           <MessageItem
             key={key}
             message={msg}
+            currentUser={currentUser}
             replyTarget={replyTarget}
             onReply={onReply}
             onShowThread={onShowThread}
