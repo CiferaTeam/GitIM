@@ -54,7 +54,7 @@ pub async fn handle_flow_list(state: SharedState) -> Response {
         }
     }
     flows.sort_by(|a, b| a.slug.cmp(&b.slug));
-    Response::success(serde_json::to_value(ListFlowsResponse { flows }).unwrap())
+    Response::success(serde_json::to_value(ListFlowsResponse { flows }).unwrap_or_else(|e| { tracing::error!("serializing ListFlowsResponse: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_flow_show(state: SharedState, slug: String) -> Response {
@@ -85,7 +85,7 @@ pub async fn handle_flow_show(state: SharedState, slug: String) -> Response {
         nodes: doc.meta.nodes.iter().map(FlowNodeSummary::from).collect(),
         raw_markdown: content,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_flow_create(
@@ -135,7 +135,7 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
     }
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Move the entire flows/<slug>/ directory (including any runs/ subtree) to
     // .trash/flows/<slug>/. Previously only index.md was moved, leaving orphan
@@ -219,7 +219,7 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                         message: format!("invalid slug: {}", e),
                     }],
                 })
-                .unwrap(),
+                .unwrap_or_else(|e| { tracing::error!("serializing ValidateFlowResponse: {e}"); serde_json::Value::Null }),
             );
         }
     };
@@ -253,7 +253,7 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                         ok: false,
                         items,
                     })
-                    .unwrap(),
+                    .unwrap_or_else(|e| { tracing::error!("serializing ValidateFlowResponse: {e}"); serde_json::Value::Null }),
                 );
             }
             for w in validate_flow_for_storage(&doc, file_size) {
@@ -268,7 +268,7 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                     ok: true,
                     items,
                 })
-                .unwrap(),
+                .unwrap_or_else(|e| { tracing::error!("serializing ValidateFlowResponse: {e}"); serde_json::Value::Null }),
             )
         }
         Err(e) => {
@@ -282,7 +282,7 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                     ok: false,
                     items,
                 })
-                .unwrap(),
+                .unwrap_or_else(|e| { tracing::error!("serializing ValidateFlowResponse: {e}"); serde_json::Value::Null }),
             )
         }
     }
@@ -295,7 +295,7 @@ fn commit_flow_document_locked(
     message_prefix: &str,
     author: &str,
 ) -> Result<CommittedFlow, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     doc.meta.updated_at = Some(current_timestamp());
 
     validate_flow_document(&doc, slug.as_str()).map_err(|e| Response::error(format!("{}", e)))?;
@@ -335,7 +335,7 @@ fn flow_write_success(state: &SharedState, committed: CommittedFlow) -> Response
         status: "committed".to_string(),
         commit_id: committed.commit_id,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 fn format_warning(w: &FlowWarning) -> String {

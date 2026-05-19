@@ -123,7 +123,10 @@ pub async fn handle_flow_run_start(
                     path: c.path,
                     commit_id: c.commit_id,
                 })
-                .unwrap(),
+                .unwrap_or_else(|e| {
+                    tracing::error!("serializing StartFlowRunResponse: {e}");
+                    serde_json::Value::Null
+                }),
             )
         }
         Err(resp) => resp,
@@ -156,7 +159,7 @@ pub async fn handle_flow_run_list(
     let mut summaries = Vec::new();
     if !flows_root.exists() {
         return Response::success(
-            serde_json::to_value(ListFlowRunsResponse { runs: vec![] }).unwrap(),
+            serde_json::to_value(ListFlowRunsResponse { runs: vec![] }).unwrap_or_else(|e| { tracing::error!("serializing ListFlowRunsResponse: {e}"); serde_json::Value::Null }),
         );
     }
     let slug_entries = match std::fs::read_dir(&flows_root) {
@@ -223,7 +226,7 @@ pub async fn handle_flow_run_list(
     }
     // sort: newest first
     summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    Response::success(serde_json::to_value(ListFlowRunsResponse { runs: summaries }).unwrap())
+    Response::success(serde_json::to_value(ListFlowRunsResponse { runs: summaries }).unwrap_or_else(|e| { tracing::error!("serializing ListFlowRunsResponse: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Response {
@@ -236,7 +239,7 @@ pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Respons
         Err(resp) => return resp,
     };
     let payload: ShowFlowRunResponse = (&run).into();
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_flow_node_set(
@@ -265,7 +268,7 @@ pub async fn handle_flow_node_set(
         }
     };
 
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let (run_state_path, mut run) = match find_run(&state, &run_id_typed) {
         Ok(t) => t,
@@ -371,7 +374,10 @@ pub async fn handle_flow_node_set(
             run_status: run.status,
             commit_id,
         })
-        .unwrap(),
+        .unwrap_or_else(|e| {
+            tracing::error!("serializing UpdateFlowNodeResponse: {e}");
+            serde_json::Value::Null
+        }),
     )
 }
 
@@ -388,7 +394,7 @@ pub async fn handle_flow_run_cancel(
         Err(e) => return Response::error(format!("invalid run id: {}", e)),
     };
 
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let (run_state_path, mut run) = match find_run(&state, &run_id_typed) {
         Ok(t) => t,
@@ -437,7 +443,10 @@ pub async fn handle_flow_run_cancel(
             run_id: run.run_id,
             commit_id,
         })
-        .unwrap(),
+        .unwrap_or_else(|e| {
+            tracing::error!("serializing CancelFlowRunResponse: {e}");
+            serde_json::Value::Null
+        }),
     )
 }
 
@@ -449,7 +458,7 @@ fn commit_run_state_locked(
     message_prefix: &str,
     author: &str,
 ) -> Result<CommittedRun, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     let rel = run_path(slug.as_str(), run_id);
     let rendered =
         stringify_run_state(&run).map_err(|e| Response::error(format!("stringify: {}", e)))?;

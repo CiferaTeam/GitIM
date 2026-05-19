@@ -44,7 +44,7 @@ pub async fn handle_board_show(state: SharedState, handler: String) -> Response 
         meta: board_meta_summary(&doc.meta),
         body: doc.body,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_board_list(state: SharedState) -> Response {
@@ -88,7 +88,7 @@ pub async fn handle_board_list(state: SharedState) -> Response {
     }
 
     boards.sort_by(|a, b| a.handler.cmp(&b.handler));
-    Response::success(serde_json::to_value(ListBoardsResponse { boards }).unwrap())
+    Response::success(serde_json::to_value(ListBoardsResponse { boards }).unwrap_or_else(|e| { tracing::error!("serializing ListBoardsResponse: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_board_init(state: SharedState, author: String) -> Response {
@@ -180,7 +180,7 @@ async fn ensure_known_user(state: &SharedState, handler: &str) -> Result<(), Res
 }
 
 fn init_board(state: &SharedState, author: &str) -> Result<CommittedBoard, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     let rel = board_path(author).map_err(|e| Response::error(e.to_string()))?;
     if state.repo_root.join(&rel).exists() {
         return Err(Response::error(format!(
@@ -198,7 +198,7 @@ fn publish_board(
     author: &str,
     content: Option<String>,
 ) -> Result<CommittedBoard, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     let rel = board_path(author).map_err(|e| Response::error(e.to_string()))?;
 
     let mut doc = match content {
@@ -224,7 +224,7 @@ fn mutate_existing_board<F>(
 where
     F: FnOnce(&mut BoardDocument) -> Result<(), BoardError>,
 {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     let rel = board_path(author).map_err(|e| Response::error(e.to_string()))?;
     let content = read_board_content(state, &rel, author)?;
     let mut doc = parse_board_markdown(&content)
@@ -296,7 +296,7 @@ fn board_write_success(state: &SharedState, committed: CommittedBoard) -> Respon
         status: "committed".to_string(),
         commit_id: committed.commit_id,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 fn board_meta_summary(meta: &BoardMeta) -> BoardMetaSummary {

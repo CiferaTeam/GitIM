@@ -202,7 +202,7 @@ pub async fn handle_create_cron(
     //    sync_loop's rebase) can't slip a `git add` in between our
     //    file write and our `add_and_commit_as`.
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Re-check under lock — between our pre-check and now another
         // create_cron could have raced us into the same directory.
@@ -265,7 +265,7 @@ pub async fn handle_create_cron(
         created_by: author_handler.as_str().to_string(),
         target: resolved_target.as_str().to_string(),
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Default for `Request::HistoryCron.limit` when the client omits the
@@ -337,7 +337,7 @@ pub async fn handle_list_crons(state: SharedState) -> Response {
     }
 
     let payload = ListCronsResponse { crons: summaries };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Read a single cron spec + the most recent `SHOW_RECENT_RUNS` past
@@ -389,7 +389,7 @@ pub async fn handle_show_cron(state: SharedState, name: String) -> Response {
         recent_runs: runs,
         next_fire,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// List `<ts>.thread` files for a cron, newest first, capped by `limit`
@@ -418,7 +418,7 @@ pub async fn handle_history_cron(state: SharedState, name: String, limit: Option
     let runs = list_thread_runs(&cron_dir, Some(limit_u));
 
     let payload = HistoryCronResponse { name, runs };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Read + parse a `spec.yaml`. Errors are surfaced as `String` because
@@ -605,7 +605,7 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
     }
 
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Re-stat under lock — a concurrent delete could have raced us.
         if !active_spec.exists() {
@@ -650,7 +650,7 @@ pub async fn handle_delete_cron(state: SharedState, name: String, author: String
         name,
         deleted_by: author_handler.as_str().to_string(),
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Shared body for enable + disable. Reads spec, compares state, and
@@ -711,7 +711,7 @@ async fn toggle_enabled(
             enabled: target,
             changed: false,
         };
-        return Response::success(serde_json::to_value(payload).unwrap());
+        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
     }
 
     spec.enabled = target;
@@ -726,7 +726,7 @@ async fn toggle_enabled(
     };
 
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Re-read under lock and bail out if another writer already
         // toggled to the requested state. Guards against an interleaved
@@ -746,7 +746,7 @@ async fn toggle_enabled(
                 enabled: target,
                 changed: false,
             };
-            return Response::success(serde_json::to_value(payload).unwrap());
+            return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
         }
 
         if let Err(e) = std::fs::write(&spec_path, &new_yaml) {
@@ -793,7 +793,7 @@ async fn toggle_enabled(
         enabled: target,
         changed: true,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 #[cfg(test)]

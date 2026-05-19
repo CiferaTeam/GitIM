@@ -57,7 +57,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                         commit_id: current_commit,
                         changes: Vec::new(),
                     };
-                    return Response::success(serde_json::to_value(payload).unwrap());
+                    return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
                 }
             }
         }
@@ -74,7 +74,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             commit_id: current_commit,
             changes: Vec::new(),
         };
-        return Response::success(serde_json::to_value(payload).unwrap());
+        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
     }
 
     // Compute diff
@@ -502,7 +502,7 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         commit_id: current_commit,
         changes,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Render thread entries to JSON, attaching a `recipients` field to

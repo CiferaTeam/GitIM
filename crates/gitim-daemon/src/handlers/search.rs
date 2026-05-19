@@ -17,7 +17,7 @@ pub async fn handle_search(
 ) -> Response {
     let current_user = state.current_user.read().await.clone();
     let index = {
-        let guard = state.index.read().unwrap();
+        let guard = state.index.read().unwrap_or_else(|e| e.into_inner());
         match &*guard {
             Some(idx) => idx.clone(),
             None => return Response::error(INDEXER_DISABLED_MSG),
@@ -55,7 +55,7 @@ pub async fn handle_search(
                 messages,
                 total: result.total as u64,
             };
-            Response::success(serde_json::to_value(payload).unwrap())
+            Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
         }
         Ok(Err(gitim_index::IndexError::Rebuilding)) => Response::error("indexing_in_progress"),
         Ok(Err(gitim_index::IndexError::EmptySearch)) => {
@@ -68,7 +68,7 @@ pub async fn handle_search(
 
 pub async fn handle_reindex(state: SharedState) -> Response {
     let index = {
-        let guard = state.index.read().unwrap();
+        let guard = state.index.read().unwrap_or_else(|e| e.into_inner());
         match &*guard {
             Some(idx) => idx.clone(),
             None => return Response::error(INDEXER_DISABLED_MSG),
@@ -87,7 +87,7 @@ pub async fn handle_reindex(state: SharedState) -> Response {
                 status: "complete".to_string(),
                 messages_indexed: count as u64,
             };
-            Response::success(serde_json::to_value(payload).unwrap())
+            Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
         }
         Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
         Err(e) => Response::error(format!("reindex task failed: {}", e)),

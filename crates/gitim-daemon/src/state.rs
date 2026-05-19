@@ -117,7 +117,7 @@ impl AppState {
             last_client_activity: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_else(|e| { tracing::error!("system time before epoch: {e}"); Default::default() })
                     .as_secs(),
             ),
             auth_failed: Arc::new(AtomicBool::new(false)),
@@ -197,7 +197,7 @@ impl AppState {
         }
 
         let arc_index = Arc::new(index);
-        *state.index.write().unwrap() = Some(arc_index);
+        *state.index.write().unwrap_or_else(|e| e.into_inner()) = Some(arc_index);
         Ok(())
     }
 
@@ -252,7 +252,7 @@ impl AppState {
                             tracing::warn!("on_pushed: failed to get HEAD: {}", e);
                             "unknown".to_string()
                         });
-                    let mut pending = push_state.pending_push.write().unwrap();
+                    let mut pending = push_state.pending_push.write().unwrap_or_else(|e| e.into_inner());
                     let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
                         std::collections::HashMap::new();
                     for mut msg in pending.drain(..) {
@@ -281,7 +281,7 @@ impl AppState {
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
                         .to_string();
-                    let mut pending = renum_state.pending_push.write().unwrap();
+                    let mut pending = renum_state.pending_push.write().unwrap_or_else(|e| e.into_inner());
                     for msg in pending.iter_mut() {
                         if msg.channel == channel_name && msg.line_number == old_line {
                             let _ = renum_state.event_tx.send(Event::MessageRenumbered {
@@ -317,7 +317,7 @@ impl AppState {
                     }
 
                     // update index after each sync cycle
-                    let index_guard = synced_state.index.read().unwrap();
+                    let index_guard = synced_state.index.read().unwrap_or_else(|e| e.into_inner());
                     let index = match &*index_guard {
                         Some(idx) => idx.clone(),
                         None => return,
@@ -370,7 +370,7 @@ impl AppState {
                 },
                 move || {
                     // on_cycle_done: notify remaining waiters (with result_tx) that push failed
-                    let mut pending = cycle_done_state.pending_push.write().unwrap();
+                    let mut pending = cycle_done_state.pending_push.write().unwrap_or_else(|e| e.into_inner());
                     pending.retain_mut(|msg| {
                         if msg.result_tx.is_some() {
                             if let Some(tx) = msg.result_tx.take() {
@@ -539,7 +539,7 @@ mod tests {
         let state = make_state(None);
         assert_eq!(state.author_for("alice").1, "alice@gitim");
 
-        *state.github_email.write().unwrap() = Some("alice@example.com".to_string());
+        *state.github_email.write().unwrap_or_else(|e| e.into_inner()) = Some("alice@example.com".to_string());
         assert_eq!(state.author_for("alice").1, "alice@example.com");
     }
 }

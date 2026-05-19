@@ -375,7 +375,7 @@ pub async fn fire(state: &AppState, request: FireRequest) -> Result<(), CronEngi
     let (author_name, author_email) = state.author_for(&commit_author_handle);
 
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Delete-then-fire race guard. Between scan_due and this point a
         // concurrent `delete_cron` may have moved the spec dir to

@@ -72,7 +72,7 @@ pub async fn handle_archive_dm(state: SharedState, peer: String, author: String)
     // would bundle the unrelated send into our archive commit. Critical
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
-    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 5. git mv dm/<stem>.thread → archive/dm/<stem>.thread
     let from_rel = format!("dm/{}.thread", stem);
@@ -154,7 +154,7 @@ pub async fn handle_archive_dm(state: SharedState, peer: String, author: String)
         archived_by: author,
         dm_pair_stem: stem,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Restore `archive/dm/<sorted-pair>.thread` → `dm/<sorted-pair>.thread`.
@@ -200,7 +200,7 @@ pub async fn handle_unarchive_dm(state: SharedState, peer: String, author: Strin
     }
 
     // Commit-tree lock: see archive_dm rationale.
-    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 5. git mv archive → active.
     let from_rel = format!("archive/dm/{}.thread", stem);
@@ -278,5 +278,5 @@ pub async fn handle_unarchive_dm(state: SharedState, peer: String, author: Strin
         unarchived_by: author,
         dm_pair_stem: stem,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }

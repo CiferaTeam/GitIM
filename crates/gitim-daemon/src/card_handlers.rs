@@ -205,7 +205,7 @@ pub async fn handle_create_card(
         updated_at: now,
         archived_via: None,
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
     let meta_rel = format!("channels/{}/cards/{}/card.meta.yaml", ch_name, card_id);
     let thread_rel = format!("channels/{}/cards/{}/discussion.thread", ch_name, card_id);
     if let Err(e) = std::fs::write(card_dir.join("card.meta.yaml"), &meta_str) {
@@ -244,7 +244,7 @@ pub async fn handle_create_card(
         card_id,
         title,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 /// Restore `card.meta.yaml` to its last-committed state after a failed
@@ -433,7 +433,7 @@ pub async fn handle_archive_card(
         card_id,
         archived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_unarchive_card(
@@ -582,7 +582,7 @@ pub async fn handle_unarchive_card(
         card_id,
         unarchived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_list_cards(
@@ -680,7 +680,7 @@ pub async fn handle_list_cards(
             .then_with(|| a.card_id.cmp(&b.card_id))
     });
     let payload = gitim_core::responses::ListCardsResponse { cards };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_list_archived_cards(state: SharedState, channel: Option<String>) -> Response {
@@ -753,7 +753,7 @@ pub async fn handle_list_archived_cards(state: SharedState, channel: Option<Stri
             .then_with(|| a.card_id.cmp(&b.card_id))
     });
     let payload = gitim_core::responses::ListCardsResponse { cards };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_read_card(
@@ -813,7 +813,7 @@ pub async fn handle_read_card(
         },
         entries,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_send_card_message(
@@ -862,7 +862,7 @@ pub async fn handle_send_card_message(
     // Commit-tree lock: keeps the read-append-commit sequence serial across
     // all writers (and blocks sync_loop's rebase from interleaving). No
     // `.await` inside the locked region — std::sync::Mutex is intentional.
-    let write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let write_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let (next_line, _new_content) =
         match thread_io::append_message_to_thread(&thread_path, &handler, &body, reply_to) {
@@ -901,7 +901,7 @@ pub async fn handle_send_card_message(
     let push_rx = if should_await_push {
         let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
         {
-            let mut pending = state.pending_push.write().unwrap();
+            let mut pending = state.pending_push.write().unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: channel_key.clone(),
                 line_number: next_line,
@@ -911,7 +911,7 @@ pub async fn handle_send_card_message(
         Some(rx)
     } else {
         {
-            let mut pending = state.pending_push.write().unwrap();
+            let mut pending = state.pending_push.write().unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: channel_key.clone(),
                 line_number: next_line,
@@ -971,7 +971,7 @@ pub async fn handle_send_card_message(
             error: None,
         }
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 pub async fn handle_update_card(
@@ -1052,7 +1052,7 @@ pub async fn handle_update_card(
     }
 
     meta.updated_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write card meta: {}", e));
     }
@@ -1094,7 +1094,7 @@ pub async fn handle_update_card(
         labels: meta.labels,
         assignee: meta.assignee,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
 }
 
 #[cfg(test)]
