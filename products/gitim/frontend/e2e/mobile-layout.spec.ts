@@ -73,6 +73,15 @@ async function stubGitHubIdentity(page: Page) {
 }
 
 async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>> = []) {
+  const boardHandlers = [
+    "alpha01",
+    "bravo02",
+    "charlie03",
+    "delta04",
+    "echo05",
+    "foxtrot06",
+  ];
+
   await page.addInitScript(({ port, activeSlug }) => {
     localStorage.clear();
     localStorage.setItem("gitim-runtime-port", String(port));
@@ -139,6 +148,46 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
     }
     if (url.pathname === `/workspaces/${slug}/im/cards`) {
       await route.fulfill({ json: { ok: true, data: { cards: [] } } });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/im/boards`) {
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            boards: boardHandlers.map((handler, index) => ({
+              handler,
+              path: `showboards/${handler}/board.md`,
+              updated_at: "20260519T120000Z",
+              status: "idle",
+              summary: `Mobile board ${index + 1}`,
+              tags: ["mobile"],
+            })),
+          },
+        },
+      });
+      return;
+    }
+    if (url.pathname.startsWith(`/workspaces/${slug}/im/boards/`)) {
+      const handler = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            handler,
+            path: `showboards/${handler}/board.md`,
+            meta: {
+              version: 1,
+              handler,
+              updated_at: "20260519T120000Z",
+              status: "idle",
+              summary: `Mobile board for ${handler}`,
+              tags: ["mobile"],
+            },
+            body: "## 当前状态\n\n等待新的任务。",
+          },
+        },
+      });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/cards/general/card-1`) {
@@ -545,6 +594,31 @@ test("mobile card detail uses the shared bottom tabs once", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Chat", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Cards", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
+});
+
+test("mobile boards keep the user strip within the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubRuntime(page);
+  await page.goto("/boards");
+
+  await expect(page.getByRole("heading", { name: "Boards" })).toBeVisible();
+  const firstBoardButton = page.getByRole("button", { name: /@alpha01/ });
+  await expect(firstBoardButton).toBeVisible();
+
+  const metrics = await firstBoardButton.evaluate((button) => {
+    const scroller = button.parentElement as HTMLElement;
+    const viewportWidth = document.documentElement.clientWidth;
+    return {
+      viewportWidth,
+      scrollerClientWidth: scroller.clientWidth,
+      scrollerScrollWidth: scroller.scrollWidth,
+      overflowX: window.getComputedStyle(scroller).overflowX,
+    };
+  });
+
+  expect(metrics.overflowX).toMatch(/auto|scroll/);
+  expect(metrics.scrollerClientWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+  expect(metrics.scrollerScrollWidth).toBeGreaterThan(metrics.scrollerClientWidth);
 });
 
 test("browser mode setup is reachable without a runtime port", async ({ page }) => {

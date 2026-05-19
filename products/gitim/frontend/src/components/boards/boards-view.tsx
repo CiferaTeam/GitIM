@@ -177,7 +177,7 @@ export function BoardsView() {
       {boards.length === 0 && listState !== "loading" ? (
         <EmptyBoards />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] overflow-hidden md:grid-cols-[18rem_1fr] md:grid-rows-1">
+        <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_1fr] overflow-hidden md:grid-cols-[18rem_1fr] md:grid-rows-1">
           <BoardList
             boards={boards}
             selectedHandler={selectedHandler}
@@ -207,8 +207,8 @@ function BoardList({
   onSelect: (handler: string) => void;
 }) {
   return (
-    <aside className="border-b border-border md:border-b-0 md:border-r">
-      <div className="flex gap-2 overflow-x-auto px-4 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
+    <aside className="min-w-0 overflow-hidden border-b border-border md:border-b-0 md:border-r">
+      <div className="flex w-full min-w-0 gap-2 overflow-x-auto px-4 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
         {boards.map((board) => {
           const selected = board.handler === selectedHandler;
           return (
