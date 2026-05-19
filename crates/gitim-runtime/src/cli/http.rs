@@ -45,13 +45,13 @@ const BODY_EXCERPT_BYTES: usize = 512;
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Long-running per-request timeout for handlers that block on filesystem or
-/// network IO the runtime can't bound (`add-agent` `git clone`s the workspace
-/// remote inline; `update-agent` writes potentially-large dotenv content to
-/// disk). 5 minutes is wide enough for a realistic GitHub repo over a slow
-/// uplink, narrow enough to surface a hung server without burning the
-/// whole agent turn. Callers thread this through `Client::post_with_timeout`
-/// or `Client::patch_with_timeout`.
-pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// network IO the runtime can't bound (`add-agent` runs provider preflight and
+/// `git clone`s the workspace remote inline; `update-agent` writes
+/// potentially-large dotenv content to disk). 6 minutes gives the runtime's
+/// 5-minute provider preflight a transport margin while still surfacing a hung
+/// server without burning the whole agent turn. Callers thread this through
+/// `Client::post_with_timeout` or `Client::patch_with_timeout`.
+pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// Connect timeout — small because we only ever talk to loopback. Anything
 /// slower than 5s is a stuck listener, not a slow link.
@@ -153,12 +153,12 @@ impl Client {
         //   the client sends. Sized for fast verbs that hit in-memory runtime
         //   state — they should fail fast on a stuck listener, not hang the
         //   agent's Bash tool call for minutes.
-        // - Per-request override = 300s, used by `post_with_timeout` for the
+        // - Per-request override = 360s, used by `post_with_timeout` for the
         //   provisioning verbs (`add-agent`, `update-agent`) whose runtime
         //   handlers block on `git clone` or large file writes that we can't
         //   meaningfully bound below the wall clock.
         //
-        // Without the per-verb split, a generous 300s default would penalize
+        // Without the per-verb split, a generous 360s default would penalize
         // every fast verb on an accepted-but-not-responding runtime. Without
         // the per-request override, a tight 30s default would abort `add-agent`
         // mid-clone and leave an orphaned half-provisioned state.
@@ -966,7 +966,7 @@ mod tests {
     /// fails loudly instead of stalling the test runner.
     ///
     /// In short: this test guarantees the dead-port path → Transport. The
-    /// 30s default request timeout, 300s long-form request timeout, and 5s
+    /// 30s default request timeout, 360s long-form request timeout, and 5s
     /// connect timeout configured in `Client::new` are locked in by the build
     /// itself (any code path that drops them is a static change reviewers
     /// will catch). Their values are pinned by
@@ -1015,7 +1015,7 @@ mod tests {
         );
         assert_eq!(
             LONG_REQUEST_TIMEOUT,
-            Duration::from_secs(300),
+            Duration::from_secs(360),
             "provisioning-verb long timeout drifted; review whether the new value still covers a worst-case GitHub clone",
         );
         assert_eq!(

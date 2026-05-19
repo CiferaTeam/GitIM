@@ -1928,11 +1928,13 @@ pub fn read_default_profile_llm_from(hermes_home: &Path) -> Option<(String, Stri
 // so the caller can pick a more specific HTTP `error_code` than the generic
 // `provision_preflight_failed`.
 
-/// Hard ceiling on a single preflight call. Tighter than runtime's
-/// LONG_REQUEST_TIMEOUT (300s) because the add-agent request needs to feel
-/// responsive — but loose enough that a real Claude/Codex hello with a slow
-/// upstream still completes. Per requirements §4.
-pub const PROVIDER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(90);
+/// Hard ceiling on a single add-agent preflight call.
+///
+/// Codex can spend minutes reconnecting or falling back between websocket and
+/// HTTP when the ChatGPT edge is unstable. Keep this wide enough for that
+/// retry path to finish, but still bounded so provisioning cannot hang
+/// indefinitely.
+pub const PROVIDER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Default binary paths (PATH-resolved at spawn time). Tests use the
 /// `_test` entry seam below to inject fake binaries without mutating PATH.
@@ -1960,7 +1962,7 @@ pub const ERROR_CODE_PROVISION_PREFLIGHT_FAILED: &str = "provision_preflight_fai
 /// Test-only seam for [`preflight_for_add_request`]. Lets tests inject:
 /// - alternative binary paths (fake shell scripts) without mutating PATH, and
 /// - a tighter outer timeout so timeout-classification can be exercised in
-///   under a second without sleeping `PROVIDER_PREFLIGHT_TIMEOUT` (90s) live.
+///   under a second without sleeping `PROVIDER_PREFLIGHT_TIMEOUT` live.
 /// - an explicit `hermes_home` so the default-profile YAML resolution exercises
 ///   a test-controlled directory rather than reading `$HOME/.hermes`.
 ///
@@ -2032,10 +2034,10 @@ pub async fn preflight_for_add_request_with_overrides(
         .outer_timeout
         .unwrap_or(PROVIDER_PREFLIGHT_TIMEOUT);
 
-    // We let the inner provider helpers manage their own per-call timeout
-    // (they all use Duration::from_secs(60) when called via _with), but the
-    // outer wrap is the hard cap that guarantees the add-agent request never
-    // hangs past PROVIDER_PREFLIGHT_TIMEOUT regardless of inner behavior.
+    // We let the inner provider helpers manage their own per-call timeout,
+    // but the outer wrap is the hard cap that guarantees the add-agent
+    // request never hangs past PROVIDER_PREFLIGHT_TIMEOUT regardless of inner
+    // behavior.
     let started_outer = Instant::now();
     let inner = dispatch_preflight(provider, env, model, llm_provider, llm_model, &overrides);
 
@@ -2070,9 +2072,10 @@ async fn dispatch_preflight(
         model_override: model.map(String::from),
     };
 
-    // Inner per-provider timeout — same 60s the zero-arg variants use. The
-    // outer 90s wrap is the hard cap.
-    let inner_timeout = Duration::from_secs(60);
+    // Add-agent preflight is model-specific and can hit slow upstream retry
+    // paths, especially for Codex. Use the add-agent hard cap here rather
+    // than the shorter direct health-ping defaults.
+    let inner_timeout = PROVIDER_PREFLIGHT_TIMEOUT;
 
     match provider {
         "mock" => {

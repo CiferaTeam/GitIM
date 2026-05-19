@@ -11,11 +11,11 @@
 //!      default-profile resolution) end-to-end via HTTP, including the
 //!      `hermes_default_profile_no_llm` tagged failure code.
 //!
-//! The outer-timeout flavor (provider preflight exceeds the 90s cap) is
+//! The outer-timeout flavor (provider preflight exceeds the production cap) is
 //! exercised directly via `preflight_for_add_request_with_overrides` in
 //! `tests/preflight_for_add_request.rs::outer_timeout_fires_with_slow_binary`.
 //! `agents_add` calls the production `preflight_for_add_request` which uses
-//! the default cap, so reproducing it through HTTP would require a 90s
+//! the default cap, so reproducing it through HTTP would require a multi-minute
 //! sleep — covered by the lower-level test instead.
 //!
 //! The post-preflight failure path (preflight passes, then hermes profile
@@ -557,8 +557,8 @@ async fn test_hermes_no_llm_default_profile_missing_llm_returns_default_profile_
 // ── Outer-timeout flavor ────────────────────────────────────────────────────
 //
 // `agents_add` calls the production `preflight_for_add_request` which uses
-// the default `PROVIDER_PREFLIGHT_TIMEOUT` (90s). Reproducing the timeout
-// path here would require a 90s sleep. The behavior is covered directly in
+// the default `PROVIDER_PREFLIGHT_TIMEOUT`. Reproducing the timeout path here
+// would require a multi-minute sleep. The behavior is covered directly in
 // `tests/preflight_for_add_request.rs::outer_timeout_fires_with_slow_binary`
 // against the `_with_overrides` variant — agents_add inherits the same
 // dispatcher, so the wire shape (error_kind: timeout, no failure_code,

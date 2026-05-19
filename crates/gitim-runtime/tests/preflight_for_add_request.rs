@@ -26,7 +26,7 @@ use gitim_runtime::preflight::{
     classify_preflight_error_code, preflight_for_add_request,
     preflight_for_add_request_with_overrides, ErrorKind, PreflightDispatchOverrides,
     PreflightResult, ERROR_CODE_PROVISION_PREFLIGHT_FAILED, FAILURE_CODE_HERMES_NO_LLM,
-    FAILURE_CODE_MISSING_LLM_PROVIDER, FAILURE_CODE_UNKNOWN_PROVIDER,
+    FAILURE_CODE_MISSING_LLM_PROVIDER, FAILURE_CODE_UNKNOWN_PROVIDER, PROVIDER_PREFLIGHT_TIMEOUT,
 };
 use tempfile::TempDir;
 
@@ -65,6 +65,11 @@ fn make_capture_script(
 }
 
 // ─── mock provider ──────────────────────────────────────────────────────────
+
+#[test]
+fn add_request_preflight_default_timeout_is_five_minutes() {
+    assert_eq!(PROVIDER_PREFLIGHT_TIMEOUT, Duration::from_secs(300));
+}
 
 #[tokio::test]
 async fn mock_provider_short_circuits_success() {
@@ -490,7 +495,7 @@ async fn classify_recognizes_each_setup_level_code() {
 async fn outer_timeout_fires_with_slow_binary() {
     // Slow fake binary + tight outer_timeout override → the outer
     // `tokio::time::timeout` wrap should trip before the inner per-provider
-    // timeout (60s) does. Verifies the outer cap is wired correctly.
+    // production timeout does. Verifies the outer cap is wired correctly.
     let tmp = TempDir::new().unwrap();
     let script = tmp.path().join("slow_claude.sh");
     std::fs::write(&script, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
@@ -516,7 +521,7 @@ async fn outer_timeout_fires_with_slow_binary() {
         classify_preflight_error_code(&result),
         ERROR_CODE_PROVISION_PREFLIGHT_FAILED
     );
-    // We should have returned in well under the inner 60s default.
+    // We should have returned in well under the inner production default.
     assert!(
         elapsed < Duration::from_secs(5),
         "outer timeout didn't fire promptly: elapsed = {elapsed:?}"
