@@ -51,6 +51,14 @@ pub struct AgentState {
     pub estimated_tokens: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_notice_pending: bool,
+    /// Set after the runtime has injected the pressure-relief preamble for the
+    /// current provider session. This is distinct from `usage_notice_pending`:
+    /// providers with estimator-only pressure can lose their visible
+    /// `session_usage` snapshot once the estimate overflows the display budget,
+    /// but the reset prompt must still remain one-shot instead of re-arming on
+    /// every turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_notice_sent: bool,
 
     /// Set by the `[[RESET]]` branch after `clear_session()`. The next
     /// `run_once` consumes it: if the poll cycle has no external changes,
@@ -103,10 +111,10 @@ impl AgentState {
     }
 
     /// Clear all fields tied to the current provider session, plus any
-    /// pending cross-cycle signals (`usage_notice_pending`,
-    /// `post_reset_pending`). Called on `[[RESET]]` detection, on session
-    /// failure, and from PATCH-agent paths that effectively start fresh
-    /// (model / system_prompt change).
+    /// cross-cycle pressure/continuation signals (`usage_notice_pending`,
+    /// `usage_notice_sent`, `post_reset_pending`). Called on `[[RESET]]`
+    /// detection, on session failure, and from PATCH-agent paths that
+    /// effectively start fresh (model / system_prompt change).
     ///
     /// The reset branch is the one place where a continuation signal is
     /// supposed to outlive a `clear_session()`: it re-arms
@@ -117,6 +125,7 @@ impl AgentState {
         self.session_usage = None;
         self.estimated_tokens = 0;
         self.usage_notice_pending = false;
+        self.usage_notice_sent = false;
         self.post_reset_pending = false;
         self.last_session_usage = None;
     }
@@ -147,6 +156,7 @@ mod tests {
             }),
             estimated_tokens: 125_400,
             usage_notice_pending: false,
+            usage_notice_sent: false,
             post_reset_pending: false,
             last_session_usage: None,
         };
@@ -191,6 +201,7 @@ mod tests {
             session_usage: None,
             estimated_tokens: 0,
             usage_notice_pending: false,
+            usage_notice_sent: false,
             post_reset_pending: false,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
@@ -222,6 +233,7 @@ mod tests {
             session_usage: None,
             estimated_tokens: 0,
             usage_notice_pending: false,
+            usage_notice_sent: false,
             post_reset_pending: false,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
@@ -274,12 +286,17 @@ mod tests {
             session_usage: None,
             estimated_tokens: 100,
             usage_notice_pending: true,
+            usage_notice_sent: true,
             post_reset_pending: true,
             last_session_usage: None,
         };
         state.clear_session();
         assert!(state.session_token.is_none());
         assert!(!state.usage_notice_pending);
+        assert!(
+            !state.usage_notice_sent,
+            "clear_session must allow a fresh session to receive its own notice"
+        );
         assert!(
             !state.post_reset_pending,
             "clear_session must wipe post_reset_pending; reset branch re-arms after"
@@ -300,6 +317,7 @@ mod tests {
             session_usage: None,
             estimated_tokens: 100,
             usage_notice_pending: true,
+            usage_notice_sent: true,
             post_reset_pending: false,
             last_session_usage: None,
         };
@@ -333,6 +351,10 @@ mod tests {
         assert!(state.session_usage.is_none());
         assert_eq!(state.estimated_tokens, 0);
         assert!(!state.usage_notice_pending);
+        assert!(
+            !state.usage_notice_sent,
+            "field added 2026-05-19 — legacy state must default to false"
+        );
         assert!(
             !state.post_reset_pending,
             "field added 2026-05-12 — legacy state must default to false"

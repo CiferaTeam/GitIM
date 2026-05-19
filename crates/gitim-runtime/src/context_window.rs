@@ -21,6 +21,7 @@ pub fn default_max_tokens(provider: &str, model: &str) -> Option<u64> {
     match provider {
         "claude" => Some(claude_max_tokens(&m)),
         "codex" => Some(codex_max_tokens(&m)),
+        "cursor" => Some(cursor_max_tokens(&m)),
         "mock" => Some(10_000),
         "pi" => Some(200_000),
         // Self-managed-context providers: the runtime cannot know how much
@@ -56,6 +57,17 @@ fn codex_max_tokens(model_lc: &str) -> u64 {
         return 1_000_000;
     }
     272_000
+}
+
+fn cursor_max_tokens(model_lc: &str) -> u64 {
+    // Cursor does not report a live context-window signal through stream-json.
+    // Composer models are the long-context path in current GitIM deployments;
+    // using 1M keeps the reset fallback aligned with the observed session size
+    // instead of firing at the generic 200k unknown-provider default.
+    if model_lc.contains("composer") {
+        return 1_000_000;
+    }
+    200_000
 }
 
 #[cfg(test)]
@@ -117,6 +129,18 @@ mod default_max_tests {
     fn codex_gpt5_is_272k() {
         assert_eq!(default_max_tokens("codex", "gpt-5"), Some(272_000));
         assert_eq!(default_max_tokens("codex", "gpt-5-codex"), Some(272_000));
+    }
+
+    #[test]
+    fn cursor_composer_uses_1m_fallback_budget() {
+        assert_eq!(
+            default_max_tokens("cursor", "composer-2.5-fast"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            default_max_tokens("cursor", "Cursor Composer 2.5 Fast"),
+            Some(1_000_000)
+        );
     }
 
     #[test]

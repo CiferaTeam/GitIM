@@ -279,15 +279,10 @@ fn snapshot_returns_none_when_estimator_overflows_max() {
     // stdout doesn't stream token_count events, so ExecResult.usage = None)
     // the runtime falls back to compute_from_estimate, which monotonically
     // accumulates `tokenize_for_provider(assistant_text_buf)` across turns.
-    // Live cfo observed: estimated_tokens=518906 vs max=272000 → 190% →
-    // previously clamp(0, 100) → 100.0 → just_crossed_threshold(prev, 100)
-    // returns true → usage_notice_pending=true → next turn injects the
-    // pressure-relief preamble → agent emits [[RESET]] → false-positive
-    // context wipe. We'd rather show "no snapshot" (empty HUD) than a fake
-    // 100% that trips the RESET pipeline; a real >=100 always lands via
-    // ProviderReported with the actual numbers, which is the trustworthy
-    // path. The estimator is a per-process monotonic lower-bound; once it
-    // outgrows max it's lost the resolution to mean anything.
+    // Live cfo observed: estimated_tokens=518906 vs max=272000 → 190%.
+    // The HUD should show "no snapshot" rather than a fake precise 100%.
+    // The reset fallback is tested separately through update_session_usage so
+    // display precision and pressure relief do not share the same gate.
     let snap = compute_snapshot(
         "sess-overflow",
         None,
@@ -305,8 +300,7 @@ fn snapshot_returns_none_when_cumulative_short_circuit_estimator_overflows() {
     // short-circuit path (bb66f7d): if usage_is_cumulative=true, the
     // function routes to compute_from_estimate. That path must respect the
     // overflow guard too, otherwise codex (now declared cumulative again
-    // to match real stdout semantics) would re-introduce the same fake-100
-    // RESET loop.
+    // to match real stdout semantics) would re-introduce a fake HUD 100%.
     let snap = compute_snapshot(
         "sess-cum-overflow",
         Some(&ProviderUsage {

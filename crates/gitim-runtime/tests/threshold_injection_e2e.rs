@@ -18,7 +18,7 @@ mod common;
 use common::short_tempdir;
 
 use gitim_agent_provider::ProviderUsage;
-use gitim_runtime::agent_loop::AgentLoop;
+use gitim_runtime::agent_loop::{AgentLoop, AgentLoopConfig};
 use gitim_runtime::state::AgentState;
 
 fn bootstrap_workspace(handler: &str) -> tempfile::TempDir {
@@ -96,4 +96,90 @@ async fn threshold_crossing_sets_notice_pending() {
         after_t2.usage_notice_pending,
         "crossing 80% must flip usage_notice_pending to true"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn estimator_overflow_still_arms_one_shot_notice() {
+    let tmp = bootstrap_workspace("cursor-threshold-agent");
+    let repo_root = tmp.path();
+
+    let loop_ = AgentLoop::with_config(
+        repo_root,
+        &AgentLoopConfig {
+            provider_type: "cursor".to_string(),
+            handler: "cursor-threshold-agent".to_string(),
+            model: Some("composer-2.5-fast".to_string()),
+            ..AgentLoopConfig::default()
+        },
+    )
+    .expect("loop");
+
+    let cursor_usage = ProviderUsage {
+        input_tokens: Some(100_000),
+        output_tokens: Some(2_000),
+        cache_read_tokens: Some(500_000),
+        context_tokens: Some(0),
+        context_window_tokens: Some(0),
+        ..Default::default()
+    };
+
+    let mut state = AgentState::load(repo_root).expect("load");
+    state.estimated_tokens = 1_100_000;
+    loop_
+        .update_session_usage(&mut state, Some(&cursor_usage), "sess-cursor-overflow")
+        .expect("update overflow");
+
+    let after = AgentState::load(repo_root).expect("reload");
+    assert!(
+        after.session_usage.is_none(),
+        "overflowed estimator should still hide the HUD snapshot"
+    );
+    assert!(
+        after.usage_notice_pending,
+        "hidden HUD snapshot must not disable the reset fallback"
+    );
+    assert!(
+        !after.usage_notice_sent,
+        "update only arms the next-turn notice; run_once marks it sent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn estimator_overflow_notice_does_not_rearm_after_sent() {
+    let tmp = bootstrap_workspace("cursor-threshold-sent");
+    let repo_root = tmp.path();
+
+    let loop_ = AgentLoop::with_config(
+        repo_root,
+        &AgentLoopConfig {
+            provider_type: "cursor".to_string(),
+            handler: "cursor-threshold-sent".to_string(),
+            model: Some("composer-2.5-fast".to_string()),
+            ..AgentLoopConfig::default()
+        },
+    )
+    .expect("loop");
+
+    let cursor_usage = ProviderUsage {
+        input_tokens: Some(100_000),
+        output_tokens: Some(2_000),
+        cache_read_tokens: Some(500_000),
+        context_tokens: Some(0),
+        context_window_tokens: Some(0),
+        ..Default::default()
+    };
+
+    let mut state = AgentState::load(repo_root).expect("load");
+    state.estimated_tokens = 1_100_000;
+    state.usage_notice_sent = true;
+    loop_
+        .update_session_usage(&mut state, Some(&cursor_usage), "sess-cursor-overflow")
+        .expect("update overflow");
+
+    let after = AgentState::load(repo_root).expect("reload");
+    assert!(
+        !after.usage_notice_pending,
+        "a consumed pressure notice must stay one-shot for the session"
+    );
+    assert!(after.usage_notice_sent);
 }

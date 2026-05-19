@@ -272,35 +272,35 @@ impl AgentLoop {
             &now,
         );
 
-        let prev_pct = state.session_usage.as_ref().map(|s| s.used_percent);
         let self_managed = self.provider.self_managed_context();
+        let estimated_pct = estimate_pressure_percent(state.estimated_tokens, max);
+        if should_arm_usage_notice(
+            state.session_usage.as_ref(),
+            new_snapshot.as_ref(),
+            estimated_pct,
+            state.usage_notice_pending,
+            state.usage_notice_sent,
+            self_managed,
+        ) {
+            state.usage_notice_pending = true;
+            let snapshot_pct = new_snapshot.as_ref().map(|s| s.used_percent);
+            let notice_pct = snapshot_pct.or(estimated_pct).unwrap_or(WARN_AT_PERCENT);
+            tracing::info!(
+                session_id = %session_id,
+                provider_input_tokens = ?provider_reported.and_then(|p| p.input_tokens),
+                provider_used_pct = ?snapshot_pct,
+                estimated_tokens = state.estimated_tokens,
+                estimated_used_pct = ?estimated_pct,
+                notice_used_pct = notice_pct,
+                max_tokens = ?max,
+                provider = %self.provider_type,
+                model = %model,
+                self_managed = self_managed,
+                "threshold_crossed_80pct"
+            );
+        }
+
         if let Some(snap) = &new_snapshot {
-            if just_crossed_threshold(prev_pct, snap.used_percent) {
-                // Self-managed providers (e.g. hermes) compress in-loop and
-                // do not need the runtime-side `[系统通知]` preamble +
-                // `[[RESET]]` handoff. Log the crossing for observability but
-                // do not arm the preamble. For other providers the default
-                // pressure-relief flow stays unchanged.
-                if !self_managed {
-                    state.usage_notice_pending = true;
-                }
-                let est_pct = max
-                    .map(|m| (state.estimated_tokens as f64) / (m as f64) * 100.0)
-                    .unwrap_or(0.0);
-                tracing::info!(
-                    session_id = %session_id,
-                    provider_input_tokens = ?provider_reported.and_then(|p| p.input_tokens),
-                    provider_used_pct = snap.used_percent,
-                    estimated_tokens = state.estimated_tokens,
-                    estimated_used_pct = est_pct,
-                    delta_pp = snap.used_percent - est_pct,
-                    max_tokens = ?max,
-                    provider = %self.provider_type,
-                    model = %model,
-                    self_managed = self_managed,
-                    "threshold_crossed_80pct"
-                );
-            }
             if snap.used_percent > 110.0 {
                 tracing::warn!(
                     session_id = %session_id,
@@ -657,9 +657,16 @@ impl AgentLoop {
                 .session_usage
                 .as_ref()
                 .map(|s| s.used_percent)
-                .unwrap_or(80.0);
+                .or_else(|| {
+                    let model = self.model.as_deref().unwrap_or("");
+                    let max = crate::context_window::default_max_tokens(&self.provider_type, model);
+                    estimate_pressure_percent(state.estimated_tokens, max)
+                })
+                .map(|p| p.clamp(WARN_AT_PERCENT, 100.0))
+                .unwrap_or(WARN_AT_PERCENT);
             let preamble = build_usage_notice_preamble(pct);
             state.usage_notice_pending = false;
+            state.usage_notice_sent = true;
             format!("{preamble}\n\n---\n\n{prompt}")
         } else {
             prompt
@@ -1349,19 +1356,12 @@ fn compute_from_estimate(
     let pct = (estimated_tokens as f64) / (max as f64) * 100.0;
     // Overflow guard: the estimator is a monotonic lower bound built from
     // `tokenize_for_provider(assistant_text_buf)` accumulated across turns.
-    // Once it grows past max it has lost the resolution to mean anything —
-    // clamping to 100 would trip `just_crossed_threshold` and inject the
-    // `[[RESET]]` preamble, which on a cumulative-usage provider (codex
-    // stdout `turn.completed.usage` is session-cumulative; no per-LLM-call
-    // signal is available outside the rollout file) traps the agent in a
-    // reset-spin without any real context pressure. Observed live on cfo
-    // (gpt-5.5): estimated_tokens=518906, max=272000 → 190% → clamp 100 →
-    // RESET loop.
-    //
-    // Returning None is the honest signal: "no trustworthy snapshot". The
-    // HUD treats it as missing data; the threshold-crossing logic doesn't
-    // fire. Provider-reported >=100 still lands via the ProviderReported
-    // branch above and remains authoritative.
+    // Once it grows past max it has lost the resolution to render as a precise
+    // HUD percentage. Returning None is the honest display signal: "no
+    // trustworthy snapshot". The pressure-relief state machine uses a separate
+    // one-shot estimate gate, so hiding the HUD no longer disables reset.
+    // Provider-reported >=100 still lands via the ProviderReported branch above
+    // and remains authoritative.
     if pct >= 100.0 {
         return None;
     }
@@ -1387,6 +1387,42 @@ pub fn just_crossed_threshold(prev_pct: Option<f64>, new_pct: f64) -> bool {
         None => true,
         Some(p) => p < WARN_AT_PERCENT,
     }
+}
+
+fn estimate_pressure_percent(estimated_tokens: u64, max_tokens: Option<u64>) -> Option<f64> {
+    let max = max_tokens?;
+    if estimated_tokens == 0 || max == 0 {
+        return None;
+    }
+    Some((estimated_tokens as f64) / (max as f64) * 100.0)
+}
+
+fn should_arm_usage_notice(
+    previous: Option<&SessionUsageSnapshot>,
+    current: Option<&SessionUsageSnapshot>,
+    estimated_pct: Option<f64>,
+    pending: bool,
+    sent: bool,
+    self_managed: bool,
+) -> bool {
+    if self_managed || pending || sent {
+        return false;
+    }
+
+    if let Some(snap) = current {
+        return just_crossed_threshold(previous.map(|s| s.used_percent), snap.used_percent);
+    }
+
+    let Some(pct) = estimated_pct else {
+        return false;
+    };
+    if pct < WARN_AT_PERCENT {
+        return false;
+    }
+
+    previous
+        .map(|s| s.used_percent < WARN_AT_PERCENT)
+        .unwrap_or(true)
 }
 
 /// The one-shot preamble inserted before the next user prompt when
