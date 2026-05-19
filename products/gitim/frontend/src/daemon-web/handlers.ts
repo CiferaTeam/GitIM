@@ -56,6 +56,8 @@ type SendWriteResult =
   | { kind: "response"; response: ApiResponse };
 
 type RawCardMeta = Omit<Card, "card_id">;
+type MessageEntry = Extract<ThreadEntry, { type: "message" }>;
+type ThreadEntryWithRecipients = ThreadEntry & { recipients?: string[] };
 
 interface BoardMeta {
   version: number;
@@ -1680,13 +1682,13 @@ function boardMetaSummary(meta: BoardMeta): BoardMeta {
 
 async function readChannelEntries(
   channel: string,
-): Promise<ThreadEntry[]> {
+): Promise<ThreadEntryWithRecipients[]> {
   return (await readChannelEntriesWithArchive(channel)).entries;
 }
 
 async function readChannelEntriesWithArchive(
   channel: string,
-): Promise<{ entries: ThreadEntry[]; archived: boolean }> {
+): Promise<{ entries: ThreadEntryWithRecipients[]; archived: boolean }> {
   const s = getState();
   const target = resolveThreadTarget(channel);
   let absPath = `${s.repoDir}/${target.threadPath}`;
@@ -1704,7 +1706,88 @@ async function readChannelEntriesWithArchive(
 
   const content = await readFile(absPath);
   const file = parseThread(content);
-  return { entries: file.entries, archived };
+  const entries = await enrichEntriesWithRecipients(file.entries, target, archived);
+  return { entries, archived };
+}
+
+async function enrichEntriesWithRecipients(
+  entries: ThreadEntry[],
+  target: ReturnType<typeof resolveThreadTarget>,
+  archived: boolean,
+): Promise<ThreadEntryWithRecipients[]> {
+  if (target.kind === "dm") {
+    const recipients = [...target.members].sort();
+    return entries.map((entry) =>
+      entry.type === "message" ? { ...entry, recipients } : entry,
+    );
+  }
+
+  const s = getState();
+  const metaPath = archived
+    ? `${s.repoDir}/archive/channels/${target.name}.meta.yaml`
+    : `${s.repoDir}/${channelMetaPath(target.name)}`;
+  if (!(await exists(metaPath))) return entries;
+
+  const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
+  const messages = entries.filter(isMessageEntry);
+
+  return entries.map((entry) => {
+    if (entry.type !== "message") return entry;
+    const recipients = computeChannelRecipients(entry, meta, messages);
+    return recipients.length > 0 ? { ...entry, recipients } : entry;
+  });
+}
+
+function isMessageEntry(entry: ThreadEntry): entry is MessageEntry {
+  return entry.type === "message";
+}
+
+function addRecipient(recipients: Set<string>, handler: unknown): void {
+  if (typeof handler !== "string") return;
+  const trimmed = handler.trim();
+  if (trimmed) recipients.add(trimmed);
+}
+
+const PROTOCOL_MENTION_RE = /<@([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)>/g;
+
+function extractProtocolMentions(body: string): string[] {
+  const mentions: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = PROTOCOL_MENTION_RE.exec(body)) !== null) {
+    mentions.push(match[1]);
+  }
+  PROTOCOL_MENTION_RE.lastIndex = 0;
+  return mentions;
+}
+
+function computeChannelRecipients(
+  message: MessageEntry,
+  channelMeta: ChannelMeta,
+  allMessages: MessageEntry[],
+): string[] {
+  const recipients = new Set<string>();
+  addRecipient(recipients, channelMeta.created_by);
+
+  const byLine = new Map<number, MessageEntry>();
+  for (const entry of allMessages) {
+    if (entry.line_number > 0) byLine.set(entry.line_number, entry);
+  }
+
+  const visited = new Set<number>();
+  let cursor = message.point_to;
+  while (cursor !== 0 && !visited.has(cursor)) {
+    visited.add(cursor);
+    const ancestor = byLine.get(cursor);
+    if (!ancestor) break;
+    addRecipient(recipients, ancestor.author);
+    cursor = ancestor.point_to;
+  }
+
+  for (const handler of extractProtocolMentions(message.body)) {
+    addRecipient(recipients, handler);
+  }
+
+  return [...recipients].sort();
 }
 
 async function readCardEntries(

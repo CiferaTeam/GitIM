@@ -581,6 +581,7 @@ describe("daemon-web handlers", () => {
         kind: "channel",
         unreadCount: 0,
         members: ["alice", "lewis"],
+        created_by: "alice",
       },
       {
         name: "alice--lewis",
@@ -607,9 +608,35 @@ describe("daemon-web handlers", () => {
         point_to: 1,
         author: "lewis",
         body: "reply",
+        recipients: ["alice"],
       }),
     ]);
     expect(res.data).not.toHaveProperty("messages");
+  });
+
+  it("adds channel recipients from creator, parent chain, and mentions", async () => {
+    files.set(
+      "/repo/channels/general.thread",
+      [
+        "[L000001][P000000][@alice][20260317T120000Z] hello",
+        "[L000002][P000001][@lewis][20260317T120100Z] <@flame4> reply",
+        "",
+      ].join("\n"),
+    );
+
+    const res = await read("general");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.entries).toEqual([
+      expect.objectContaining({
+        line_number: 1,
+        recipients: ["alice"],
+      }),
+      expect.objectContaining({
+        line_number: 2,
+        recipients: ["alice", "flame4"],
+      }),
+    ]);
   });
 
   it("resolves dm: API names to dm/*.thread", async () => {
@@ -621,6 +648,7 @@ describe("daemon-web handlers", () => {
         line_number: 1,
         author: "alice",
         body: "private",
+        recipients: ["alice", "lewis"],
       }),
     ]);
   });
@@ -809,6 +837,7 @@ describe("daemon-web handlers", () => {
         kind: "channel",
         unreadCount: 0,
         members: ["alice", "lewis"],
+        created_by: "lewis",
       },
       {
         name: "alice--lewis",
@@ -1348,8 +1377,16 @@ describe("daemon-web handlers", () => {
         channel: "general",
         kind: "new_messages",
         entries: [
-          expect.objectContaining({ line_number: 1, body: "hello" }),
-          expect.objectContaining({ line_number: 2, body: "reply" }),
+          expect.objectContaining({
+            line_number: 1,
+            body: "hello",
+            recipients: ["alice"],
+          }),
+          expect.objectContaining({
+            line_number: 2,
+            body: "reply",
+            recipients: ["alice"],
+          }),
         ],
       },
     ]);
