@@ -53,7 +53,7 @@
 - **Dark mode:** 这就是默认模式。不提供 light mode（目标用户是开发者）
 
 ## Spacing
-- **Base unit:** 4px
+- **Base unit:** 3.6px implementation density (`--spacing: 0.225rem`), preserving the 4px grid proportions at ~90% scale
 - **Density:** Comfortable — 不像 Slack 那么松散，也不像 terminal 那么紧凑。介于两者之间
 - **Scale:**
   - 2xs: 2px
@@ -96,3 +96,4 @@
 | 2026-04-10 | Soft blue accent #60a5fa | 不刺眼，区别于 Slack 紫/Discord blurple |
 | 2026-04-10 | 非纯黑背景 #1c1c1e | 降低对比度，减少视觉疲劳 |
 | 2026-04-10 | Comfortable spacing | 平衡信息密度和阅读舒适度 |
+| 2026-05-19 | Default UI density at ~90% scale | 让聊天默认观感接近浏览器缩放后的舒适密度，减少顶栏、侧栏、头像和内边距的视觉占用 |
