@@ -45,9 +45,9 @@ describe("AgentCard compact layout", () => {
     document.body.innerHTML = "";
   });
 
-  it("keeps long descriptive fields out of the compact summary row", () => {
+  it("shows a bounded introduction preview with full text on hover", () => {
     const longIntroduction =
-      "This is a deliberately long operating note that should not make the control plane row taller.";
+      "This is a deliberately long operating note that should appear near the status area without making the control plane row taller.";
     const record: Agent = {
       ...agent("codex", "gpt-5.5"),
       introduction: longIntroduction,
@@ -70,8 +70,14 @@ describe("AgentCard compact layout", () => {
     const summary = container.querySelector<HTMLElement>(
       '[data-testid="agent-card-summary"]',
     );
+    const intro = container.querySelector<HTMLElement>(
+      '[data-testid="agent-card-introduction"]',
+    );
     expect(summary).not.toBeNull();
-    expect(summary?.textContent).not.toContain(longIntroduction);
-    expect(container.querySelector('[data-testid="agent-hover-detail"]')).toBeNull();
+    expect(intro).not.toBeNull();
+    expect(intro?.getAttribute("title")).toBe(longIntroduction);
+    expect(intro?.textContent).toContain("This is a deliberately long");
+    expect(intro?.textContent).toContain("...");
+    expect(intro?.textContent).not.toBe(longIntroduction);
   });
 });

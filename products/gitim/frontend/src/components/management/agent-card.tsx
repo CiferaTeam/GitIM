@@ -39,6 +39,15 @@ function avatarColor(name: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
+const INTRODUCTION_PREVIEW_MAX = 72;
+
+function introductionPreview(introduction: string | undefined): string | null {
+  const value = introduction?.trim();
+  if (!value) return null;
+  if (value.length <= INTRODUCTION_PREVIEW_MAX) return value;
+  return `${value.slice(0, INTRODUCTION_PREVIEW_MAX).trimEnd()}...`;
+}
+
 interface AgentCardProps {
   agent: Agent;
   readOnly?: boolean;
@@ -51,6 +60,7 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
   const [burnOpen, setBurnOpen] = useState(false);
 
   const isRunning = agent.status !== "offline";
+  const introPreview = introductionPreview(agent.introduction);
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -86,7 +96,7 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
 
         <div
           data-testid="agent-card-summary"
-          className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 pl-4"
+          className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 pl-4 md:grid-cols-[auto_minmax(0,1fr)_minmax(10rem,16rem)_auto]"
         >
           <div
             className="flex size-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white shadow-sm"
@@ -108,7 +118,18 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
               {agent.provider ?? "—"} · {agentModelLabel(agent)}
             </span>
           </div>
-          <div className="hidden shrink-0 md:block">{statusBadge(agent.status)}</div>
+          {introPreview && (
+            <div
+              data-testid="agent-card-introduction"
+              title={agent.introduction?.trim()}
+              className="hidden min-w-0 text-xs leading-5 text-text-secondary md:col-start-3 md:row-start-1 md:row-span-2 md:block"
+            >
+              <span className="block truncate">{introPreview}</span>
+            </div>
+          )}
+          <div className="hidden shrink-0 md:col-start-4 md:row-start-1 md:block">
+            {statusBadge(agent.status)}
+          </div>
 
           <div
             className={`col-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary ${
@@ -128,7 +149,7 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
 
           {!readOnly && (
             <div
-              className="col-start-3 row-start-2 flex items-center justify-end gap-1"
+              className="col-start-3 row-start-2 flex items-center justify-end gap-1 md:col-start-4"
               onClick={(e) => e.stopPropagation()}
             >
               <Button
