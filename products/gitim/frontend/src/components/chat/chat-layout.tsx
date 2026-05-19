@@ -7,6 +7,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
+import { expandAllMentions } from "../../lib/expand-all-mentions";
 import type { Channel, Message } from "../../lib/types";
 import { writeUiState } from "../../lib/ui-state";
 import { workspaceIdentity } from "../../lib/workspace-key";
@@ -99,15 +100,21 @@ export function ChatLayout() {
   const pushNav = useChatStore((s) => s.pushNav);
   const navHistory = useChatStore((s) => s.navHistory);
 
-  const mentionCandidates = useMemo(() => {
-    const agentIds = agents.map((a) => a.id);
-    const set = new Set([...users, ...agentIds]);
-    return [...set];
-  }, [users, agents]);
-
   const currentChannelData = currentChannel
     ? channels.find((c) => c.name === currentChannel)
     : null;
+  const allMentionRecipients = useMemo(
+    () => currentChannelData?.kind === "channel" ? currentChannelData.members : [],
+    [currentChannelData],
+  );
+  const mentionCandidates = useMemo(() => {
+    const agentIds = agents.map((a) => a.id);
+    const set = new Set([...users, ...agentIds]);
+    const candidates = [...set];
+    if (allMentionRecipients.length === 0) return candidates;
+    return candidates.includes("all") ? candidates : [...candidates, "all"];
+  }, [users, agents, allMentionRecipients]);
+
   const activeWorkspace = activeSlug
     ? workspaces.find((workspace) => workspace.slug === activeSlug)
     : undefined;
@@ -143,7 +150,6 @@ export function ChatLayout() {
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
   useEffect(() => {
     // Intentional: UX contract is "switching context closes transient overlays".
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCardDrawerOpen(false);
   }, [currentChannel]);
 
@@ -222,6 +228,7 @@ export function ChatLayout() {
     async (body: string, pointTo: number = 0) => {
       if (!currentChannel) return { ok: false, error: "No channel selected" };
       if (!activeSlug) return { ok: false, error: "No workspace selected" };
+      const expandedBody = expandAllMentions(body, allMentionRecipients);
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
       const requestChannel = currentChannel;
@@ -234,7 +241,7 @@ export function ChatLayout() {
           .toISOString()
           .replace(/[-:]/g, "")
           .replace(/\.\d+/, ""),
-        body,
+        body: expandedBody,
         _status: "sending",
         _pendingId: pendingId,
       };
@@ -244,7 +251,7 @@ export function ChatLayout() {
       const res = await client.send(
         requestSlug,
         apiChannel,
-        body,
+        expandedBody,
         currentUser,
         pointTo
       );
@@ -268,7 +275,16 @@ export function ChatLayout() {
       }
       return res;
     },
-    [activeSlug, workspaceKey, currentChannel, currentUser, addPendingMessage, markPendingSent, markPendingFailed]
+    [
+      activeSlug,
+      workspaceKey,
+      currentChannel,
+      currentUser,
+      allMentionRecipients,
+      addPendingMessage,
+      markPendingSent,
+      markPendingFailed,
+    ]
   );
 
   const handleReply = useCallback(
