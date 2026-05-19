@@ -141,6 +141,39 @@ describe("AgentList fleet grouping", () => {
     expect(text.indexOf("Local")).toBeLessThan(text.indexOf("mac-mini"));
   });
 
+  it("uses a compact adaptive three-column grid for node agents", () => {
+    useAgentStore.setState({
+      agents: [
+        agent("local-cfo"),
+        agent("local-judge"),
+        agent("local-robin"),
+        agent("local-infra"),
+        agent("local-strategy"),
+        agent("local-claude"),
+      ],
+      selectedAgentId: null,
+    });
+    useFleetStore.setState({
+      agents: [],
+      statuses: [],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="agent-node-grid"]',
+    );
+    expect(grid).not.toBeNull();
+    expect(grid?.className).toContain("md:grid-cols-2");
+    expect(grid?.className).toContain("xl:grid-cols-3");
+  });
+
   it("does not duplicate fleet and local usage when there are no remote agents", () => {
     useAgentStore.setState({
       agents: [agent("local-cfo", "codex", usageSummary())],
