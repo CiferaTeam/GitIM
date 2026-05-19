@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -54,8 +54,6 @@ use crate::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
 const EVENT_CHANNEL_BUFFER: usize = 256;
-const IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY: Duration = Duration::from_secs(15);
-const IDLE_COMPLETE_AFTER_TOOL_USE: Duration = Duration::from_secs(75);
 const KIMI_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const HOST_TURN_COMPLETION_NOTE: &str = "\
 Host turn completion note: after completing the requested tool or GitIM action, \
@@ -442,42 +440,18 @@ async fn drive_session(
         Finished(Result<crate::acp::PromptOutcome, ProviderError>),
         Cancelled,
         Timeout,
-        IdleComplete,
     }
-
-    let (idle_complete_tx, mut idle_complete_rx) = watch::channel(false);
-    let idle_watch_cancel = CancellationToken::new();
-    let idle_watch_cancel_inner = idle_watch_cancel.clone();
-    let idle_watch_acp = Arc::clone(&acp);
-    let idle_watch_handle = tokio::spawn(async move {
-        watch_idle_completion(
-            idle_watch_acp,
-            idle_complete_tx,
-            idle_watch_cancel_inner,
-            pid,
-        )
-        .await;
-    });
 
     let prompt_future = prompt_acp.prompt(&prompt_sid, &prompt_text);
     tokio::pin!(prompt_future);
     let timeout_sleep = tokio::time::sleep(timeout);
     tokio::pin!(timeout_sleep);
 
-    let prompt_outcome = loop {
-        tokio::select! {
-            r = &mut prompt_future => break PromptWait::Finished(r),
-            _ = cancel_token.cancelled() => break PromptWait::Cancelled,
-            _ = &mut timeout_sleep => break PromptWait::Timeout,
-            r = idle_complete_rx.changed() => {
-                if r.is_ok() && *idle_complete_rx.borrow() {
-                    break PromptWait::IdleComplete;
-                }
-            },
-        }
+    let prompt_outcome = tokio::select! {
+        r = &mut prompt_future => PromptWait::Finished(r),
+        _ = cancel_token.cancelled() => PromptWait::Cancelled,
+        _ = &mut timeout_sleep => PromptWait::Timeout,
     };
-    idle_watch_cancel.cancel();
-    idle_watch_handle.abort();
 
     match prompt_outcome {
         PromptWait::Finished(Ok(outcome)) => {
@@ -511,14 +485,6 @@ async fn drive_session(
         PromptWait::Timeout => {
             final_status = ExecStatus::Timeout;
             final_error = Some(format!("kimi timed out after {timeout:?}"));
-        }
-        PromptWait::IdleComplete => {
-            info!(
-                pid,
-                terminal_idle_after = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
-                tool_idle_after = ?IDLE_COMPLETE_AFTER_TOOL_USE,
-                "kimi prompt response idle-completed after provider activity"
-            );
         }
     }
 
@@ -709,68 +675,6 @@ fn parse_kimi_context_usage_line(line: &str) -> Option<ProviderUsage> {
         context_window_tokens: Some(KIMI_CONTEXT_WINDOW_TOKENS),
         ..Default::default()
     })
-}
-
-async fn watch_idle_completion(
-    acp: Arc<AcpClient>,
-    complete: watch::Sender<bool>,
-    cancel: CancellationToken,
-    pid: u32,
-) {
-    info!(
-        pid,
-        terminal_idle_after = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
-        tool_idle_after = ?IDLE_COMPLETE_AFTER_TOOL_USE,
-        "kimi idle completion watchdog started"
-    );
-    let mut activity_logged = false;
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-        }
-
-        let terminal_idle = acp
-            .last_terminal_activity_at()
-            .await
-            .map(|last| last.elapsed());
-        let tool_idle = acp.last_tool_use_at().await.map(|last| last.elapsed());
-
-        if !activity_logged && (terminal_idle.is_some() || tool_idle.is_some()) {
-            info!(
-                pid,
-                terminal_idle = ?terminal_idle,
-                tool_idle = ?tool_idle,
-                "kimi idle completion watchdog observed provider activity"
-            );
-            activity_logged = true;
-        }
-
-        if let Some(idle) = terminal_idle {
-            if idle >= IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY {
-                info!(
-                    pid,
-                    idle = ?idle,
-                    threshold = ?IDLE_COMPLETE_AFTER_TERMINAL_ACTIVITY,
-                    "kimi idle completion watchdog reached terminal idle threshold"
-                );
-                let _ = complete.send(true);
-                break;
-            }
-        }
-        if let Some(idle) = tool_idle {
-            if idle >= IDLE_COMPLETE_AFTER_TOOL_USE {
-                info!(
-                    pid,
-                    idle = ?idle,
-                    threshold = ?IDLE_COMPLETE_AFTER_TOOL_USE,
-                    "kimi idle completion watchdog reached tool idle threshold"
-                );
-                let _ = complete.send(true);
-                break;
-            }
-        }
-    }
 }
 
 /// Helper to send ExecResult on the result oneshot when the driver

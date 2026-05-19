@@ -36,7 +36,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -104,15 +103,6 @@ pub struct AcpClient {
     /// concatenated in arrival order. Drained by the driver via
     /// `collected_output` at session end to populate `ExecResult.output`.
     text_accumulator: Mutex<String>,
-    /// Last point at which the agent emitted user-visible terminal activity:
-    /// assistant text or a completed tool result. Kimi can occasionally omit
-    /// the final `session/prompt` response after tool-only turns; its driver
-    /// uses this timestamp as a bounded completion fallback.
-    terminal_activity_at: Mutex<Option<Instant>>,
-    /// Last emitted tool invocation. Kimi can fail to stream the completed
-    /// tool update even though the tool ran; its driver uses this as a more
-    /// conservative idle fallback with a longer grace period.
-    tool_use_at: Mutex<Option<Instant>>,
     /// Session id assigned by `session/new` or `session/resume`. Cached so
     /// `handle_line` can embed it in `Event::Usage` without the driver
     /// passing it in for every line.
@@ -164,8 +154,6 @@ impl AcpClient {
             pending_tools: Mutex::new(HashMap::new()),
             usage: Mutex::new(ProviderUsage::default()),
             text_accumulator: Mutex::new(String::new()),
-            terminal_activity_at: Mutex::new(None),
-            tool_use_at: Mutex::new(None),
             current_session_id: Mutex::new(None),
             hooks,
         }
@@ -491,19 +479,6 @@ impl AcpClient {
         self.text_accumulator.lock().await.clone()
     }
 
-    /// Last assistant text or completed tool-result timestamp observed during
-    /// this process lifetime. Kimi uses this to avoid 20-minute hangs when its
-    /// ACP server performs the requested action but never resolves the prompt
-    /// request.
-    pub async fn last_terminal_activity_at(&self) -> Option<Instant> {
-        *self.terminal_activity_at.lock().await
-    }
-
-    /// Last tool invocation timestamp observed during this process lifetime.
-    pub async fn last_tool_use_at(&self) -> Option<Instant> {
-        *self.tool_use_at.lock().await
-    }
-
     /// Flush and close the underlying stdin handle. The provider sees EOF
     /// on its stdin reader and shuts the session down cleanly. Callers do
     /// this once the terminal `session/prompt` response has been received
@@ -536,7 +511,6 @@ impl AcpClient {
     async fn dispatch_parsed(&self, parsed: ParsedNotification, event_tx: &mpsc::Sender<Event>) {
         match parsed {
             ParsedNotification::Text { content } => {
-                *self.terminal_activity_at.lock().await = Some(Instant::now());
                 self.text_accumulator.lock().await.push_str(&content);
                 try_send_event(event_tx, Event::Text { content });
             }
@@ -560,7 +534,6 @@ impl AcpClient {
                             emitted: true,
                         },
                     );
-                    *self.tool_use_at.lock().await = Some(Instant::now());
                     try_send_event(
                         event_tx,
                         Event::ToolUse {
@@ -609,7 +582,6 @@ impl AcpClient {
                 )
                 .await;
                 let tool_output = output.unwrap_or(args_text);
-                *self.terminal_activity_at.lock().await = Some(Instant::now());
                 try_send_event(
                     event_tx,
                     Event::ToolResult {
@@ -682,7 +654,6 @@ impl AcpClient {
                 input,
             },
         );
-        *self.tool_use_at.lock().await = Some(Instant::now());
     }
 }
 
