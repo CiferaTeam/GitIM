@@ -1,4 +1,5 @@
 import { formatTokens } from "@/lib/format-tokens";
+import { usageBucketTokenTotal } from "@/lib/usage-totals";
 import type { Agent } from "@/lib/types";
 
 interface AgentUsageTagProps {
@@ -16,8 +17,7 @@ export function AgentUsageTag({ agent }: AgentUsageTagProps) {
     );
   }
   const today = summary.today;
-  const todayTokens =
-    today.input + today.output + today.cacheRead + today.cacheCreation;
+  const todayTokens = usageBucketTokenTotal(today, agent.provider);
 
   if (!summary.providerReportsUsage) {
     return (

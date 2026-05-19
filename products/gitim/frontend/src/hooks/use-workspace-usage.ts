@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { usageBucketTokenTotal } from "../lib/usage-totals";
 import type { Agent, UsageBucket, UsageDayEntry, UsageSummary } from "../lib/types";
 import { useAgentStore } from "./use-agent-store";
 
@@ -8,7 +9,14 @@ export interface UsageBreakdownEntry {
   bucket: UsageBucket;
   /** Today's bucket for the same provider/handler grouping. */
   today: UsageBucket;
+  bucketTokens: number;
+  todayTokens: number;
   providerReportsUsage: boolean;
+}
+
+interface UsageDayTokenTotal {
+  date: string;
+  tokens: number;
 }
 
 /** Workspace-level rollup of all agents' usage_summary. Computed on the
@@ -18,7 +26,10 @@ export interface UsageBreakdownEntry {
 export interface WorkspaceUsage {
   totals: UsageBucket;
   today: UsageBucket;
+  totalTokens: number;
+  todayTokens: number;
   byDay: UsageDayEntry[];
+  byDayTokens: UsageDayTokenTotal[];
   /** One entry per distinct provider across the workspace. Providers that
    *  do not report token usage remain visible with providerReportsUsage=false
    *  so the UI can render turns without implying zero tokens. */
@@ -43,7 +54,10 @@ const ZERO_BUCKET: UsageBucket = {
 const EMPTY_USAGE: WorkspaceUsage = {
   totals: ZERO_BUCKET,
   today: ZERO_BUCKET,
+  totalTokens: 0,
+  todayTokens: 0,
   byDay: [],
+  byDayTokens: [],
   byProvider: [],
   byHandler: [],
   hasData: false,
@@ -78,6 +92,14 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
 
   const totals = mergeBuckets(summaries.map((e) => e.summary.totals));
   const today = mergeBuckets(summaries.map((e) => e.summary.today));
+  const totalTokens = summaries.reduce(
+    (acc, e) => acc + usageBucketTokenTotal(e.summary.totals, e.provider),
+    0,
+  );
+  const todayTokens = summaries.reduce(
+    (acc, e) => acc + usageBucketTokenTotal(e.summary.today, e.provider),
+    0,
+  );
 
   // Index every agent's by_day so the merger can reduce same-date buckets.
   // We use the longest individual byDay array as the canonical date set;
@@ -86,14 +108,22 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
   // Fall back to keying by date string when array lengths disagree (e.g.
   // an agent first seen mid-window — defensive).
   const byDay = mergeByDay(summaries.map((e) => e.summary.byDay));
+  const byDayTokens = mergeByDayTokens(
+    summaries.map((e) =>
+      e.summary.byDay.map((day) => ({
+        date: day.date,
+        tokens: usageBucketTokenTotal(day.bucket, e.provider),
+      })),
+    ),
+  );
 
   // byProvider: enumerate every distinct provider across ALL agents. A
   // provider whose agents have produced zero token usage still shows up as
   // `0`; a provider that does not report tokens shows up as turn-only data.
   const byProviderMap = new Map<string, UsageBreakdownEntry[]>();
   for (const a of agents) {
-    const entry = breakdownEntryForAgent(a.usageSummary);
     const key = a.provider ?? "unknown";
+    const entry = breakdownEntryForAgent(a.usageSummary, key);
     const arr = byProviderMap.get(key) ?? [];
     arr.push(entry);
     byProviderMap.set(key, arr);
@@ -111,24 +141,34 @@ export function aggregateWorkspaceUsage(agents: Agent[]): WorkspaceUsage {
   const byHandler = agents
     .map((a) => ({
       handler: a.id,
-      ...breakdownEntryForAgent(a.usageSummary),
+      ...breakdownEntryForAgent(a.usageSummary, a.provider ?? "unknown"),
     }))
     .sort(compareEntry((e) => e.handler));
 
   return {
     totals,
     today,
+    totalTokens,
+    todayTokens,
     byDay,
+    byDayTokens,
     byProvider,
     byHandler,
     hasData: true,
   };
 }
 
-function breakdownEntryForAgent(summary: UsageSummary | undefined): UsageBreakdownEntry {
+function breakdownEntryForAgent(
+  summary: UsageSummary | undefined,
+  provider: string,
+): UsageBreakdownEntry {
+  const bucket = summary?.totals ?? { ...ZERO_BUCKET };
+  const today = summary?.today ?? { ...ZERO_BUCKET };
   return {
-    bucket: summary?.totals ?? { ...ZERO_BUCKET },
-    today: summary?.today ?? { ...ZERO_BUCKET },
+    bucket,
+    today,
+    bucketTokens: usageBucketTokenTotal(bucket, provider),
+    todayTokens: usageBucketTokenTotal(today, provider),
     providerReportsUsage: summary?.providerReportsUsage ?? true,
   };
 }
@@ -137,6 +177,8 @@ function mergeBreakdownEntries(entries: UsageBreakdownEntry[]): UsageBreakdownEn
   return {
     bucket: mergeBuckets(entries.map((e) => e.bucket)),
     today: mergeBuckets(entries.map((e) => e.today)),
+    bucketTokens: entries.reduce((acc, e) => acc + e.bucketTokens, 0),
+    todayTokens: entries.reduce((acc, e) => acc + e.todayTokens, 0),
     providerReportsUsage: entries.some((e) => e.providerReportsUsage),
   };
 }
@@ -145,7 +187,7 @@ function compareEntry<T extends UsageBreakdownEntry>(
   labelOf: (e: T) => string,
 ) {
   return (a: T, b: T) => {
-    const diff = bucketTokenTotal(b.bucket) - bucketTokenTotal(a.bucket);
+    const diff = b.bucketTokens - a.bucketTokens;
     return diff !== 0 ? diff : labelOf(a).localeCompare(labelOf(b));
   };
 }
@@ -180,8 +222,14 @@ function mergeByDay(arrays: UsageDayEntry[][]): UsageDayEntry[] {
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
-/** Sum the token-bearing fields of a usage bucket. Shared with the header
- *  so the sort comparator here and the displayed totals there cannot drift. */
-export function bucketTokenTotal(b: UsageBucket): number {
-  return b.input + b.output + b.cacheRead + b.cacheCreation;
+function mergeByDayTokens(arrays: UsageDayTokenTotal[][]): UsageDayTokenTotal[] {
+  const byDate = new Map<string, number>();
+  for (const arr of arrays) {
+    for (const entry of arr) {
+      byDate.set(entry.date, (byDate.get(entry.date) ?? 0) + entry.tokens);
+    }
+  }
+  return Array.from(byDate.entries())
+    .map(([date, tokens]) => ({ date, tokens }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }

@@ -5,14 +5,11 @@ import {
 } from "@/components/ui/hover-card";
 import { formatTokens } from "@/lib/format-tokens";
 import { sparklinePath } from "@/lib/sparkline";
-import type { Agent, UsageBucket } from "@/lib/types";
+import { usageBucketTokenTotal } from "@/lib/usage-totals";
+import type { Agent } from "@/lib/types";
 
 interface AgentUsageCardProps {
   agent: Agent;
-}
-
-function bucketTotal(b: UsageBucket): number {
-  return b.input + b.output + b.cacheRead + b.cacheCreation;
 }
 
 /** Detail-page block: cumulative + today + 30-day sparkline + 4-field hover
@@ -25,10 +22,12 @@ export function AgentUsageCard({ agent }: AgentUsageCardProps) {
 
   const totals = summary.totals;
   const today = summary.today;
-  const totalTokens = bucketTotal(totals);
-  const todayTokens = bucketTotal(today);
+  const totalTokens = usageBucketTokenTotal(totals, agent.provider);
+  const todayTokens = usageBucketTokenTotal(today, agent.provider);
 
-  const sparklineValues = summary.byDay.map((d) => bucketTotal(d.bucket));
+  const sparklineValues = summary.byDay.map((d) =>
+    usageBucketTokenTotal(d.bucket, agent.provider),
+  );
   const peak = Math.max(0, ...sparklineValues);
   const startDate = summary.firstSeen ? summary.firstSeen.slice(0, 10) : "—";
 

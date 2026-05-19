@@ -73,6 +73,26 @@ describe("aggregateWorkspaceUsage", () => {
     );
   });
 
+  it("uses provider display totals when sorting provider and handler breakdowns", () => {
+    const out = aggregateWorkspaceUsage([
+      agent(
+        "cfo",
+        "codex",
+        summary(bucket(100, 20, 1_000, 0, 1), bucket(100, 20, 1_000, 0, 1)),
+      ),
+      agent(
+        "robin",
+        "claude",
+        summary(bucket(100, 20, 300, 0, 1), bucket(100, 20, 300, 0, 1)),
+      ),
+    ]);
+
+    expect(out.totalTokens).toBe(540);
+    expect(out.todayTokens).toBe(540);
+    expect(out.byProvider.map((p) => p.provider)).toEqual(["claude", "codex"]);
+    expect(out.byHandler.map((h) => h.handler)).toEqual(["robin", "cfo"]);
+  });
+
   it("groups totals by provider and sorts descending", () => {
     const out = aggregateWorkspaceUsage([
       agent("a", "claude", summary(bucket(100, 0), bucket(0, 0))),

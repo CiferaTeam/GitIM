@@ -12,7 +12,6 @@ import {
 } from "@/lib/ui-state";
 import {
   aggregateWorkspaceUsage,
-  bucketTokenTotal,
   useWorkspaceUsage,
   type UsageBreakdownEntry,
 } from "@/hooks/use-workspace-usage";
@@ -79,9 +78,9 @@ export function WorkspaceUsageHeader({
 
   if (!usage.hasData) return null;
 
-  const totalTokens = bucketTokenTotal(usage.totals);
-  const todayTokens = bucketTokenTotal(usage.today);
-  const sparklineValues = usage.byDay.map((d) => bucketTokenTotal(d.bucket));
+  const totalTokens = usage.totalTokens;
+  const todayTokens = usage.todayTokens;
+  const sparklineValues = usage.byDayTokens.map((d) => d.tokens);
 
   const entries: UsageEntry[] =
     breakdown === "provider"
@@ -90,6 +89,8 @@ export function WorkspaceUsageHeader({
           label: e.provider,
           bucket: e.bucket,
           today: e.today,
+          bucketTokens: e.bucketTokens,
+          todayTokens: e.todayTokens,
           providerReportsUsage: e.providerReportsUsage,
         }))
       : usage.byHandler.map((e) => ({
@@ -97,10 +98,20 @@ export function WorkspaceUsageHeader({
           label: e.handler,
           bucket: e.bucket,
           today: e.today,
+          bucketTokens: e.bucketTokens,
+          todayTokens: e.todayTokens,
           providerReportsUsage: e.providerReportsUsage,
         }));
-  const todayEntries = sortEntries(entries, (entry) => entry.today);
-  const totalEntries = sortEntries(entries, (entry) => entry.bucket);
+  const todayEntries = sortEntries(
+    entries,
+    (entry) => entry.today,
+    (entry) => entry.todayTokens,
+  );
+  const totalEntries = sortEntries(
+    entries,
+    (entry) => entry.bucket,
+    (entry) => entry.bucketTokens,
+  );
 
   function selectBreakdown(next: UsageBreakdown) {
     setBreakdown(next);
@@ -149,7 +160,12 @@ export function WorkspaceUsageHeader({
             </BreakdownButton>
           </div>
           {todayEntries.map((entry) => (
-            <BreakdownMetric key={entry.key} entry={entry} bucket={entry.today} />
+            <BreakdownMetric
+              key={entry.key}
+              entry={entry}
+              bucket={entry.today}
+              tokens={entry.todayTokens}
+            />
           ))}
         </div>
         <div
@@ -160,7 +176,12 @@ export function WorkspaceUsageHeader({
             累计 {formatTokens(totalTokens)}
           </span>
           {totalEntries.map((entry) => (
-            <BreakdownMetric key={entry.key} entry={entry} bucket={entry.bucket} />
+            <BreakdownMetric
+              key={entry.key}
+              entry={entry}
+              bucket={entry.bucket}
+              tokens={entry.bucketTokens}
+            />
           ))}
         </div>
       </div>
@@ -197,9 +218,10 @@ type UsageEntry = {
 function sortEntries(
   entries: UsageEntry[],
   bucketOf: (entry: UsageEntry) => UsageBucket,
+  tokensOf: (entry: UsageEntry) => number,
 ): UsageEntry[] {
   return [...entries].sort((a, b) => {
-    const diff = bucketTokenTotal(bucketOf(b)) - bucketTokenTotal(bucketOf(a));
+    const diff = tokensOf(b) - tokensOf(a);
     if (diff !== 0) return diff;
     const turnDiff = bucketOf(b).turns - bucketOf(a).turns;
     return turnDiff !== 0 ? turnDiff : a.label.localeCompare(b.label);
@@ -209,16 +231,16 @@ function sortEntries(
 function BreakdownMetric({
   entry,
   bucket,
+  tokens,
 }: {
   entry: UsageEntry;
   bucket: UsageBucket;
+  tokens: number;
 }) {
   return (
     <span>
       {entry.label}{" "}
-      {entry.providerReportsUsage
-        ? formatTokens(bucketTokenTotal(bucket))
-        : `— · ${bucket.turns}t`}
+      {entry.providerReportsUsage ? formatTokens(tokens) : `— · ${bucket.turns}t`}
     </span>
   );
 }
