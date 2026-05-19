@@ -94,6 +94,11 @@ export interface Message {
   author: string;
   timestamp: string; // 20260317T120000Z
   body: string;
+  /**
+   * Ephemeral delivery target list attached by live poll responses. This is
+   * not written into Git and may be absent after a refresh/history read.
+   */
+  recipients?: string[];
   event_type?: string;
   /** Event payload. For `event_type: "join"` may contain `{ targets: [...] }`
    * identifying users who were added (vs self-join when omitted). */

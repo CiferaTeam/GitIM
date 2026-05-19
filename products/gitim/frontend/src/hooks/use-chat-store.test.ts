@@ -109,6 +109,28 @@ describe("useChatStore pending messages", () => {
 
     expect(useChatStore.getState().messages).toEqual([real]);
   });
+
+  it("addMessages merges recipients from the real poll echo into a sent pending message", () => {
+    const pending = msg(-1, "通知范围需要可见", {
+      _pendingId: "pending-1",
+      _status: "sending",
+    });
+    const real = msg(42, "通知范围需要可见", {
+      recipients: ["lewis", "flame4"],
+    });
+
+    useChatStore.getState().addPendingMessage(pending);
+    useChatStore.getState().markPendingSent("pending-1", 42);
+    useChatStore.getState().addMessages([real]);
+
+    expect(useChatStore.getState().messages).toEqual([
+      {
+        ...real,
+        _pendingId: "pending-1",
+        _status: "sent",
+      },
+    ]);
+  });
 });
 
 describe("useChatStore history pagination", () => {

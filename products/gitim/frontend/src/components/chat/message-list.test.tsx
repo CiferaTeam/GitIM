@@ -112,6 +112,23 @@ describe("MessageList scroll-to-top history trigger", () => {
     // Reaching this line means no throw. Sanity check the list renders.
     expect(rendered.container.querySelector("[data-message-scroll]")).not.toBeNull();
   });
+
+  it("shows an ephemeral acknowledgement box for messages with recipients", async () => {
+    const rendered = await renderList({
+      messages: [
+        {
+          ...msg(1, "需要确认一下通知范围"),
+          recipients: ["lewis", "flame4"],
+        },
+      ],
+    });
+    root = rendered.root;
+
+    const receipt = rendered.container.querySelector("[data-message-receipt]");
+    expect(receipt?.textContent).toContain("🫡");
+    expect(receipt?.textContent).toContain("@lewis");
+    expect(receipt?.textContent).toContain("@flame4");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { MessageSquare, GitBranch, Copy, Check } from "lucide-react";
+import { MessageSquare, GitBranch, Copy, Check, CheckCheck } from "lucide-react";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -40,6 +40,19 @@ function avatarColor(name: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
+function deliveryRecipients(message: Message): string[] {
+  if (message._status === "sending") return [];
+  const seen = new Set<string>();
+  const recipients: string[] = [];
+  for (const recipient of message.recipients ?? []) {
+    const handler = recipient.trim();
+    if (!handler || seen.has(handler)) continue;
+    seen.add(handler);
+    recipients.push(handler);
+  }
+  return recipients;
+}
+
 export function MessageItem({
   message,
   replyTarget,
@@ -69,6 +82,7 @@ export function MessageItem({
     };
   }, []);
   const isFailed = message._status === "failed";
+  const recipients = deliveryRecipients(message);
 
   function handleClick() {
     if (isPending) return;
@@ -252,6 +266,27 @@ export function MessageItem({
               onUserProfileClick={onUserProfileClick}
             />
           </div>
+
+          {recipients.length > 0 && (
+            <div
+              data-message-receipt
+              className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-text-muted"
+              aria-label={`🫡 ${recipients.map((r) => `@${r}`).join(", ")}`}
+            >
+              <span className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-surface/60 px-2 font-medium text-foreground/80">
+                <CheckCheck className="h-3 w-3 text-success" />
+                🫡
+              </span>
+              {recipients.map((recipient) => (
+                <span
+                  key={recipient}
+                  className="inline-flex h-6 items-center rounded-md border border-border/80 bg-surface/40 px-2 font-mono text-[10px] text-text-muted"
+                >
+                  @{recipient}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

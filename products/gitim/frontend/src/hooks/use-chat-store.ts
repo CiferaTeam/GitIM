@@ -165,6 +165,35 @@ function dropFailedPendingsMatching(
   );
 }
 
+function mergeIncomingByLine(
+  existing: Message[],
+  incoming: Message[]
+): { messages: Message[]; changed: boolean } {
+  const incomingByLine = new Map<number, Message>();
+  for (const m of incoming) {
+    if (m.line_number > 0 && !m._pendingId) {
+      incomingByLine.set(m.line_number, m);
+    }
+  }
+  if (incomingByLine.size === 0) {
+    return { messages: existing, changed: false };
+  }
+
+  let changed = false;
+  const messages = existing.map((current) => {
+    const authoritative = incomingByLine.get(current.line_number);
+    if (!authoritative) return current;
+
+    changed = true;
+    const pendingState = current._pendingId
+      ? { _pendingId: current._pendingId, _status: current._status }
+      : {};
+    return { ...current, ...authoritative, ...pendingState };
+  });
+
+  return { messages, changed };
+}
+
 export const useChatStore = create<ChatState>((set) => ({
   connected: false,
   currentUser: "",
@@ -468,11 +497,12 @@ export const useChatStore = create<ChatState>((set) => ({
 
   addMessages: (m) =>
     set((state) => {
-      const existing = new Set(state.messages.map((msg) => msg.line_number));
+      const reconciled = dropFailedPendingsMatching(state.messages, m);
+      const merged = mergeIncomingByLine(reconciled, m);
+      const existing = new Set(merged.messages.map((msg) => msg.line_number));
       const toAdd = m.filter((msg) => !existing.has(msg.line_number));
-      if (toAdd.length === 0) return {};
-      const reconciled = dropFailedPendingsMatching(state.messages, toAdd);
-      return { messages: [...reconciled, ...toAdd] };
+      if (toAdd.length === 0 && !merged.changed) return {};
+      return { messages: [...merged.messages, ...toAdd] };
     }),
 
   prependMessages: (older) =>
