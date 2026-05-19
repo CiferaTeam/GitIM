@@ -177,6 +177,52 @@ describe("BoardsView", () => {
     expect(container.textContent).toContain("poll 刷新");
   });
 
+  it("constrains long board status labels in list headers", async () => {
+    const longStatus = "Phase1b1: 4个对标产品并行调研，两 coder 互评";
+    const robinRead = boardRead("robin", "Coordinating comparison research");
+    listBoardsMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        boards: [{
+          ...boardSummary("robin", "Coordinating comparison research"),
+          status: longStatus,
+        }],
+      },
+    });
+    showBoardMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ...robinRead,
+        meta: {
+          ...robinRead.meta,
+          status: longStatus,
+        },
+      },
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<BoardsView />);
+      await flushPromises();
+    });
+
+    const robinButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("@robin"),
+    );
+    expect(robinButton).toBeDefined();
+
+    const status = Array.from(robinButton!.querySelectorAll("span")).find(
+      (span) => span.textContent === longStatus,
+    );
+    expect(status?.getAttribute("title")).toBe(longStatus);
+    expect(status?.className).toContain("max-w-[55%]");
+    expect(status?.className).toContain("truncate");
+    expect(status?.className).not.toContain("shrink-0");
+  });
+
   it("refresh button reloads the board list", async () => {
     listBoardsMock.mockResolvedValue({
       ok: true,

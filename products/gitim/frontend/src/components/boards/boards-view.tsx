@@ -223,9 +223,12 @@ function BoardList({
                   : "border-border bg-card/40 hover:bg-accent/50",
               )}
             >
-              <div className="flex min-w-0 items-center justify-between gap-2">
-                <span className="truncate font-mono text-sm">@{board.handler}</span>
-                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-sm">@{board.handler}</span>
+                <span
+                  className="min-w-0 max-w-[55%] shrink truncate rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                  title={board.status}
+                >
                   {board.status}
                 </span>
               </div>
