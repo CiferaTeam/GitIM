@@ -366,7 +366,7 @@ where
         // commit_lock across the whole block so handler writes never interleave
         // with the snapshot or tree mutation. Push happens *after* the guard
         // drops so a slow remote can't stall handler writers.
-        let rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+        let rebase_guard = commit_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Capture local additions BEFORE attempting rebase
         let local_additions = match repo.diff_unpushed("*.thread") {
@@ -722,7 +722,7 @@ fn sync_pull_only(
 
     // Rebase mutates the local commit tree; hold commit_lock so it can't
     // interleave with a handler's read-append-commit window.
-    let _rebase_guard = commit_lock.lock().expect("commit_lock poisoned");
+    let _rebase_guard = commit_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Err(e) = repo.rebase_onto_origin() {
         warn!("sync: rebase failed after fetch: {}", e);
         let _ = repo.abort_rebase();
