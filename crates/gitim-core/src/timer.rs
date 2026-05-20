@@ -7,7 +7,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -72,6 +72,26 @@ impl TimersFile {
     }
 }
 
+pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
+    // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
+    // them but we want compact CLI-friendly forms only.
+    if s.chars().any(char::is_whitespace) {
+        return Err(TimerError::InvalidDuration(format!(
+            "{s:?}: whitespace not allowed; use compact form like 30m or 1h30m"
+        )));
+    }
+    let std_dur = humantime::parse_duration(s)
+        .map_err(|e| TimerError::InvalidDuration(format!("{s:?}: {e}")))?;
+    let secs = std_dur.as_secs() as i64;
+    if !(MIN_DURATION_SECS..=MAX_DURATION_SECS).contains(&secs) {
+        return Err(TimerError::InvalidDuration(format!(
+            "{s:?}: must be {MIN_DURATION_SECS}s..{MAX_DURATION_SECS}s ({}s given)",
+            secs
+        )));
+    }
+    Ok(ChronoDuration::seconds(secs))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -114,5 +134,38 @@ mod tests {
         let json = r#"{"version":1,"timers":[{"id":"20260520T143055-a3f4c2","fire_at":"2026-05-20T15:00:55Z","created_at":"2026-05-20T14:30:55Z","anchor":"<#x>"}]}"#;
         let f: TimersFile = serde_json::from_str(json).unwrap();
         assert!(f.timers[0].note.is_none());
+    }
+
+    #[test]
+    fn parse_duration_humantime_ok() {
+        assert_eq!(parse_duration("30s").unwrap().num_seconds(), 30);
+        assert_eq!(parse_duration("5m").unwrap().num_seconds(), 300);
+        assert_eq!(parse_duration("2h").unwrap().num_seconds(), 7200);
+        assert_eq!(parse_duration("1h30m").unwrap().num_seconds(), 5400);
+    }
+
+    #[test]
+    fn parse_duration_min_bound() {
+        let err = parse_duration("5s").unwrap_err();
+        assert!(matches!(err, TimerError::InvalidDuration(_)));
+    }
+
+    #[test]
+    fn parse_duration_max_bound() {
+        let err = parse_duration("25h").unwrap_err();
+        assert!(matches!(err, TimerError::InvalidDuration(_)));
+    }
+
+    #[test]
+    fn parse_duration_garbage() {
+        assert!(parse_duration("30 minutes").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("abc").is_err());
+    }
+
+    #[test]
+    fn parse_duration_at_bounds_ok() {
+        assert!(parse_duration("10s").is_ok());
+        assert!(parse_duration("24h").is_ok());
     }
 }
