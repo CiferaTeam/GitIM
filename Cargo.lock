@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-agent-provider"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-cli"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "clap",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-client"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "async-stream",
  "axum",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-runtime"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "gitim-core",
  "notify",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-updater"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "flate2",
  "hex",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-wasm"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "gitim-core",
  "gitim-sync",
