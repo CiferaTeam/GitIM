@@ -13,6 +13,7 @@ gitim-core = { path = "../gitim-core" }
 gitim-updater = { path = "../gitim-updater" }
 chrono.workspace = true
 clap = { version = "4", features = ["derive"] }
+humantime = "2"
 tokio.workspace = true
 serde_json.workspace = true
 regex.workspace = true

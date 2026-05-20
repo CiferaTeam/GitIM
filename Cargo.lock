@@ -810,6 +810,7 @@ dependencies = [
  "gitim-client",
  "gitim-core",
  "gitim-updater",
+ "humantime",
  "regex",
  "serde_json",
  "serde_yaml",
