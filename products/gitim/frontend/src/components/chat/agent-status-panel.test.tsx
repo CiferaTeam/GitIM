@@ -119,6 +119,31 @@ describe("AgentStatusPanel", () => {
     expect(fill?.getAttribute("aria-hidden")).toBe("true");
   });
 
+  it("marks active work with a spinner on the usage fill", async () => {
+    useAgentStore.setState({ agents: [agentWithUsage(47.5)], selectedAgentId: null });
+    useAgentActivityStore.getState().push({
+      agent_id: "cfo",
+      workspace_id: "room",
+      event_type: "thinking",
+      detail: "processing...",
+      timestamp: "2026-05-18T11:19:35Z",
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentStatusPanel />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("working");
+    expect(
+      container.querySelector(".agent-usage-working-spinner"),
+    ).not.toBeNull();
+  });
+
   it("renders a remote fleet agent with its fleet activity", async () => {
     useFleetStore.getState().setAgents([
       {

@@ -134,7 +134,10 @@ export interface AgentActivityEvent {
     | "done"
     | "error"
     | "usage"
-    | "burned";
+    | "burned"
+    | "steering"
+    | "steered"
+    | "retrying";
   detail: string;
   timestamp: string; // ISO8601
 }

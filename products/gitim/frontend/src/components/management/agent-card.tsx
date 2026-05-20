@@ -1,7 +1,9 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { agentWorkState } from "@/lib/agent-runtime-state";
 import * as client from "@/lib/client";
 import type { Agent, AgentStatus } from "@/lib/types";
 import { useState } from "react";
@@ -10,7 +12,7 @@ import { toast } from "sonner";
 import { AgentUsageTag } from "./agent-usage-tag";
 import { BurnAgentDialog } from "./burn-agent-dialog";
 import { Play, Pause, Settings, Flame } from "lucide-react";
-import { relativeTime, statusBadge } from "./agent-status";
+import { presenceBadge, relativeTime, workBadge } from "./agent-status";
 import { agentModelLabel } from "./agent-model-label";
 
 function statusBarColor(status: AgentStatus) {
@@ -18,7 +20,7 @@ function statusBarColor(status: AgentStatus) {
     case "running":
       return "bg-success";
     case "idle":
-      return "bg-warning";
+      return "bg-text-muted";
     case "error":
       return "bg-destructive";
     case "offline":
@@ -51,16 +53,25 @@ function introductionPreview(introduction: string | undefined): string | null {
 interface AgentCardProps {
   agent: Agent;
   readOnly?: boolean;
+  activityKey?: string;
 }
 
-export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
+export function AgentCard({
+  agent,
+  readOnly = false,
+  activityKey,
+}: AgentCardProps) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const updateAgent = useAgentStore((s) => s.updateAgent);
+  const latestActivity = useAgentActivityStore(
+    (s) => s.activities[activityKey ?? agent.id]?.[0],
+  );
   const navigate = useNavigate();
   const [burnOpen, setBurnOpen] = useState(false);
 
-  const isRunning = agent.status !== "offline";
+  const isRunning = agent.status === "running";
   const introPreview = introductionPreview(agent.introduction);
+  const workState = agentWorkState(agent, latestActivity);
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -109,7 +120,10 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
               <span className="truncate text-base font-semibold" title={agent.name}>
                 {agent.name}
               </span>
-              <span className="shrink-0 md:hidden">{statusBadge(agent.status)}</span>
+              <span className="flex shrink-0 items-center gap-1 md:hidden">
+                {workBadge(workState)}
+                {presenceBadge(agent.status)}
+              </span>
             </div>
             <span
               className="block truncate text-xs text-text-muted"
@@ -128,7 +142,10 @@ export function AgentCard({ agent, readOnly = false }: AgentCardProps) {
             </div>
           )}
           <div className="hidden shrink-0 md:col-start-4 md:row-start-1 md:block">
-            {statusBadge(agent.status)}
+            <div className="flex items-center justify-end gap-1">
+              {workBadge(workState)}
+              {presenceBadge(agent.status)}
+            </div>
           </div>
 
           <div

@@ -1,7 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useAgentStore } from "@/hooks/use-agent-store";
-import { useFleetStore } from "@/hooks/use-fleet-store";
+import { fleetActivityKey, useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { presenceMatchesFilter } from "@/lib/agent-runtime-state";
 import * as client from "@/lib/client";
 import type { Agent, FleetAgentSnapshot, FleetNodeStatus } from "@/lib/types";
 import type { ArchivedUserEntry } from "@/lib/client";
@@ -104,10 +105,9 @@ export function AgentList() {
       });
 
   const statusOptions = [
-    { value: "running", label: "Running" },
-    { value: "idle", label: "Idle" },
+    { value: "online", label: "online" },
+    { value: "stopped", label: "stopped" },
     { value: "error", label: "Error" },
-    { value: "offline", label: "Offline" },
   ];
 
   function handleUnarchived(handler: string) {
@@ -207,6 +207,11 @@ export function AgentList() {
               <AgentCard
                 key={`${snapshot.nodeId}:${snapshot.workspaceId}:${snapshot.agent.id}`}
                 agent={snapshot.agent}
+                activityKey={fleetActivityKey(
+                  snapshot.nodeId,
+                  snapshot.workspaceId,
+                  snapshot.agent.id,
+                )}
                 readOnly
               />
             ))
@@ -423,7 +428,7 @@ function matchesAgent(
     ]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(q));
-  const matchesStatus = !statusFilter || agent.status === statusFilter;
+  const matchesStatus = presenceMatchesFilter(agent.status, statusFilter);
   return matchesQuery && matchesStatus;
 }
 

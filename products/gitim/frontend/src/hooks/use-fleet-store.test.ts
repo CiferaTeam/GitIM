@@ -138,7 +138,7 @@ describe("useFleetStore", () => {
       .getState()
       .agents.find((entry) => entry.agent.id === "glm51op");
     expect(inferred?.nodeName).toBe("lewismac-mini");
-    expect(inferred?.agent.status).toBe("idle");
+    expect(inferred?.agent.status).toBe("running");
 
     const events =
       useAgentActivityStore.getState().activities[

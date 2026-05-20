@@ -4,6 +4,7 @@ import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
 import { fleetActivityKey, useFleetStore } from "../../hooks/use-fleet-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import { agentWorkState } from "../../lib/agent-runtime-state";
 import type { Agent, AgentActivityEvent } from "../../lib/types";
 import { Button } from "../ui/button";
 import {
@@ -164,11 +165,20 @@ function AgentRow({
   const usageFill = usageFillValue(agent);
   const usageTone =
     (agent.sessionUsage?.usedPercent ?? 0) >= 80 ? "warning" : "normal";
+  const workState = agentWorkState(agent, latest);
+  const isWorking = workState === "working";
 
   const row = (
     <div
-      className="relative overflow-hidden rounded-md border border-border/60 bg-background/40"
+      className={`relative overflow-hidden rounded-md border bg-background/40 ${
+        isWorking ? "border-info/40 shadow-[0_0_0_1px_rgba(96,165,250,0.08)]" : "border-border/60"
+      }`}
       data-testid={testId}
+      style={
+        usageFill
+          ? ({ "--agent-usage-fill": usageFill } as CSSProperties)
+          : undefined
+      }
     >
       {usageFill && (
         <div
@@ -180,6 +190,9 @@ function AgentRow({
             { "--agent-usage-fill": usageFill } as CSSProperties
           }
         />
+      )}
+      {usageFill && isWorking && (
+        <span className="agent-usage-working-spinner" aria-hidden="true" />
       )}
       <div
         key={latest?.timestamp ?? "idle"}
@@ -208,7 +221,7 @@ function AgentRow({
             {latest.detail}
           </span>
         ) : (
-          <span className="text-[11px] text-text-faint italic">idle</span>
+          <span className="min-w-0" />
         )}
       </div>
     </div>

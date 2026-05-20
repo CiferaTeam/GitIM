@@ -154,6 +154,15 @@
     }
   }
 
+  @keyframes agent-working-spin {
+    from {
+      transform: translateY(-50%) rotate(0deg);
+    }
+    to {
+      transform: translateY(-50%) rotate(360deg);
+    }
+  }
+
   @keyframes route-recipient-nudge {
     0%, 100% {
       transform: translateX(0);
@@ -220,10 +229,26 @@
     background: rgba(251, 191, 36, 0.42);
   }
 
+  .agent-usage-working-spinner {
+    position: absolute;
+    top: 50%;
+    left: clamp(3px, calc(var(--agent-usage-fill) - 7px), calc(100% - 14px));
+    z-index: 5;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 1.5px solid rgba(96, 165, 250, 0.76);
+    border-top-color: transparent;
+    background: var(--color-background);
+    box-shadow: 0 0 8px rgba(96, 165, 250, 0.28);
+    animation: agent-working-spin 800ms linear infinite;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .agent-usage-liquid,
     .agent-usage-liquid::before,
     .agent-usage-liquid::after,
+    .agent-usage-working-spinner,
     .route-recipient-nudge {
       animation: none;
       transition: none;

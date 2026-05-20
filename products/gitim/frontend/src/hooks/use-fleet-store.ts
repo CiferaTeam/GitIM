@@ -219,7 +219,6 @@ function ensureInferredAgent(envelope: FleetAgentActivityEnvelope) {
 
 function statusForActivityEvent(eventType: string): AgentStatus {
   if (eventType === "error") return "error";
-  if (eventType === "done" || eventType === "usage") return "idle";
   return "running";
 }
 
