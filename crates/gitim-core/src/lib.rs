@@ -10,5 +10,6 @@ pub mod mention;
 pub mod parser;
 pub mod recipients;
 pub mod responses;
+pub mod timer;
 pub mod types;
 pub mod validator;
