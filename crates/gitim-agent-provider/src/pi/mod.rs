@@ -120,11 +120,12 @@ async fn drive_session(
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
-    // Pi emits a `turn_end` per assistant turn carrying `message.usage`. Within
-    // a single `prompt` round we expect exactly one turn_end, but if Pi ever
-    // emits multiple (steered, tool retry) we want the latest authoritative
-    // count — same policy as Claude/Codex.
-    let mut latest_usage: Option<ProviderUsage> = None;
+    // Pi emits one `turn_end` per assistant turn. A single GitIM prompt can
+    // loop through many assistant turns when the model uses tools, and Pi's
+    // own stats add all of them. Keep billing counters cumulative for the
+    // result, while preserving the final turn as the live context signal.
+    let mut accumulated_usage: Option<ProviderUsage> = None;
+    let mut latest_context_usage: Option<ProviderUsage> = None;
 
     // Collect stderr tail for error reporting.
     let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -202,7 +203,8 @@ async fn drive_session(
                                         final_error = Some("cancelled by steering".to_string());
                                     }
                                     if let Some(u) = usage {
-                                        latest_usage = Some(u);
+                                        accumulate_pi_usage(&mut accumulated_usage, &u);
+                                        latest_context_usage = Some(u);
                                     }
                                 }
                                 Some(PiEvent::AgentEnd) => {
@@ -299,6 +301,7 @@ async fn drive_session(
         }
     }
 
+    let usage = finalize_pi_usage(accumulated_usage, latest_context_usage.as_ref());
     let _ = result_tx.send(ExecResult {
         status: final_status,
         output,
@@ -309,7 +312,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: latest_usage,
+        usage,
     });
 }
 
@@ -582,10 +585,8 @@ fn extract_tool_result_text(result: &Value) -> String {
 /// - `output` → `output_tokens`
 /// - `cacheRead` → `cache_read_tokens`
 /// - `cacheWrite` → `cache_creation_tokens`
-/// - `cost`, `totalTokens` are dropped — `compute_snapshot` recomputes total
-///   as `input + cache_read + cache_creation`, which is what matches the
-///   Claude / opencode convention. Pi's `totalTokens` includes `output`,
-///   which is correct cost-wise but wrong window-occupancy-wise.
+/// - `totalTokens` → `context_tokens` (latest-turn context signal)
+/// - `cost` is dropped — GitIM tracks tokens, not money.
 ///
 /// Returns `None` if the value isn't an object or every numeric field is
 /// missing — pi sometimes emits an empty `usage: {}` on degenerate paths.
@@ -595,6 +596,7 @@ fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
     let output = obj.get("output").and_then(Value::as_u64);
     let cache_read = obj.get("cacheRead").and_then(Value::as_u64);
     let cache_write = obj.get("cacheWrite").and_then(Value::as_u64);
+    let total_tokens = obj.get("totalTokens").and_then(Value::as_u64);
     if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
         return None;
     }
@@ -604,9 +606,44 @@ fn parse_pi_usage(v: &Value) -> Option<ProviderUsage> {
         used_percent: None,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
-        context_tokens: None,
+        context_tokens: total_tokens.or_else(|| {
+            Some(
+                input
+                    .unwrap_or(0)
+                    .saturating_add(output.unwrap_or(0))
+                    .saturating_add(cache_read.unwrap_or(0))
+                    .saturating_add(cache_write.unwrap_or(0)),
+            )
+        }),
         context_window_tokens: None,
     })
+}
+
+fn accumulate_pi_usage(accumulated: &mut Option<ProviderUsage>, next: &ProviderUsage) {
+    let usage = accumulated.get_or_insert_with(ProviderUsage::default);
+    usage.input_tokens = add_optional_tokens(usage.input_tokens, next.input_tokens);
+    usage.output_tokens = add_optional_tokens(usage.output_tokens, next.output_tokens);
+    usage.cache_read_tokens = add_optional_tokens(usage.cache_read_tokens, next.cache_read_tokens);
+    usage.cache_creation_tokens =
+        add_optional_tokens(usage.cache_creation_tokens, next.cache_creation_tokens);
+}
+
+fn add_optional_tokens(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    if current.is_none() && next.is_none() {
+        return None;
+    }
+    Some(current.unwrap_or(0).saturating_add(next.unwrap_or(0)))
+}
+
+fn finalize_pi_usage(
+    mut accumulated: Option<ProviderUsage>,
+    latest_context: Option<&ProviderUsage>,
+) -> Option<ProviderUsage> {
+    if let (Some(accumulated), Some(latest_context)) = (accumulated.as_mut(), latest_context) {
+        accumulated.context_tokens = latest_context.context_tokens;
+        accumulated.context_window_tokens = latest_context.context_window_tokens;
+    }
+    accumulated
 }
 
 #[cfg(test)]

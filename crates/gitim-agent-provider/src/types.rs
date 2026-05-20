@@ -133,10 +133,11 @@ pub enum ExecStatus {
 /// its API exposes; missing fields stay `None`.
 ///
 /// Context-window occupancy semantics differ by provider:
-/// - Claude / opencode / pi: sum `input_tokens + cache_read_tokens +
-///   cache_creation_tokens` — cache hits are excluded from
-///   `input_tokens` alone and underreport by orders of magnitude
-///   once caching kicks in.
+/// - Claude / opencode: sum `input_tokens + cache_read_tokens +
+///   cache_creation_tokens` — cache hits are excluded from `input_tokens`
+///   alone and underreport by orders of magnitude once caching kicks in.
+/// - Pi: billing counters sum all assistant turns in the tool loop, while
+///   `context_tokens` carries the latest assistant turn's live context.
 /// - Codex: read `context_tokens` / `context_window_tokens`
 ///   directly. `cached_input_tokens` is already counted inside
 ///   `input_tokens` there, so the Claude-style sum would
@@ -156,7 +157,9 @@ pub struct ProviderUsage {
     /// (Claude `cache_creation_input_tokens`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<u64>,
-    /// Current context-window tokens as reported by the provider.
+    /// Current context-window tokens as reported by the provider. If
+    /// `context_window_tokens` is absent, runtime may pair this with its
+    /// provider/model default max.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
     /// Provider-reported context-window capacity matching `context_tokens`.

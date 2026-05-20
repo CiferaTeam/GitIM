@@ -1335,7 +1335,10 @@ fn read_handler_from_me_json(repo_root: &Path) -> Result<String, RuntimeError> {
 /// 1. provider_reported.used_percent — providers that compute it
 ///    against their own context window (Codex rate-limit %).
 /// 2. provider_reported.context_tokens / context_window_tokens —
-///    explicit context occupancy from rollout (Codex).
+///    explicit context occupancy from rollout (Codex) or latest-turn context
+///    from providers that aggregate billing across internal tool-use calls
+///    (Pi). If the provider omits `context_window_tokens`, runtime pairs the
+///    context count with its provider/model default max.
 /// 3. provider_reported is session-cumulative (`usage_is_cumulative`) —
 ///    fall through to the estimate path so the ratio resets per turn
 ///    instead of monotonically clamping at 100% (codex
@@ -1376,9 +1379,24 @@ pub fn compute_snapshot(
                 pu.output_tokens,
                 max_tokens,
             )
-        } else if let (Some(context_tokens), Some(context_window)) =
-            (pu.context_tokens, pu.context_window_tokens)
-        {
+        } else if let Some(context_tokens) = pu.context_tokens {
+            let context_window = match pu.context_window_tokens {
+                Some(0) => {
+                    // Some providers, currently Cursor, report useful accounting
+                    // tokens but no meaningful live context-window signal.
+                    return compute_from_estimate(
+                        session_id,
+                        estimated_tokens,
+                        max_tokens,
+                        updated_at,
+                    );
+                }
+                Some(window) => Some(window),
+                None => max_tokens,
+            };
+            let Some(context_window) = context_window else {
+                return compute_from_estimate(session_id, estimated_tokens, max_tokens, updated_at);
+            };
             if context_window == 0 {
                 // Some providers, currently Cursor, report useful accounting
                 // tokens but no meaningful live context-window signal.

@@ -407,6 +407,39 @@ fn snapshot_billing_only_provider_falls_back_to_estimate() {
 }
 
 #[test]
+fn snapshot_uses_context_tokens_with_runtime_max_when_provider_window_missing() {
+    // Pi reports billing totals across every internal tool-use LLM call, but
+    // the latest assistant turn still carries the live context size. When Pi
+    // does not include a model context window on the wire, use the runtime's
+    // provider/model max instead of deriving occupancy from the billing sum.
+    let snap = compute_snapshot(
+        "sess-pi",
+        Some(&ProviderUsage {
+            input_tokens: Some(600),
+            output_tokens: Some(60),
+            cache_read_tokens: Some(6000),
+            cache_creation_tokens: Some(6),
+            context_tokens: Some(3333),
+            context_window_tokens: None,
+            ..Default::default()
+        }),
+        1200,
+        Some(200_000),
+        false,
+        "2026-05-20T04:20:00Z",
+    )
+    .expect("snapshot");
+
+    assert!(
+        (snap.used_percent - 1.6665).abs() < 0.01,
+        "got {}, want latest-context percentage",
+        snap.used_percent
+    );
+    assert_eq!(snap.max_tokens, Some(200_000));
+    assert!(matches!(snap.source, UsageSource::ProviderReported));
+}
+
+#[test]
 fn snapshot_cumulative_provider_still_honors_explicit_used_percent() {
     // Even when usage_is_cumulative=true, an explicit `used_percent` from
     // the provider stays authoritative — that field is computed by the
