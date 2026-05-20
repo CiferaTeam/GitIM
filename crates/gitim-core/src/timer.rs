@@ -8,7 +8,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const MIN_DURATION_SECS: i64 = 10;
@@ -148,6 +151,44 @@ pub fn partition_fired(mut timers: Vec<Timer>, now: DateTime<Utc>) -> (Vec<Timer
         }
     }
     (fired, pending)
+}
+
+/// Acquire an exclusive advisory lock on the timer lockfile, run `f`, release.
+/// Locks `<clone>/.gitim/timers.json.lock` — independent of `timers.json` so
+/// atomic-rename writes of `timers.json` don't unlink the lock anchor (F1).
+///
+/// The closure receives the lock-held path to `timers.json` (purely a
+/// convenience — the lock is on `.lock`, the read/write targets `.json`).
+///
+/// On `NotInClone`, the closure is never called.
+pub fn with_timers_lock<T>(
+    clone_path: &Path,
+    f: impl FnOnce(&Path) -> Result<T, TimerError>,
+) -> Result<T, TimerError> {
+    let gitim_dir = clone_path.join(GITIM_DIR);
+    if !gitim_dir.is_dir() {
+        return Err(TimerError::NotInClone);
+    }
+    let lock_path = gitim_dir.join(LOCK_FILENAME);
+    let timers_path = gitim_dir.join(TIMERS_FILENAME);
+
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    let result = f(&timers_path);
+    // Drop-as-unlock would work, but explicit is friendlier on review.
+    let _ = lock_file.unlock();
+    result
+}
+
+/// Convenience for callers that need the timers.json path without holding
+/// the lock (read-only inspection, e.g., peek_next_due best-effort).
+pub fn timers_path(clone_path: &Path) -> PathBuf {
+    clone_path.join(GITIM_DIR).join(TIMERS_FILENAME)
 }
 
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
@@ -383,5 +424,69 @@ mod tests {
             other => panic!("expected AmbiguousPrefix, got {other:?}"),
         }
         assert_eq!(timers.len(), 2);
+    }
+
+    #[test]
+    fn with_timers_lock_serializes_writers() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone_path = tmp.path().to_path_buf();
+        std::fs::create_dir_all(clone_path.join(GITIM_DIR)).unwrap();
+
+        let counter = Arc::new(Mutex::new(0u32));
+        let observed_concurrent = Arc::new(Mutex::new(false));
+
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let clone_path = clone_path.clone();
+            let counter = counter.clone();
+            let observed = observed_concurrent.clone();
+            handles.push(thread::spawn(move || {
+                with_timers_lock(&clone_path, |_locked_path| {
+                    {
+                        let mut c = counter.lock().unwrap();
+                        if *c != 0 {
+                            // Another thread holds the lock simultaneously — bug.
+                            *observed.lock().unwrap() = true;
+                        }
+                        *c += 1;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    {
+                        let mut c = counter.lock().unwrap();
+                        *c -= 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(
+            !*observed_concurrent.lock().unwrap(),
+            "two threads held the lock simultaneously"
+        );
+    }
+
+    #[test]
+    fn with_timers_lock_creates_lockfile_if_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone_path = tmp.path().to_path_buf();
+        std::fs::create_dir_all(clone_path.join(GITIM_DIR)).unwrap();
+
+        with_timers_lock(&clone_path, |_| Ok(())).unwrap();
+        assert!(clone_path.join(GITIM_DIR).join(LOCK_FILENAME).exists());
+    }
+
+    #[test]
+    fn with_timers_lock_requires_gitim_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No .gitim/ created.
+        let err = with_timers_lock(tmp.path(), |_| Ok(())).unwrap_err();
+        assert!(matches!(err, TimerError::NotInClone));
     }
 }
