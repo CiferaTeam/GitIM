@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use gitim_core::epoch::EpochStatus;
 use gitim_core::types::Config;
+use gitim_daemon::api::Request;
+use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -172,4 +174,134 @@ fn sync_callback_refresh_observes_new_redirected_file() {
     // The sync_loop's on_synced closure body calls this on the captured Arc.
     state.refresh_epoch_status().expect("post-sync refresh");
     assert!(state.is_redirected());
+}
+
+// --------------------------------------------------------------------------
+// Status response exposes epoch_status_snapshot.
+//
+// `Request::Status` returns `Response::success(data)` where `data` is the
+// serialized `StatusResponse` payload. The handler appends an `epoch` field
+// to that JSON object carrying the parsed `gitim.epoch.yaml` content (the
+// same `EpochFile` shape `AppState::epoch_status_snapshot` returns).
+//
+// - Active YAML → `data.epoch.status == "active"`, snapshot populated, no
+//   redirect.
+// - Redirected YAML → `data.epoch.status == "redirected"`, redirect
+//   populated, no snapshot.
+// - No YAML at all → field omitted (backward-compat: old clients see the
+//   same object shape they always did).
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn status_exposes_active_epoch() {
+    let tmp = TempDir::new().unwrap();
+    write_epoch_file(tmp.path(), ACTIVE_YAML);
+    let state = make_state(tmp.path());
+    state.refresh_epoch_status().expect("refresh active file");
+
+    let resp = handle_request(Request::Status, state.clone()).await;
+    assert!(resp.ok, "status request should succeed, got {:?}", resp);
+
+    let data = resp.data.expect("status response carries data");
+    let epoch = data
+        .get("epoch")
+        .expect("active YAML on disk → status.data.epoch must be present")
+        .clone();
+
+    assert_eq!(
+        epoch.get("status").and_then(|v| v.as_str()),
+        Some("active"),
+        "epoch.status should serialize to 'active', got {:?}",
+        epoch.get("status")
+    );
+    assert_eq!(
+        epoch.get("epoch").and_then(|v| v.as_u64()),
+        Some(2),
+        "epoch.epoch should match the fixture's epoch field"
+    );
+    assert_eq!(
+        epoch.get("branch").and_then(|v| v.as_str()),
+        Some("main-epoch-2"),
+        "epoch.branch should match the fixture's branch"
+    );
+    assert!(
+        epoch.get("snapshot").map(|v| !v.is_null()).unwrap_or(false),
+        "active fixture carries a snapshot block, got {:?}",
+        epoch.get("snapshot")
+    );
+    assert!(
+        epoch.get("redirect").map(|v| v.is_null()).unwrap_or(true),
+        "active fixture must not carry redirect, got {:?}",
+        epoch.get("redirect")
+    );
+}
+
+#[tokio::test]
+async fn status_exposes_redirected_epoch() {
+    let tmp = TempDir::new().unwrap();
+    write_epoch_file(tmp.path(), REDIRECTED_YAML);
+    let state = make_state(tmp.path());
+    state
+        .refresh_epoch_status()
+        .expect("refresh redirected file");
+
+    let resp = handle_request(Request::Status, state.clone()).await;
+    assert!(resp.ok, "status request should succeed, got {:?}", resp);
+
+    let data = resp.data.expect("status response carries data");
+    let epoch = data
+        .get("epoch")
+        .expect("redirected YAML → status.data.epoch must be present")
+        .clone();
+
+    assert_eq!(
+        epoch.get("status").and_then(|v| v.as_str()),
+        Some("redirected"),
+        "epoch.status should serialize to 'redirected'"
+    );
+    let redirect = epoch
+        .get("redirect")
+        .expect("redirected fixture carries a redirect block");
+    assert_eq!(
+        redirect.get("target_branch").and_then(|v| v.as_str()),
+        Some("main-epoch-2"),
+        "redirect.target_branch should round-trip from YAML"
+    );
+    assert_eq!(
+        redirect.get("target_commit").and_then(|v| v.as_str()),
+        Some("1122334455667788990011223344556677889900"),
+        "redirect.target_commit should round-trip from YAML"
+    );
+    assert!(
+        epoch.get("snapshot").map(|v| v.is_null()).unwrap_or(true),
+        "redirected fixture must not carry snapshot, got {:?}",
+        epoch.get("snapshot")
+    );
+}
+
+#[tokio::test]
+async fn status_omits_epoch_when_no_file() {
+    // No `gitim.epoch.yaml` on disk → snapshot is None → wire `epoch` field
+    // is omitted entirely. This keeps the response shape byte-identical for
+    // legacy repos and pre-observability clients.
+    let tmp = TempDir::new().unwrap();
+    let state = make_state(tmp.path());
+    state.refresh_epoch_status().expect("refresh no-file path");
+    assert!(state.epoch_status_snapshot().is_none());
+
+    let resp = handle_request(Request::Status, state.clone()).await;
+    assert!(resp.ok, "status request should succeed, got {:?}", resp);
+
+    let data = resp.data.expect("status response carries data");
+    assert!(
+        data.get("epoch").is_none(),
+        "no epoch file → status data must omit `epoch` key, got {:?}",
+        data.get("epoch")
+    );
+    // Sanity: pre-existing fields still serialize.
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("running"),
+        "baseline status field should still be present"
+    );
 }
