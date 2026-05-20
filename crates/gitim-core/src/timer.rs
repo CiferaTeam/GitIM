@@ -102,6 +102,23 @@ impl TimersFile {
     }
 }
 
+/// Pure function — `now` is injected so tests can simulate clock skew.
+/// Returned `pending` is sorted by `fire_at` ascending; `fired` preserves
+/// input order (caller renders them in registration sequence).
+pub fn partition_fired(mut timers: Vec<Timer>, now: DateTime<Utc>) -> (Vec<Timer>, Vec<Timer>) {
+    timers.sort_by_key(|t| t.fire_at);
+    let mut fired = Vec::new();
+    let mut pending = Vec::new();
+    for t in timers {
+        if t.fire_at <= now {
+            fired.push(t);
+        } else {
+            pending.push(t);
+        }
+    }
+    (fired, pending)
+}
+
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
     // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
     // them but we want compact CLI-friendly forms only.
@@ -225,5 +242,70 @@ mod tests {
             s.insert(Timer::new_id().unwrap());
         }
         assert!(s.len() >= 199, "had {}/200 unique", s.len());
+    }
+
+    fn mk_timer(id: &str, fire_at_iso: &str) -> Timer {
+        Timer {
+            id: id.into(),
+            fire_at: fire_at_iso.parse().unwrap(),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            anchor: "<#x>".into(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn partition_fired_empty() {
+        let (fired, pending) = partition_fired(vec![], "2026-05-20T15:00:00Z".parse().unwrap());
+        assert!(fired.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn partition_fired_all_future() {
+        let timers = vec![
+            mk_timer("a", "2026-05-20T16:00:00Z"),
+            mk_timer("b", "2026-05-20T17:00:00Z"),
+        ];
+        let (fired, pending) = partition_fired(timers, "2026-05-20T15:00:00Z".parse().unwrap());
+        assert!(fired.is_empty());
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn partition_fired_all_past() {
+        let timers = vec![
+            mk_timer("a", "2026-05-20T14:00:00Z"),
+            mk_timer("b", "2026-05-20T13:00:00Z"),
+        ];
+        let (fired, pending) = partition_fired(timers, "2026-05-20T15:00:00Z".parse().unwrap());
+        assert_eq!(fired.len(), 2);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn partition_fired_mixed() {
+        let timers = vec![
+            mk_timer("past", "2026-05-20T14:00:00Z"),
+            mk_timer("future", "2026-05-20T16:00:00Z"),
+            mk_timer("now", "2026-05-20T15:00:00Z"),
+        ];
+        let (fired, pending) = partition_fired(timers, "2026-05-20T15:00:00Z".parse().unwrap());
+        let fired_ids: Vec<_> = fired.iter().map(|t| t.id.as_str()).collect();
+        let pending_ids: Vec<_> = pending.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(fired_ids, vec!["past", "now"], "fire_at == now is fired");
+        assert_eq!(pending_ids, vec!["future"]);
+    }
+
+    #[test]
+    fn partition_fired_pending_sorted_by_fire_at_ascending() {
+        let timers = vec![
+            mk_timer("late", "2026-05-20T18:00:00Z"),
+            mk_timer("early", "2026-05-20T16:00:00Z"),
+            mk_timer("mid", "2026-05-20T17:00:00Z"),
+        ];
+        let (_, pending) = partition_fired(timers, "2026-05-20T15:00:00Z".parse().unwrap());
+        let ids: Vec<_> = pending.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["early", "mid", "late"]);
     }
 }
