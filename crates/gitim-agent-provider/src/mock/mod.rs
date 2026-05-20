@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 /// MockProvider returns a fixed response without calling an LLM.
@@ -140,6 +140,7 @@ impl Provider for MockProvider {
                 error: None,
                 duration_ms,
                 session_token: None,
+                usage_report: ProviderUsageReport::from_usage(usage.clone()),
                 usage,
             });
         });

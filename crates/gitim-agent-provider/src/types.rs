@@ -116,8 +116,10 @@ pub struct ExecResult {
     pub duration_ms: u64,
     /// Session token for resuming (provider-specific).
     pub session_token: Option<String>,
-    /// Per-turn usage data, when the provider reported any.
+    /// Per-turn billing usage data, when the provider reported any.
     pub usage: Option<ProviderUsage>,
+    /// Split usage signals for accounting and context-window display.
+    pub usage_report: ProviderUsageReport,
 }
 
 /// Execution outcome status.
@@ -165,6 +167,30 @@ pub struct ProviderUsage {
     /// Provider-reported context-window capacity matching `context_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
+}
+
+/// Provider usage split by semantic consumer.
+///
+/// `billing` is accumulated into token statistics. `context` is used for the
+/// live context-window HUD and threshold handling. Providers whose wire format
+/// exposes only one shape can put the same value in both fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProviderUsageReport {
+    pub billing: Option<ProviderUsage>,
+    pub context: Option<ProviderUsage>,
+}
+
+impl ProviderUsageReport {
+    pub fn new(billing: Option<ProviderUsage>, context: Option<ProviderUsage>) -> Self {
+        Self { billing, context }
+    }
+
+    pub fn from_usage(usage: Option<ProviderUsage>) -> Self {
+        Self {
+            billing: usage.clone(),
+            context: usage,
+        }
+    }
 }
 
 /// Context passed to prompt generation methods.

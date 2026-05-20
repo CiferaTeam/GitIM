@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use gitim_agent_provider::{
     create, ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage,
+    ProviderUsageReport,
 };
 use gitim_client::{ensure_daemon_with_log, GitimClient};
 use serde::Serialize;
@@ -262,12 +263,35 @@ impl AgentLoop {
         provider_reported: Option<&ProviderUsage>,
         session_id: &str,
     ) -> Result<(), RuntimeError> {
+        self.update_session_usage_parts(state, provider_reported, provider_reported, session_id)
+    }
+
+    pub fn update_session_usage_report(
+        &self,
+        state: &mut AgentState,
+        report: Option<&ProviderUsageReport>,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let billing_reported = report.and_then(|report| report.billing.as_ref());
+        let context_reported = report
+            .and_then(|report| report.context.as_ref())
+            .or(billing_reported);
+        self.update_session_usage_parts(state, billing_reported, context_reported, session_id)
+    }
+
+    fn update_session_usage_parts(
+        &self,
+        state: &mut AgentState,
+        billing_reported: Option<&ProviderUsage>,
+        context_reported: Option<&ProviderUsage>,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
         let model = self.model.as_deref().unwrap_or("");
         let max = crate::context_window::default_max_tokens(&self.provider_type, model);
         let now = chrono::Utc::now().to_rfc3339();
         let new_snapshot = compute_snapshot(
             session_id,
-            provider_reported,
+            context_reported,
             state.estimated_tokens,
             max,
             self.provider.usage_is_cumulative(),
@@ -289,7 +313,7 @@ impl AgentLoop {
             let notice_pct = snapshot_pct.or(estimated_pct).unwrap_or(WARN_AT_PERCENT);
             tracing::info!(
                 session_id = %session_id,
-                provider_input_tokens = ?provider_reported.and_then(|p| p.input_tokens),
+                provider_input_tokens = ?context_reported.and_then(|p| p.input_tokens),
                 provider_used_pct = ?snapshot_pct,
                 estimated_tokens = state.estimated_tokens,
                 estimated_used_pct = ?estimated_pct,
@@ -328,12 +352,10 @@ impl AgentLoop {
 
         state.session_usage = new_snapshot.clone();
 
-        // Step A — Normalize provider_reported into a per-turn delta. We do
-        // this *here*, after compute_snapshot has already used the raw value
-        // for percentage display, so the visible HUD remains driven by the
-        // provider's authoritative cumulative number. The delta is what the
-        // statistics layer accumulates.
-        let delta = self.normalize_to_delta(state, session_id, provider_reported);
+        // Step A — Normalize billing usage into a per-turn delta. The context
+        // usage above remains the source for percentage display, while this
+        // value is what the statistics layer accumulates.
+        let delta = self.normalize_to_delta(state, session_id, billing_reported);
 
         // Persist updated last_session_usage baseline alongside session_usage.
         state.save(&self.repo_root)?;
@@ -914,9 +936,9 @@ impl AgentLoop {
                     &self.provider_type,
                     &assistant_text_buf,
                 );
-                self.update_session_usage(
+                self.update_session_usage_report(
                     &mut state,
-                    exec_result.usage.as_ref(),
+                    Some(&exec_result.usage_report),
                     &sid_for_accumulate,
                 )?;
             }
@@ -990,7 +1012,11 @@ impl AgentLoop {
                             &self.provider_type,
                             &assistant_text_buf,
                         );
-                        self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                        self.update_session_usage_report(
+                            &mut state,
+                            Some(&exec_result.usage_report),
+                            sid,
+                        )?;
                     }
                     // Keep session_token for resume in next cycle
                     if let Some(token) = exec_result.session_token {
@@ -1014,7 +1040,11 @@ impl AgentLoop {
                             &self.provider_type,
                             &assistant_text_buf,
                         );
-                        self.update_session_usage(&mut state, exec_result.usage.as_ref(), sid)?;
+                        self.update_session_usage_report(
+                            &mut state,
+                            Some(&exec_result.usage_report),
+                            sid,
+                        )?;
                     }
                     if let Some(token) = exec_result.session_token {
                         self.session_token = Some(token);

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -271,6 +271,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report: ProviderUsageReport::from_usage(captured_usage.clone()),
         usage: captured_usage,
     });
 }
@@ -347,7 +348,10 @@ pub enum ParsedMessage {
     /// Step start with session ID.
     StepStart { session_id: String },
     /// Step finish with token usage.
-    StepFinish { usage: ProviderUsage, reason: Option<String> },
+    StepFinish {
+        usage: ProviderUsage,
+        reason: Option<String>,
+    },
     /// Text content from an assistant message.
     Text { content: String },
     /// Tool use event — combined: carries invocation + optional result when completed.
@@ -530,7 +534,11 @@ while true; do sleep 1; done
         path
     }
 
-    async fn run_fake(body: &str, provider_timeout: Duration, test_timeout: Duration) -> (ExecResult, tokio::task::JoinHandle<()>) {
+    async fn run_fake(
+        body: &str,
+        provider_timeout: Duration,
+        test_timeout: Duration,
+    ) -> (ExecResult, tokio::task::JoinHandle<()>) {
         let tmp = std::env::temp_dir().join(format!(
             "gitim-opencode-test-{}",
             std::time::SystemTime::now()
@@ -548,17 +556,18 @@ while true; do sleep 1; done
         });
 
         let session = provider
-            .execute("test prompt", ExecOptions {
-                timeout: Some(provider_timeout),
-                ..Default::default()
-            })
+            .execute(
+                "test prompt",
+                ExecOptions {
+                    timeout: Some(provider_timeout),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("execute should start");
 
         let mut events = session.events;
-        let drain = tokio::spawn(async move {
-            while events.recv().await.is_some() {}
-        });
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         let result = timeout(test_timeout, session.result)
             .await
@@ -576,7 +585,8 @@ while true; do sleep 1; done
 echo '{"type":"text","part":{"text":"hello"}}'"#,
             Duration::from_secs(2),
             Duration::from_secs(10),
-        ).await;
+        )
+        .await;
 
         assert_eq!(
             result.status,

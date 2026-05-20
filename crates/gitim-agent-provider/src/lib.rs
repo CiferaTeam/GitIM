@@ -19,5 +19,5 @@ pub use error::ProviderError;
 pub use provider::{create, provider_reports_usage, Provider};
 pub use types::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, ProviderConfig, ProviderUsage,
-    Session,
+    ProviderUsageReport, Session,
 };

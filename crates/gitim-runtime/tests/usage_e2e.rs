@@ -13,7 +13,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use gitim_agent_provider::{mock::MockProvider, ProviderConfig, ProviderUsage};
+use gitim_agent_provider::{
+    mock::MockProvider, ProviderConfig, ProviderUsage, ProviderUsageReport,
+};
 use gitim_runtime::agent_loop::AgentLoop;
 use gitim_runtime::http::{AgentInfo, RuntimeState, SharedRuntimeState};
 use gitim_runtime::state::AgentState;
@@ -95,6 +97,42 @@ fn turn(input: u64, output: u64, cache_read: u64, cache_creation: u64) -> Provid
         context_tokens: None,
         context_window_tokens: None,
     }
+}
+
+#[test]
+fn split_usage_report_accumulates_billing_but_snapshots_context() {
+    let provider = Box::new(MockProvider::new(ProviderConfig::default()));
+    let (loop_, state, tmp) = harness(provider);
+    let agent_clone = tmp.path().join(HANDLER);
+
+    let mut agent_state = AgentState::load(&agent_clone).unwrap();
+    let report = ProviderUsageReport {
+        billing: Some(turn(600, 60, 6000, 6)),
+        context: Some(ProviderUsage {
+            context_tokens: Some(3333),
+            ..ProviderUsage::default()
+        }),
+    };
+
+    loop_
+        .update_session_usage_report(&mut agent_state, Some(&report), "sess-A")
+        .unwrap();
+
+    let s = state.lock().unwrap();
+    let info = s.workspaces[SLUG].agents.get(HANDLER).unwrap();
+    let summary = info.usage_summary.as_ref().expect("summary patched");
+    assert_eq!(summary.totals.input, 600);
+    assert_eq!(summary.totals.output, 60);
+    assert_eq!(summary.totals.cache_read, 6000);
+    assert_eq!(summary.totals.cache_creation, 6);
+
+    let snap = info.session_usage.as_ref().expect("snapshot patched");
+    assert!(
+        (snap.used_percent - 33.33).abs() < 0.05,
+        "got {}, want context-derived percentage",
+        snap.used_percent
+    );
+    assert_eq!(snap.input_tokens, None);
 }
 
 #[test]

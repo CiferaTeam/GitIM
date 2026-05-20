@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -288,9 +288,13 @@ async fn drive_session(
         final_error = Some("codex stream ended without turn.completed".to_string());
     }
 
+    let billing_usage = latest_usage;
+    let mut legacy_usage = billing_usage.clone();
+    let mut final_context_usage: Option<ProviderUsage> = None;
     if let Some(tid) = thread_id.as_deref() {
         if let Some(context_usage) = read_rollout_context_usage(codex_home.as_deref(), tid) {
-            attach_context_usage(&mut latest_usage, context_usage);
+            final_context_usage = Some(context_usage.clone());
+            attach_context_usage(&mut legacy_usage, context_usage);
         }
     }
 
@@ -325,7 +329,8 @@ async fn drive_session(
         error: final_error,
         duration_ms: duration.as_millis() as u64,
         session_token: thread_id,
-        usage: latest_usage,
+        usage_report: ProviderUsageReport::new(billing_usage, final_context_usage),
+        usage: legacy_usage,
     });
 }
 

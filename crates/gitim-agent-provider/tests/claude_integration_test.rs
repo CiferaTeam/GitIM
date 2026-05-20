@@ -141,6 +141,41 @@ async fn tool_use_events_are_streamed() {
 }
 
 #[tokio::test]
+async fn usage_report_splits_result_billing_from_assistant_context() {
+    let provider = create("claude", mock_config()).unwrap();
+    let session = provider
+        .execute("multi-usage", ExecOptions::default())
+        .await
+        .unwrap();
+
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    assert_eq!(result.status, ExecStatus::Completed);
+
+    let billing = result
+        .usage_report
+        .billing
+        .as_ref()
+        .expect("result usage should drive billing");
+    assert_eq!(billing.input_tokens, Some(30));
+    assert_eq!(billing.output_tokens, Some(80));
+    assert_eq!(billing.cache_read_tokens, Some(30_000));
+    assert_eq!(billing.cache_creation_tokens, Some(300));
+
+    let context = result
+        .usage_report
+        .context
+        .as_ref()
+        .expect("assistant usage should drive context");
+    assert_eq!(context.input_tokens, Some(2));
+    assert_eq!(context.output_tokens, Some(6));
+    assert_eq!(context.cache_read_tokens, Some(2_000));
+    assert_eq!(context.cache_creation_tokens, Some(20));
+}
+
+#[tokio::test]
 async fn control_request_auto_approved() {
     let provider = create("claude", mock_config()).unwrap();
     let session = provider

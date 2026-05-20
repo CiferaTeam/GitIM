@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 pub mod parse;
@@ -432,6 +432,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report: ProviderUsageReport::from_usage(final_usage.clone()),
         usage: final_usage,
     });
 }

@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
-    ProviderError, ProviderUsage, Session,
+    ProviderError, ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -151,7 +151,8 @@ async fn drive_session(
     let mut final_error: Option<String> = None;
     let mut saw_result = false;
     let mut num_turns: u32 = 0;
-    let mut captured_usage: Option<ProviderUsage> = None;
+    let mut context_usage: Option<ProviderUsage> = None;
+    let mut billing_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut stdin = stdin;
@@ -202,11 +203,10 @@ async fn drive_session(
                                 ParsedMessage::AssistantEvents { events, usage } => {
                                     num_turns += 1;
                                     // Per-iteration usage reflects actual window occupancy
-                                    // at this step. Result.usage (when it arrives) sums
-                                    // across iterations — billing-correct but wrong as a
-                                    // window denominator.
+                                    // at this step. Result.usage sums across iterations and
+                                    // is the billing signal.
                                     if usage.as_ref().is_some_and(usage_has_reported_tokens) {
-                                        captured_usage = usage;
+                                        context_usage = usage;
                                     }
                                     for event in events {
                                         if let Event::Text { ref content } = event {
@@ -228,13 +228,15 @@ async fn drive_session(
                                 } => {
                                     saw_result = true;
                                     session_id = sid;
-                                    // Fall back to result.usage when no assistant message
-                                    // surfaced real per-iteration usage. Some
-                                    // Anthropic-compatible endpoints emit zero-filled
-                                    // assistant usage placeholders and put real counts on
-                                    // the final result event.
-                                    if should_replace_captured_usage(&captured_usage, &result_usage) {
-                                        captured_usage = result_usage;
+                                    if result_usage.as_ref().is_some_and(usage_has_reported_tokens) {
+                                        billing_usage = result_usage.clone();
+                                    }
+                                    // Fall back to result.usage for context when no assistant
+                                    // message surfaced real per-iteration usage. Some
+                                    // Anthropic-compatible endpoints emit zero-filled assistant
+                                    // usage placeholders and put real counts on the final result.
+                                    if should_replace_captured_usage(&context_usage, &result_usage) {
+                                        context_usage = result_usage;
                                     }
                                     info!(
                                         pid,
@@ -331,6 +333,9 @@ async fn drive_session(
         }
     }
 
+    let report_billing = billing_usage.or_else(|| context_usage.clone());
+    let usage_report = ProviderUsageReport::new(report_billing, context_usage);
+    let usage = usage_report.billing.clone();
     let _ = result_tx.send(ExecResult {
         status: final_status,
         output,
@@ -341,7 +346,8 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage: captured_usage,
+        usage_report,
+        usage,
     });
 }
 

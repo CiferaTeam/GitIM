@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError, Session,
+    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
+    ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -267,6 +268,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report: ProviderUsageReport::default(),
         usage: None,
     });
 }

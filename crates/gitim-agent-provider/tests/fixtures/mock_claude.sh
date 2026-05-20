@@ -9,6 +9,7 @@
 #   "slow"    — sleep 10 seconds (for timeout testing)
 #   "tools"   — includes tool_use and tool_result events
 #   "control" — sends a control_request and reads response
+#   "multi-usage" — assistant usage for context, result usage for billing
 
 PROMPT=""
 while [[ $# -gt 0 ]]; do
@@ -45,6 +46,13 @@ case "$PROMPT" in
         echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"hi"}]}}'
         echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Tool returned: hi"}]}}'
         echo '{"type":"result","session_id":"'"$SESSION_ID"'","result":"Tool returned: hi","is_error":false,"duration_ms":200.0,"num_turns":2}'
+        ;;
+    *multi-usage*)
+        echo '{"type":"system","subtype":"init","session_id":"'"$SESSION_ID"'"}'
+        echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"echo one"}}],"usage":{"input_tokens":1,"output_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":10}}}'
+        echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"one"}]}}'
+        echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"output_tokens":6,"cache_read_input_tokens":2000,"cache_creation_input_tokens":20}}}'
+        echo '{"type":"result","session_id":"'"$SESSION_ID"'","result":"done","is_error":false,"duration_ms":200.0,"num_turns":2,"usage":{"input_tokens":30,"output_tokens":80,"cache_read_input_tokens":30000,"cache_creation_input_tokens":300}}'
         ;;
     *control*)
         echo '{"type":"system","subtype":"init","session_id":"'"$SESSION_ID"'"}'

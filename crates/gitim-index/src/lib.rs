@@ -31,7 +31,9 @@ pub struct Index {
 }
 
 fn lock_index_state(mutex: &Mutex<IndexState>) -> std::sync::MutexGuard<'_, IndexState> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 搜索参数

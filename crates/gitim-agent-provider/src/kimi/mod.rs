@@ -48,7 +48,7 @@ use tracing::{debug, info, warn};
 use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -563,6 +563,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report: ProviderUsageReport::from_usage(latest_usage.clone()),
         usage: latest_usage,
     });
 }
@@ -699,6 +700,7 @@ fn send_result(
         } else {
             Some(session_id.to_string())
         },
+        usage_report: ProviderUsageReport::from_usage(usage.clone()),
         usage,
     });
 }

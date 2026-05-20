@@ -13,7 +13,7 @@ use crate::acp::parse::detect_api_failure;
 use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
-    ProviderError, ProviderUsage, Session,
+    ProviderError, ProviderUsage, ProviderUsageReport, Session,
 };
 
 pub mod prompts;
@@ -474,6 +474,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report: ProviderUsageReport::from_usage(latest_usage.clone()),
         usage: latest_usage,
     });
 }
@@ -499,6 +500,7 @@ fn send_result(
         } else {
             Some(session_id.to_string())
         },
+        usage_report: ProviderUsageReport::from_usage(usage.clone()),
         usage,
     });
 }

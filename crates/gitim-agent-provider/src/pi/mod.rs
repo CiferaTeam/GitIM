@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, Session,
+    ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -154,6 +154,7 @@ async fn drive_session(
             error: Some(format!("failed to write prompt: {e}")),
             duration_ms: start.elapsed().as_millis() as u64,
             session_token: None,
+            usage_report: ProviderUsageReport::default(),
             usage: None, // prompt never made it out — no usage to report
         });
         return;
@@ -301,7 +302,10 @@ async fn drive_session(
         }
     }
 
-    let usage = finalize_pi_usage(accumulated_usage, latest_context_usage.as_ref());
+    let billing_usage = accumulated_usage;
+    let context_usage = latest_context_usage;
+    let usage = finalize_pi_usage(billing_usage.clone(), context_usage.as_ref());
+    let usage_report = ProviderUsageReport::new(billing_usage, context_usage);
     let _ = result_tx.send(ExecResult {
         status: final_status,
         output,
@@ -312,6 +316,7 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
+        usage_report,
         usage,
     });
 }
