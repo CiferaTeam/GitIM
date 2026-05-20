@@ -730,7 +730,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Record the port we're about to bind so the self-update async phase can
     // pass the same `--port` to the replacement runtime. `run_shell` is the
     // single writer; nothing else in the crate needs to mutate this.
-    state.lock().unwrap().listen_port = port;
+    state.lock().unwrap_or_else(|e| e.into_inner()).listen_port = port;
 
     // Materialize the device-bound runtime ID. First boot generates and
     // persists; subsequent boots read the existing UUID. Either way it lands
@@ -738,7 +738,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // real ID even during the recovery window.
     // See docs/plans/runtime-id/00-design.md.
     let runtime_id = gitim_runtime::user_config::ensure_runtime_id();
-    state.lock().unwrap().runtime_id = runtime_id.clone();
+    state.lock().unwrap_or_else(|e| e.into_inner()).runtime_id = runtime_id.clone();
     eprintln!("runtime started, id: {runtime_id}");
 
     // Token + email propagation MUST run before `recover_from_config`, because
@@ -802,13 +802,13 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
             let last = idle_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .last_activity
                 .load(std::sync::atomic::Ordering::Relaxed);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             if now.saturating_sub(last) >= IDLE_TIMEOUT_SECS {
                 if gitim_runtime::http::has_active_agents(&idle_state) {
                     eprintln!("idle timeout reached but agents still active, deferring exit");
@@ -889,13 +889,22 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
 
-    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = sigterm.recv() => {},
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 
     eprintln!("\nshutting down...");
