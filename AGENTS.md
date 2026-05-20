@@ -147,6 +147,11 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - DM 文件名：两个 handler 按字典序排列，`--` 连接
 - Plan / 需求 / 设计文档统一放 `docs/plans/<feature-slug>/`，不要散落在仓库根或新建 `plans/`
 
+## Commit 格式
+- 提交标题沿用现有 Conventional Commits 风格：`<type>(<scope>): <summary>`，如 `fix(runtime): retry provider failures`；无明确 scope 时可省略。
+- 提交正文按 Google-style footer 记录验证信息，至少包含 `Test: <command>`；如果没有运行测试，写 `Test: not run (<reason>)`。
+- AI agent 参与的提交必须在 footer 把自己带进去，使用标准 Git trailer：`Co-authored-by: <agent-name> <<agent-email>>`。Codex 提交使用 `Co-authored-by: Codex <codex@openai.com>`。
+
 ## Rust toolchain policy
 
 仓库根 `rust-toolchain.toml` 把 channel 锁到 **stable**。这是硬线,因为:
