@@ -1011,7 +1011,12 @@ pub(super) async fn write_channel_event(
     // Compliance check: same belt-and-suspenders defense used on the message
     // path. Under the lock this can't fail on concurrency; it still catches
     // any out-of-band thread mutation (e.g. a hand-edit).
-    let allowed_refs: Vec<&str> = channel_meta.members.iter().map(|s| s.as_str()).collect();
+    let mut allowed_senders = channel_meta.members.clone();
+    if event_type == "join" && targets.is_empty() && !allowed_senders.contains(&author) {
+        // Self-join is authored before meta.members contains the joining user.
+        allowed_senders.push(author.clone());
+    }
+    let allowed_refs: Vec<&str> = allowed_senders.iter().map(|s| s.as_str()).collect();
     if let Err(e) = validate_append(&existing, &new_content, &user_refs, &allowed_refs) {
         return Response::error(format!("compliance check failed: {}", e));
     }

@@ -80,6 +80,15 @@ async fn register_test_user(state: &SharedState, handler: &str) {
 
 /// Create a channel with meta.yaml and empty .thread file.
 fn create_test_channel(state: &SharedState, name: &str, created_by: &str) {
+    create_test_channel_with_members(state, name, created_by, &[]);
+}
+
+fn create_test_channel_with_members(
+    state: &SharedState,
+    name: &str,
+    created_by: &str,
+    members: &[&str],
+) {
     let ch_dir = state.repo_root.join("channels");
     std::fs::create_dir_all(&ch_dir).unwrap();
     let meta = ChannelMeta {
@@ -87,7 +96,7 @@ fn create_test_channel(state: &SharedState, name: &str, created_by: &str) {
         created_by: created_by.to_string(),
         created_at: "20260323T000000Z".to_string(),
         introduction: "test channel".to_string(),
-        members: Vec::new(),
+        members: members.iter().map(|m| m.to_string()).collect(),
     };
     std::fs::write(
         ch_dir.join(format!("{}.meta.yaml", name)),
@@ -133,6 +142,39 @@ async fn test_join_channel_self() {
     assert!(
         meta.members.contains(&"alice".to_string()),
         "alice not in members"
+    );
+}
+
+#[tokio::test]
+async fn test_join_channel_self_when_channel_already_has_members() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel_with_members(&state, "general", "alice", &["alice"]);
+
+    let resp = handle_request(
+        Request::JoinChannel {
+            channel: "general".to_string(),
+            targets: vec![],
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp.ok, "join failed: {:?}", resp.error);
+
+    let thread = std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
+    assert!(thread.contains("[E:join]"), "thread missing join event");
+    assert!(thread.contains("@bob"), "thread missing joining author");
+
+    let meta_str =
+        std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+    let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+    assert_eq!(
+        meta.members,
+        vec!["alice".to_string(), "bob".to_string()],
+        "members should include the existing member and joining author"
     );
 }
 
