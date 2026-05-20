@@ -10,6 +10,8 @@ pub mod mention;
 pub mod parser;
 pub mod recipients;
 pub mod responses;
+// timer uses fs2 for advisory file locking, which has no wasm32 backend.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod timer;
 pub mod types;
 pub mod validator;

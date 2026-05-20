@@ -108,21 +108,39 @@ fn cancel_no_match_exits_2() {
 #[test]
 fn cancel_ambiguous_prefix_exits_2() {
     let clone = fake_clone();
+    let mut ids = Vec::new();
     for _ in 0..2 {
-        gitim()
+        let out = gitim()
             .current_dir(clone.path())
             .args(["timer", "set", "30m", "<#x>"])
-            .assert()
-            .success();
+            .output()
+            .expect("set");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let id = stdout.split_whitespace().next().expect("id").to_string();
+        ids.push(id);
     }
-    // Both timer ids start with the year prefix "2026" — stable until 2027.
+    // Derive the longest common prefix from the actual ids — clock-stable
+    // (no calendar dependency, no year-boundary brittleness).
+    let prefix = longest_common_prefix(&ids[0], &ids[1]);
+    assert!(
+        prefix.len() >= 8,
+        "expected ids registered in the same second to share ≥8 chars; got {prefix:?}"
+    );
     gitim()
         .current_dir(clone.path())
-        .args(["timer", "cancel", "2026"])
+        .args(["timer", "cancel", &prefix])
         .assert()
         .failure()
         .code(2)
         .stderr(predicate::str::contains("matches 2 timers"));
+}
+
+fn longest_common_prefix(a: &str, b: &str) -> String {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x)
+        .collect()
 }
 
 #[test]
