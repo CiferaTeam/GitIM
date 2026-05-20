@@ -55,7 +55,7 @@ pub async fn handle_search(
                 messages,
                 total: result.total as u64,
             };
-            Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+            Response::json(payload)
         }
         Ok(Err(gitim_index::IndexError::Rebuilding)) => Response::error("indexing_in_progress"),
         Ok(Err(gitim_index::IndexError::EmptySearch)) => {
@@ -87,7 +87,7 @@ pub async fn handle_reindex(state: SharedState) -> Response {
                 status: "complete".to_string(),
                 messages_indexed: count as u64,
             };
-            Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+            Response::json(payload)
         }
         Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
         Err(e) => Response::error(format!("reindex task failed: {}", e)),

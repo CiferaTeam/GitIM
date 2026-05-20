@@ -78,7 +78,7 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
             commits: 0,
             already_departed: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
+        return Response::json(payload);
     }
 
     // 3. Validate active user actually exists. This catches the
@@ -130,7 +130,7 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
         commits: total_commits,
         already_departed: false,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// `archive/users/<handler>.meta.yaml` existing is the single source of

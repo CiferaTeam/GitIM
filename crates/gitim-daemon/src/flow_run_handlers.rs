@@ -115,19 +115,13 @@ pub async fn handle_flow_run_start(
                 });
             }
             state.push_notify.notify_one();
-            Response::success(
-                serde_json::to_value(StartFlowRunResponse {
-                    run_id: c.run_id,
-                    flow_slug: c.flow_slug,
-                    channel: c.channel,
-                    path: c.path,
-                    commit_id: c.commit_id,
-                })
-                .unwrap_or_else(|e| {
-                    tracing::error!("serializing StartFlowRunResponse: {e}");
-                    serde_json::Value::Null
-                }),
-            )
+            Response::json(StartFlowRunResponse {
+                run_id: c.run_id,
+                flow_slug: c.flow_slug,
+                channel: c.channel,
+                path: c.path,
+                commit_id: c.commit_id,
+            })
         }
         Err(resp) => resp,
     }
@@ -158,9 +152,7 @@ pub async fn handle_flow_run_list(
     let flows_root = state.repo_root.join("flows");
     let mut summaries = Vec::new();
     if !flows_root.exists() {
-        return Response::success(
-            serde_json::to_value(ListFlowRunsResponse { runs: vec![] }).unwrap_or_else(|e| { tracing::error!("serializing ListFlowRunsResponse: {e}"); serde_json::Value::Null }),
-        );
+        return Response::json(ListFlowRunsResponse { runs: vec![] });
     }
     let slug_entries = match std::fs::read_dir(&flows_root) {
         Ok(e) => e,
@@ -226,7 +218,7 @@ pub async fn handle_flow_run_list(
     }
     // sort: newest first
     summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    Response::success(serde_json::to_value(ListFlowRunsResponse { runs: summaries }).unwrap_or_else(|e| { tracing::error!("serializing ListFlowRunsResponse: {e}"); serde_json::Value::Null }))
+    Response::json(ListFlowRunsResponse { runs: summaries })
 }
 
 pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Response {
@@ -239,7 +231,7 @@ pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Respons
         Err(resp) => return resp,
     };
     let payload: ShowFlowRunResponse = (&run).into();
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_flow_node_set(
@@ -366,19 +358,13 @@ pub async fn handle_flow_node_set(
     }
     state.push_notify.notify_one();
 
-    Response::success(
-        serde_json::to_value(UpdateFlowNodeResponse {
-            run_id: run.run_id,
-            node_id,
-            status: new_status,
-            run_status: run.status,
-            commit_id,
-        })
-        .unwrap_or_else(|e| {
-            tracing::error!("serializing UpdateFlowNodeResponse: {e}");
-            serde_json::Value::Null
-        }),
-    )
+    Response::json(UpdateFlowNodeResponse {
+        run_id: run.run_id,
+        node_id,
+        status: new_status,
+        run_status: run.status,
+        commit_id,
+    })
 }
 
 pub async fn handle_flow_run_cancel(
@@ -438,16 +424,10 @@ pub async fn handle_flow_run_cancel(
     });
     state.push_notify.notify_one();
 
-    Response::success(
-        serde_json::to_value(CancelFlowRunResponse {
-            run_id: run.run_id,
-            commit_id,
-        })
-        .unwrap_or_else(|e| {
-            tracing::error!("serializing CancelFlowRunResponse: {e}");
-            serde_json::Value::Null
-        }),
-    )
+    Response::json(CancelFlowRunResponse {
+        run_id: run.run_id,
+        commit_id,
+    })
 }
 
 fn commit_run_state_locked(

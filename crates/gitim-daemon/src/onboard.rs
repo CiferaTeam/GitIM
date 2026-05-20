@@ -46,7 +46,12 @@ pub async fn handle_onboard(
         AppState::spawn_sync_loop(state.clone());
 
         // Initialize search index
-        if state.index.read().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if state
+            .index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             if let Err(e) = AppState::initialize_index(&state) {
                 warn!("index initialization after guest onboard failed: {}", e);
             }
@@ -57,7 +62,7 @@ pub async fn handle_onboard(
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let payload = gitim_core::responses::OnboardResponse::Guest { guest: true };
-        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
+        return Response::json(payload);
     }
 
     // --- Step A: Infer identity ---
@@ -145,7 +150,12 @@ pub async fn handle_onboard(
     AppState::spawn_cron_engine(state.clone());
 
     // Initialize search index (if not already initialized)
-    if state.index.read().unwrap_or_else(|e| e.into_inner()).is_none() {
+    if state
+        .index
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
         if let Err(e) = AppState::initialize_index(&state) {
             warn!("index initialization after onboard failed: {}", e);
         }
@@ -165,7 +175,7 @@ pub async fn handle_onboard(
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
     let payload = gitim_core::responses::OnboardResponse::User { handler, created };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +227,7 @@ fn write_me_json(
     // Going from guest → real identity, drop any stale guest flag.
     merged.clear_guest();
 
-    let content = serde_json::to_string_pretty(&merged).unwrap_or_else(|e| { tracing::error!("serializing merged me.json: {e}"); String::new() });
+    let content = Response::json_pretty_string(&merged, "me.json")?;
     std::fs::write(&me_path, &content)
         .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
 
@@ -250,7 +260,7 @@ fn write_guest_me_json(state: &SharedState) -> Result<(), Response> {
     };
 
     let me_path = gitim_dir.join("me.json");
-    let content = serde_json::to_string_pretty(&me).unwrap_or_else(|e| { tracing::error!("serializing me.json: {e}"); String::new() });
+    let content = Response::json_pretty_string(&me, "me.json")?;
     std::fs::write(&me_path, &content)
         .map_err(|e| Response::error(format!("failed to write me.json: {}", e)))?;
 
@@ -303,7 +313,7 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
             introduction: "默认频道".to_string(),
             members: vec![handler.to_string()],
         };
-        let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+        let meta_str = Response::yaml_string(&meta, "general channel meta")?;
         std::fs::write(&meta_path, &meta_str)
             .map_err(|e| Response::error(format!("failed to write general.meta.yaml: {}", e)))?;
         changed_paths.push("channels/general.meta.yaml".to_string());
@@ -384,7 +394,7 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
         role: "member".to_string(),
         introduction: "GitIM user".to_string(),
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+    let meta_str = Response::yaml_string(&meta, "user meta")?;
     std::fs::write(&meta_path, &meta_str)
         .map_err(|e| Response::error(format!("failed to write user meta: {}", e)))?;
 
@@ -469,7 +479,7 @@ fn auto_join_general(state: &SharedState, handler: &str) -> Result<(), Response>
     // Update meta.yaml members
     meta.members.push(handler.to_string());
     meta.members.sort();
-    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+    let meta_str = Response::yaml_string(&meta, "general channel meta")?;
     std::fs::write(&meta_path, &meta_str)
         .map_err(|e| Response::error(format!("write meta: {}", e)))?;
 

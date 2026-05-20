@@ -105,7 +105,10 @@ pub async fn handle_create_channel(
         introduction: introduction.unwrap_or_default(),
         members,
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+    let meta_str = match Response::yaml_string(&meta, "channel meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
@@ -179,7 +182,7 @@ pub async fn handle_create_channel(
         channel: name,
         created_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_archive_channel(
@@ -508,7 +511,7 @@ pub async fn handle_archive_channel(
         channel,
         archived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_unarchive_channel(
@@ -871,7 +874,7 @@ pub async fn handle_unarchive_channel(
         channel,
         unarchived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub(super) async fn write_channel_event(
@@ -1058,7 +1061,10 @@ pub(super) async fn write_channel_event(
         _ => {}
     }
 
-    let meta_str = serde_yaml::to_string(&channel_meta).unwrap_or_else(|e| { tracing::error!("serializing channel meta: {e}"); String::new() });
+    let meta_str = match Response::yaml_string(&channel_meta, "channel meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
@@ -1111,5 +1117,5 @@ pub(super) async fn write_channel_event(
         line_number: next_line,
         status: commit_status.to_string(),
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }

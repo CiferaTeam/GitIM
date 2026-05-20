@@ -49,7 +49,7 @@ pub async fn handle_register_user(
             handler,
             exists: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
+        return Response::json(payload);
     }
 
     // Create meta file
@@ -58,7 +58,10 @@ pub async fn handle_register_user(
         role,
         introduction,
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+    let meta_str = match Response::yaml_string(&meta, "user meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
 
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write user meta: {}", e));
@@ -85,7 +88,7 @@ pub async fn handle_register_user(
         handler,
         exists: false,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Overwrite the `introduction` field of an existing user's meta.yaml.
@@ -139,11 +142,14 @@ pub async fn handle_update_user(
             handler,
             exists: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }));
+        return Response::json(payload);
     }
 
     meta.introduction = introduction;
-    let meta_str = serde_yaml::to_string(&meta).unwrap_or_else(|e| { tracing::error!("serializing meta: {e}"); String::new() });
+    let meta_str = match Response::yaml_string(&meta, "user meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write user meta: {}", e));
     }
@@ -161,7 +167,7 @@ pub async fn handle_update_user(
         handler,
         exists: true,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Move `users/<handler>.meta.yaml` → `archive/users/<handler>.meta.yaml`
@@ -308,7 +314,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         handler,
         archived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Restore `archive/users/<handler>.meta.yaml` → `users/<handler>.meta.yaml`.
@@ -458,7 +464,7 @@ pub async fn handle_unarchive_user(
         handler,
         unarchived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 #[cfg(test)]

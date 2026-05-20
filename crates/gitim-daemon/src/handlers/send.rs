@@ -204,7 +204,10 @@ pub async fn handle_send(
     let push_rx = if should_await_push {
         let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
         {
-            let mut pending = state.pending_push.write().unwrap_or_else(|e| e.into_inner());
+            let mut pending = state
+                .pending_push
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: thread_name.clone(),
                 line_number: next_line,
@@ -214,7 +217,10 @@ pub async fn handle_send(
         Some(rx)
     } else {
         {
-            let mut pending = state.pending_push.write().unwrap_or_else(|e| e.into_inner());
+            let mut pending = state
+                .pending_push
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: thread_name.clone(),
                 line_number: next_line,
@@ -279,5 +285,5 @@ pub async fn handle_send(
             error: None,
         }
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }

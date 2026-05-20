@@ -111,7 +111,7 @@ pub async fn handle_read(
         entries,
         archived: is_archived,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_list_channels(state: SharedState) -> Response {
@@ -163,7 +163,7 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
     }
 
     channels.sort_by(|a, b| a.name.cmp(&b.name));
-    Response::success(serde_json::to_value(ListChannelsResponse { channels }).unwrap_or_else(|e| { tracing::error!("serializing ListChannelsResponse: {e}"); serde_json::Value::Null }))
+    Response::json(ListChannelsResponse { channels })
 }
 
 pub async fn handle_list_archived_channels(
@@ -216,9 +216,7 @@ pub async fn handle_list_archived_channels(
     let has_more = window.len() > limit;
     let channels: Vec<_> = window.into_iter().take(limit).collect();
 
-    Response::success(
-        serde_json::to_value(ListArchivedChannelsResponse { channels, has_more }).unwrap_or_else(|e| { tracing::error!("serializing ListArchivedChannelsResponse: {e}"); serde_json::Value::Null }),
-    )
+    Response::json(ListArchivedChannelsResponse { channels, has_more })
 }
 
 /// List active users. When `include_archived` is true, also scan
@@ -259,7 +257,7 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
         users: sorted,
         archived_users,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Scan `archive/users/*.meta.yaml` and return one `ArchivedUserEntry`
@@ -296,7 +294,7 @@ pub async fn handle_list_archived_users(state: SharedState) -> Response {
     }
     entries.sort_by(|a, b| a.handler.cmp(&b.handler));
     let payload = ListArchivedUsersResponse { users: entries };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Scan `archive/dm/*.thread` and return the rows where `author` is one
@@ -367,7 +365,7 @@ pub async fn handle_list_archived_dms(
     let dms: Vec<_> = window.into_iter().take(limit).collect();
 
     let payload = ListArchivedDmsResponse { dms, has_more };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_get_thread(state: SharedState, channel: String, line_number: u64) -> Response {
@@ -455,7 +453,7 @@ pub async fn handle_get_thread(state: SharedState, channel: String, line_number:
         root_line,
         entries: thread_entries,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_stop(state: SharedState) -> Response {
@@ -472,5 +470,5 @@ pub async fn handle_stop(state: SharedState) -> Response {
     let payload = gitim_core::responses::StopResponse {
         status: "stopping".to_string(),
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }

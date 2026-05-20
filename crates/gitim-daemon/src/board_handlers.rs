@@ -44,7 +44,7 @@ pub async fn handle_board_show(state: SharedState, handler: String) -> Response 
         meta: board_meta_summary(&doc.meta),
         body: doc.body,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 pub async fn handle_board_list(state: SharedState) -> Response {
@@ -88,7 +88,7 @@ pub async fn handle_board_list(state: SharedState) -> Response {
     }
 
     boards.sort_by(|a, b| a.handler.cmp(&b.handler));
-    Response::success(serde_json::to_value(ListBoardsResponse { boards }).unwrap_or_else(|e| { tracing::error!("serializing ListBoardsResponse: {e}"); serde_json::Value::Null }))
+    Response::json(ListBoardsResponse { boards })
 }
 
 pub async fn handle_board_init(state: SharedState, author: String) -> Response {
@@ -296,7 +296,7 @@ fn board_write_success(state: &SharedState, committed: CommittedBoard) -> Respon
         status: "committed".to_string(),
         commit_id: committed.commit_id,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 fn board_meta_summary(meta: &BoardMeta) -> BoardMetaSummary {

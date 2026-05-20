@@ -154,7 +154,7 @@ pub async fn handle_archive_dm(state: SharedState, peer: String, author: String)
         archived_by: author,
         dm_pair_stem: stem,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
 
 /// Restore `archive/dm/<sorted-pair>.thread` → `dm/<sorted-pair>.thread`.
@@ -278,5 +278,5 @@ pub async fn handle_unarchive_dm(state: SharedState, peer: String, author: Strin
         unarchived_by: author,
         dm_pair_stem: stem,
     };
-    Response::success(serde_json::to_value(payload).unwrap_or_else(|e| { tracing::error!("serializing response: {e}"); serde_json::Value::Null }))
+    Response::json(payload)
 }
