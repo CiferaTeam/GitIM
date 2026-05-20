@@ -56,6 +56,36 @@ pub struct Timer {
     pub note: Option<String>,
 }
 
+impl Timer {
+    pub fn new_id() -> Result<String, TimerError> {
+        let now = Utc::now();
+        let timestamp = now.format("%Y%m%dT%H%M%S");
+        let mut hash_bytes = [0u8; 3];
+        getrandom::getrandom(&mut hash_bytes)?;
+        let hash = hex::encode(hash_bytes);
+        Ok(format!("{timestamp}-{hash}"))
+    }
+
+    pub fn new(
+        duration: ChronoDuration,
+        anchor: String,
+        note: Option<String>,
+    ) -> Result<Self, TimerError> {
+        let trimmed = anchor.trim();
+        if trimmed.is_empty() {
+            return Err(TimerError::EmptyAnchor);
+        }
+        let now = Utc::now();
+        Ok(Self {
+            id: Self::new_id()?,
+            fire_at: now + duration,
+            created_at: now,
+            anchor: trimmed.to_string(),
+            note,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimersFile {
     pub version: u32,
@@ -167,5 +197,33 @@ mod tests {
     fn parse_duration_at_bounds_ok() {
         assert!(parse_duration("10s").is_ok());
         assert!(parse_duration("24h").is_ok());
+    }
+
+    #[test]
+    fn new_id_matches_22_char_pattern() {
+        let id = Timer::new_id().unwrap();
+        assert_eq!(id.len(), 22, "id was: {id:?}");
+        let bytes = id.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            let ok = match i {
+                0..=7 => b.is_ascii_digit(),
+                8 => b == b'T',
+                9..=14 => b.is_ascii_digit(),
+                15 => b == b'-',
+                16..=21 => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+                _ => false,
+            };
+            assert!(ok, "char at {i} (={b}) failed validation in {id:?}");
+        }
+    }
+
+    #[test]
+    fn new_id_pairs_unique_with_high_probability() {
+        use std::collections::HashSet;
+        let mut s = HashSet::new();
+        for _ in 0..200 {
+            s.insert(Timer::new_id().unwrap());
+        }
+        assert!(s.len() >= 199, "had {}/200 unique", s.len());
     }
 }
