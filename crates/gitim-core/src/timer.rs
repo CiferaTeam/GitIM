@@ -330,6 +330,21 @@ pub fn format_fired_for_prompt(timers: &[Timer], now: DateTime<Utc>) -> String {
     out
 }
 
+/// Walk up from `start` looking for a directory containing `.gitim/`.
+/// Returns that ancestor (the clone root). Errors if none found.
+pub fn find_clone_root(start: &Path) -> Result<PathBuf, TimerError> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(GITIM_DIR).is_dir() {
+            return Ok(current);
+        }
+        match current.parent() {
+            Some(p) => current = p.to_path_buf(),
+            None => return Err(TimerError::NotInClone),
+        }
+    }
+}
+
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
     // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
     // them but we want compact CLI-friendly forms only.
@@ -877,5 +892,38 @@ mod tests {
     fn format_fired_for_prompt_empty_is_empty() {
         let now = Utc::now();
         assert_eq!(format_fired_for_prompt(&[], now), "");
+    }
+
+    #[test]
+    fn find_clone_root_finds_gitim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let sub = clone.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = find_clone_root(&sub).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(clone).unwrap()
+        );
+    }
+
+    #[test]
+    fn find_clone_root_at_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let found = find_clone_root(clone).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(clone).unwrap()
+        );
+    }
+
+    #[test]
+    fn find_clone_root_not_in_clone_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = find_clone_root(tmp.path()).unwrap_err();
+        assert!(matches!(err, TimerError::NotInClone));
     }
 }
