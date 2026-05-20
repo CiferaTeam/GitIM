@@ -585,6 +585,17 @@ enum TimerCommands {
         #[arg(long)]
         note: Option<String>,
     },
+    /// List pending timers.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a pending timer by full id or unique prefix.
+    Cancel {
+        /// Full timer id or unique prefix.
+        id_or_prefix: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -703,6 +714,10 @@ async fn main() {
                 anchor,
                 note,
             } => commands::timer::cmd_set(&mode, &duration, &anchor, note.as_deref()).await,
+            TimerCommands::List { json } => commands::timer::cmd_list(&mode, json).await,
+            TimerCommands::Cancel { id_or_prefix } => {
+                commands::timer::cmd_cancel(&mode, &id_or_prefix).await
+            }
         }
         return;
     }
