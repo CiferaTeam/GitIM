@@ -5,8 +5,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static CREDENTIAL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(https?://)([^:/@\s]+):[^@\s]+@").unwrap());
+static CREDENTIAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(https?://)([^:/@\s]+):[^@\s]+@")
+        .unwrap_or_else(|_| unreachable!("credential URL regex is valid"))
+});
 
 pub fn redacted_url(text: &str) -> String {
     CREDENTIAL_RE
