@@ -300,6 +300,36 @@ pub fn cancel_timer(clone_path: &Path, id_or_prefix: &str) -> Result<String, Tim
     })
 }
 
+/// Render fired timers as the synthetic prompt prefix injected before
+/// daemon-change content. Empty `timers` → empty string (caller decides
+/// whether to skip the run entirely).
+pub fn format_fired_for_prompt(timers: &[Timer], now: DateTime<Utc>) -> String {
+    if timers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## ⏰ Timer reminder(s) fired\n\n");
+    for (i, t) in timers.iter().enumerate() {
+        let elapsed = (now - t.created_at).num_seconds().max(0) as u64;
+        let ago = humantime::format_duration(std::time::Duration::from_secs(elapsed));
+        // humantime may include sub-unit parts (e.g. "30m 0s") — trim to leading
+        // unit pair so the prompt stays compact.
+        let ago_trimmed: String = ago
+            .to_string()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!("{}. Set {} ago\n", i + 1, ago_trimmed));
+        out.push_str(&format!("   anchor: {}\n", t.anchor));
+        if let Some(note) = &t.note {
+            out.push_str(&format!("   note: {}\n", note));
+        }
+        out.push('\n');
+    }
+    out.push_str("Use the `gitim` CLI to fetch context at the anchor(s) above.\n");
+    out
+}
+
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
     // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
     // them but we want compact CLI-friendly forms only.
@@ -795,5 +825,57 @@ mod tests {
             register_timer(clone, ChronoDuration::seconds(60), "   ".into(), None).unwrap_err();
         assert!(matches!(err, TimerError::EmptyAnchor));
         assert_eq!(read_timers(clone).unwrap().timers.len(), 0);
+    }
+
+    #[test]
+    fn format_fired_for_prompt_single() {
+        let timers = vec![Timer {
+            id: "20260520T143055-aaaaaa".into(),
+            fire_at: "2026-05-20T15:00:55Z".parse().unwrap(),
+            created_at: "2026-05-20T14:30:55Z".parse().unwrap(),
+            anchor: "<#product:L000042>".into(),
+            note: Some("check deploy".into()),
+        }];
+        let now: DateTime<Utc> = "2026-05-20T15:00:55Z".parse().unwrap();
+        let out = format_fired_for_prompt(&timers, now);
+        assert!(out.contains("## ⏰ Timer reminder(s) fired"));
+        assert!(out.contains("<#product:L000042>"));
+        assert!(out.contains("check deploy"));
+        assert!(
+            out.contains("30m"),
+            "expected 'Set 30m ago' phrasing: {out}"
+        );
+    }
+
+    #[test]
+    fn format_fired_for_prompt_multiple_numbered() {
+        let timers = vec![
+            Timer {
+                id: "20260520T143055-aaaaaa".into(),
+                fire_at: "2026-05-20T15:00:55Z".parse().unwrap(),
+                created_at: "2026-05-20T14:30:55Z".parse().unwrap(),
+                anchor: "<#a>".into(),
+                note: None,
+            },
+            Timer {
+                id: "20260520T143120-bbbbbb".into(),
+                fire_at: "2026-05-20T15:00:55Z".parse().unwrap(),
+                created_at: "2026-05-20T13:48:55Z".parse().unwrap(),
+                anchor: "<#b>".into(),
+                note: Some("follow up".into()),
+            },
+        ];
+        let now: DateTime<Utc> = "2026-05-20T15:00:55Z".parse().unwrap();
+        let out = format_fired_for_prompt(&timers, now);
+        assert!(out.contains("1."), "{out}");
+        assert!(out.contains("2."), "{out}");
+        assert!(out.contains("<#a>"));
+        assert!(out.contains("<#b>"));
+    }
+
+    #[test]
+    fn format_fired_for_prompt_empty_is_empty() {
+        let now = Utc::now();
+        assert_eq!(format_fired_for_prompt(&[], now), "");
     }
 }
