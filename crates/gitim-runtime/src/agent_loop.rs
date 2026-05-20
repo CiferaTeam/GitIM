@@ -587,7 +587,24 @@ impl AgentLoop {
         // would sit unread until something external happens to mention it.
         let mut state = AgentState::load(&self.repo_root)?;
 
-        let external_prompt = if result.changes.is_empty() {
+        // Pop any oneshot timers due at or before `now`. Failure to read /
+        // write `.gitim/timers.json` is logged and treated as "no fired timers"
+        // — a corrupted file shouldn't crash the whole agent loop. See
+        // `docs/plans/oneshot-timer/01-eng-review-findings.md` F4.
+        let fired_timers = gitim_core::timer::pop_fired_timers(&self.repo_root, chrono::Utc::now())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, handler = %self.handler, "timer pop failed; continuing");
+                Vec::new()
+            });
+        let timer_prefix = if fired_timers.is_empty() {
+            None
+        } else {
+            Some(gitim_core::timer::format_fired_for_prompt(
+                &fired_timers,
+                chrono::Utc::now(),
+            ))
+        };
+        let changes_prompt = if result.changes.is_empty() {
             None
         } else {
             // `format_changes_as_prompt` returns None when every entry was
@@ -595,6 +612,7 @@ impl AgentLoop {
             // from the agent's point of view.
             format_changes_as_prompt(&result.changes, &self.handler)
         };
+        let external_prompt = combine_timer_and_changes(timer_prefix, changes_prompt);
 
         // Decide what (if anything) to run this cycle:
         //   - external input present                  → run with that prompt
@@ -1034,6 +1052,18 @@ impl AgentLoop {
             tokio::time::sleep(self.poll_interval).await;
         }
     }
+
+    /// Best-effort: earliest pending `fire_at` for this agent, or None.
+    /// Used by the outer scheduler in `start_agent_loop` to shorten the
+    /// idle sleep when a timer is closer than the configured poll
+    /// interval. Read is unlocked — `pop_fired_timers` re-reads under
+    /// lock on the next cycle, so a stale snapshot here only affects
+    /// the next sleep duration by at most one cycle.
+    pub fn next_timer_due(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        gitim_core::timer::peek_next_due(&self.repo_root)
+            .ok()
+            .flatten()
+    }
 }
 
 fn is_provider_failure_status(status: &ExecStatus) -> bool {
@@ -1076,6 +1106,23 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
         j -= 1;
     }
     j
+}
+
+/// Compose external_prompt from optional timer-fired prefix and optional
+/// daemon-change body. Returns None when both are empty — caller treats
+/// that as "idle".
+fn combine_timer_and_changes(
+    timer_prefix: Option<String>,
+    changes_prompt: Option<String>,
+) -> Option<String> {
+    match (timer_prefix, changes_prompt) {
+        (None, None) => None,
+        (Some(t), None) if t.is_empty() => None,
+        (Some(t), None) => Some(t),
+        (None, Some(c)) => Some(c),
+        (Some(t), Some(c)) if t.is_empty() => Some(c),
+        (Some(t), Some(c)) => Some(format!("{t}\n---\n\n{c}")),
+    }
 }
 
 /// Format channel changes into a prompt, filtering out self-authored messages.
@@ -1827,5 +1874,47 @@ mod tests {
         assert_eq!(ev.detail, "", "empty detail signals 'drop cached snapshot'");
         assert_eq!(ev.workspace_id, "gitim-company");
         assert_eq!(ev.agent_id, "framer-opus");
+    }
+
+    #[test]
+    fn fired_timer_prefix_renders_into_run_once_path() {
+        // Hosted as a unit test: directly call the helper that builds
+        // the combined external_prompt from (fired_timers, daemon_changes).
+        use gitim_core::timer::{format_fired_for_prompt, Timer};
+        let now: chrono::DateTime<chrono::Utc> = "2026-05-20T15:00:55Z"
+            .parse()
+            .expect("static rfc3339 parses");
+        let fired = vec![Timer {
+            id: "20260520T143055-aaaaaa".into(),
+            fire_at: "2026-05-20T15:00:55Z"
+                .parse()
+                .expect("static rfc3339 parses"),
+            created_at: "2026-05-20T14:30:55Z"
+                .parse()
+                .expect("static rfc3339 parses"),
+            anchor: "<#x>".into(),
+            note: Some("test".into()),
+        }];
+        let timer_part = format_fired_for_prompt(&fired, now);
+
+        let combined = combine_timer_and_changes(Some(timer_part.clone()), None);
+        assert!(combined.is_some());
+        assert!(combined.unwrap().contains("⏰ Timer reminder"));
+
+        let combined =
+            combine_timer_and_changes(Some(timer_part.clone()), Some("from daemon".into()));
+        let s = combined.unwrap();
+        assert!(s.contains("⏰ Timer reminder"));
+        assert!(s.contains("from daemon"));
+        assert!(
+            s.find("⏰").unwrap() < s.find("from daemon").unwrap(),
+            "timer must come first"
+        );
+
+        let combined = combine_timer_and_changes(None, Some("from daemon".into()));
+        assert_eq!(combined.as_deref(), Some("from daemon"));
+
+        let combined = combine_timer_and_changes(None, None);
+        assert!(combined.is_none());
     }
 }
