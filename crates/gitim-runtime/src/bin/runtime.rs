@@ -187,6 +187,12 @@ enum Command {
         /// chmod 0600.
         #[arg(long = "dotenv-file")]
         dotenv_file: Option<PathBuf>,
+        /// When set, wipes the agent's session state (session_token,
+        /// session_usage, estimated_tokens, and all pending/recovery flags).
+        /// Use after manual credential rotation or to force a clean restart
+        /// without a full burn-and-recreate cycle.
+        #[arg(long = "clear-session")]
+        clear_session: bool,
     },
     /// Run provider preflight checks (binary present, version, hello round-trip).
     ///
@@ -454,6 +460,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             introduction,
             env,
             dotenv_file,
+            clear_session,
         } => {
             let args = cmd_update_agent::Args {
                 workspace,
@@ -464,6 +471,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 introduction,
                 env,
                 dotenv_file,
+                clear_session,
             };
             cmd_update_agent::run(&client, args).await
         }
@@ -1558,6 +1566,7 @@ mod argv_subcommand_tests {
                 introduction,
                 env,
                 dotenv_file,
+                clear_session,
             }) => {
                 assert!(workspace.is_none());
                 assert_eq!(id, "agent-1");
@@ -1567,6 +1576,7 @@ mod argv_subcommand_tests {
                 assert!(introduction.is_none());
                 assert!(env.is_empty());
                 assert!(dotenv_file.is_none());
+                assert!(!clear_session);
             }
             other => panic!("expected UpdateAgent, got {other:?}"),
         }
@@ -1598,6 +1608,7 @@ mod argv_subcommand_tests {
                 system_prompt,
                 env,
                 introduction,
+                clear_session,
                 ..
             }) => {
                 assert_eq!(workspace.as_deref(), Some("ws-a"));
@@ -1605,6 +1616,7 @@ mod argv_subcommand_tests {
                 assert_eq!(system_prompt.as_deref(), Some("new prompt"));
                 assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
                 assert_eq!(introduction.as_deref(), Some("new blurb"));
+                assert!(!clear_session);
             }
             other => panic!("expected UpdateAgent, got {other:?}"),
         }
@@ -1658,6 +1670,54 @@ mod argv_subcommand_tests {
             "/tmp/y",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_agent_clear_session_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "agent-1",
+            "--clear-session",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                id, clear_session, ..
+            }) => {
+                assert_eq!(id, "agent-1");
+                assert!(clear_session);
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_clear_session_with_model() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "agent-1",
+            "--model",
+            "claude-opus-4-7",
+            "--clear-session",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                id,
+                model,
+                clear_session,
+                ..
+            }) => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(model.as_deref(), Some("claude-opus-4-7"));
+                assert!(clear_session);
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
     }
 
     // ------------------------------------------------------------------
