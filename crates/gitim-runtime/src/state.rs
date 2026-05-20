@@ -75,6 +75,18 @@ pub struct AgentState {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub post_reset_pending: bool,
 
+    /// Set after a provider execution fails after consuming a poll batch.
+    /// The next `run_once` consumes it: if there are no external changes, the
+    /// runtime still kicks one recovery turn with a synthetic preamble so the
+    /// agent can inspect persistent state and continue unfinished work instead
+    /// of waiting forever for a new message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failure_recovery_pending: bool,
+    /// Number of consecutive provider-failure recovery attempts. Bounded by
+    /// the agent loop so a persistent provider/config failure does not spin.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub failure_recovery_attempts: u32,
+
     /// Baseline used to convert cumulative provider usage to per-turn deltas
     /// in the token-statistics layer. Lives next to `session_token` because
     /// it shares the session lifecycle, not because it serves the session
@@ -84,6 +96,10 @@ pub struct AgentState {
 }
 
 fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -112,9 +128,9 @@ impl AgentState {
 
     /// Clear all fields tied to the current provider session, plus any
     /// cross-cycle pressure/continuation signals (`usage_notice_pending`,
-    /// `usage_notice_sent`, `post_reset_pending`). Called on `[[RESET]]`
-    /// detection, on session failure, and from PATCH-agent paths that
-    /// effectively start fresh (model / system_prompt change).
+    /// `usage_notice_sent`, `post_reset_pending`, failure recovery). Called
+    /// on `[[RESET]]` detection, on session failure, and from PATCH-agent
+    /// paths that effectively start fresh (model / system_prompt change).
     ///
     /// The reset branch is the one place where a continuation signal is
     /// supposed to outlive a `clear_session()`: it re-arms
@@ -127,6 +143,8 @@ impl AgentState {
         self.usage_notice_pending = false;
         self.usage_notice_sent = false;
         self.post_reset_pending = false;
+        self.failure_recovery_pending = false;
+        self.failure_recovery_attempts = 0;
         self.last_session_usage = None;
     }
 }
@@ -158,6 +176,8 @@ mod tests {
             usage_notice_pending: false,
             usage_notice_sent: false,
             post_reset_pending: false,
+            failure_recovery_pending: false,
+            failure_recovery_attempts: 0,
             last_session_usage: None,
         };
 
@@ -203,6 +223,8 @@ mod tests {
             usage_notice_pending: false,
             usage_notice_sent: false,
             post_reset_pending: false,
+            failure_recovery_pending: false,
+            failure_recovery_attempts: 0,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
                 usage: ProviderUsage {
@@ -235,6 +257,8 @@ mod tests {
             usage_notice_pending: false,
             usage_notice_sent: false,
             post_reset_pending: false,
+            failure_recovery_pending: false,
+            failure_recovery_attempts: 0,
             last_session_usage: Some(LastSessionUsage {
                 session_id: "sess-cum".into(),
                 usage: ProviderUsage {
@@ -259,6 +283,37 @@ mod tests {
         state.save(dir.path()).expect("save");
         let loaded = AgentState::load(dir.path()).expect("load");
         assert!(loaded.post_reset_pending);
+    }
+
+    #[test]
+    fn failure_recovery_state_roundtrips() {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".gitim")).expect("mkdir");
+        let state = AgentState {
+            failure_recovery_pending: true,
+            failure_recovery_attempts: 2,
+            ..AgentState::default()
+        };
+
+        state.save(dir.path()).expect("save");
+        let loaded = AgentState::load(dir.path()).expect("load");
+
+        assert!(loaded.failure_recovery_pending);
+        assert_eq!(loaded.failure_recovery_attempts, 2);
+    }
+
+    #[test]
+    fn clear_session_drops_failure_recovery_state() {
+        let mut state = AgentState {
+            failure_recovery_pending: true,
+            failure_recovery_attempts: 2,
+            ..AgentState::default()
+        };
+
+        state.clear_session();
+
+        assert!(!state.failure_recovery_pending);
+        assert_eq!(state.failure_recovery_attempts, 0);
     }
 
     #[test]
@@ -288,6 +343,8 @@ mod tests {
             usage_notice_pending: true,
             usage_notice_sent: true,
             post_reset_pending: true,
+            failure_recovery_pending: true,
+            failure_recovery_attempts: 2,
             last_session_usage: None,
         };
         state.clear_session();
@@ -301,6 +358,11 @@ mod tests {
             !state.post_reset_pending,
             "clear_session must wipe post_reset_pending; reset branch re-arms after"
         );
+        assert!(
+            !state.failure_recovery_pending,
+            "clear_session must wipe failure recovery; provider failure re-arms after"
+        );
+        assert_eq!(state.failure_recovery_attempts, 0);
     }
 
     #[test]
@@ -319,6 +381,8 @@ mod tests {
             usage_notice_pending: true,
             usage_notice_sent: true,
             post_reset_pending: false,
+            failure_recovery_pending: false,
+            failure_recovery_attempts: 0,
             last_session_usage: None,
         };
         state.clear_session();

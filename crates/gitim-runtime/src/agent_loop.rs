@@ -18,6 +18,8 @@ use crate::poller::{ChannelChange, Poller};
 use crate::state::{AgentState, LastSessionUsage, SessionUsageSnapshot, UsageSource};
 use crate::usage_log::{AgentUsageLog, UsageSummary};
 
+pub(crate) const MAX_FAILURE_RECOVERY_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone, Default)]
 pub struct AgentLoopConfig {
     pub provider_type: String,
@@ -562,6 +564,16 @@ impl AgentLoop {
         self.emit_activity("usage", "");
     }
 
+    fn clear_failure_recovery_state(&self) -> Result<(), RuntimeError> {
+        let mut state = AgentState::load(&self.repo_root)?;
+        if state.failure_recovery_pending || state.failure_recovery_attempts != 0 {
+            state.failure_recovery_pending = false;
+            state.failure_recovery_attempts = 0;
+            state.save(&self.repo_root)?;
+        }
+        Ok(())
+    }
+
     /// Initialize the poller cursor if not already set.
     /// Call this once before entering a manual run_once() loop.
     pub async fn init(&mut self) -> Result<(), RuntimeError> {
@@ -597,12 +609,21 @@ impl AgentLoop {
         };
 
         // Decide what (if anything) to run this cycle:
-        //   - external input present                  → run with that prompt
-        //   - no external input, post_reset armed     → run a cold-start kick
-        //   - no external input, no continuation flag → idle
-        let prompt = match (external_prompt, state.post_reset_pending) {
-            (Some(p), _) => p,
-            (None, true) => {
+        //   - external input present                     → run with that prompt
+        //   - no external input, post_reset armed        → run a cold-start kick
+        //   - no external input, failure recovery armed  → run a recovery kick
+        //   - no external input, no continuation flag    → idle
+        let prompt = match (
+            external_prompt,
+            state.post_reset_pending,
+            state.failure_recovery_pending,
+        ) {
+            (Some(p), _, _) => {
+                state.failure_recovery_pending = false;
+                state.failure_recovery_attempts = 0;
+                p
+            }
+            (None, true, _) => {
                 tracing::info!(
                     handler = %self.handler,
                     "post-reset self-wake: empty poll, kicking cold-start continuation turn"
@@ -611,8 +632,34 @@ impl AgentLoop {
                 // an empty body with the preamble itself.
                 String::new()
             }
-            (None, false) => {
-                tracing::debug!("idle: no external changes, no post-reset continuation pending");
+            (None, false, true)
+                if state.failure_recovery_attempts <= MAX_FAILURE_RECOVERY_ATTEMPTS =>
+            {
+                tracing::info!(
+                    handler = %self.handler,
+                    attempt = state.failure_recovery_attempts,
+                    max_attempts = MAX_FAILURE_RECOVERY_ATTEMPTS,
+                    "post-failure self-wake: empty poll, kicking recovery turn"
+                );
+                String::new()
+            }
+            (None, false, true) => {
+                tracing::warn!(
+                    handler = %self.handler,
+                    attempt = state.failure_recovery_attempts,
+                    max_attempts = MAX_FAILURE_RECOVERY_ATTEMPTS,
+                    "dropping stale failure recovery flag beyond retry budget"
+                );
+                state.failure_recovery_pending = false;
+                state.failure_recovery_attempts = 0;
+                state.save(&self.repo_root)?;
+                self.save_state()?;
+                return Ok(false);
+            }
+            (None, false, false) => {
+                tracing::debug!(
+                    "idle: no external changes, no post-reset/failure continuation pending"
+                );
                 self.save_state()?;
                 return Ok(false);
             }
@@ -632,6 +679,25 @@ impl AgentLoop {
         let prompt = if state.post_reset_pending {
             let preamble = build_post_reset_preamble();
             state.post_reset_pending = false;
+            state.failure_recovery_pending = false;
+            state.failure_recovery_attempts = 0;
+            if prompt.is_empty() {
+                preamble
+            } else {
+                format!("{preamble}\n\n---\n\n{prompt}")
+            }
+        } else {
+            prompt
+        };
+
+        // Consume failure_recovery_pending after post_reset. This is a
+        // bounded self-wake used only after provider failure consumes a poll
+        // batch: it gives long-running agents one more turn to inspect durable
+        // state and continue unfinished work instead of staying idle forever.
+        let prompt = if state.failure_recovery_pending {
+            let attempt = state.failure_recovery_attempts.max(1);
+            let preamble = build_failure_recovery_preamble(attempt, MAX_FAILURE_RECOVERY_ATTEMPTS);
+            state.failure_recovery_pending = false;
             if prompt.is_empty() {
                 preamble
             } else {
@@ -884,8 +950,25 @@ impl AgentLoop {
             // Clear session_token to avoid resuming a broken session
             self.session_token = None;
             let mut state = AgentState::load(&self.repo_root)?;
-            state.clear_session();
+            let rearmed = arm_failure_recovery_after_provider_failure(&mut state);
             state.save(&self.repo_root)?;
+            if rearmed {
+                self.emit_activity(
+                    "retrying",
+                    &format!(
+                        "retrying after failure ({}/{})",
+                        state.failure_recovery_attempts, MAX_FAILURE_RECOVERY_ATTEMPTS
+                    ),
+                );
+            } else {
+                self.emit_activity(
+                    "error",
+                    &format!(
+                        "automatic retry exhausted after {} attempts",
+                        MAX_FAILURE_RECOVERY_ATTEMPTS
+                    ),
+                );
+            }
             // Mirror the on-disk clear into the runtime's shared state
             // so the HUD stops showing a stale percentage.
             self.clear_runtime_session_usage();
@@ -941,6 +1024,9 @@ impl AgentLoop {
             }
         };
 
+        if provider_completed {
+            self.clear_failure_recovery_state()?;
+        }
         self.save_state()?;
         Ok(provider_completed)
     }
@@ -1038,6 +1124,17 @@ impl AgentLoop {
 
 fn is_provider_failure_status(status: &ExecStatus) -> bool {
     matches!(status, ExecStatus::Failed | ExecStatus::Timeout)
+}
+
+pub(crate) fn arm_failure_recovery_after_provider_failure(state: &mut AgentState) -> bool {
+    let next_attempt = state.failure_recovery_attempts.saturating_add(1);
+    state.clear_session();
+    if next_attempt > MAX_FAILURE_RECOVERY_ATTEMPTS {
+        return false;
+    }
+    state.failure_recovery_pending = true;
+    state.failure_recovery_attempts = next_attempt;
+    true
 }
 
 pub(crate) fn is_daemon_not_running_poll_error(error: &RuntimeError) -> bool {
@@ -1486,6 +1583,22 @@ pub fn build_post_reset_preamble() -> String {
     )
 }
 
+pub fn build_failure_recovery_preamble(attempt: u32, max_attempts: u32) -> String {
+    format!(
+        "[系统] 上一轮 agent 执行失败了，runtime 已清理损坏的 provider \
+         session 并自动重新唤醒你（第 {attempt}/{max_attempts} 次自动恢复）。\n\
+         \n\
+         这不是新的用户需求；目标是恢复刚才被中断的长期工作。请按顺序判断：\n\
+         1. 查看最近消息、记忆文件、当前仓库/运行状态，找出上一轮未完成在哪里；\n\
+         2. 如果能安全继续 → 继续推进原工作，并优先修正导致失败的直接原因；\n\
+         3. 如果失败原因仍然存在、需要用户介入、或没有可确认的未完成工作 → \
+            不要循环重试，发一条简短说明或直接结束本轮。\n\
+         \n\
+         本提醒是 bounded retry；如果连续失败达到上限，runtime 会停止自动恢复，\
+         等待新的外部消息。",
+    )
+}
+
 /// Construct a `ProviderConfig` with provider-specific env defaults.
 ///
 /// For the `hermes` provider, injects `HERMES_HOME=<profile_dir>` so the agent
@@ -1575,9 +1688,56 @@ mod tests {
         assert!(
             !post_reset.contains("[[RESET]]"),
             "post-reset preamble is sent AFTER reset — it must not re-instruct \
-             the agent to emit [[RESET]] (that would tee up an immediate \
+            the agent to emit [[RESET]] (that would tee up an immediate \
              second reset on an empty session)"
         );
+    }
+
+    #[test]
+    fn failure_recovery_preamble_names_bounded_retry_and_unfinished_work() {
+        let p = build_failure_recovery_preamble(2, MAX_FAILURE_RECOVERY_ATTEMPTS);
+        assert!(
+            p.contains("2/3"),
+            "preamble should show bounded retry position: {p}"
+        );
+        assert!(
+            p.contains("长期工作") || p.contains("未完成"),
+            "preamble should orient the agent toward unfinished work: {p}"
+        );
+        assert!(
+            p.contains("不要循环重试") || p.contains("上限"),
+            "preamble should prevent unbounded retry loops: {p}"
+        );
+    }
+
+    #[test]
+    fn provider_failure_rearms_bounded_recovery_after_clearing_session() {
+        let mut state = AgentState {
+            session_token: Some("broken-session".to_string()),
+            estimated_tokens: 42,
+            failure_recovery_attempts: 2,
+            ..AgentState::default()
+        };
+
+        assert!(arm_failure_recovery_after_provider_failure(&mut state));
+
+        assert!(state.session_token.is_none());
+        assert_eq!(state.estimated_tokens, 0);
+        assert!(state.failure_recovery_pending);
+        assert_eq!(state.failure_recovery_attempts, 3);
+    }
+
+    #[test]
+    fn provider_failure_stops_rearming_after_retry_budget() {
+        let mut state = AgentState {
+            failure_recovery_attempts: MAX_FAILURE_RECOVERY_ATTEMPTS,
+            ..AgentState::default()
+        };
+
+        assert!(!arm_failure_recovery_after_provider_failure(&mut state));
+
+        assert!(!state.failure_recovery_pending);
+        assert_eq!(state.failure_recovery_attempts, 0);
     }
 
     #[test]
