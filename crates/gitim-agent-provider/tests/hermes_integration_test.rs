@@ -37,7 +37,8 @@ async fn completed_prompt_does_not_wait_forever_for_acp_server_exit() {
         .usage
         .expect("prompt response usage must be captured");
     assert_eq!(usage.input_tokens, Some(12));
-    assert_eq!(usage.output_tokens, Some(3));
+    assert_eq!(usage.output_tokens, Some(8));
+    assert_eq!(usage.cache_read_tokens, Some(100));
 
     timeout(Duration::from_secs(1), drain_events)
         .await

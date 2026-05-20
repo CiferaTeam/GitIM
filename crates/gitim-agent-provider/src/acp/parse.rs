@@ -220,25 +220,39 @@ fn extract_tool_content_text(update: &Value) -> String {
 
 /// Map an ACP `usage` object to the provider-agnostic [`ProviderUsage`].
 ///
-/// ACP surfaces usage in two shapes:
-/// 1. `session/prompt` response — ACP snake_case (`input_tokens`, …)
-/// 2. `session/update` `usage_update` — hermes' camelCase
-///    (`inputTokens`, …)
+/// ACP surfaces usage in a few shapes:
+/// 1. `session/prompt` response — ACP schema aliases (`inputTokens`,
+///    `cachedReadTokens`, `thoughtTokens`, …)
+/// 2. older prompt/notification shapes — snake_case (`input_tokens`, …)
+/// 3. older Hermes `usage_update` notifications — camelCase
+///    (`cacheReadInputTokens`, …)
 ///
-/// Try snake_case first (ACP spec), camelCase as fallback. Returns
-/// `None` when none of the four counts are present, so an empty
+/// Returns `None` when none of the billing counts are present, so an empty
 /// `usage: {}` does not fabricate a 0% snapshot.
 pub fn parse_acp_usage(v: &Value) -> Option<ProviderUsage> {
     let obj = v.as_object()?;
-    let pick = |snake: &str, camel: &str| -> Option<u64> {
-        obj.get(snake)
-            .or_else(|| obj.get(camel))
-            .and_then(Value::as_u64)
+    let pick = |keys: &[&str]| -> Option<u64> {
+        keys.iter()
+            .find_map(|key| obj.get(*key).and_then(Value::as_u64))
     };
-    let input = pick("input_tokens", "inputTokens");
-    let output = pick("output_tokens", "outputTokens");
-    let cache_read = pick("cache_read_input_tokens", "cacheReadInputTokens");
-    let cache_creation = pick("cache_creation_input_tokens", "cacheCreationInputTokens");
+    let input = pick(&["input_tokens", "inputTokens"]);
+    let output = add_optional_tokens(
+        pick(&["output_tokens", "outputTokens"]),
+        pick(&["thought_tokens", "thoughtTokens"]),
+    );
+    let cache_read = pick(&[
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cached_read_tokens",
+        "cachedReadTokens",
+    ]);
+    let cache_creation = pick(&[
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+        "cached_write_tokens",
+        "cachedWriteTokens",
+        "cacheWriteTokens",
+    ]);
     if input.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none() {
         return None;
     }
@@ -251,6 +265,13 @@ pub fn parse_acp_usage(v: &Value) -> Option<ProviderUsage> {
         context_tokens: None,
         context_window_tokens: None,
     })
+}
+
+fn add_optional_tokens(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    if current.is_none() && next.is_none() {
+        return None;
+    }
+    Some(current.unwrap_or(0).saturating_add(next.unwrap_or(0)))
 }
 
 #[cfg(test)]
@@ -528,6 +549,23 @@ mod tests {
         .expect("prompt response usage parses");
         assert_eq!(usage.input_tokens, Some(999));
         assert_eq!(usage.output_tokens, Some(42));
+        assert_eq!(usage.cache_read_tokens, Some(11_000));
+        assert_eq!(usage.cache_creation_tokens, Some(100));
+    }
+
+    #[test]
+    fn prompt_response_usage_accepts_acp_schema_aliases() {
+        let usage = parse_acp_usage(&json!({
+            "inputTokens": 999,
+            "outputTokens": 42,
+            "totalTokens": 12_345,
+            "cachedReadTokens": 11_000,
+            "cachedWriteTokens": 100,
+            "thoughtTokens": 7,
+        }))
+        .expect("prompt response usage parses");
+        assert_eq!(usage.input_tokens, Some(999));
+        assert_eq!(usage.output_tokens, Some(49));
         assert_eq!(usage.cache_read_tokens, Some(11_000));
         assert_eq!(usage.cache_creation_tokens, Some(100));
     }

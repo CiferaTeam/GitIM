@@ -14,7 +14,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"session/prompt"'*)
       printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_fake_hermes","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fake hermes ok"}}}}\n'
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"input_tokens":12,"output_tokens":3}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":3,"totalTokens":120,"cachedReadTokens":100,"thoughtTokens":5}}}\n' "$id"
       sleep 30
       exit 0
       ;;
