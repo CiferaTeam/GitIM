@@ -122,7 +122,8 @@ async fn drive_session(
     let mut session_id = String::new();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
-    let mut captured_usage: Option<ProviderUsage> = None;
+    let mut billing_usage: Option<ProviderUsage> = None;
+    let mut context_usage: Option<ProviderUsage> = None;
 
     let mut reader = BufReader::new(stdout).lines();
 
@@ -173,7 +174,8 @@ async fn drive_session(
                                     });
                                 }
                                 ParsedMessage::StepFinish { usage, reason } => {
-                                    captured_usage = Some(usage);
+                                    accumulate_opencode_usage(&mut billing_usage, &usage);
+                                    context_usage = Some(usage);
                                     if reason.as_deref() == Some("stop") {
                                         break;
                                     }
@@ -271,8 +273,8 @@ async fn drive_session(
         } else {
             Some(session_id)
         },
-        usage_report: ProviderUsageReport::from_usage(captured_usage.clone()),
-        usage: captured_usage,
+        usage_report: ProviderUsageReport::new(billing_usage.clone(), context_usage),
+        usage: billing_usage,
     });
 }
 
@@ -280,6 +282,22 @@ fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
         warn!("event channel full, dropping event");
     }
+}
+
+fn accumulate_opencode_usage(accumulated: &mut Option<ProviderUsage>, next: &ProviderUsage) {
+    let usage = accumulated.get_or_insert_with(ProviderUsage::default);
+    usage.input_tokens = add_optional_tokens(usage.input_tokens, next.input_tokens);
+    usage.output_tokens = add_optional_tokens(usage.output_tokens, next.output_tokens);
+    usage.cache_read_tokens = add_optional_tokens(usage.cache_read_tokens, next.cache_read_tokens);
+    usage.cache_creation_tokens =
+        add_optional_tokens(usage.cache_creation_tokens, next.cache_creation_tokens);
+}
+
+fn add_optional_tokens(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    if current.is_none() && next.is_none() {
+        return None;
+    }
+    Some(current.unwrap_or(0).saturating_add(next.unwrap_or(0)))
 }
 
 /// Plan of record for invoking `opencode run`. Separated from execute() so
@@ -646,11 +664,11 @@ echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":
         let (result, drain) = run_fake(
             r#"echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"tool_use","part":{"tool":"read","callID":"c1","state":{"status":"completed","input":{"filePath":"/tmp/test"}}}}'
-echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"tool-calls"}}'
+echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":100,"write":1}},"reason":"tool-calls"}}'
 sleep 0.5
 echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"text","part":{"text":"done"}}'
-echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
+echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":1,"cache":{"read":50,"write":2}},"reason":"stop"}}'"#,
             Duration::from_secs(30),
             Duration::from_secs(5),
         ).await;
@@ -661,6 +679,28 @@ echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":0
             "expected Completed after final stop following tool-calls; got {:?}",
             result
         );
+
+        let expected_billing = ProviderUsage {
+            input_tokens: Some(15),
+            output_tokens: Some(11),
+            used_percent: None,
+            cache_read_tokens: Some(150),
+            cache_creation_tokens: Some(3),
+            context_tokens: None,
+            context_window_tokens: None,
+        };
+        let expected_context = ProviderUsage {
+            input_tokens: Some(5),
+            output_tokens: Some(4),
+            used_percent: None,
+            cache_read_tokens: Some(50),
+            cache_creation_tokens: Some(2),
+            context_tokens: None,
+            context_window_tokens: None,
+        };
+        assert_eq!(result.usage, Some(expected_billing.clone()));
+        assert_eq!(result.usage_report.billing, Some(expected_billing));
+        assert_eq!(result.usage_report.context, Some(expected_context));
 
         let _ = drain.await;
     }
