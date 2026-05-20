@@ -172,8 +172,11 @@ async fn drive_session(
                                         status: "running".to_string(),
                                     });
                                 }
-                                ParsedMessage::StepFinish { usage } => {
+                                ParsedMessage::StepFinish { usage, reason } => {
                                     captured_usage = Some(usage);
+                                    if reason.as_deref() == Some("stop") {
+                                        break;
+                                    }
                                 }
                                 ParsedMessage::Text { content } => {
                                     output.push_str(&content);
@@ -225,15 +228,21 @@ async fn drive_session(
         let _ = child.start_kill();
     }
 
-    if final_status != ExecStatus::Timeout {
-        match child.wait().await {
-            Ok(status) if !status.success() && final_status == ExecStatus::Completed => {
+    if final_status != ExecStatus::Timeout && final_status != ExecStatus::Aborted {
+        // Graceful wait with a short window; if the child does not exit after
+        // receiving the stop signal, force-kill it so we don't leak processes.
+        match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(Ok(status)) if !status.success() && final_status == ExecStatus::Completed => {
                 final_status = ExecStatus::Failed;
                 final_error = Some(format!("opencode exited with status: {status}"));
             }
-            Err(e) if final_status == ExecStatus::Completed => {
+            Ok(Err(e)) if final_status == ExecStatus::Completed => {
                 final_status = ExecStatus::Failed;
                 final_error = Some(format!("failed to wait for opencode: {e}"));
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
             _ => {}
         }
@@ -338,7 +347,7 @@ pub enum ParsedMessage {
     /// Step start with session ID.
     StepStart { session_id: String },
     /// Step finish with token usage.
-    StepFinish { usage: ProviderUsage },
+    StepFinish { usage: ProviderUsage, reason: Option<String> },
     /// Text content from an assistant message.
     Text { content: String },
     /// Tool use event — combined: carries invocation + optional result when completed.
@@ -368,7 +377,9 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             session_id: raw.session_id.unwrap_or_default(),
         }),
         "step_finish" => {
-            let tokens = raw.part?.tokens?;
+            let part = raw.part?;
+            let tokens = part.tokens?;
+            let reason = part.reason;
             Some(ParsedMessage::StepFinish {
                 usage: ProviderUsage {
                     input_tokens: Some(tokens.input),
@@ -379,6 +390,7 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                     context_tokens: None,
                     context_window_tokens: None,
                 },
+                reason,
             })
         }
         "text" => {
@@ -440,6 +452,8 @@ struct RawPart {
     state: Option<RawToolState>,
     #[serde(default)]
     tokens: Option<RawTokens>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -478,4 +492,166 @@ struct RawError {
     name: Option<String>,
     #[serde(default)]
     data: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+    use tokio::time::{timeout, Duration};
+
+    // Serialise fake-opencode tests so they do not compete for processes/stdout
+    // and flake under parallel execution.
+    static FAKE_OPENCODE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Create a fake opencode binary that emits the given NDJSON lines then hangs.
+    fn fake_opencode_with_script(tmp: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = tmp.join("fake-opencode");
+        let script = format!(
+            r#"#!/bin/bash
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --format|--model|--agent|--session) shift 2 ;; 
+        --dangerously-skip-permissions) shift ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+{}
+while true; do sleep 1; done
+"#,
+            body
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    async fn run_fake(body: &str, provider_timeout: Duration, test_timeout: Duration) -> (ExecResult, tokio::task::JoinHandle<()>) {
+        let tmp = std::env::temp_dir().join(format!(
+            "gitim-opencode-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let fake = fake_opencode_with_script(&tmp, body);
+
+        let provider = OpencodeProvider::new(ProviderConfig {
+            executable_path: Some(fake.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+
+        let session = provider
+            .execute("test prompt", ExecOptions {
+                timeout: Some(provider_timeout),
+                ..Default::default()
+            })
+            .await
+            .expect("execute should start");
+
+        let mut events = session.events;
+        let drain = tokio::spawn(async move {
+            while events.recv().await.is_some() {}
+        });
+
+        let result = timeout(test_timeout, session.result)
+            .await
+            .expect("result should arrive before test timeout")
+            .expect("result channel should not close");
+
+        (result, drain)
+    }
+
+    #[tokio::test]
+    async fn provider_times_out_when_opencode_never_exits() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
+        let (result, drain) = run_fake(
+            r#"echo '{"type":"step_start","sessionID":"test-session"}'
+echo '{"type":"text","part":{"text":"hello"}}'"#,
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        ).await;
+
+        assert_eq!(
+            result.status,
+            ExecStatus::Timeout,
+            "expected Timeout when no step_finish is emitted; got {:?}",
+            result
+        );
+
+        let _ = drain.await;
+    }
+
+    #[tokio::test]
+    async fn provider_should_complete_after_full_ndjson_without_waiting_for_process_exit() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
+        let (result, drain) = run_fake(
+            r#"echo '{"type":"step_start","sessionID":"test-session"}'
+echo '{"type":"text","part":{"text":"hello from fake opencode"}}'
+echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        ).await;
+
+        assert_eq!(
+            result.status,
+            ExecStatus::Completed,
+            "expected Completed once step_finish(reason=stop) received; got {:?}",
+            result
+        );
+
+        let _ = drain.await;
+    }
+
+    #[tokio::test]
+    async fn provider_should_not_complete_on_tool_calls_without_final_stop() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
+        let (result, drain) = run_fake(
+            r#"echo '{"type":"step_start","sessionID":"test-session"}'
+echo '{"type":"tool_use","part":{"tool":"read","callID":"c1","state":{"status":"completed","input":{"filePath":"/tmp/test"}}}}'
+echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"tool-calls"}}'"#,
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        ).await;
+
+        assert_eq!(
+            result.status,
+            ExecStatus::Timeout,
+            "expected Timeout when only tool-calls stop is emitted; got {:?}",
+            result
+        );
+
+        let _ = drain.await;
+    }
+
+    #[tokio::test]
+    async fn provider_should_wait_for_stop_after_tool_calls() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
+        let (result, drain) = run_fake(
+            r#"echo '{"type":"step_start","sessionID":"test-session"}'
+echo '{"type":"tool_use","part":{"tool":"read","callID":"c1","state":{"status":"completed","input":{"filePath":"/tmp/test"}}}}'
+echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"tool-calls"}}'
+sleep 0.5
+echo '{"type":"step_start","sessionID":"test-session"}'
+echo '{"type":"text","part":{"text":"done"}}'
+echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        ).await;
+
+        assert_eq!(
+            result.status,
+            ExecStatus::Completed,
+            "expected Completed after final stop following tool-calls; got {:?}",
+            result
+        );
+
+        let _ = drain.await;
+    }
 }

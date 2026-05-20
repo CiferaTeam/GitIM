@@ -79,7 +79,7 @@ fn parse_step_finish_with_tokens() {
     .to_string();
 
     let msg = parse_line(&line).unwrap();
-    let ParsedMessage::StepFinish { usage } = msg else {
+    let ParsedMessage::StepFinish { usage, reason: _ } = msg else {
         panic!("expected StepFinish");
     };
     assert_eq!(usage.input_tokens, Some(315));
