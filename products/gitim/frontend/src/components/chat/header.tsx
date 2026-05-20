@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AtSign, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
+import { AtSign, Crown, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
 import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
@@ -75,6 +75,8 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
 
   const members = channel?.members ?? [];
   const canInvite = !isDm && !!currentUser && members.includes(currentUser);
+  const creator = !isDm ? channel?.created_by?.trim() : null;
+  const showChannelInfo = !isDm && (members.length > 0 || !!creator);
 
   return (
     <div className="h-12 border-b border-border flex items-center px-4 justify-between shrink-0 bg-card/30">
@@ -110,7 +112,7 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
             )}
           </Button>
         )}
-        {!isDm && members.length > 0 && (
+        {showChannelInfo && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" className="gap-1.5 text-text-secondary hover:text-foreground hover:bg-surface-hover">
@@ -131,27 +133,56 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
                   <DropdownMenuSeparator className="bg-border" />
                 </>
               )}
-              <DropdownMenuLabel className="text-text-muted text-xs uppercase tracking-wider">Members</DropdownMenuLabel>
-              <DropdownMenuSeparator className="bg-border" />
-              {members.map((member) => (
-                <DropdownMenuItem
-                  key={member}
-                  className="justify-between cursor-default focus:bg-transparent"
-                  onSelect={(e) => e.preventDefault()}
-                >
-                  <span className="text-sm">@{member}</span>
-                  {member !== currentUser && (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      onClick={() => onStartDm(member)}
-                      className="text-primary hover:text-primary hover:bg-primary/10"
+              {creator && (
+                <>
+                  <DropdownMenuLabel className="text-text-muted text-xs uppercase tracking-wider">Creator</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    className="justify-between cursor-default focus:bg-transparent"
+                    onSelect={(e) => e.preventDefault()}
+                  >
+                    <span className="flex items-center gap-1.5 text-sm text-foreground">
+                      <Crown className="size-3.5 text-warning" />
+                      @{creator}
+                    </span>
+                    {creator !== currentUser && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => onStartDm(creator)}
+                        className="text-primary hover:text-primary hover:bg-primary/10"
+                      >
+                        DM
+                      </Button>
+                    )}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator className="bg-border" />
+                </>
+              )}
+              {members.length > 0 && (
+                <>
+                  <DropdownMenuLabel className="text-text-muted text-xs uppercase tracking-wider">Members</DropdownMenuLabel>
+                  <DropdownMenuSeparator className="bg-border" />
+                  {members.map((member) => (
+                    <DropdownMenuItem
+                      key={member}
+                      className="justify-between cursor-default focus:bg-transparent"
+                      onSelect={(e) => e.preventDefault()}
                     >
-                      DM
-                    </Button>
-                  )}
-                </DropdownMenuItem>
-              ))}
+                      <span className="text-sm">@{member}</span>
+                      {member !== currentUser && (
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => onStartDm(member)}
+                          className="text-primary hover:text-primary hover:bg-primary/10"
+                        >
+                          DM
+                        </Button>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}

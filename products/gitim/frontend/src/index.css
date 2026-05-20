@@ -154,6 +154,25 @@
     }
   }
 
+  @keyframes route-recipient-nudge {
+    0%, 100% {
+      transform: translateX(0);
+    }
+    22% {
+      transform: translateX(-3px);
+    }
+    48% {
+      transform: translateX(3px);
+    }
+    72% {
+      transform: translateX(-2px);
+    }
+  }
+
+  .route-recipient-nudge {
+    animation: route-recipient-nudge 850ms ease-in-out 2;
+  }
+
   .agent-usage-liquid {
     position: absolute;
     inset: 0 auto 0 0;
@@ -204,7 +223,8 @@
   @media (prefers-reduced-motion: reduce) {
     .agent-usage-liquid,
     .agent-usage-liquid::before,
-    .agent-usage-liquid::after {
+    .agent-usage-liquid::after,
+    .route-recipient-nudge {
       animation: none;
       transition: none;
     }

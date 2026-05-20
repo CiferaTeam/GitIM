@@ -260,6 +260,67 @@ describe("ChatLayout all mention send", () => {
     expect(preview?.textContent).not.toContain("@bob");
   });
 
+  it("shows the current user when they are the only routed recipient", async () => {
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const textarea = document.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "hello");
+      await Promise.resolve();
+    });
+
+    const preview = document.querySelector("[data-recipient-preview]");
+    expect(preview?.textContent).toContain("@lewis");
+    expect(preview?.textContent).not.toContain("no one else");
+  });
+  it("renders high-visibility routed recipient chips while replying", async () => {
+    useChatStore.setState({
+      channels: [
+        {
+          name: "general",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis", "alice", "bob"],
+          created_by: "cfo",
+        },
+      ],
+      replyTo: {
+        line_number: 1,
+        point_to: 0,
+        author: "alice",
+        timestamp: "20260511T120000Z",
+        body: "please keep this visible",
+      },
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const textarea = document.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "replying");
+      await Promise.resolve();
+    });
+
+    const chips = Array.from(document.querySelectorAll("[data-recipient-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.textContent)).toEqual(["@alice", "@cfo"]);
+    for (const chip of chips) {
+      expect(chip.className).toContain("route-recipient-nudge");
+      expect(chip.className).toContain("text-primary");
+    }
+  });
+
   it("keeps the target line scroll intent after following a message link", async () => {
     await act(async () => {
       root!.render(<ChatLayout />);

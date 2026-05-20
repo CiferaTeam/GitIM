@@ -77,8 +77,12 @@ export function InputArea({
   );
   const displayedRecipients = useMemo(() => {
     const current = currentUser?.trim();
-    return current
-      ? draftRecipients.filter((recipient) => recipient !== current)
+    if (!current) return draftRecipients;
+    const recipientsWithoutCurrent = draftRecipients.filter(
+      (recipient) => recipient !== current,
+    );
+    return recipientsWithoutCurrent.length > 0
+      ? recipientsWithoutCurrent
       : draftRecipients;
   }, [draftRecipients, currentUser]);
 
@@ -208,16 +212,21 @@ export function InputArea({
   return (
     <div className="border-t border-border bg-card/60 px-4 py-3 shrink-0">
       {replyTo && (
-        <div className="mb-2 flex items-center gap-2 rounded-lg border border-border/60 bg-surface/60 px-3 py-1.5 text-xs text-text-muted">
+        <div
+          key={replyTo.line_number}
+          className="mb-2 flex items-center gap-2 rounded-lg border border-primary/45 bg-primary/15 px-3 py-1.5 text-xs text-foreground shadow-[0_0_0_1px_rgba(96,165,250,0.12)]"
+        >
           <span className="flex-1 truncate">
-            <span className="font-medium text-foreground">Reply to @{replyTo.author}: </span>
-            {replyTo.body.length > 40
-              ? replyTo.body.slice(0, 40) + "..."
-              : replyTo.body}
+            <span className="font-semibold text-primary">Reply to @{replyTo.author}: </span>
+            <span className="text-foreground/85">
+              {replyTo.body.length > 40
+                ? replyTo.body.slice(0, 40) + "..."
+                : replyTo.body}
+            </span>
           </span>
           <button
             onClick={() => onReplyToChange(null)}
-            className="ml-1 shrink-0 hover:text-foreground transition-colors p-0.5 rounded hover:bg-surface-hover"
+            className="ml-1 shrink-0 rounded p-0.5 text-primary transition-colors hover:bg-primary/15 hover:text-foreground"
             aria-label="Clear reply"
           >
             <X className="size-3.5" />
@@ -283,8 +292,9 @@ export function InputArea({
           {displayedRecipients.length > 0 ? (
             displayedRecipients.map((recipient) => (
               <span
-                key={recipient}
-                className="inline-flex h-6 items-center rounded-md border border-border/80 bg-surface/40 px-2 font-mono text-[10px] text-text-muted"
+                key={`${recipient}-${replyTo?.line_number ?? 0}-${displayedRecipients.join("|")}`}
+                data-recipient-chip
+                className="route-recipient-nudge inline-flex h-6 items-center rounded-md border border-primary/45 bg-primary/15 px-2 font-mono text-[10px] font-semibold text-primary shadow-[0_0_0_1px_rgba(96,165,250,0.10)]"
               >
                 @{recipient}
               </span>
