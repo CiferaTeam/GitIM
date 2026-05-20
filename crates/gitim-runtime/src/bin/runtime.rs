@@ -730,10 +730,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Record the port we're about to bind so the self-update async phase can
     // pass the same `--port` to the replacement runtime. `run_shell` is the
     // single writer; nothing else in the crate needs to mutate this.
-    state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .listen_port = port;
+    state.lock().unwrap_or_else(|e| e.into_inner()).listen_port = port;
 
     // Materialize the device-bound runtime ID. First boot generates and
     // persists; subsequent boots read the existing UUID. Either way it lands
@@ -741,10 +738,7 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // real ID even during the recovery window.
     // See docs/plans/runtime-id/00-design.md.
     let runtime_id = gitim_runtime::user_config::ensure_runtime_id();
-    state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .runtime_id = runtime_id.clone();
+    state.lock().unwrap_or_else(|e| e.into_inner()).runtime_id = runtime_id.clone();
     eprintln!("runtime started, id: {runtime_id}");
 
     // Token + email propagation MUST run before `recover_from_config`, because
