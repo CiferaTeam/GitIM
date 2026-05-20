@@ -11,7 +11,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 pub const MIN_DURATION_SECS: i64 = 10;
@@ -189,6 +191,57 @@ pub fn with_timers_lock<T>(
 /// the lock (read-only inspection, e.g., peek_next_due best-effort).
 pub fn timers_path(clone_path: &Path) -> PathBuf {
     clone_path.join(GITIM_DIR).join(TIMERS_FILENAME)
+}
+
+/// Read the timers file. Returns empty on: file missing, corrupted JSON,
+/// or unknown schema version (logs warning in the latter two cases).
+/// Never errors on read — read errors translate to "0 timers".
+pub fn read_timers(clone_path: &Path) -> Result<TimersFile, TimerError> {
+    let path = timers_path(clone_path);
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<TimersFile>(&bytes) {
+            Ok(f) if f.version == 1 => Ok(f),
+            Ok(f) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    version = f.version,
+                    "timers.json unknown schema version, treating as empty"
+                );
+                Ok(TimersFile::empty())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "timers.json corrupted, treating as empty (file preserved)"
+                );
+                Ok(TimersFile::empty())
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TimersFile::empty()),
+        Err(e) => Err(TimerError::Io(e)),
+    }
+}
+
+/// Write the timers file atomically: stage in a NamedTempFile under the
+/// `.gitim/` dir, fsync, then `persist` (atomic rename). NamedTempFile's
+/// Drop cleans up the temp on early-return / panic / persist failure (F5).
+pub fn write_timers(clone_path: &Path, file: &TimersFile) -> Result<(), TimerError> {
+    let gitim = clone_path.join(GITIM_DIR);
+    if !gitim.is_dir() {
+        return Err(TimerError::NotInClone);
+    }
+    let target = gitim.join(TIMERS_FILENAME);
+
+    let mut tmp = NamedTempFile::new_in(&gitim)?;
+    {
+        let writer = tmp.as_file_mut();
+        let json = serde_json::to_vec_pretty(file)?;
+        writer.write_all(&json)?;
+        writer.sync_all()?;
+    }
+    tmp.persist(&target).map_err(|e| TimerError::Io(e.error))?;
+    Ok(())
 }
 
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
@@ -488,5 +541,78 @@ mod tests {
         // No .gitim/ created.
         let err = with_timers_lock(tmp.path(), |_| Ok(())).unwrap_err();
         assert!(matches!(err, TimerError::NotInClone));
+    }
+
+    #[test]
+    fn read_timers_missing_file_returns_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let f = read_timers(clone).unwrap();
+        assert_eq!(f.timers.len(), 0);
+    }
+
+    #[test]
+    fn read_timers_corrupted_returns_empty_and_warns() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        let gitim = clone.join(GITIM_DIR);
+        std::fs::create_dir_all(&gitim).unwrap();
+        std::fs::write(gitim.join(TIMERS_FILENAME), "{this is not json").unwrap();
+        let f = read_timers(clone).unwrap();
+        assert_eq!(f.timers.len(), 0);
+        // File preserved (not deleted) — eng-review constraint.
+        assert!(gitim.join(TIMERS_FILENAME).exists());
+    }
+
+    #[test]
+    fn read_timers_unknown_version_returns_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        let gitim = clone.join(GITIM_DIR);
+        std::fs::create_dir_all(&gitim).unwrap();
+        std::fs::write(gitim.join(TIMERS_FILENAME), r#"{"version":99,"timers":[]}"#).unwrap();
+        let f = read_timers(clone).unwrap();
+        assert_eq!(f.timers.len(), 0);
+    }
+
+    #[test]
+    fn write_then_read_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let original = TimersFile {
+            version: 1,
+            timers: vec![Timer {
+                id: "20260520T143055-aaaaaa".into(),
+                fire_at: "2026-05-20T15:00:55Z".parse().unwrap(),
+                created_at: "2026-05-20T14:30:55Z".parse().unwrap(),
+                anchor: "<#x>".into(),
+                note: None,
+            }],
+        };
+        write_timers(clone, &original).unwrap();
+        let read = read_timers(clone).unwrap();
+        assert_eq!(read.timers.len(), 1);
+        assert_eq!(read.timers[0].id, "20260520T143055-aaaaaa");
+    }
+
+    #[test]
+    fn write_does_not_leave_tmp_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        let gitim = clone.join(GITIM_DIR);
+        std::fs::create_dir_all(&gitim).unwrap();
+        write_timers(clone, &TimersFile::empty()).unwrap();
+        let leftover: Vec<_> = std::fs::read_dir(&gitim)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                s.starts_with("timers.json.") && s != "timers.json.lock"
+            })
+            .collect();
+        assert!(leftover.is_empty(), "tmp files remained: {leftover:?}");
     }
 }

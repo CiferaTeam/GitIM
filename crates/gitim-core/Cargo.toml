@@ -16,10 +16,11 @@ fs2 = "0.4"
 getrandom = { version = "0.2", features = ["std"] }
 hex.workspace = true
 humantime = "2"
+tempfile = "3"
+tracing.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1"
-tempfile = "3"
 
 [lints]
 workspace = true
