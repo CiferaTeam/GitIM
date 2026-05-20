@@ -49,7 +49,7 @@ pub async fn handle_register_user(
             handler,
             exists: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap());
+        return Response::json(payload);
     }
 
     // Create meta file
@@ -58,7 +58,10 @@ pub async fn handle_register_user(
         role,
         introduction,
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    let meta_str = match Response::yaml_string(&meta, "user meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
 
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write user meta: {}", e));
@@ -85,7 +88,7 @@ pub async fn handle_register_user(
         handler,
         exists: false,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 /// Overwrite the `introduction` field of an existing user's meta.yaml.
@@ -139,11 +142,14 @@ pub async fn handle_update_user(
             handler,
             exists: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap());
+        return Response::json(payload);
     }
 
     meta.introduction = introduction;
-    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    let meta_str = match Response::yaml_string(&meta, "user meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write user meta: {}", e));
     }
@@ -161,7 +167,7 @@ pub async fn handle_update_user(
         handler,
         exists: true,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 /// Move `users/<handler>.meta.yaml` → `archive/users/<handler>.meta.yaml`
@@ -219,7 +225,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     // would bundle the unrelated send into our archive commit. Critical
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
-    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 6. git mv users/<h>.meta.yaml → archive/users/<h>.meta.yaml
     let from_rel = format!("users/{}.meta.yaml", handler);
@@ -308,7 +314,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         handler,
         archived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 /// Restore `archive/users/<handler>.meta.yaml` → `users/<handler>.meta.yaml`.
@@ -367,7 +373,7 @@ pub async fn handle_unarchive_user(
     // would bundle the unrelated send into our unarchive commit. Critical
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
-    let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 6. git mv archive → active.
     let from_rel = format!("archive/users/{}.meta.yaml", handler);
@@ -458,7 +464,7 @@ pub async fn handle_unarchive_user(
         handler,
         unarchived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 #[cfg(test)]

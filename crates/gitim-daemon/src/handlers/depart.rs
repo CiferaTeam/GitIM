@@ -78,7 +78,7 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
             commits: 0,
             already_departed: true,
         };
-        return Response::success(serde_json::to_value(payload).unwrap());
+        return Response::json(payload);
     }
 
     // 3. Validate active user actually exists. This catches the
@@ -130,7 +130,7 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
         commits: total_commits,
         already_departed: false,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 /// `archive/users/<handler>.meta.yaml` existing is the single source of
@@ -265,7 +265,7 @@ async fn append_leave_event_to_thread(
     // a concurrent send can't slip an unrelated commit between our git
     // add and git commit. Mirrors handle_send / write_channel_event.
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Re-read under lock — another writer (or a sync_loop rebase)
         // may have moved the file or appended after our pre-read.
@@ -432,7 +432,7 @@ async fn phase2_archive_dms(state: &SharedState, handler: &str) -> Result<u64, R
         }
 
         {
-            let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+            let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
             if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
                 return Err(Response::error(format!(
@@ -510,7 +510,7 @@ async fn phase3_clean_channel_members(state: &SharedState, handler: &str) -> Res
         }
 
         {
-            let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+            let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
             // Re-read under lock for the same reason as phase1.
             let cur_str = match std::fs::read_to_string(&meta_path) {
@@ -615,7 +615,7 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
     }
 
     {
-        let _commit_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
             return Err(Response::error(format!("phase4: git mv failed: {}", e)));

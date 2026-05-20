@@ -105,7 +105,10 @@ pub async fn handle_create_channel(
         introduction: introduction.unwrap_or_default(),
         members,
     };
-    let meta_str = serde_yaml::to_string(&meta).unwrap();
+    let meta_str = match Response::yaml_string(&meta, "channel meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
@@ -179,7 +182,7 @@ pub async fn handle_create_channel(
         channel: name,
         created_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 pub async fn handle_archive_channel(
@@ -209,7 +212,7 @@ pub async fn handle_archive_channel(
     // + single commit). Without the lock a concurrent writer could interleave
     // commits between our mvs and our commit, leaving the working tree in a
     // half-archived state that the push-rebase would not cleanly resolve.
-    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _write_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 3. Read channel meta, confirm channel exists
     let meta_path = state
@@ -508,7 +511,7 @@ pub async fn handle_archive_channel(
         channel,
         archived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 pub async fn handle_unarchive_channel(
@@ -540,7 +543,7 @@ pub async fn handle_unarchive_channel(
     // the tree in many steps (yaml clears + filtered card mvs + channel meta+thread
     // mvs + single commit). Concurrent writers would otherwise interleave commits
     // mid-operation.
-    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _write_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // 3. Read archive meta; fail if source not present
     let archive_meta_path = state
@@ -871,7 +874,7 @@ pub async fn handle_unarchive_channel(
         channel,
         unarchived_by: author,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 pub(super) async fn write_channel_event(
@@ -964,7 +967,7 @@ pub(super) async fn write_channel_event(
     // Commit-tree lock: covers read → re-validate → append → commit so
     // concurrent joins (and sync_loop's rebase) can't interleave. Critical
     // section is all blocking I/O; no `.await` between here and the commit.
-    let _write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _write_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Read .thread for next line number
     let thread_path = state
@@ -1058,7 +1061,10 @@ pub(super) async fn write_channel_event(
         _ => {}
     }
 
-    let meta_str = serde_yaml::to_string(&channel_meta).unwrap();
+    let meta_str = match Response::yaml_string(&channel_meta, "channel meta") {
+        Ok(meta_str) => meta_str,
+        Err(resp) => return resp,
+    };
     if let Err(e) = std::fs::write(&meta_path, &meta_str) {
         return Response::error(format!("failed to write channel meta: {}", e));
     }
@@ -1111,5 +1117,5 @@ pub(super) async fn write_channel_event(
         line_number: next_line,
         status: commit_status.to_string(),
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }

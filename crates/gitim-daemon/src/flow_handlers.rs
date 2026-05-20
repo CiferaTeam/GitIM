@@ -54,7 +54,7 @@ pub async fn handle_flow_list(state: SharedState) -> Response {
         }
     }
     flows.sort_by(|a, b| a.slug.cmp(&b.slug));
-    Response::success(serde_json::to_value(ListFlowsResponse { flows }).unwrap())
+    Response::json(ListFlowsResponse { flows })
 }
 
 pub async fn handle_flow_show(state: SharedState, slug: String) -> Response {
@@ -85,7 +85,7 @@ pub async fn handle_flow_show(state: SharedState, slug: String) -> Response {
         nodes: doc.meta.nodes.iter().map(FlowNodeSummary::from).collect(),
         raw_markdown: content,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 pub async fn handle_flow_create(
@@ -135,7 +135,7 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
     }
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Move the entire flows/<slug>/ directory (including any runs/ subtree) to
     // .trash/flows/<slug>/. Previously only index.md was moved, leaving orphan
@@ -210,17 +210,14 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
     let slug = match FlowSlug::new(&slug) {
         Ok(s) => s,
         Err(e) => {
-            return Response::success(
-                serde_json::to_value(ValidateFlowResponse {
-                    slug: slug_str,
-                    ok: false,
-                    items: vec![FlowValidationItem {
-                        kind: "error".into(),
-                        message: format!("invalid slug: {}", e),
-                    }],
-                })
-                .unwrap(),
-            );
+            return Response::json(ValidateFlowResponse {
+                slug: slug_str,
+                ok: false,
+                items: vec![FlowValidationItem {
+                    kind: "error".into(),
+                    message: format!("invalid slug: {}", e),
+                }],
+            });
         }
     };
     let rel = flow_path(&slug);
@@ -247,14 +244,11 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                     kind: "error".into(),
                     message: format!("{}", e),
                 });
-                return Response::success(
-                    serde_json::to_value(ValidateFlowResponse {
-                        slug: slug.to_string(),
-                        ok: false,
-                        items,
-                    })
-                    .unwrap(),
-                );
+                return Response::json(ValidateFlowResponse {
+                    slug: slug.to_string(),
+                    ok: false,
+                    items,
+                });
             }
             for w in validate_flow_for_storage(&doc, file_size) {
                 items.push(FlowValidationItem {
@@ -262,28 +256,22 @@ pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response 
                     message: format_warning(&w),
                 });
             }
-            Response::success(
-                serde_json::to_value(ValidateFlowResponse {
-                    slug: slug.to_string(),
-                    ok: true,
-                    items,
-                })
-                .unwrap(),
-            )
+            Response::json(ValidateFlowResponse {
+                slug: slug.to_string(),
+                ok: true,
+                items,
+            })
         }
         Err(e) => {
             items.push(FlowValidationItem {
                 kind: "error".into(),
                 message: format!("{}", e),
             });
-            Response::success(
-                serde_json::to_value(ValidateFlowResponse {
-                    slug: slug.to_string(),
-                    ok: false,
-                    items,
-                })
-                .unwrap(),
-            )
+            Response::json(ValidateFlowResponse {
+                slug: slug.to_string(),
+                ok: false,
+                items,
+            })
         }
     }
 }
@@ -295,7 +283,7 @@ fn commit_flow_document_locked(
     message_prefix: &str,
     author: &str,
 ) -> Result<CommittedFlow, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     doc.meta.updated_at = Some(current_timestamp());
 
     validate_flow_document(&doc, slug.as_str()).map_err(|e| Response::error(format!("{}", e)))?;
@@ -335,7 +323,7 @@ fn flow_write_success(state: &SharedState, committed: CommittedFlow) -> Response
         status: "committed".to_string(),
         commit_id: committed.commit_id,
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 fn format_warning(w: &FlowWarning) -> String {

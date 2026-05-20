@@ -88,7 +88,7 @@ pub async fn handle_send(
     // stall other writers. The critical section is entirely blocking I/O —
     // std::sync::Mutex is the right primitive here and must not be held
     // across any `.await`.
-    let write_guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let write_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     // Read existing content and parse
     let existing = std::fs::read_to_string(&thread_path).unwrap_or_default();
@@ -204,7 +204,10 @@ pub async fn handle_send(
     let push_rx = if should_await_push {
         let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
         {
-            let mut pending = state.pending_push.write().unwrap();
+            let mut pending = state
+                .pending_push
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: thread_name.clone(),
                 line_number: next_line,
@@ -214,7 +217,10 @@ pub async fn handle_send(
         Some(rx)
     } else {
         {
-            let mut pending = state.pending_push.write().unwrap();
+            let mut pending = state
+                .pending_push
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             pending.push(PendingMessage {
                 channel: thread_name.clone(),
                 line_number: next_line,
@@ -279,5 +285,5 @@ pub async fn handle_send(
             error: None,
         }
     };
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
