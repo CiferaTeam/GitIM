@@ -498,7 +498,12 @@ struct RawError {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
     use tokio::time::{timeout, Duration};
+
+    // Serialise fake-opencode tests so they do not compete for processes/stdout
+    // and flake under parallel execution.
+    static FAKE_OPENCODE_LOCK: Mutex<()> = Mutex::new(());
 
     /// Create a fake opencode binary that emits the given NDJSON lines then hangs.
     fn fake_opencode_with_script(tmp: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -565,6 +570,7 @@ while true; do sleep 1; done
 
     #[tokio::test]
     async fn provider_times_out_when_opencode_never_exits() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
         let (result, drain) = run_fake(
             r#"echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"text","part":{"text":"hello"}}'"#,
@@ -584,12 +590,13 @@ echo '{"type":"text","part":{"text":"hello"}}'"#,
 
     #[tokio::test]
     async fn provider_should_complete_after_full_ndjson_without_waiting_for_process_exit() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
         let (result, drain) = run_fake(
             r#"echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"text","part":{"text":"hello from fake opencode"}}'
 echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
             Duration::from_secs(30),
-            Duration::from_secs(15),
+            Duration::from_secs(5),
         ).await;
 
         assert_eq!(
@@ -604,6 +611,7 @@ echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":
 
     #[tokio::test]
     async fn provider_should_not_complete_on_tool_calls_without_final_stop() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
         let (result, drain) = run_fake(
             r#"echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"tool_use","part":{"tool":"read","callID":"c1","state":{"status":"completed","input":{"filePath":"/tmp/test"}}}}'
@@ -624,6 +632,7 @@ echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":
 
     #[tokio::test]
     async fn provider_should_wait_for_stop_after_tool_calls() {
+        let _guard = FAKE_OPENCODE_LOCK.lock().unwrap();
         let (result, drain) = run_fake(
             r#"echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"tool_use","part":{"tool":"read","callID":"c1","state":{"status":"completed","input":{"filePath":"/tmp/test"}}}}'
@@ -633,7 +642,7 @@ echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"text","part":{"text":"done"}}'
 echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
             Duration::from_secs(30),
-            Duration::from_secs(15),
+            Duration::from_secs(5),
         ).await;
 
         assert_eq!(
