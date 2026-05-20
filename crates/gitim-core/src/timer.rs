@@ -244,6 +244,33 @@ pub fn write_timers(clone_path: &Path, file: &TimersFile) -> Result<(), TimerErr
     Ok(())
 }
 
+/// Remove and return all timers with `fire_at <= now`. Atomic + locked.
+/// Returns `Ok(vec![])` for file-missing / corrupted / empty. Write failure
+/// after read keeps fired in the file (next call retries) — see eng-review F2.
+pub fn pop_fired_timers(clone_path: &Path, now: DateTime<Utc>) -> Result<Vec<Timer>, TimerError> {
+    with_timers_lock(clone_path, |_| {
+        let current = read_timers(clone_path)?;
+        let (fired, pending) = partition_fired(current.timers, now);
+        if fired.is_empty() {
+            return Ok(vec![]);
+        }
+        let new_file = TimersFile {
+            version: 1,
+            timers: pending,
+        };
+        write_timers(clone_path, &new_file)?;
+        Ok(fired)
+    })
+}
+
+/// Best-effort read of earliest pending `fire_at`. No lock held — the next
+/// `pop_fired_timers` will re-read under lock anyway, so a stale snapshot
+/// here only affects the next sleep duration by at most one cycle.
+pub fn peek_next_due(clone_path: &Path) -> Result<Option<DateTime<Utc>>, TimerError> {
+    let f = read_timers(clone_path)?;
+    Ok(f.timers.iter().map(|t| t.fire_at).min())
+}
+
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
     // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
     // them but we want compact CLI-friendly forms only.
@@ -614,5 +641,89 @@ mod tests {
             })
             .collect();
         assert!(leftover.is_empty(), "tmp files remained: {leftover:?}");
+    }
+
+    #[test]
+    fn pop_fired_removes_fired_keeps_pending() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let initial = TimersFile {
+            version: 1,
+            timers: vec![
+                mk_timer("a", "2026-05-20T14:00:00Z"),
+                mk_timer("b", "2026-05-20T16:00:00Z"),
+            ],
+        };
+        write_timers(clone, &initial).unwrap();
+        let now: DateTime<Utc> = "2026-05-20T15:00:00Z".parse().unwrap();
+        let fired = pop_fired_timers(clone, now).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].id, "a");
+        let remaining = read_timers(clone).unwrap();
+        assert_eq!(remaining.timers.len(), 1);
+        assert_eq!(remaining.timers[0].id, "b");
+    }
+
+    #[test]
+    fn pop_fired_missing_file_returns_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let fired = pop_fired_timers(clone, Utc::now()).unwrap();
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn pop_fired_no_due_does_not_rewrite() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let f = TimersFile {
+            version: 1,
+            timers: vec![mk_timer("a", "2026-05-20T16:00:00Z")],
+        };
+        write_timers(clone, &f).unwrap();
+        let before_mtime = std::fs::metadata(timers_path(clone))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let now: DateTime<Utc> = "2026-05-20T15:00:00Z".parse().unwrap();
+        let fired = pop_fired_timers(clone, now).unwrap();
+        assert!(fired.is_empty());
+        let after_mtime = std::fs::metadata(timers_path(clone))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before_mtime, after_mtime, "file rewrote unnecessarily");
+    }
+
+    #[test]
+    fn peek_next_due_returns_earliest() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let f = TimersFile {
+            version: 1,
+            timers: vec![
+                mk_timer("late", "2026-05-20T18:00:00Z"),
+                mk_timer("early", "2026-05-20T16:00:00Z"),
+            ],
+        };
+        write_timers(clone, &f).unwrap();
+        let next = peek_next_due(clone).unwrap();
+        assert_eq!(
+            next.map(|t| t.to_rfc3339()),
+            Some("2026-05-20T16:00:00+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn peek_next_due_empty_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        assert!(peek_next_due(clone).unwrap().is_none());
     }
 }
