@@ -12,7 +12,7 @@
 
 use std::process;
 
-use chrono::Utc;
+use chrono::{SubsecRound, Utc};
 use gitim_core::timer::{
     cancel_timer, find_clone_root, parse_duration, read_timers, register_timer, TimerError,
 };
@@ -39,12 +39,15 @@ pub async fn cmd_set(_mode: &OutputMode, duration: &str, anchor: &str, note: Opt
             _ => exit_with(&e, 1),
         },
     };
+    // Whole-seconds for human display. Sub-second precision is noise at
+    // 10s-24h timer scale and overflows the list column elsewhere.
     let remaining = (timer.fire_at - Utc::now()).to_std().unwrap_or_default();
+    let remaining_secs = std::time::Duration::from_secs(remaining.as_secs());
     println!(
         "{}  fires in {}  (at {})",
         timer.id,
-        format_duration(remaining),
-        timer.fire_at.to_rfc3339()
+        format_duration(remaining_secs),
+        timer.fire_at.trunc_subsecs(0).to_rfc3339()
     );
 }
 
@@ -77,17 +80,18 @@ pub async fn cmd_list(_mode: &OutputMode, json: bool) {
 
     let now = Utc::now();
     println!(
-        "{:<28} {:<10} {:<22} {:<28} NOTE",
+        "{:<28} {:<10} {:<25} {:<28} NOTE",
         "ID", "DUE IN", "FIRES AT", "ANCHOR"
     );
     for t in &file.timers {
         let due_in = (t.fire_at - now).to_std().unwrap_or_default();
-        let due_fmt = trim_humantime(format_duration(due_in).to_string());
+        let due_secs = std::time::Duration::from_secs(due_in.as_secs());
+        let due_fmt = trim_humantime(format_duration(due_secs).to_string());
         println!(
-            "{:<28} {:<10} {:<22} {:<28} {}",
+            "{:<28} {:<10} {:<25} {:<28} {}",
             t.id,
             due_fmt,
-            t.fire_at.to_rfc3339(),
+            t.fire_at.trunc_subsecs(0).to_rfc3339(),
             t.anchor,
             t.note.as_deref().unwrap_or("")
         );
