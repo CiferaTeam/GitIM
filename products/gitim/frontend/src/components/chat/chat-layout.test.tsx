@@ -89,7 +89,18 @@ vi.mock("./header", () => ({
 }));
 
 vi.mock("./message-list", () => ({
-  MessageList: () => <div data-testid="message-list" />,
+  MessageList: ({
+    onMessageLinkClick,
+  }: {
+    onMessageLinkClick?: (channel: string, line: number) => void;
+  }) => (
+    <div data-testid="message-list">
+      <button
+        data-testid="message-link"
+        onClick={() => onMessageLinkClick?.("random", 42)}
+      />
+    </div>
+  ),
 }));
 
 vi.mock("./scroll-to-bottom-button", () => ({
@@ -128,6 +139,20 @@ describe("ChatLayout all mention send", () => {
     mocks.client.send.mockResolvedValue({
       ok: true,
       data: { line_number: 7 },
+    });
+    mocks.client.read.mockResolvedValue({
+      ok: true,
+      data: {
+        entries: [
+          {
+            line_number: 42,
+            point_to: 0,
+            author: "alice",
+            timestamp: "20260511T120000Z",
+            body: "linked",
+          },
+        ],
+      },
     });
 
     useConnectionStore.setState({ mode: "remote", status: "ready" });
@@ -233,5 +258,26 @@ describe("ChatLayout all mention send", () => {
     expect(preview).not.toBeNull();
     expect(preview?.textContent).toContain("@alice");
     expect(preview?.textContent).not.toContain("@bob");
+  });
+
+  it("keeps the target line scroll intent after following a message link", async () => {
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const link = document.querySelector<HTMLButtonElement>(
+      "[data-testid='message-link']",
+    );
+    expect(link).not.toBeNull();
+
+    await act(async () => {
+      link!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().currentChannel).toBe("random");
+    expect(useChatStore.getState().pendingScrollLine).toBe(42);
   });
 });

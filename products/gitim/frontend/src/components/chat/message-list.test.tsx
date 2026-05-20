@@ -386,4 +386,53 @@ describe("MessageList scroll position on message mutations", () => {
     // Expected: scrollTop = 20 + (1000 - 500) = 520 (visual anchor held).
     expect(scroll.scrollTop).toBe(520);
   });
+
+  it("treats a scope change as a fresh timeline instead of preserving the previous channel anchor", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(50, "a"), msg(51, "b"), msg(52, "c"), msg(53, "d"), msg(54, "e")],
+      500,
+    );
+    stubScrollTop(scroll, 20);
+    stubClientHeight(scroll, 400);
+    stubScrollHeight(scroll, 700);
+
+    await rerender(r, {
+      ...baseProps,
+      scopeKey: "random",
+      messages: [msg(1, "new-a"), msg(2, "new-b"), msg(3, "new-c")],
+    });
+
+    expect(scroll.scrollTop).toBe(700);
+  });
+
+  it("restores a stored scrollTop on scope change when one is provided", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    const scroll = await mountWithHeight(
+      r,
+      [msg(50, "a"), msg(51, "b"), msg(52, "c"), msg(53, "d"), msg(54, "e")],
+      500,
+    );
+    stubScrollTop(scroll, 20);
+    stubClientHeight(scroll, 400);
+    stubScrollHeight(scroll, 700);
+
+    await rerender(r, {
+      ...baseProps,
+      scopeKey: "random",
+      restoreScrollTop: 120,
+      messages: [msg(1, "new-a"), msg(2, "new-b"), msg(3, "new-c")],
+    } as Parameters<typeof MessageList>[0]);
+
+    expect(scroll.scrollTop).toBe(120);
+  });
 });

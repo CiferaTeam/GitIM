@@ -107,6 +107,10 @@ function ChatPage() {
   return <ChatLayout />;
 }
 
+function isChatRoute(pathname: string): boolean {
+  return pathname === "/chat" || pathname.startsWith("/chat/");
+}
+
 function FirstRunScreen() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-6">
@@ -704,11 +708,15 @@ export default function App() {
           if (!knownChannel && !isDmChange) continue;
         }
 
+        const selectedChannelVisible =
+          displayName === currentChannelRef.current &&
+          isChatRoute(locationPathRef.current);
         if (displayName === currentChannelRef.current) {
           if (change.entries?.length) {
             addMessages(change.entries as Message[]);
           }
-        } else {
+        }
+        if (!selectedChannelVisible) {
           // Filter out self-authored entries before counting unread: after
           // sending a message and switching channels, poll echoes our own
           // send back, which would otherwise bump an unread marker on the

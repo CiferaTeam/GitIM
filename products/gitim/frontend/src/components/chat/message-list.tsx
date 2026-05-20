@@ -2,6 +2,7 @@ import { useRef, useEffect, useLayoutEffect, useMemo, useState, type RefObject }
 import type { Message } from "../../lib/types";
 import { MessageItem } from "./message-item";
 import { MessageSquare, Hash } from "lucide-react";
+import { decideTimelineScroll, type TimelineSnapshot } from "./message-scroll";
 
 interface MessageListProps {
   messages: Message[];
@@ -12,6 +13,7 @@ interface MessageListProps {
   replyTo: Message | null;
   highlightLine: number | null;
   pendingScrollLine: number | null;
+  restoreScrollTop?: number | null;
   onHighlightLineChange: (line: number | null) => void;
   onPendingScrollClear: () => void;
   /** Custom empty-state hint when scope is selected but has no messages. */
@@ -41,12 +43,6 @@ interface MessageListProps {
  *  Anything beyond this is regarded as still browsing the current page. */
 const SCROLL_TOP_THRESHOLD_PX = 50;
 
-/** How close to the bottom counts as "user is still pinned to latest" when
- *  deciding whether a new appended message should drag them down. Matches
- *  useScrollAtBottom's default so the jump-button visibility and the
- *  auto-scroll decision agree. */
-const SCROLL_BOTTOM_THRESHOLD_PX = 80;
-
 export function MessageList({
   messages,
   currentUser,
@@ -54,6 +50,7 @@ export function MessageList({
   replyTo,
   highlightLine,
   pendingScrollLine,
+  restoreScrollTop,
   onHighlightLineChange,
   onPendingScrollClear,
   emptyHint,
@@ -70,21 +67,7 @@ export function MessageList({
 }: MessageListProps) {
   const internalScrollRef = useRef<HTMLDivElement>(null);
   const scrollRef = externalScrollRef ?? internalScrollRef;
-  // Track first line number, list length, and pre-mutation scrollHeight so we
-  // can distinguish prepend (older history arrived at the head) from append
-  // (anything growing the list — new live message, pending placeholder, poll
-  // delivering newer entries) and adjust scroll position appropriately.
-  //
-  // Why head-line for prepend but length for append: pending outbound
-  // messages live at the tail with line_number = -1, so a line-number-based
-  // append detector ("last line grew") would miss them and the user's just-
-  // sent message would scroll off-screen. Length is the right append signal
-  // because pending always grows the array. Prepend, conversely, is unique
-  // in that the head shrinks — length grows too, so we must check the
-  // prepend signal first and bail out before the append branch.
-  const prevFirstLineRef = useRef<number | undefined>(undefined);
-  const prevLengthRef = useRef(0);
-  const prevScrollHeightRef = useRef(0);
+  const previousTimelineRef = useRef<TimelineSnapshot | null>(null);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
@@ -100,69 +83,56 @@ export function MessageList({
     const el = scrollRef.current;
     if (!el) return;
 
-    const newFirstLine = messages[0]?.line_number;
-    const newLength = messages.length;
-    const prevFirstLine = prevFirstLineRef.current;
-    const prevLength = prevLengthRef.current;
-    const prevScrollHeight = prevScrollHeightRef.current;
-    const newScrollHeight = el.scrollHeight;
+    const nextTimeline: TimelineSnapshot = {
+      scopeKey,
+      firstLine: messages[0]?.line_number,
+      length: messages.length,
+      scrollHeight: el.scrollHeight,
+    };
+    const previousTimeline = previousTimelineRef.current;
 
-    // Update refs for the next effect cycle BEFORE any early return so
-    // subsequent decisions compare against the most recent state.
-    prevFirstLineRef.current = newFirstLine;
-    prevLengthRef.current = newLength;
-    prevScrollHeightRef.current = newScrollHeight;
+    // Capture the timeline before applying scroll changes so the next render
+    // compares against the latest committed message set, not the latest scroll.
+    previousTimelineRef.current = nextTimeline;
 
-    if (pendingScrollLine !== null && newLength > 0) {
+    const decision = decideTimelineScroll({
+      previous: previousTimeline,
+      next: nextTimeline,
+      scrollTop: el.scrollTop,
+      clientHeight: el.clientHeight,
+      pendingScrollLine,
+      restoreScrollTop,
+      lastMessageIsOutbound: !!messages[messages.length - 1]?._pendingId,
+    });
+
+    if (decision.kind === "line") {
       requestAnimationFrame(() => {
         if (!scrollRef.current) return;
         const target = scrollRef.current.querySelector(
-          `[data-line="${pendingScrollLine}"]`,
+          `[data-line="${decision.line}"]`,
         ) as HTMLElement | null;
         if (target) {
           target.scrollIntoView({ behavior: "smooth", block: "center" });
-          onHighlightLineChange(pendingScrollLine);
+          onHighlightLineChange(decision.line);
         }
         onPendingScrollClear();
       });
-      return;
+    } else if (decision.kind === "preserve-prepend-anchor") {
+      el.scrollTop = el.scrollTop + decision.heightDelta;
+    } else if (decision.kind === "bottom") {
+      el.scrollTop = nextTimeline.scrollHeight;
+    } else if (decision.kind === "scroll-top") {
+      el.scrollTop = decision.top;
     }
-
-    // Prepend: older messages arrived at the head — preserve the visual
-    // anchor by adding the height delta to scrollTop so the message the
-    // user was looking at stays put. Check this BEFORE the length-based
-    // append branch because a prepend also grows the list.
-    if (
-      prevFirstLine !== undefined &&
-      newFirstLine !== undefined &&
-      newFirstLine < prevFirstLine
-    ) {
-      el.scrollTop = el.scrollTop + (newScrollHeight - prevScrollHeight);
-      return;
-    }
-
-    // Append: anything growing the list at the tail — new live message,
-    // pending placeholder (line_number = -1), poll delivering newer entries.
-    // Length-based detection catches all three; line-number-based detection
-    // would miss the pending case and the user's outbound message would
-    // scroll off-screen.
-    //
-    // Only drag the user to the bottom if they were already pinned there;
-    // if they've scrolled up to read history, let the new message accumulate
-    // off-screen and surface the jump-to-latest button instead. Outbound
-    // pending messages always win — pressing Enter is an explicit "I want
-    // to see what I just sent" signal.
-    if (newLength > prevLength) {
-      const wasAtBottom =
-        prevScrollHeight === 0 || // first render with messages → snap to latest
-        prevScrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
-      const lastMsg = messages[messages.length - 1];
-      const isOutbound = !!lastMsg?._pendingId;
-      if (wasAtBottom || isOutbound) {
-        el.scrollTop = newScrollHeight;
-      }
-    }
-  }, [messages, pendingScrollLine, onHighlightLineChange, onPendingScrollClear]);
+  }, [
+    messages,
+    pendingScrollLine,
+    restoreScrollTop,
+    scopeKey,
+    scrollRef,
+    onHighlightLineChange,
+    onPendingScrollClear,
+  ]);
 
   function handleScrollEvent(event: React.UIEvent<HTMLDivElement>) {
     if (!onLoadOlder) return;

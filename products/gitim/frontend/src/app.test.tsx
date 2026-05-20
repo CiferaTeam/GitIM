@@ -423,4 +423,51 @@ describe("App card thread toasts", () => {
     expect(mocks.client.listFleetAgents).toHaveBeenCalledTimes(1);
     expect(mocks.client.listFleetStatus).toHaveBeenCalledTimes(1);
   });
+
+  it("counts messages in the selected channel as unread while chat is not visible", async () => {
+    mocks.client.poll.mockResolvedValue({
+      ok: true,
+      data: {
+        commit_id: "next-head",
+        changes: [
+          {
+            kind: "new_messages",
+            channel: "general",
+            entries: [
+              {
+                line_number: 2,
+                point_to: 0,
+                author: "alice",
+                timestamp: "20260516T000002Z",
+                body: "ping",
+              } satisfies Message,
+            ],
+          },
+        ],
+      },
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/crons"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    const general = useChatStore
+      .getState()
+      .channels.find((channel) => channel.name === "general");
+    expect(general?.unreadCount).toBe(1);
+  });
 });

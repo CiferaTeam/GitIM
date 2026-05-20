@@ -148,16 +148,32 @@ export function ChatLayout() {
 
   // Card drawer state — auto-close when switching channels.
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
+  const [restoreScrollTop, setRestoreScrollTop] = useState<number | null>(null);
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     // Intentional: UX contract is "switching context closes transient overlays".
     setCardDrawerOpen(false);
   }, [currentChannel]);
+
+  const rememberCurrentScroll = useCallback(() => {
+    if (!currentChannel) return;
+    const el = messageScrollRef.current;
+    if (el) scrollPositionsRef.current.set(currentChannel, el.scrollTop);
+  }, [currentChannel]);
+
+  const restoreForChannel = useCallback((name: string): number | null => {
+    return scrollPositionsRef.current.has(name)
+      ? (scrollPositionsRef.current.get(name) ?? null)
+      : null;
+  }, []);
 
   const handleChannelSelect = useCallback(
     async (name: string) => {
       if (!activeSlug) return;
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
+      rememberCurrentScroll();
+      setRestoreScrollTop(restoreForChannel(name));
       selectChannel(name);
       if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: name });
       clearUnread(name);
@@ -174,7 +190,16 @@ export function ChatLayout() {
         setMessages(res.data.entries as Message[]);
       }
     },
-    [activeSlug, workspaceKey, selectChannel, clearUnread, setMessages, setThreadRoot]
+    [
+      activeSlug,
+      workspaceKey,
+      rememberCurrentScroll,
+      restoreForChannel,
+      selectChannel,
+      clearUnread,
+      setMessages,
+      setThreadRoot,
+    ]
   );
 
   useEffect(() => {
@@ -353,8 +378,8 @@ export function ChatLayout() {
       if (currentChannel) {
         pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
       }
-      setPendingScrollLine(line);
       handleChannelSelect(channel);
+      setPendingScrollLine(line);
     },
     [currentChannel, pushNav, getScrollTop, setPendingScrollLine, handleChannelSelect]
   );
@@ -364,6 +389,8 @@ export function ChatLayout() {
     if (!entry || !activeSlug) return;
     const requestSlug = activeSlug;
     const requestWorkspaceKey = workspaceKey;
+    rememberCurrentScroll();
+    setRestoreScrollTop(entry.scrollTop);
     selectChannel(entry.channel);
     if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: entry.channel });
     clearUnread(entry.channel);
@@ -379,17 +406,15 @@ export function ChatLayout() {
     ) {
       setMessages(res.data.entries as Message[]);
     }
-    requestAnimationFrame(() => {
-      if (
-        !isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey) ||
-        useChatStore.getState().currentChannel !== entry.channel
-      ) {
-        return;
-      }
-      const el = document.querySelector("[data-message-scroll]");
-      if (el) el.scrollTop = entry.scrollTop;
-    });
-  }, [activeSlug, workspaceKey, selectChannel, clearUnread, setMessages, setThreadRoot]);
+  }, [
+    activeSlug,
+    workspaceKey,
+    rememberCurrentScroll,
+    selectChannel,
+    clearUnread,
+    setMessages,
+    setThreadRoot,
+  ]);
 
   // In-flight guard for history paging. Plain ref (not store state) — the
   // scroll handler may fire many times during a fast scroll, and we drop
@@ -627,6 +652,7 @@ export function ChatLayout() {
           replyTo={replyTo}
           highlightLine={highlightLine}
           pendingScrollLine={pendingScrollLine}
+          restoreScrollTop={restoreScrollTop}
           onHighlightLineChange={setHighlightLine}
           onPendingScrollClear={handlePendingScrollClear}
           onReply={handleReply}
