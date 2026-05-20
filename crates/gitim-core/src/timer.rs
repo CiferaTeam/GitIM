@@ -102,6 +102,37 @@ impl TimersFile {
     }
 }
 
+/// Remove and return the cancelled id. The needle is matched as a substring
+/// against `id` (lets users type either a full id or the random hash suffix
+/// like `a3f`). 0 or >1 matches → error and `timers` is left unchanged.
+pub fn cancel_by_id_or_prefix(timers: &mut Vec<Timer>, prefix: &str) -> Result<String, TimerError> {
+    let matches: Vec<usize> = timers
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.id.contains(prefix))
+        .map(|(i, _)| i)
+        .collect();
+    match matches.len() {
+        0 => Err(TimerError::NoMatch(prefix.to_string())),
+        1 => {
+            let idx = matches[0];
+            Ok(timers.remove(idx).id)
+        }
+        n => {
+            let ids = matches
+                .iter()
+                .map(|&i| timers[i].id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TimerError::AmbiguousPrefix {
+                prefix: prefix.to_string(),
+                count: n,
+                ids,
+            })
+        }
+    }
+}
+
 /// Pure function — `now` is injected so tests can simulate clock skew.
 /// Returned `pending` is sorted by `fire_at` ascending; `fired` preserves
 /// input order (caller renders them in registration sequence).
@@ -140,7 +171,7 @@ pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -307,5 +338,50 @@ mod tests {
         let (_, pending) = partition_fired(timers, "2026-05-20T15:00:00Z".parse().unwrap());
         let ids: Vec<_> = pending.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["early", "mid", "late"]);
+    }
+
+    #[test]
+    fn cancel_by_full_id() {
+        let mut timers = vec![
+            mk_timer("20260520T143055-aaaaaa", "2026-05-20T16:00:00Z"),
+            mk_timer("20260520T143120-bbbbbb", "2026-05-20T17:00:00Z"),
+        ];
+        let cancelled = cancel_by_id_or_prefix(&mut timers, "20260520T143055-aaaaaa").unwrap();
+        assert_eq!(cancelled, "20260520T143055-aaaaaa");
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0].id, "20260520T143120-bbbbbb");
+    }
+
+    #[test]
+    fn cancel_by_unique_prefix() {
+        let mut timers = vec![
+            mk_timer("20260520T143055-aaaaaa", "2026-05-20T16:00:00Z"),
+            mk_timer("20260520T143120-bbbbbb", "2026-05-20T17:00:00Z"),
+        ];
+        let cancelled = cancel_by_id_or_prefix(&mut timers, "aaa").unwrap();
+        assert_eq!(cancelled, "20260520T143055-aaaaaa");
+        assert_eq!(timers.len(), 1);
+    }
+
+    #[test]
+    fn cancel_no_match() {
+        let mut timers = vec![mk_timer("20260520T143055-aaaaaa", "2026-05-20T16:00:00Z")];
+        let err = cancel_by_id_or_prefix(&mut timers, "zzz").unwrap_err();
+        assert!(matches!(err, TimerError::NoMatch(_)));
+        assert_eq!(timers.len(), 1);
+    }
+
+    #[test]
+    fn cancel_ambiguous_prefix() {
+        let mut timers = vec![
+            mk_timer("20260520T143055-aaaaaa", "2026-05-20T16:00:00Z"),
+            mk_timer("20260520T143120-bbbbbb", "2026-05-20T17:00:00Z"),
+        ];
+        let err = cancel_by_id_or_prefix(&mut timers, "2026").unwrap_err();
+        match err {
+            TimerError::AmbiguousPrefix { count, .. } => assert_eq!(count, 2),
+            other => panic!("expected AmbiguousPrefix, got {other:?}"),
+        }
+        assert_eq!(timers.len(), 2);
     }
 }
