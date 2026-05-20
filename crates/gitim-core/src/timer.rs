@@ -271,6 +271,35 @@ pub fn peek_next_due(clone_path: &Path) -> Result<Option<DateTime<Utc>>, TimerEr
     Ok(f.timers.iter().map(|t| t.fire_at).min())
 }
 
+/// Register a new timer. Enforces cap on current pending count.
+pub fn register_timer(
+    clone_path: &Path,
+    duration: ChronoDuration,
+    anchor: String,
+    note: Option<String>,
+) -> Result<Timer, TimerError> {
+    with_timers_lock(clone_path, |_| {
+        let mut current = read_timers(clone_path)?;
+        if current.timers.len() >= MAX_PENDING_PER_AGENT {
+            return Err(TimerError::CapReached);
+        }
+        let timer = Timer::new(duration, anchor, note)?;
+        current.timers.push(timer.clone());
+        write_timers(clone_path, &current)?;
+        Ok(timer)
+    })
+}
+
+/// Cancel a timer by full id or unique prefix.
+pub fn cancel_timer(clone_path: &Path, id_or_prefix: &str) -> Result<String, TimerError> {
+    with_timers_lock(clone_path, |_| {
+        let mut current = read_timers(clone_path)?;
+        let cancelled = cancel_by_id_or_prefix(&mut current.timers, id_or_prefix)?;
+        write_timers(clone_path, &current)?;
+        Ok(cancelled)
+    })
+}
+
 pub fn parse_duration(s: &str) -> Result<ChronoDuration, TimerError> {
     // Reject whitespace-bearing strings ("30 minutes" etc) — humantime accepts
     // them but we want compact CLI-friendly forms only.
@@ -725,5 +754,46 @@ mod tests {
         let clone = tmp.path();
         std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
         assert!(peek_next_due(clone).unwrap().is_none());
+    }
+
+    #[test]
+    fn register_timer_persists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let dur = ChronoDuration::seconds(60);
+        let t = register_timer(clone, dur, "<#x>".into(), Some("test".into())).unwrap();
+        assert!(!t.id.is_empty());
+        let f = read_timers(clone).unwrap();
+        assert_eq!(f.timers.len(), 1);
+        assert_eq!(f.timers[0].id, t.id);
+    }
+
+    #[test]
+    fn register_timer_cap_enforced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        for _ in 0..MAX_PENDING_PER_AGENT {
+            register_timer(clone, ChronoDuration::seconds(60), "<#x>".into(), None).unwrap();
+        }
+        let err =
+            register_timer(clone, ChronoDuration::seconds(60), "<#x>".into(), None).unwrap_err();
+        assert!(matches!(err, TimerError::CapReached));
+        assert_eq!(
+            read_timers(clone).unwrap().timers.len(),
+            MAX_PENDING_PER_AGENT
+        );
+    }
+
+    #[test]
+    fn register_timer_empty_anchor_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let clone = tmp.path();
+        std::fs::create_dir_all(clone.join(GITIM_DIR)).unwrap();
+        let err =
+            register_timer(clone, ChronoDuration::seconds(60), "   ".into(), None).unwrap_err();
+        assert!(matches!(err, TimerError::EmptyAnchor));
+        assert_eq!(read_timers(clone).unwrap().timers.len(), 0);
     }
 }
