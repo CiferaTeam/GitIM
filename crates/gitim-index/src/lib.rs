@@ -30,6 +30,10 @@ pub struct Index {
     db_path: std::path::PathBuf,
 }
 
+fn lock_index_state(mutex: &Mutex<IndexState>) -> std::sync::MutexGuard<'_, IndexState> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 搜索参数
 pub struct SearchParams {
     pub query: Option<String>,
@@ -125,7 +129,7 @@ impl Index {
 
     /// 获取当前索引对应的 commit_id。
     pub fn get_commit_id(&self) -> Result<Option<String>, IndexError> {
-        let guard = self.state.lock().unwrap();
+        let guard = lock_index_state(&self.state);
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
@@ -176,7 +180,7 @@ impl Index {
         channel_name: &str,
         content: &str,
     ) -> Result<usize, IndexError> {
-        let guard = self.state.lock().unwrap();
+        let guard = lock_index_state(&self.state);
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
@@ -207,7 +211,7 @@ impl Index {
         diff_results: &std::collections::HashMap<String, String>,
         new_commit_id: &str,
     ) -> Result<usize, IndexError> {
-        let guard = self.state.lock().unwrap();
+        let guard = lock_index_state(&self.state);
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
@@ -241,7 +245,7 @@ impl Index {
 
     /// 全量重建：扫描 repo_root 下所有 .thread 文件。
     pub fn rebuild(&self, repo_root: &Path, commit_id: &str) -> Result<usize, IndexError> {
-        let guard = self.state.lock().unwrap();
+        let guard = lock_index_state(&self.state);
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
@@ -378,7 +382,7 @@ impl Index {
     pub fn reindex(&self, repo_root: &Path, commit_id: &str) -> Result<usize, IndexError> {
         // 1. Mark as rebuilding
         {
-            let mut guard = self.state.lock().unwrap();
+            let mut guard = lock_index_state(&self.state);
             *guard = IndexState::Rebuilding;
         }
 
@@ -390,7 +394,7 @@ impl Index {
         // 3. Try to open, rebuild, and only then set Ready
         match self.try_open_and_rebuild(repo_root, commit_id) {
             Ok((conn, count)) => {
-                let mut guard = self.state.lock().unwrap();
+                let mut guard = lock_index_state(&self.state);
                 *guard = IndexState::Ready(conn);
                 Ok(count)
             }
@@ -401,7 +405,7 @@ impl Index {
                         let _ = conn
                             .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
                         let _ = conn.execute_batch(SCHEMA_SQL);
-                        let mut guard = self.state.lock().unwrap();
+                        let mut guard = lock_index_state(&self.state);
                         *guard = IndexState::Ready(conn);
                     }
                     Err(open_err) => {
@@ -554,7 +558,7 @@ impl Index {
             return Err(IndexError::EmptySearch);
         }
 
-        let guard = self.state.lock().unwrap();
+        let guard = lock_index_state(&self.state);
         let conn = match &*guard {
             IndexState::Ready(c) => c,
             IndexState::Rebuilding => return Err(IndexError::Rebuilding),
