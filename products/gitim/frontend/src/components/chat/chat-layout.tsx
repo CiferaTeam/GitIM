@@ -168,7 +168,7 @@ export function ChatLayout() {
   }, []);
 
   const handleChannelSelect = useCallback(
-    async (name: string) => {
+    async (name: string, options: { markRead?: boolean } = {}) => {
       if (!activeSlug) return;
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
@@ -176,7 +176,7 @@ export function ChatLayout() {
       setRestoreScrollTop(restoreForChannel(name));
       selectChannel(name);
       if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: name });
-      clearUnread(name);
+      if (options.markRead !== false) clearUnread(name);
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
@@ -206,7 +206,7 @@ export function ChatLayout() {
     if (currentChannel) return;
     const general = channels.find((c) => c.name === "general");
     if (general) {
-      handleChannelSelect("general");
+      handleChannelSelect("general", { markRead: false });
     }
   }, [channels, currentChannel, handleChannelSelect]);
 

@@ -280,4 +280,34 @@ describe("ChatLayout all mention send", () => {
     expect(useChatStore.getState().currentChannel).toBe("random");
     expect(useChatStore.getState().pendingScrollLine).toBe(42);
   });
+
+  it("does not mark unread messages read when auto-selecting the fallback channel on mount", async () => {
+    useChatStore.setState({
+      currentChannel: null,
+      channels: [
+        {
+          name: "general",
+          kind: "channel",
+          unreadCount: 10,
+          hasMention: true,
+          members: ["lewis", "alice", "bob"],
+          created_by: "lewis",
+        },
+      ],
+      messages: [],
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const general = useChatStore
+      .getState()
+      .channels.find((channel) => channel.name === "general");
+    expect(useChatStore.getState().currentChannel).toBe("general");
+    expect(general?.unreadCount).toBe(10);
+    expect(general?.hasMention).toBe(true);
+  });
 });
