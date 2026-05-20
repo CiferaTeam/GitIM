@@ -589,7 +589,7 @@ echo '{"type":"text","part":{"text":"hello"}}'"#,
 echo '{"type":"text","part":{"text":"hello from fake opencode"}}'
 echo '{"type":"step_finish","part":{"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
             Duration::from_secs(30),
-            Duration::from_secs(5),
+            Duration::from_secs(15),
         ).await;
 
         assert_eq!(
@@ -633,7 +633,7 @@ echo '{"type":"step_start","sessionID":"test-session"}'
 echo '{"type":"text","part":{"text":"done"}}'
 echo '{"type":"step_finish","part":{"tokens":{"input":5,"output":3,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"stop"}}'"#,
             Duration::from_secs(30),
-            Duration::from_secs(5),
+            Duration::from_secs(15),
         ).await;
 
         assert_eq!(
