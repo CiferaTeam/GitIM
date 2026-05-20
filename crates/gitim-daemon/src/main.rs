@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _guard = watcher_state
                             .commit_lock
                             .lock()
-                            .expect("commit_lock poisoned");
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         match std::fs::read_to_string(&index_md) {
                             Ok(content) => {
                                 let rel_path = format!("flows/{}/index.md", slug);
@@ -253,8 +253,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .load(std::sync::atomic::Ordering::Relaxed);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             if now.saturating_sub(last) >= IDLE_TIMEOUT_SECS {
                 info!("no client activity for 24h — shutting down");
                 idle_lc.cleanup();
@@ -274,12 +274,13 @@ async fn shutdown_signal() {
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
         }
     }
 
