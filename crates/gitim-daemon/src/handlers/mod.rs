@@ -190,7 +190,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 status: "running".to_string(),
                 guest: is_guest,
             };
-            Response::success(serde_json::to_value(payload).unwrap())
+            Response::json(payload)
         }
         Request::Send {
             channel,
@@ -217,7 +217,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         } => handle_get_thread(state, channel, line_number).await,
         Request::Subscribe => {
             let payload = gitim_core::responses::SubscribeResponse { subscribed: true };
-            Response::success(serde_json::to_value(payload).unwrap())
+            Response::json(payload)
         }
         Request::RegisterUser {
             handler,

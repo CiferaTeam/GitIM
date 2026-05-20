@@ -23,7 +23,7 @@ use tracing::{info, warn};
 pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String> {
     // Acquire commit_lock before touching the git tree.  Hold for the full
     // function so no concurrent handler can interleave git operations.
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let repo_root = &state.repo_root;
     let channels_dir = repo_root.join("channels");

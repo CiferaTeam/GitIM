@@ -20,7 +20,10 @@ pub async fn start_unix_socket(
         state.last_client_activity.store(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_else(|e| {
+                    tracing::error!("system time before epoch: {e}");
+                    Default::default()
+                })
                 .as_secs(),
             Ordering::Relaxed,
         );
@@ -39,8 +42,7 @@ pub async fn start_unix_socket(
                     Err(e) => Response::error(format!("invalid request: {}", e)),
                 };
 
-                let mut resp_json = serde_json::to_string(&response).unwrap();
-                resp_json.push('\n');
+                let resp_json = Response::json_line(&response, "response");
                 if let Err(e) = writer.write_all(resp_json.as_bytes()).await {
                     error!("write error: {}", e);
                     return;
@@ -76,8 +78,7 @@ async fn handle_subscribed(
                             Ok(req) => crate::handlers::handle_request(req, state.clone()).await,
                             Err(e) => Response::error(format!("invalid request: {}", e)),
                         };
-                        let mut resp_json = serde_json::to_string(&response).unwrap();
-                        resp_json.push('\n');
+                        let resp_json = Response::json_line(&response, "response");
                         if let Err(e) = writer.write_all(resp_json.as_bytes()).await {
                             error!("write error: {}", e);
                             return;
@@ -90,8 +91,7 @@ async fn handle_subscribed(
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        let mut event_json = serde_json::to_string(&event).unwrap();
-                        event_json.push('\n');
+                        let event_json = Response::json_line(&event, "event");
                         if let Err(e) = writer.write_all(event_json.as_bytes()).await {
                             error!("push write error: {}", e);
                             return;

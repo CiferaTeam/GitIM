@@ -1221,6 +1221,16 @@ impl Response {
         }
     }
 
+    pub fn json(data: impl Serialize) -> Self {
+        match serde_json::to_value(data) {
+            Ok(data) => Self::success(data),
+            Err(e) => {
+                tracing::error!("serializing response: {e}");
+                Self::error("internal serialization error")
+            }
+        }
+    }
+
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
             ok: false,
@@ -1239,6 +1249,36 @@ impl Response {
             data: None,
             error: Some(msg.into()),
             error_code: Some(code.into()),
+        }
+    }
+
+    pub fn yaml_string<T: Serialize + ?Sized>(value: &T, context: &str) -> Result<String, Self> {
+        serde_yaml::to_string(value).map_err(|e| {
+            tracing::error!("serializing {context}: {e}");
+            Self::error(format!("failed to serialize {context}: {e}"))
+        })
+    }
+
+    pub fn json_pretty_string<T: Serialize + ?Sized>(
+        value: &T,
+        context: &str,
+    ) -> Result<String, Self> {
+        serde_json::to_string_pretty(value).map_err(|e| {
+            tracing::error!("serializing {context}: {e}");
+            Self::error(format!("failed to serialize {context}: {e}"))
+        })
+    }
+
+    pub fn json_line<T: Serialize + ?Sized>(value: &T, context: &str) -> String {
+        match serde_json::to_string(value) {
+            Ok(mut json) => {
+                json.push('\n');
+                json
+            }
+            Err(e) => {
+                tracing::error!("serializing {context}: {e}");
+                "{\"ok\":false,\"error\":\"internal serialization error\"}\n".to_string()
+            }
         }
     }
 }

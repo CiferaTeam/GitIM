@@ -115,16 +115,13 @@ pub async fn handle_flow_run_start(
                 });
             }
             state.push_notify.notify_one();
-            Response::success(
-                serde_json::to_value(StartFlowRunResponse {
-                    run_id: c.run_id,
-                    flow_slug: c.flow_slug,
-                    channel: c.channel,
-                    path: c.path,
-                    commit_id: c.commit_id,
-                })
-                .unwrap(),
-            )
+            Response::json(StartFlowRunResponse {
+                run_id: c.run_id,
+                flow_slug: c.flow_slug,
+                channel: c.channel,
+                path: c.path,
+                commit_id: c.commit_id,
+            })
         }
         Err(resp) => resp,
     }
@@ -155,9 +152,7 @@ pub async fn handle_flow_run_list(
     let flows_root = state.repo_root.join("flows");
     let mut summaries = Vec::new();
     if !flows_root.exists() {
-        return Response::success(
-            serde_json::to_value(ListFlowRunsResponse { runs: vec![] }).unwrap(),
-        );
+        return Response::json(ListFlowRunsResponse { runs: vec![] });
     }
     let slug_entries = match std::fs::read_dir(&flows_root) {
         Ok(e) => e,
@@ -223,7 +218,7 @@ pub async fn handle_flow_run_list(
     }
     // sort: newest first
     summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    Response::success(serde_json::to_value(ListFlowRunsResponse { runs: summaries }).unwrap())
+    Response::json(ListFlowRunsResponse { runs: summaries })
 }
 
 pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Response {
@@ -236,7 +231,7 @@ pub async fn handle_flow_run_show(state: SharedState, run_id: String) -> Respons
         Err(resp) => return resp,
     };
     let payload: ShowFlowRunResponse = (&run).into();
-    Response::success(serde_json::to_value(payload).unwrap())
+    Response::json(payload)
 }
 
 pub async fn handle_flow_node_set(
@@ -265,7 +260,7 @@ pub async fn handle_flow_node_set(
         }
     };
 
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let (run_state_path, mut run) = match find_run(&state, &run_id_typed) {
         Ok(t) => t,
@@ -363,16 +358,13 @@ pub async fn handle_flow_node_set(
     }
     state.push_notify.notify_one();
 
-    Response::success(
-        serde_json::to_value(UpdateFlowNodeResponse {
-            run_id: run.run_id,
-            node_id,
-            status: new_status,
-            run_status: run.status,
-            commit_id,
-        })
-        .unwrap(),
-    )
+    Response::json(UpdateFlowNodeResponse {
+        run_id: run.run_id,
+        node_id,
+        status: new_status,
+        run_status: run.status,
+        commit_id,
+    })
 }
 
 pub async fn handle_flow_run_cancel(
@@ -388,7 +380,7 @@ pub async fn handle_flow_run_cancel(
         Err(e) => return Response::error(format!("invalid run id: {}", e)),
     };
 
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let (run_state_path, mut run) = match find_run(&state, &run_id_typed) {
         Ok(t) => t,
@@ -432,13 +424,10 @@ pub async fn handle_flow_run_cancel(
     });
     state.push_notify.notify_one();
 
-    Response::success(
-        serde_json::to_value(CancelFlowRunResponse {
-            run_id: run.run_id,
-            commit_id,
-        })
-        .unwrap(),
-    )
+    Response::json(CancelFlowRunResponse {
+        run_id: run.run_id,
+        commit_id,
+    })
 }
 
 fn commit_run_state_locked(
@@ -449,7 +438,7 @@ fn commit_run_state_locked(
     message_prefix: &str,
     author: &str,
 ) -> Result<CommittedRun, Response> {
-    let _guard = state.commit_lock.lock().expect("commit_lock poisoned");
+    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
     let rel = run_path(slug.as_str(), run_id);
     let rendered =
         stringify_run_state(&run).map_err(|e| Response::error(format!("stringify: {}", e)))?;
