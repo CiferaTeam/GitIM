@@ -117,8 +117,19 @@ function equalStringSets(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-function sortPinnedFirst(items: Channel[], pinnedNames: Set<string>): Channel[] {
+function sortUnreadThenPinned(
+  items: Channel[],
+  pinnedNames: Set<string>,
+): Channel[] {
   return [...items].sort((a, b) => {
+    const aUnread = (a.unreadCount || 0) > 0;
+    const bUnread = (b.unreadCount || 0) > 0;
+    if (aUnread !== bUnread) return aUnread ? -1 : 1;
+
+    const aMention = aUnread && a.hasMention;
+    const bMention = bUnread && b.hasMention;
+    if (aMention !== bMention) return aMention ? -1 : 1;
+
     const aPinned = pinnedNames.has(a.name);
     const bPinned = pinnedNames.has(b.name);
     if (aPinned === bPinned) return 0;
@@ -318,7 +329,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
   }, [dmSearchOpen]);
 
-  const regularChannels = sortPinnedFirst(
+  const regularChannels = sortUnreadThenPinned(
     channels.filter((c) => c.kind === "channel"),
     pinnedConversations.channels,
   );
@@ -326,7 +337,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     () => new Set(agents.map((agent) => agent.id)),
     [agents],
   );
-  const dmChannels = sortPinnedFirst(
+  const dmChannels = sortUnreadThenPinned(
     channels
       .filter((c) => c.kind === "dm")
       .filter((c) => !shouldHideDmChannel(c, currentUser, liveAgentIds, knownAgentIds))
