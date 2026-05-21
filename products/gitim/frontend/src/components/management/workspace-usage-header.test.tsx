@@ -73,6 +73,17 @@ function agent(id: string, provider: string, usageSummary: UsageSummary): Agent 
   };
 }
 
+function bareAgent(id: string): Agent {
+  return {
+    id,
+    name: id,
+    status: "running",
+    systemPrompt: "",
+    repoPath: `/tmp/${id}`,
+    messagesProcessed: 0,
+  };
+}
+
 describe("WorkspaceUsageHeader", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
@@ -155,5 +166,20 @@ describe("WorkspaceUsageHeader", () => {
     expect(totalRow?.textContent ?? "").toContain("300");
     expect(totalRow?.textContent ?? "").toContain("bob");
     expect(totalRow?.textContent ?? "").toContain("100");
+  });
+
+  it("renders workload even before token usage exists", () => {
+    act(() => {
+      root?.render(
+        <WorkspaceUsageHeader
+          agents={[bareAgent("alice"), bareAgent("bob"), bareAgent("cara")]}
+          workload={{ working: 2, total: 3 }}
+        />,
+      );
+    });
+
+    const workload = container.querySelector('[data-testid="workspace-workload"]');
+    expect(workload?.textContent ?? "").toContain("Working 2/3");
+    expect(container.querySelector('[data-testid="workspace-usage-today"]')).toBeNull();
   });
 });

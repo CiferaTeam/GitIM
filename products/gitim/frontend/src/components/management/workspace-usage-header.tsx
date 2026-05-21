@@ -18,9 +18,11 @@ import {
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import type { Agent, UsageBucket } from "@/lib/types";
+import type { AgentWorkloadSummary } from "@/lib/agent-runtime-state";
 
 interface WorkspaceUsageHeaderProps {
   agents?: Agent[];
+  workload?: AgentWorkloadSummary;
   label?: string;
   className?: string;
 }
@@ -29,8 +31,8 @@ interface WorkspaceUsageHeaderProps {
  *  Sums every agent's `usageSummary` client-side and renders the workspace-
  *  level totals + 30-day sparkline + breakdown. The breakdown grouping
  *  dimension (Provider | Handler) is user-controlled and persists per
- *  workspace via `lib/ui-state.ts`. Hides itself when no agent has
- *  produced usage data yet.
+ *  workspace via `lib/ui-state.ts`. Also accepts an optional workload
+ *  summary so the same strip can render fleet activity before usage exists.
  *
  *  Fleet-mode caveat: when this component renders multiple times on the same
  *  screen (one per remote node — see `agent-list.tsx`), clicking the toggle
@@ -40,6 +42,7 @@ interface WorkspaceUsageHeaderProps {
  *  out-of-scope for v1 (see `docs/plans/workspace-usage-breakdown-toggle/`). */
 export function WorkspaceUsageHeader({
   agents,
+  workload,
   label = "Workspace Usage",
   className = "mb-4",
 }: WorkspaceUsageHeaderProps) {
@@ -76,7 +79,15 @@ export function WorkspaceUsageHeader({
     setBreakdown(initialBreakdown);
   }
 
-  if (!usage.hasData) return null;
+  const normalizedWorkload =
+    workload && workload.total > 0
+      ? {
+          total: workload.total,
+          working: Math.min(Math.max(workload.working, 0), workload.total),
+        }
+      : null;
+
+  if (!usage.hasData && !normalizedWorkload) return null;
 
   const totalTokens = usage.totalTokens;
   const todayTokens = usage.todayTokens;
@@ -127,65 +138,87 @@ export function WorkspaceUsageHeader({
           {label}
         </div>
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <span className="text-xs uppercase tracking-wide text-primary">
-            近日
-          </span>
-          <span className="text-xl font-mono text-foreground">
-            今日 {formatTokens(todayTokens)}
-          </span>
-          <span className="text-sm text-text-secondary">
-            {usage.today.turns} turns
-          </span>
+          {normalizedWorkload && (
+            <span
+              data-testid="workspace-workload"
+              aria-label={`${normalizedWorkload.working} of ${normalizedWorkload.total} agents working`}
+              className="inline-flex items-baseline gap-1"
+            >
+              <span className="text-xs uppercase tracking-wide text-info">
+                Working{" "}
+              </span>
+              <span className="text-xl font-mono text-foreground">
+                {normalizedWorkload.working}/{normalizedWorkload.total}
+              </span>
+            </span>
+          )}
+          {usage.hasData && (
+            <>
+              <span className="text-xs uppercase tracking-wide text-primary">
+                近日
+              </span>
+              <span className="text-xl font-mono text-foreground">
+                今日 {formatTokens(todayTokens)}
+              </span>
+              <span className="text-sm text-text-secondary">
+                {usage.today.turns} turns
+              </span>
+            </>
+          )}
         </div>
-        <div
-          data-testid="workspace-usage-today"
-          className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-text-muted"
-        >
+        {usage.hasData && (
           <div
-            role="group"
-            aria-label="Usage breakdown grouping"
-            className="flex shrink-0 items-center gap-1"
+            data-testid="workspace-usage-today"
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-text-muted"
           >
-            <BreakdownButton
-              active={breakdown === "provider"}
-              onClick={() => selectBreakdown("provider")}
+            <div
+              role="group"
+              aria-label="Usage breakdown grouping"
+              className="flex shrink-0 items-center gap-1"
             >
-              Provider
-            </BreakdownButton>
-            <BreakdownButton
-              active={breakdown === "handler"}
-              onClick={() => selectBreakdown("handler")}
-            >
-              Handler
-            </BreakdownButton>
+              <BreakdownButton
+                active={breakdown === "provider"}
+                onClick={() => selectBreakdown("provider")}
+              >
+                Provider
+              </BreakdownButton>
+              <BreakdownButton
+                active={breakdown === "handler"}
+                onClick={() => selectBreakdown("handler")}
+              >
+                Handler
+              </BreakdownButton>
+            </div>
+            {todayEntries.map((entry) => (
+              <BreakdownMetric
+                key={entry.key}
+                entry={entry}
+                bucket={entry.today}
+                tokens={entry.todayTokens}
+              />
+            ))}
           </div>
-          {todayEntries.map((entry) => (
-            <BreakdownMetric
-              key={entry.key}
-              entry={entry}
-              bucket={entry.today}
-              tokens={entry.todayTokens}
-            />
-          ))}
-        </div>
-        <div
-          data-testid="workspace-usage-total"
-          className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-soft/80 pt-2 text-xs font-mono text-text-faint"
-        >
-          <span className="font-sans text-xs text-text-muted">
-            累计 {formatTokens(totalTokens)}
-          </span>
-          {totalEntries.map((entry) => (
-            <BreakdownMetric
-              key={entry.key}
-              entry={entry}
-              bucket={entry.bucket}
-              tokens={entry.bucketTokens}
-            />
-          ))}
-        </div>
+        )}
+        {usage.hasData && (
+          <div
+            data-testid="workspace-usage-total"
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-soft/80 pt-2 text-xs font-mono text-text-faint"
+          >
+            <span className="font-sans text-xs text-text-muted">
+              累计 {formatTokens(totalTokens)}
+            </span>
+            {totalEntries.map((entry) => (
+              <BreakdownMetric
+                key={entry.key}
+                entry={entry}
+                bucket={entry.bucket}
+                tokens={entry.bucketTokens}
+              />
+            ))}
+          </div>
+        )}
       </div>
-      {sparklineValues.length > 0 && (
+      {usage.hasData && sparklineValues.length > 0 && (
         <div className="flex shrink-0 flex-col items-start gap-1 text-primary lg:items-end">
           <span className="text-xs font-medium text-text-muted">近 30 天</span>
           <svg

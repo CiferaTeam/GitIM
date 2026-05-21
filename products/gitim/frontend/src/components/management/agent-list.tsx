@@ -1,8 +1,12 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
 import { fleetActivityKey, useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import { presenceMatchesFilter } from "@/lib/agent-runtime-state";
+import {
+  presenceMatchesFilter,
+  summarizeAgentWorkload,
+} from "@/lib/agent-runtime-state";
 import * as client from "@/lib/client";
 import type { Agent, FleetAgentSnapshot, FleetNodeStatus } from "@/lib/types";
 import type { ArchivedUserEntry } from "@/lib/client";
@@ -24,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 
 export function AgentList() {
   const agents = useAgentStore((s) => s.agents);
+  const activities = useAgentActivityStore((s) => s.activities);
   const fleetAgents = useFleetStore((s) => s.agents);
   const fleetStatuses = useFleetStore((s) => s.statuses);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -71,6 +76,27 @@ export function AgentList() {
   const allAgentsForUsage = useMemo(
     () => [...agents, ...remoteSnapshots.map((snapshot) => snapshot.agent)],
     [agents, remoteSnapshots],
+  );
+  const workspaceWorkload = useMemo(
+    () =>
+      summarizeAgentWorkload([
+        ...agents.map((agent) => ({
+          agent,
+          latestActivity: activities[agent.id]?.[0],
+        })),
+        ...remoteSnapshots.map((snapshot) => ({
+          agent: snapshot.agent,
+          latestActivity:
+            activities[
+              fleetActivityKey(
+                snapshot.nodeId,
+                snapshot.workspaceId,
+                snapshot.agent.id,
+              )
+            ]?.[0],
+        })),
+      ]),
+    [activities, agents, remoteSnapshots],
   );
   const filteredAgents = agents.filter((agent) =>
     matchesAgent(agent, query, statusFilter),
@@ -175,6 +201,7 @@ export function AgentList() {
 
       <WorkspaceUsageHeader
         agents={allAgentsForUsage}
+        workload={workspaceWorkload}
         label={hasFleetUsageContext ? "Fleet Usage" : "Workspace Usage"}
       />
 
