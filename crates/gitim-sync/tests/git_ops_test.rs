@@ -383,3 +383,67 @@ fn test_changed_files_unpushed_empty_when_pushed() {
     let changed = repo.changed_files_unpushed("*.meta.yaml").unwrap();
     assert!(changed.is_empty());
 }
+
+#[test]
+fn count_commits_on_branch_returns_total_reachable_count() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    // Make 3 commits.
+    for i in 0..3 {
+        std::fs::write(dir.path().join(format!("f{i}")), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", &format!("c{i}")])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+    }
+
+    let storage = GitStorage::new(dir.path());
+    let n = storage.count_commits_on_branch("main").expect("count");
+    assert_eq!(n, 3);
+}
+
+#[test]
+fn count_commits_on_branch_zero_for_missing_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    // Empty branch is not yet born — count should error (chosen contract).
+    let res = storage.count_commits_on_branch("nonexistent");
+    assert!(
+        res.is_err(),
+        "missing branch must surface error, got {:?}",
+        res
+    );
+}

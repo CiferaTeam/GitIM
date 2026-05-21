@@ -335,6 +335,25 @@ impl GitStorage {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Return the number of commits reachable from `branch` head.
+    /// Equivalent to `git rev-list --count <branch>`. Missing branch → Err.
+    pub fn count_commits_on_branch(&self, branch: &str) -> Result<u64, GitError> {
+        let output = Command::new("git")
+            .args(["rev-list", "--count", branch])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "rev-list --count {branch} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| GitError::CommandFailed(format!("parse count: {e}")))
+    }
+
     pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let range = format!("{}..{}", from, to);
         // `--no-renames` is load-bearing: `git mv` (how we archive channels
