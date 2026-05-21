@@ -20,7 +20,7 @@ pub enum ProjectSlugError {
 pub struct ProjectSlug(String);
 
 /// Reserved set covers top-level directory names + system handler.
-/// Keep in sync with channel reserved expectations and `RESERVED_PROJECT_SLUGS` test below.
+/// Keep in sync with channel reserved expectations and the `reserved` test below.
 pub const RESERVED_PROJECT_SLUGS: &[&str] = &[
     "archive", "channels", "projects", "users", "dms", "cards", "flows", "system",
 ];
