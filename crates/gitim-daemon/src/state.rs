@@ -176,17 +176,11 @@ impl AppState {
     /// daemon's tolerance for a malformed file.
     pub fn refresh_epoch_status(&self) -> Result<(), String> {
         let path = self.repo_root.join("gitim.epoch.yaml");
-        let parsed = match gitim_core::epoch::EpochFile::load_from_path(&path) {
-            Ok(file) => Some(file),
-            Err(gitim_core::epoch::EpochError::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
-                None
-            }
-            Err(e) => {
-                return Err(format!("failed to load {}: {}", path.display(), e));
-            }
-        };
+        // `load_from_path` returns `Ok(None)` for the missing-file case
+        // (legacy repos, freshly-cloned pre-pack workspaces) — only true
+        // parse / validate / non-NotFound IO failures surface as `Err`.
+        let parsed = gitim_core::epoch::EpochFile::load_from_path(&path)
+            .map_err(|e| format!("failed to load {}: {}", path.display(), e))?;
         let mut guard = self
             .epoch_status
             .write()
