@@ -18,7 +18,10 @@ import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
-import { readMessageScrollTop, writeMessageScrollTop } from "@/lib/ui-state";
+import {
+  readChatScopeScrollTop,
+  writeChatScopeScrollTop,
+} from "@/lib/chat-ui-state";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import { CardMetaBar } from "./card-meta-bar";
 
@@ -92,12 +95,12 @@ export function CardDetail() {
   const [highlightLine, setHighlightLine] = useState<number | null>(null);
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
   const restoreScrollTop = useMemo(
-    () => readMessageScrollTop(workspaceKey, scopeKey),
+    () => readChatScopeScrollTop(workspaceKey, scopeKey),
     [workspaceKey, scopeKey],
   );
   const handleMessageScrollTopChange = useCallback(
     (scrollTop: number) => {
-      writeMessageScrollTop(workspaceKey, scopeKey, scrollTop);
+      writeChatScopeScrollTop(workspaceKey, scopeKey, scrollTop);
     },
     [workspaceKey, scopeKey],
   );

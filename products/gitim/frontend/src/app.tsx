@@ -35,10 +35,14 @@ import type {
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
 import {
-  incrementStoredUnread,
-  mergeUnreadIntoChannels,
-  readUiState,
-} from "./lib/ui-state";
+  chatScopeKeyForName,
+  chatScopeName,
+  incrementChatScopeUnread,
+  mergeChatUnreadIntoChannels,
+  readActiveChatScope,
+  writeActiveChatScope,
+} from "./lib/chat-ui-state";
+import { readUiState } from "./lib/ui-state";
 import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
@@ -393,7 +397,7 @@ export default function App() {
 
       const nextChannels =
         channelsRes.ok && channelsRes.data
-          ? mergeUnreadIntoChannels(
+          ? mergeChatUnreadIntoChannels(
               workspaceKey,
               channelsRes.data.channels as Channel[],
             )
@@ -448,7 +452,7 @@ export default function App() {
         nextChannel = previousChannel;
       }
       if (nextChannel === null) {
-        const storedChannel = storedUiState.channel;
+        const storedChannel = chatScopeName(readActiveChatScope(workspaceKey));
         if (storedChannel && isSelectable(storedChannel)) {
           nextChannel = storedChannel;
         }
@@ -513,6 +517,9 @@ export default function App() {
 
       if (nextChannel && nextChannel !== previousChannel) {
         selectChannel(nextChannel);
+      }
+      if (nextChannel) {
+        writeActiveChatScope(workspaceKey, chatScopeKeyForName(nextChannel));
       }
       if (messagesForChannel) {
         setMessages(messagesForChannel);
@@ -738,7 +745,20 @@ export default function App() {
             e.body?.includes(mentionTag)
           );
           incrementUnread(displayName, mentioned);
-          incrementStoredUnread(requestWorkspaceKey, displayName, mentioned);
+          const firstUnreadLine =
+            othersEntries
+              .map((entry) => entry.line_number)
+              .filter((line) => line > 0)
+              .sort((a, b) => a - b)[0] ?? null;
+          incrementChatScopeUnread(
+            requestWorkspaceKey,
+            chatScopeKeyForName(displayName),
+            {
+              count: othersEntries.length,
+              hasMention: mentioned,
+              firstUnreadLine,
+            },
+          );
         }
       }
 
@@ -747,7 +767,7 @@ export default function App() {
         if (!isCurrentPollTarget()) return;
         if (chRes.ok && chRes.data) {
           setChannels(
-            mergeUnreadIntoChannels(
+            mergeChatUnreadIntoChannels(
               requestWorkspaceKey,
               chRes.data.channels as Channel[],
             ),

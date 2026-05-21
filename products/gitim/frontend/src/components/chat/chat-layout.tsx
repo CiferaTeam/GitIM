@@ -10,11 +10,15 @@ import * as client from "../../lib/client";
 import { expandAllMentions } from "../../lib/expand-all-mentions";
 import type { Channel, Message } from "../../lib/types";
 import {
-  clearStoredUnread,
-  readMessageScrollTop,
-  writeMessageScrollTop,
-  writeUiState,
-} from "../../lib/ui-state";
+  chatScopeKeyForName,
+  chatScopeName,
+  clearChatScopeUnread,
+  readActiveChatScope,
+  readChatScopeState,
+  readChatScopeScrollTop,
+  writeActiveChatScope,
+  writeChatScopeScrollTop,
+} from "../../lib/chat-ui-state";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { Button } from "../ui/button";
 import { ChannelCardDrawer } from "../cards/channel-card-drawer";
@@ -108,6 +112,16 @@ export function ChatLayout() {
   const currentChannelData = currentChannel
     ? channels.find((c) => c.name === currentChannel)
     : null;
+  const scopeKeyForChannelName = useCallback(
+    (name: string): string => {
+      const channel = channels.find((c) => c.name === name);
+      return chatScopeKeyForName(name, channel?.kind);
+    },
+    [channels],
+  );
+  const currentScopeKey = currentChannel
+    ? scopeKeyForChannelName(currentChannel)
+    : null;
   const allMentionRecipients = useMemo(
     () => currentChannelData?.kind === "channel" ? currentChannelData.members : [],
     [currentChannelData],
@@ -161,27 +175,34 @@ export function ChatLayout() {
   }, [currentChannel]);
 
   const rememberCurrentScroll = useCallback(() => {
-    if (!currentChannel) return;
+    if (!currentScopeKey) return;
     const el = messageScrollRef.current;
     if (el) {
-      scrollPositionsRef.current.set(currentChannel, el.scrollTop);
-      writeMessageScrollTop(workspaceKey, currentChannel, el.scrollTop);
+      scrollPositionsRef.current.set(currentScopeKey, el.scrollTop);
+      writeChatScopeScrollTop(workspaceKey, currentScopeKey, el.scrollTop);
     }
-  }, [currentChannel, workspaceKey]);
+  }, [currentScopeKey, workspaceKey]);
 
   const restoreForChannel = useCallback((name: string): number | null => {
-    return scrollPositionsRef.current.has(name)
-      ? (scrollPositionsRef.current.get(name) ?? null)
-      : readMessageScrollTop(workspaceKey, name);
-  }, [workspaceKey]);
+    const scopeKey = scopeKeyForChannelName(name);
+    return scrollPositionsRef.current.has(scopeKey)
+      ? (scrollPositionsRef.current.get(scopeKey) ?? null)
+      : readChatScopeScrollTop(workspaceKey, scopeKey);
+  }, [scopeKeyForChannelName, workspaceKey]);
+  const persistedRestoreScrollTop = useMemo(
+    () => readChatScopeScrollTop(workspaceKey, currentScopeKey),
+    [workspaceKey, currentScopeKey],
+  );
+  const messageRestoreScrollTop =
+    restoreScrollTop ?? persistedRestoreScrollTop;
 
   const handleMessageScrollTopChange = useCallback(
     (scrollTop: number) => {
-      if (!currentChannel) return;
-      scrollPositionsRef.current.set(currentChannel, scrollTop);
-      writeMessageScrollTop(workspaceKey, currentChannel, scrollTop);
+      if (!currentScopeKey) return;
+      scrollPositionsRef.current.set(currentScopeKey, scrollTop);
+      writeChatScopeScrollTop(workspaceKey, currentScopeKey, scrollTop);
     },
-    [currentChannel, workspaceKey],
+    [currentScopeKey, workspaceKey],
   );
 
   const handleChannelSelect = useCallback(
@@ -189,14 +210,17 @@ export function ChatLayout() {
       if (!activeSlug) return;
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
+      const targetScopeKey = scopeKeyForChannelName(name);
+      const targetState = readChatScopeState(requestWorkspaceKey, targetScopeKey);
+      const unreadTargetLine =
+        options.markRead !== false && targetState.unreadCount > 0
+          ? targetState.firstUnreadLine
+          : null;
       rememberCurrentScroll();
-      setRestoreScrollTop(restoreForChannel(name));
+      setRestoreScrollTop(unreadTargetLine ? null : restoreForChannel(name));
       selectChannel(name);
-      if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: name });
-      if (options.markRead !== false) {
-        clearUnread(name);
-        clearStoredUnread(requestWorkspaceKey, name);
-      }
+      setPendingScrollLine(unreadTargetLine);
+      writeActiveChatScope(requestWorkspaceKey, targetScopeKey);
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
@@ -208,6 +232,10 @@ export function ChatLayout() {
         useChatStore.getState().currentChannel === name
       ) {
         setMessages(res.data.entries as Message[]);
+        if (options.markRead !== false) {
+          clearUnread(name);
+          clearChatScopeUnread(requestWorkspaceKey, targetScopeKey);
+        }
       }
     },
     [
@@ -215,20 +243,33 @@ export function ChatLayout() {
       workspaceKey,
       rememberCurrentScroll,
       restoreForChannel,
+      scopeKeyForChannelName,
       selectChannel,
       clearUnread,
       setMessages,
       setThreadRoot,
+      setPendingScrollLine,
     ]
   );
 
   useEffect(() => {
     if (currentChannel) return;
-    const general = channels.find((c) => c.name === "general");
-    if (general) {
-      handleChannelSelect("general", { markRead: false });
+    const storedName = chatScopeName(readActiveChatScope(workspaceKey));
+    const stored =
+      storedName && channels.some((c) => c.name === storedName)
+        ? storedName
+        : null;
+    const fallback = stored ?? channels.find((c) => c.name === "general")?.name;
+    if (fallback) {
+      handleChannelSelect(fallback, { markRead: false });
     }
-  }, [channels, currentChannel, handleChannelSelect]);
+  }, [channels, currentChannel, handleChannelSelect, workspaceKey]);
+
+  useEffect(() => {
+    if (currentScopeKey) {
+      writeActiveChatScope(workspaceKey, currentScopeKey);
+    }
+  }, [workspaceKey, currentScopeKey]);
 
   const handleJoin = useCallback(async () => {
     if (!currentChannel || !activeSlug) return;
@@ -409,12 +450,12 @@ export function ChatLayout() {
     if (!entry || !activeSlug) return;
     const requestSlug = activeSlug;
     const requestWorkspaceKey = workspaceKey;
+    const entryScopeKey = scopeKeyForChannelName(entry.channel);
     rememberCurrentScroll();
     setRestoreScrollTop(entry.scrollTop);
+    setPendingScrollLine(null);
     selectChannel(entry.channel);
-    if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: entry.channel });
-    clearUnread(entry.channel);
-    clearStoredUnread(requestWorkspaceKey, entry.channel);
+    writeActiveChatScope(requestWorkspaceKey, entryScopeKey);
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
@@ -426,15 +467,19 @@ export function ChatLayout() {
       useChatStore.getState().currentChannel === entry.channel
     ) {
       setMessages(res.data.entries as Message[]);
+      clearUnread(entry.channel);
+      clearChatScopeUnread(requestWorkspaceKey, entryScopeKey);
     }
   }, [
     activeSlug,
     workspaceKey,
     rememberCurrentScroll,
+    scopeKeyForChannelName,
     selectChannel,
     clearUnread,
     setMessages,
     setThreadRoot,
+    setPendingScrollLine,
   ]);
 
   // In-flight guard for history paging. Plain ref (not store state) — the
@@ -673,7 +718,7 @@ export function ChatLayout() {
           replyTo={replyTo}
           highlightLine={highlightLine}
           pendingScrollLine={pendingScrollLine}
-          restoreScrollTop={restoreScrollTop}
+          restoreScrollTop={messageRestoreScrollTop}
           onHighlightLineChange={setHighlightLine}
           onPendingScrollClear={handlePendingScrollClear}
           onScrollTopChange={handleMessageScrollTopChange}

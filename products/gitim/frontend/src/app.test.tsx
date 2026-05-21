@@ -146,6 +146,7 @@ import { useCardStore } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
+import { readChatScopeState } from "./lib/chat-ui-state";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -469,6 +470,11 @@ describe("App card thread toasts", () => {
       .getState()
       .channels.find((channel) => channel.name === "general");
     expect(general?.unreadCount).toBe(1);
+    expect(readChatScopeState("runtime:room", "channel:general")).toMatchObject({
+      unreadCount: 1,
+      hasMention: false,
+      firstUnreadLine: 2,
+    });
   });
 
   it("restores unread state after a refresh once the poll cursor already advanced", async () => {
@@ -553,5 +559,10 @@ describe("App card thread toasts", () => {
       .channels.find((channel) => channel.name === "general");
     expect(general?.unreadCount).toBe(1);
     expect(general?.hasMention).toBe(true);
+    expect(readChatScopeState("runtime:room", "channel:general")).toMatchObject({
+      unreadCount: 1,
+      hasMention: true,
+      firstUnreadLine: 2,
+    });
   });
 });

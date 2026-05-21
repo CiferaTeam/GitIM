@@ -268,6 +268,44 @@ describe("MessageList scroll position on message mutations", () => {
     expect(scroll.scrollTop).toBe(600);
   });
 
+  it("reports programmatic bottom scrolls so parents can persist route returns", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+    const onScrollTopChange = vi.fn();
+
+    await act(async () => {
+      r.render(
+        <MessageList
+          {...baseProps}
+          onScrollTopChange={onScrollTopChange}
+          messages={[msg(0, "__placeholder__")]}
+        />,
+      );
+      await Promise.resolve();
+    });
+    const scroll = document.querySelector<HTMLDivElement>(
+      "[data-message-scroll]",
+    )!;
+    stubScrollHeight(scroll, 600);
+    onScrollTopChange.mockClear();
+
+    await act(async () => {
+      r.render(
+        <MessageList
+          {...baseProps}
+          onScrollTopChange={onScrollTopChange}
+          messages={[msg(1, "a"), msg(2, "b"), msg(3, "c")]}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(scroll.scrollTop).toBe(600);
+    expect(onScrollTopChange).toHaveBeenLastCalledWith(600);
+  });
+
   it("scrolls to the bottom when a pending outbound message is appended (line_number = -1)", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

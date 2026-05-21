@@ -8,6 +8,13 @@ import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import {
+  incrementChatScopeUnread,
+  readActiveChatScope,
+  readChatScopeState,
+  writeActiveChatScope,
+  writeChatScopeScrollTop,
+} from "../../lib/chat-ui-state";
 
 const mocks = vi.hoisted(() => ({
   client: {
@@ -91,10 +98,15 @@ vi.mock("./header", () => ({
 vi.mock("./message-list", () => ({
   MessageList: ({
     onMessageLinkClick,
+    restoreScrollTop,
   }: {
     onMessageLinkClick?: (channel: string, line: number) => void;
+    restoreScrollTop?: number | null;
   }) => (
-    <div data-testid="message-list">
+    <div
+      data-testid="message-list"
+      data-restore-scroll-top={restoreScrollTop ?? ""}
+    >
       <button
         data-testid="message-link"
         onClick={() => onMessageLinkClick?.("random", 42)}
@@ -108,7 +120,12 @@ vi.mock("./scroll-to-bottom-button", () => ({
 }));
 
 vi.mock("./sidebar", () => ({
-  Sidebar: () => null,
+  Sidebar: ({ onChannelSelect }: { onChannelSelect?: (name: string) => void }) => (
+    <button
+      data-testid="select-random-channel"
+      onClick={() => onChannelSelect?.("random")}
+    />
+  ),
 }));
 
 vi.mock("./thread-panel", () => ({
@@ -370,5 +387,118 @@ describe("ChatLayout all mention send", () => {
     expect(useChatStore.getState().currentChannel).toBe("general");
     expect(general?.unreadCount).toBe(10);
     expect(general?.hasMention).toBe(true);
+  });
+
+  it("auto-selects the stored active scope when /chat mounts without a channel", async () => {
+    writeActiveChatScope("runtime:room", "channel:random");
+    useChatStore.setState({
+      currentChannel: null,
+      channels: [
+        {
+          name: "general",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis"],
+          created_by: "lewis",
+        },
+        {
+          name: "random",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis"],
+          created_by: "lewis",
+        },
+      ],
+      messages: [],
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().currentChannel).toBe("random");
+    expect(mocks.client.read).toHaveBeenCalledWith("room", "random", 50);
+  });
+
+  it("restores persisted scroll when /chat remounts with an existing current channel", async () => {
+    writeChatScopeScrollTop("runtime:room", "channel:general", 321);
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const list = document.querySelector<HTMLElement>(
+      "[data-testid='message-list']",
+    );
+    expect(list?.dataset.restoreScrollTop).toBe("321");
+  });
+
+  it("uses firstUnreadLine when opening a channel with persisted unread state", async () => {
+    useChatStore.setState({
+      channels: [
+        {
+          name: "general",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis"],
+          created_by: "lewis",
+        },
+        {
+          name: "random",
+          kind: "channel",
+          unreadCount: 2,
+          hasMention: true,
+          members: ["lewis", "alice"],
+          created_by: "lewis",
+        },
+      ],
+      currentChannel: "general",
+      messages: [],
+    });
+    incrementChatScopeUnread("runtime:room", "channel:random", {
+      count: 2,
+      hasMention: true,
+      firstUnreadLine: 88,
+    });
+    expect(readChatScopeState("runtime:room", "channel:random")).toMatchObject({
+      unreadCount: 2,
+      firstUnreadLine: 88,
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const selectRandom = document.querySelector<HTMLButtonElement>(
+      "[data-testid='select-random-channel']",
+    );
+    expect(selectRandom).not.toBeNull();
+
+    await act(async () => {
+      selectRandom!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().currentChannel).toBe("random");
+    expect(useChatStore.getState().pendingScrollLine).toBe(88);
+    expect(readActiveChatScope("runtime:room")).toBe("channel:random");
+    expect(readChatScopeState("runtime:room", "channel:random")).toMatchObject({
+      unreadCount: 0,
+      hasMention: false,
+      firstUnreadLine: null,
+    });
+    const random = useChatStore
+      .getState()
+      .channels.find((channel) => channel.name === "random");
+    expect(random?.unreadCount).toBe(0);
+    expect(random?.hasMention).toBe(false);
   });
 });

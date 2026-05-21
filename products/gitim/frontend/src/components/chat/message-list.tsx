@@ -115,16 +115,20 @@ export function MessageList({
         ) as HTMLElement | null;
         if (target) {
           target.scrollIntoView({ behavior: "smooth", block: "center" });
+          onScrollTopChange?.(scrollRef.current.scrollTop);
           onHighlightLineChange(decision.line);
         }
         onPendingScrollClear();
       });
     } else if (decision.kind === "preserve-prepend-anchor") {
       el.scrollTop = el.scrollTop + decision.heightDelta;
+      onScrollTopChange?.(el.scrollTop);
     } else if (decision.kind === "bottom") {
       el.scrollTop = nextTimeline.scrollHeight;
+      onScrollTopChange?.(el.scrollTop);
     } else if (decision.kind === "scroll-top") {
       el.scrollTop = decision.top;
+      onScrollTopChange?.(el.scrollTop);
     }
   }, [
     messages,
@@ -132,6 +136,7 @@ export function MessageList({
     restoreScrollTop,
     scopeKey,
     scrollRef,
+    onScrollTopChange,
     onHighlightLineChange,
     onPendingScrollClear,
   ]);

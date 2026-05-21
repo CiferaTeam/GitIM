@@ -9,6 +9,10 @@ import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import {
+  readChatScopeScrollTop,
+  writeChatScopeScrollTop,
+} from "@/lib/chat-ui-state";
 import type { Card, Message } from "@/lib/types";
 
 const testEnv = vi.hoisted(() => {
@@ -154,14 +158,7 @@ describe("CardDetail message scroll state", () => {
   });
 
   it("passes persisted card discussion scrollTop into MessageList and stores new positions", async () => {
-    localStorage.setItem(
-      "gitim-ui-state:runtime:room",
-      JSON.stringify({
-        messageScrollByScope: {
-          "card:general/card-1": 240,
-        },
-      }),
-    );
+    writeChatScopeScrollTop("runtime:room", "card:general/card-1", 240);
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -190,11 +187,6 @@ describe("CardDetail message scroll state", () => {
       onScrollTopChange?.(360);
     });
 
-    expect(
-      JSON.parse(localStorage.getItem("gitim-ui-state:runtime:room") ?? "{}")
-        .messageScrollByScope,
-    ).toEqual({
-      "card:general/card-1": 360,
-    });
+    expect(readChatScopeScrollTop("runtime:room", "card:general/card-1")).toBe(360);
   });
 });

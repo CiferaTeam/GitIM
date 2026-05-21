@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as client from "@/lib/client";
 import { activeWorkspaceStorageKey, workspaceIdentity } from "@/lib/workspace-key";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { clearChatUiState } from "@/lib/chat-ui-state";
 import { clearUiState } from "@/lib/ui-state";
 import type { CreateWorkspaceRequest, WorkspaceSummary } from "@/lib/types";
 
@@ -121,7 +122,11 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       return false;
     }
     // Clear before fetchAll so loadStoredSlug doesn't pick up a stale active slug.
-    if (workspace) clearUiState(workspaceIdentity(mode, workspace));
+    if (workspace) {
+      const workspaceKey = workspaceIdentity(mode, workspace);
+      clearUiState(workspaceKey);
+      clearChatUiState(workspaceKey);
+    }
     await get().fetchAll();
     return true;
   },
