@@ -53,6 +53,9 @@ pub struct Args {
     /// (exit 1) rather than clap's stderr-only parse failure.
     pub env: Vec<String>,
     pub dotenv_file: Option<PathBuf>,
+    /// When true, wipes the agent's session state via the HTTP handler.
+    /// Maps to `clear_session: true` in the PATCH body.
+    pub clear_session: bool,
 }
 
 /// Entry point. Sequence:
@@ -86,10 +89,11 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         && args.introduction.is_none()
         && env_map.is_none()
         && dotenv.is_none()
+        && !args.clear_session
     {
         return Err(CliError::InvalidConfig(
             "no update fields specified; pass at least one of \
-             --system-prompt, --model, --introduction, --env, --dotenv-file"
+             --system-prompt, --model, --introduction, --env, --dotenv-file, --clear-session"
                 .to_string(),
         ));
     }
@@ -103,6 +107,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         introduction: args.introduction.as_deref(),
         env: env_map.as_ref(),
         dotenv: dotenv.as_deref(),
+        clear_session: args.clear_session,
     });
 
     // `update-agent` opts into the long-form timeout: the runtime handler
@@ -199,6 +204,7 @@ struct BuildArgs<'a> {
     introduction: Option<&'a str>,
     env: Option<&'a HashMap<String, String>>,
     dotenv: Option<&'a str>,
+    clear_session: bool,
 }
 
 /// Pure body builder. Each `Option::None` here corresponds to "user
@@ -226,6 +232,9 @@ fn build_update_body(args: BuildArgs<'_>) -> serde_json::Value {
     if let Some(de) = args.dotenv {
         body.insert("dotenv".to_string(), json!(de));
     }
+    if args.clear_session {
+        body.insert("clear_session".to_string(), json!(true));
+    }
     serde_json::Value::Object(body)
 }
 
@@ -244,6 +253,7 @@ mod tests {
             introduction: None,
             env: None,
             dotenv: None,
+            clear_session: false,
         });
         let obj = body.as_object().expect("body is object");
         assert_eq!(obj["system_prompt"], "new prompt");
@@ -268,6 +278,7 @@ mod tests {
             introduction: Some("Z"),
             env: Some(&env),
             dotenv: Some("FOO=bar\n"),
+            clear_session: false,
         });
         let obj = body.as_object().expect("body is object");
         assert_eq!(obj["system_prompt"], "X");
@@ -290,6 +301,7 @@ mod tests {
             introduction: None,
             env: None,
             dotenv: None,
+            clear_session: false,
         });
         let obj = body.as_object().expect("body is object");
         assert!(obj.is_empty(), "all-None must produce empty object");
@@ -309,6 +321,7 @@ mod tests {
             introduction: None,
             env: Some(&env),
             dotenv: None,
+            clear_session: false,
         });
         assert!(body["env"].as_object().expect("env object").is_empty());
     }
@@ -323,6 +336,7 @@ mod tests {
             introduction: None,
             env: None,
             dotenv: None,
+            clear_session: false,
         });
         assert!(!body.as_object().unwrap().contains_key("env"));
     }
@@ -341,6 +355,7 @@ mod tests {
             introduction: None,
             env: Some(&env),
             dotenv: None,
+            clear_session: false,
         });
         let env_obj = body["env"].as_object().expect("env is object");
         assert_eq!(env_obj["DEBUG"], "1");
@@ -441,5 +456,58 @@ mod tests {
         std::fs::write(&path, "hello").unwrap();
         let v = read_capped_file(Some(&path), "dotenv_file").expect("ok");
         assert_eq!(v.as_deref(), Some("hello"));
+    }
+
+    // ── clear_session tests ─────────────────────────────────────────────
+
+    /// `--clear-session` → body contains `clear_session: true`.
+    #[test]
+    fn build_body_clear_session_true() {
+        let body = build_update_body(BuildArgs {
+            system_prompt: None,
+            model: None,
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: true,
+        });
+        let obj = body.as_object().expect("body is object");
+        assert_eq!(obj["clear_session"], true);
+        assert_eq!(obj.len(), 1, "only clear_session key");
+    }
+
+    /// When `clear_session` is false, the key must be absent — not `false`.
+    /// The runtime maps a missing key to no-op; an explicit `false` would
+    /// still be no-op, but omitting it keeps the body minimal.
+    #[test]
+    fn build_body_clear_session_false_omits_key() {
+        let body = build_update_body(BuildArgs {
+            system_prompt: Some("X"),
+            model: None,
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: false,
+        });
+        let obj = body.as_object().expect("body is object");
+        assert!(!obj.contains_key("clear_session"), "must be absent when false");
+        assert_eq!(obj["system_prompt"], "X");
+    }
+
+    /// `clear_session=true` can coexist with other fields.
+    #[test]
+    fn build_body_clear_session_with_model() {
+        let body = build_update_body(BuildArgs {
+            system_prompt: None,
+            model: Some("claude-opus-4-7"),
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: true,
+        });
+        let obj = body.as_object().expect("body is object");
+        assert_eq!(obj["clear_session"], true);
+        assert_eq!(obj["model"], "claude-opus-4-7");
+        assert_eq!(obj.len(), 2);
     }
 }
