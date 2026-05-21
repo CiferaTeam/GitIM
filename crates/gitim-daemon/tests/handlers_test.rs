@@ -261,8 +261,45 @@ async fn test_leave_channel_self() {
     .await;
     assert!(resp_bob.ok, "bob join failed: {:?}", resp_bob.error);
 
-    // Alice leaves
+    // Bob leaves. This keeps the self-leave success case separate from the
+    // channel-creator guard.
     let resp2 = handle_request(
+        Request::LeaveChannel {
+            channel: "general".to_string(),
+            targets: vec![],
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp2.ok, "leave failed: {:?}", resp2.error);
+
+    // Verify meta.yaml members now contains only alice
+    let meta_str =
+        std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
+    let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
+    assert_eq!(
+        meta.members,
+        vec!["alice".to_string()],
+        "members should be [alice], got: {:?}",
+        meta.members
+    );
+
+    // Verify thread has both join and leave events
+    let thread = std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
+    assert!(thread.contains("[E:join]"), "thread missing join event");
+    assert!(thread.contains("[E:leave]"), "thread missing leave event");
+}
+
+#[tokio::test]
+async fn test_leave_channel_creator_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel_with_members(&state, "general", "alice", &["alice", "bob"]);
+
+    let resp = handle_request(
         Request::LeaveChannel {
             channel: "general".to_string(),
             targets: vec![],
@@ -271,23 +308,22 @@ async fn test_leave_channel_self() {
         state.clone(),
     )
     .await;
-    assert!(resp2.ok, "leave failed: {:?}", resp2.error);
+    assert!(!resp.ok, "channel creator self-leave should fail");
+    let err = resp.error.unwrap_or_default();
+    assert!(
+        err.contains("transfer ownership before leaving"),
+        "error should mention ownership transfer, got: {}",
+        err
+    );
 
-    // Verify meta.yaml members now contains only bob
     let meta_str =
         std::fs::read_to_string(state.repo_root.join("channels/general.meta.yaml")).unwrap();
     let meta: ChannelMeta = serde_yaml::from_str(&meta_str).unwrap();
     assert_eq!(
         meta.members,
-        vec!["bob".to_string()],
-        "members should be [bob], got: {:?}",
-        meta.members
+        vec!["alice".to_string(), "bob".to_string()],
+        "creator leave rejection should not mutate members"
     );
-
-    // Verify thread has both join and leave events
-    let thread = std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
-    assert!(thread.contains("[E:join]"), "thread missing join event");
-    assert!(thread.contains("[E:leave]"), "thread missing leave event");
 }
 
 #[tokio::test]

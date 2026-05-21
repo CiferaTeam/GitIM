@@ -28,6 +28,17 @@ pub async fn handle_leave_channel(
     write_channel_event(state, channel, targets, author, "leave").await
 }
 
+fn leave_removes_channel_creator(author: &str, targets: &[String], meta: &ChannelMeta) -> bool {
+    if meta.created_by.is_empty() {
+        return false;
+    }
+    if targets.is_empty() {
+        author == meta.created_by
+    } else {
+        targets.iter().any(|target| target == &meta.created_by)
+    }
+}
+
 const MAX_PUSH_RETRIES: u32 = 3;
 
 pub async fn handle_create_channel(
@@ -960,6 +971,9 @@ pub(super) async fn write_channel_event(
             {
                 return Response::error(format!("leave validation failed: {}", e));
             }
+            if leave_removes_channel_creator(&author, &targets, &channel_meta) {
+                return Response::error("channel creator must transfer ownership before leaving");
+            }
         }
         _ => return Response::error(format!("unknown event type: {}", event_type)),
     }
@@ -992,13 +1006,25 @@ pub(super) async fn write_channel_event(
         Err(e) => return Response::error(format!("failed to read channel meta: {}", e)),
     };
     let latest_members: Vec<&str> = latest_meta.members.iter().map(|s| s.as_str()).collect();
-    let revalidate = match event_type {
-        "join" => im_rules::validate_join(&author, &target_refs, &user_refs, &latest_members),
-        "leave" => im_rules::validate_leave(&author, &target_refs, &user_refs, &latest_members),
-        _ => Ok(()),
-    };
-    if let Err(e) = revalidate {
-        return Response::error(format!("{} validation failed: {}", event_type, e));
+    match event_type {
+        "join" => {
+            if let Err(e) =
+                im_rules::validate_join(&author, &target_refs, &user_refs, &latest_members)
+            {
+                return Response::error(format!("{} validation failed: {}", event_type, e));
+            }
+        }
+        "leave" => {
+            if let Err(e) =
+                im_rules::validate_leave(&author, &target_refs, &user_refs, &latest_members)
+            {
+                return Response::error(format!("{} validation failed: {}", event_type, e));
+            }
+            if leave_removes_channel_creator(&author, &targets, &latest_meta) {
+                return Response::error("channel creator must transfer ownership before leaving");
+            }
+        }
+        _ => {}
     }
     channel_meta = latest_meta;
 
