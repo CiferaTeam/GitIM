@@ -121,6 +121,16 @@ export function MessageList({
     return map;
   }, [messages]);
 
+  const maybeLoadOlderFromTop = useCallback(
+    (el: HTMLDivElement) => {
+      if (!onLoadOlder) return;
+      if (el.scrollTop <= SCROLL_TOP_THRESHOLD_PX) {
+        onLoadOlder();
+      }
+    },
+    [onLoadOlder],
+  );
+
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -203,10 +213,12 @@ export function MessageList({
     if (distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD_PX) {
       suppressAutoBottomRef.current = false;
     }
-    if (!onLoadOlder) return;
-    if (event.currentTarget.scrollTop <= SCROLL_TOP_THRESHOLD_PX) {
-      onLoadOlder();
-    }
+    maybeLoadOlderFromTop(event.currentTarget);
+  }
+
+  function handleWheelEvent(event: React.WheelEvent<HTMLDivElement>) {
+    if (event.deltaY >= 0) return;
+    maybeLoadOlderFromTop(event.currentTarget);
   }
 
   useEffect(() => {
@@ -278,6 +290,7 @@ export function MessageList({
       data-message-scroll
       className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
       onScroll={handleScrollEvent}
+      onWheel={handleWheelEvent}
     >
       {messages.map((msg) => {
         const key = msg._pendingId ?? msg.line_number;

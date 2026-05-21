@@ -100,6 +100,62 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
+  it("fires onLoadOlder on an upward wheel gesture even when the list cannot scroll", async () => {
+    const onLoadOlder = vi.fn();
+    const rendered = await renderList({ onLoadOlder });
+    root = rendered.root;
+
+    const el = rendered.container.querySelector<HTMLDivElement>(
+      "[data-message-scroll]",
+    );
+    expect(el).not.toBeNull();
+    Object.defineProperty(el!, "scrollTop", {
+      value: 0,
+      configurable: true,
+    });
+    Object.defineProperty(el!, "scrollHeight", {
+      value: 320,
+      configurable: true,
+    });
+    Object.defineProperty(el!, "clientHeight", {
+      value: 640,
+      configurable: true,
+    });
+
+    await act(async () => {
+      el!.dispatchEvent(
+        new WheelEvent("wheel", { deltaY: -120, bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire onLoadOlder on a downward wheel gesture at the top", async () => {
+    const onLoadOlder = vi.fn();
+    const rendered = await renderList({ onLoadOlder });
+    root = rendered.root;
+
+    const el = rendered.container.querySelector<HTMLDivElement>(
+      "[data-message-scroll]",
+    );
+    expect(el).not.toBeNull();
+    Object.defineProperty(el!, "scrollTop", {
+      value: 0,
+      configurable: true,
+    });
+
+    await act(async () => {
+      el!.dispatchEvent(
+        new WheelEvent("wheel", { deltaY: 120, bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
   it("does not throw when onLoadOlder is not provided and user scrolls", async () => {
     const rendered = await renderList(); // no onLoadOlder prop
     root = rendered.root;
