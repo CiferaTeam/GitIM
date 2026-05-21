@@ -101,14 +101,86 @@ pub struct SaturationSummary {
 - ❌ Per-provider / per-channel 切片
 - ❌ Working "duration" 直方图
 
-## 待 plan-eng-review 决
+## Phase 3 plan-eng-review 锁定的架构决策
 
-- `is_working` 用 `AtomicBool` 包在哪个共享 state struct 上(AgentState 是 per-agent serialized,但 sampler 要快速读不想 deserialize)
-- Sampler 跑期间 RuntimeState lock 持锁时长(不要阻塞 list endpoint)
-- Agent add/burn 期间的 race:add 前 sampler tick 看不到、burn 后 saturation 文件留着不动
-- Provider preflight 失败 / hermes profile create 失败这类 "agent 没真正 start" 期间不应该被 sample(还是 sample 但 always idle?)
-- 测试:`AgentSaturationLog` 纯函数化 + sampler 集成测试用注入 interval
-- 跟 `accumulate_usage_log` 是否复用同一个失败计数 pattern(看似该独立,err 语义不同)
+### 硬约束(来自 explore)
+- `RuntimeState` 是 `Arc<Mutex<...>>` 用 `std::sync::Mutex`([http.rs:430](../../../crates/gitim-runtime/src/http.rs:430)),不是 tokio mutex。任何持锁期间会阻塞 tokio worker。决定了 sampler 必须 "snapshot → drop lock → IO"。
+- `AgentInfo` 已经有 `#[serde(skip)]` runtime-only 字段(`loop_handle`)。`is_working` 加进 `AgentInfo` 复用此 pattern。
+- `AgentLoop` 已持 `runtime_state: Option<SharedRuntimeState>`([http.rs:63](../../../crates/gitim-runtime/src/http.rs:63))。toggle 路径已通。
+- `provider.execute()` 是 `?` bubble 设计([agent_loop.rs:798-802](../../../crates/gitim-runtime/src/agent_loop.rs:798))。手写 set/reset 在 error 路径会漏 reset。
+- `cleanup_agent_dir` 只 `remove_dir_all(agent_dir)`([http.rs:3146](../../../crates/gitim-runtime/src/http.rs:3146)),saturation 文件在 `<workspace>/.gitim-runtime/saturation/`,**不在 agent_dir 下**,必须显式追加清理。
+
+### 决策
+
+| ID | 决策 | 理由 |
+|----|------|------|
+| A1 | `is_working: Arc<AtomicBool>` 加到 `AgentInfo`,`#[serde(skip)]` | 跟 `loop_handle` 同 lifetime;lock-free 读写;sampler 持锁期间只 `Arc::clone` 而非 atomic load |
+| A2 | Sampler tick: 持锁→snapshot `Vec<(workspace_slug, handler, Arc<AtomicBool>)>`→drop lock→atomic load + 写盘 | sync mutex 下唯一非阻塞写法。N=20 时 snapshot ≈ μs |
+| A3 | provider.execute toggle 用 **RAII `WorkingGuard`**,Drop 时 store(false) | panic-safe + error-safe;数据准确性是 sampler 的 truth source,飘 false 永久污染数据 |
+| A4 | Agent add/burn 期间 race 接受 | 5min 一次,最多漏一个 sample;burn 时 saturation 文件留到 hard_delete 才清 |
+| C1 | v1 `saturation_log.rs` 跟 `usage_log.rs` 复制 4 个共性函数(save / load / prune / chmod_0600);不抽 trait | YAGNI;两个 struct < 300 行;第三个 metric log 出现时再抽 |
+| C2 | `hard_delete_agent_dir` 后追加 `std::fs::remove_file(<workspace>/.gitim-runtime/saturation/<handler>.json)`,best-effort 失败 warn 不阻塞 | design doc 既定要求,自动 lifecycle 一致 |
+| T1 | `SaturationSampler` 拆 `take_snapshot(state)` 纯函数 + `tick_once(snapshot)` 执行 IO,分别测试 | 纯函数 unit test 覆盖所有 sampling 逻辑;集成测试只验 wiring |
+| T2 | Sampler interval 通过 `SaturationSampler::with_interval(d: Duration)` builder 注入,production 默认 `Duration::from_secs(300)` | 集成测试用 100ms tick 几个 tick 即可验证落盘 |
+| F1 | `RuntimeState.saturation_save_failures: AtomicU64` 独立于 `usage_save_failures` | 两个 IO 路径独立,失败语义不同(saturation 失败 ≠ usage 失败) |
+
+### Open(由 Phase 4 plan 决定 implementation 细节)
+- `SaturationSampler` spawn 在 RuntimeState 构造后哪里(`run` 函数 startup 段)
+- `WorkingGuard` 类型放哪个 module(`agent_loop.rs` 文件内 private 还是 saturation 子模块)
+- `take_snapshot` 函数签名(借 lock guard 还是接 `&RuntimeState`)
+
+### Tests 计划(Phase 4 plan 落地具体测试)
+
+```
+COVERAGE MAP
+============================================================================
+[+] crates/gitim-runtime/src/saturation_log.rs (new)
+  ├── AgentSaturationLog::accumulate(working: bool, ts: DateTime)
+  │   ├── [ ] new file -> first_seen + totals + by_day + by_hour 全部 +1
+  │   ├── [ ] same day 累加 by_day; same hour 累加 by_hour; totals 同步
+  │   ├── [ ] working=false 只 +1 total_samples 不增 working_samples
+  │   └── [ ] 跨午夜 / 跨整点 创建新 bucket key
+  ├── save(workspace_root, today) + load_or_default
+  │   ├── [ ] atomic rename + chmod 0600 (mirror usage_log::save)
+  │   └── [ ] roundtrip: save then load_or_default ≡ identity
+  └── prune_by_day / prune_by_hour
+      ├── [ ] drop entries 超过 RETENTION_DAYS(90)
+      └── [ ] by_hour key 比较用 UTC 解析
+
+[+] crates/gitim-runtime/src/saturation_sampler.rs (new)
+  ├── take_snapshot(&RuntimeState) -> Vec<(slug, handler, working: bool)>
+  │   ├── [ ] 空 workspaces -> empty vec
+  │   ├── [ ] 多 workspace × 多 agent 全部枚举
+  │   └── [ ] is_working atomic.load 反映当前状态
+  └── tick_once(snapshot, now) (integration)
+      └── [ ] 注入 100ms interval, 3 tick 后 saturation/<h>.json 内容正确
+
+[+] crates/gitim-runtime/src/agent_loop.rs (modify)
+  ├── WorkingGuard Drop -> store(false)
+  │   ├── [ ] 正常 Ok 路径 reset
+  │   ├── [ ] ? bubble Err 路径 reset
+  │   └── [ ] 模拟 panic 时 reset (catch_unwind 包测试)
+  └── set_runtime_state 注入后 is_working 字段在 RuntimeState 可见
+
+[+] crates/gitim-runtime/src/http.rs (modify)
+  ├── AgentInfo.saturation_summary 字段
+  │   └── [ ] list endpoint 返回每 agent 带 summary
+  ├── HealthResponse.saturation_save_failures
+  │   └── [ ] /runtime/health 暴露
+  └── hard_delete_agent_dir 追加清 saturation/<h>.json
+      ├── [ ] hard delete 后文件不存在
+      └── [ ] saturation 文件不存在时 remove_file 失败仅 warn
+
+[+] products/gitim/frontend/src/lib/types.ts (modify)
+  └── SaturationSummary type
+      └── [ ] type 跟后端 wire format 一致
+
+[+] products/gitim/frontend/src/components/management/workspace-usage-header.tsx (modify)
+  └── 加 "Today saturation X.X%" + 7-day sparkline
+      └── [ ] 多 agent reduce 出 fleet ratio (按 Σworking / Σtotal)
+
+COVERAGE: 16 test entries planned, 0 GAP
+```
 
 ## 验收
 
