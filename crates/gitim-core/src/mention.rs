@@ -2,6 +2,9 @@ use crate::types::Handler;
 use regex::Regex;
 use std::sync::LazyLock;
 
+// SAFETY: The regex pattern is a statically-verified literal; Regex::new
+// can only fail on invalid syntax, which is impossible here.
+#[allow(clippy::unwrap_used)]
 static MENTION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>").unwrap());
 

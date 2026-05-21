@@ -2,6 +2,9 @@ use crate::types::Handler;
 use regex::Regex;
 use std::sync::LazyLock;
 
+// SAFETY: The regex pattern is a statically-verified literal; Regex::new
+// can only fail on invalid syntax, which is impossible here.
+#[allow(clippy::unwrap_used)]
 static MSG_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[L\d{6,}\]").unwrap());
 
 pub fn format_message(

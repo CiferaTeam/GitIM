@@ -113,7 +113,12 @@ impl Provider for CodexProvider {
             "codex started"
         );
 
+        // INVARIANT: `Command::stdout()`/`stderr()` return `Some` when
+        // the corresponding `Stdio` is set to `piped()`. We always configure
+        // `stdout(Stdio::piped())` etc., so these are always `Some`.
+        #[allow(clippy::expect_used)]
         let stdout = child.stdout.take().expect("stdout piped");
+        #[allow(clippy::expect_used)]
         let stderr = child.stderr.take().expect("stderr piped");
         let codex_home = codex_home_from_env(&self.config.env);
 

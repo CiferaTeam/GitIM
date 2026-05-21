@@ -16,6 +16,9 @@ pub fn ensure_config_indexer_enabled(repo_dir: &Path, enabled: bool) -> io::Resu
 
     if config_path.exists() {
         let mut content = fs::read_to_string(&config_path)?;
+        // SAFETY: The regex pattern is a statically-verified literal; Regex::new
+        // can only fail on invalid syntax, which is impossible here.
+        #[allow(clippy::unwrap_used)]
         let re = Regex::new(r"(?m)(indexer:\s*\n\s*enabled:)\s*(true|false)").unwrap();
         if re.is_match(&content) {
             content = re.replace(&content, format!("$1 {value}")).to_string();

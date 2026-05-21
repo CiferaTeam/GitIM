@@ -111,6 +111,10 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
     let runtime = FleetNodeRuntime::new(state.clone(), entry.clone());
     let mut initial_statuses = Vec::new();
     {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex. We construct
+        // this mutex ourselves and never panic while holding it, so poisoning
+        // is the only failure mode and would indicate a bug in this process.
+        #[allow(clippy::unwrap_used)]
         let mut s = state.lock().unwrap();
         s.fleet_nodes.insert(entry.node_id.clone(), runtime);
         for subscription in workspace_subscriptions(&entry) {
@@ -144,6 +148,8 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
 }
 
 pub fn remove_node(state: &SharedRuntimeState, node_id: &str) -> bool {
+    // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+    #[allow(clippy::unwrap_used)]
     let mut s = state.lock().unwrap();
     s.fleet_status
         .retain(|_, status| status.node_id.as_str() != node_id);
@@ -312,6 +318,8 @@ pub async fn resolve_workspace_mappings(
 
 pub async fn fetch_agent_snapshots(state: &SharedRuntimeState) -> Vec<FleetAgentSnapshot> {
     let nodes: Vec<_> = {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let s = state.lock().unwrap();
         s.fleet_nodes
             .values()
@@ -374,6 +382,8 @@ pub async fn fetch_agent_snapshots(state: &SharedRuntimeState) -> Vec<FleetAgent
 
 fn local_remote_identities(state: &SharedRuntimeState) -> Vec<(String, String)> {
     let mut identities: Vec<_> = {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let s = state.lock().unwrap();
         s.workspaces
             .values()
@@ -547,6 +557,8 @@ fn publish_event(
         event,
     });
     let tx = {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let s = state.lock().unwrap();
         s.fleet_tx.clone()
     };
@@ -597,6 +609,8 @@ fn update_status(
     update: impl FnOnce(&mut FleetNodeStatus),
 ) {
     let status = {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let mut s = state.lock().unwrap();
         let key = status_key(
             &entry.node_id,
@@ -627,6 +641,8 @@ fn update_status(
 
 fn publish_status(state: &SharedRuntimeState, status: FleetNodeStatus) {
     let tx = {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let s = state.lock().unwrap();
         s.fleet_tx.clone()
     };

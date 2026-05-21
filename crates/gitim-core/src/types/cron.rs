@@ -101,6 +101,9 @@ pub fn validate_cron_name(name: &str) -> Result<(), CronNameError> {
         return Err(CronNameError::Reserved(name.to_string()));
     }
     let mut chars = name.chars();
+    // INVARIANT: `chars.next()` is guaranteed to return `Some` because we
+    // checked `!name.is_empty()` at the start of this function.
+    #[allow(clippy::expect_used)]
     let first = chars.next().expect("non-empty checked above");
     if !matches!(first, 'a'..='z' | '0'..='9') {
         return Err(CronNameError::BadFirstChar(name.to_string()));

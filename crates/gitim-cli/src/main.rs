@@ -1,4 +1,5 @@
 // gitim-cli is a terminal program; printing to stdout/stderr is the interface.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod commands;
