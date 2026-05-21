@@ -7,6 +7,7 @@ pub mod handler;
 pub mod link;
 pub mod message;
 pub mod meta;
+pub mod project;
 
 pub use board::{
     append_board_section, board_path, default_board, parse_board_markdown, set_board_field,
@@ -25,3 +26,4 @@ pub use handler::Handler;
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
 pub use meta::{ChannelMeta, UserMeta, MAX_INTRODUCTION_LEN};
+pub use project::{ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
