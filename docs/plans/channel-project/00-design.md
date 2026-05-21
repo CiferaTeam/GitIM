@@ -38,6 +38,9 @@ pub struct ChannelMeta {
 
 ```rust
 // crates/gitim-core/src/types/meta.rs
+// NOTE: ProjectMeta 跟 ChannelMeta 共享 display_name / created_by / created_at / introduction
+//       4 个字段。v1 不抽象 (YAGNI)。若未来出现第 3 个 meta type (UserMeta 已经独立),
+//       考虑提取 MetaCommon base struct 或 derive macro。修改 ChannelMeta 共享字段时记得检查这里。
 pub struct ProjectMeta {
     pub display_name: String,
     pub created_by: String,
@@ -83,6 +86,8 @@ v1 **不做**:
 ## 3. Validation
 
 - `SetChannelProject { project: Some("X"), .. }` 校验:`projects/X/meta.yaml` 必须存在,否则 daemon 返 `error_code: project_not_found`
+- `SetChannelProject` 校验:目标 channel 必须是 **active** (即 `channels/<ch>/meta.yaml` 存在,非 archive)。archived channel 拒绝 mutation,返 `error_code: channel_archived`。理由:archive 是 freeze state,meta 不应再变;改 project 字段会破坏 archive 的 "瞬态切片" 语义
+- Project meta 解析失败语义:若 `projects/X/meta.yaml` 文件存在但 yaml parse 失败 / 字段不全 / 类型不对,daemon 返 server-side error code `project_meta_corrupted` (跟 `project_not_found` 区分)。client 看到 `corrupted` 知道是 server 状态异常,不是自己传错 slug
 - `CreateProject` 校验:slug 合法 + slug 不冲突(已存在 → `error_code: project_exists`)
 - channel.project 字段反向跟踪 unused project:**不做** —— project 可以是空的(只是 sidebar 不显示而已)
 - channel archive 时:`project` 字段原样跟 meta 进 `archive/channels/<ch>/`,**不做 special handling**
@@ -211,9 +216,12 @@ v1 **不做**:
 - `SetChannelProject(Some)` happy path:channel.meta.project 变成 Some(X) + 1 commit
 - `SetChannelProject(None)` happy path:从 Some(X) 变 None + 1 commit
 - `SetChannelProject` reassign:从 Some(X) 变 Some(Y) + 1 commit
+- `SetChannelProject` 对 archived channel:返 `channel_archived`,meta 不变 (review finding 2.A)
+- `SetChannelProject(Some)` 指向 corrupted project meta:返 `project_meta_corrupted` (review finding 1.B)
 - `ListProjects` 返回 channel_count 正确(空 project = 0)
-- Channel archive 时 `project` 字段保留
-- Channel unarchive 时 `project` 字段保留
+- **[REGRESSION, IRON RULE]** Channel archive → unarchive 全链路,`channel.meta.project` 字段值在 archive/unarchive 后**完全保留** (review finding 3.A)。测试覆盖 `archived_via = manual` 和 `archived_via = channel` 两条路径
+- **[BACKWARD-COMPAT]** 老 channel meta yaml (无 project 字段) 反序列化 → `project = None`,无错;写回时 `skip_serializing_if` 不写 project 字段,文件 byte-identical (review finding 3.B)
+- **[BACKWARD-COMPAT]** 老 daemon 反序列化新 channel meta (有 project 字段),`deny_unknown_fields` 未开,silently ignore 通过。实测验证假设而非假设 (review finding 3.B)
 
 ### 11.3 `gitim-cli`
 - `gitim projects list` / `create` argv 解析 + happy path 通 daemon IPC
@@ -224,13 +232,32 @@ v1 **不做**:
 - write-guard 触发 (departed user 不能 mutate)
 
 ### 11.5 `gitim-frontend`
-- Sidebar 平级 sort 算法 (mixed channel + project)
-- 空 project 隐式不显示
-- Pin/unpin project (localStorage)
-- Cards filter bar project dropdown
-- URL param `project=` round-trip
+- Sidebar 平级 sort 算法 (mixed channel + project) —— unit test
+- 空 project 隐式不显示 —— unit test
+- Pin/unpin project (localStorage) —— unit test
+- Cards filter bar project dropdown —— unit test
+- URL param `project=` round-trip —— unit test
+- **[E2E]** Create project → assign channel → sidebar 渲染 project folder + 内含 channel → click expand → click channel → send message → 验 routing 不被 project 影响 → pin project → reload → 仍 pinned (review finding 3.C)
 
-## 12. v2+ out-of-scope (锁定不做)
+## 12. Implementation guardrails (来自 plan-eng-review)
+
+### 12.1 meta.yaml dispatch path audit (review finding 1.A)
+
+`projects/<slug>/meta.yaml` 跟 `channels/<ch>/meta.yaml` 同名,实施前必须 audit 以下处理路径,确认 path 前缀 filter 严格区分两类:
+
+- `crates/gitim-sync` 的 file watcher (`watcher.rs`):新增 / 修改 / 删除事件分发要按顶层目录 (`channels/` vs `projects/` vs `archive/`) 分支
+- `crates/gitim-index` (FTS5 indexer):如果按 yaml glob 扫描,新增 `projects/` 跳过逻辑 (v1 不索引 project meta)
+- `crates/gitim-daemon` onboard 路径 (`onboard.rs`):workspace 初始化时 `projects/` 不应该被 channel 发现器扫到
+- `crates/gitim-daemon` archive / unarchive handler:`channels/<ch>/` 路径处理不能误伤 `projects/<slug>/`
+- `crates/gitim-daemon` reconcile (孤儿卡片 reconcile):path 前缀过滤要更新
+
+每个 audit 点在 PR 里 commit message 显式标注 "verified path prefix filter"。
+
+### 12.2 SSE event 命名 convention 实测确认
+
+实施时 grep 现有 SSE event 类型 (`channel_archived` / `channel_unarchived` / `card_*` / `members_changed` 等),按现役命名风格定 `project_*` event。文档 (本 design Section 9.4) 在实施 PR 里同步更新明确选定的 event 名。
+
+## 13. v2+ out-of-scope (锁定不做)
 
 - Project rename / archive / edit introduction
 - Project owner / members 概念 (permission 更细粒度)
@@ -241,9 +268,9 @@ v1 **不做**:
 - 多归属 (channel.projects: Vec) —— 永远不做 (这次锁的是 0..1)
 - Project 自己有 thread/messages —— 永远不做
 
-## 13. Open question
+## 14. Open question
 
-无 —— 全部锁定后进 plan-eng-review。
+无 —— plan-eng-review 完成,findings 已全部 patch 进 design。下一步进 writing-plans (Phase 4) 生成 TDD 实施计划。
 
 ---
 
