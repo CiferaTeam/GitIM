@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -61,6 +62,16 @@ impl std::fmt::Display for ProjectSlug {
     }
 }
 
+// NOTE: ProjectMeta 跟 ChannelMeta 共享 display_name / created_by / created_at / introduction
+// 4 个字段。v1 不抽象 (YAGNI)。修改 ChannelMeta 共享字段时记得检查这里。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMeta {
+    pub display_name: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub introduction: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +133,35 @@ mod tests {
                 Err(ProjectSlugError::Reserved(s.to_string()))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    #[test]
+    fn project_meta_roundtrip() {
+        let meta = ProjectMeta {
+            display_name: "Design Sprint".to_string(),
+            created_by: "lewisliu".to_string(),
+            created_at: "2026-05-21T08:00:00Z".to_string(),
+            introduction: "All UX work for v2".to_string(),
+        };
+        let yaml = serde_yaml::to_string(&meta).expect("ser");
+        let back: ProjectMeta = serde_yaml::from_str(&yaml).expect("de");
+        assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn project_meta_missing_required_field_fails() {
+        // display_name 缺失
+        let yaml = r#"
+created_by: lewisliu
+created_at: "2026-05-21T08:00:00Z"
+introduction: hi
+"#;
+        let res: Result<ProjectMeta, _> = serde_yaml::from_str(yaml);
+        assert!(res.is_err());
     }
 }

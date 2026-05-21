@@ -26,4 +26,4 @@ pub use handler::Handler;
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
 pub use meta::{ChannelMeta, UserMeta, MAX_INTRODUCTION_LEN};
-pub use project::{ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
+pub use project::{ProjectMeta, ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
