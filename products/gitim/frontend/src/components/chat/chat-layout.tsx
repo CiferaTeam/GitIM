@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
-import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
@@ -10,6 +9,10 @@ import * as client from "../../lib/client";
 import { expandAllMentions } from "../../lib/expand-all-mentions";
 import { buildMentionCandidates } from "../../lib/mention-candidates";
 import type { Channel, Message } from "../../lib/types";
+import {
+  recordRemoteSyncPending,
+  remoteSyncFailure,
+} from "../../lib/remote-sync-toast";
 import {
   chatScopeKeyForName,
   chatScopeName,
@@ -45,17 +48,6 @@ function toApiChannel(displayName: string): string {
     return `dm:${parts.join(",")}`;
   }
   return displayName;
-}
-
-function syncFailure(data: Record<string, unknown> | undefined): string | null {
-  if (!data) return null;
-  const status = typeof data.status === "string" ? data.status : data.sync_status;
-  const error = typeof data.error === "string"
-    ? data.error
-    : typeof data.sync_error === "string"
-      ? data.sync_error
-      : null;
-  return status === "commit_only" || error ? error ?? "Sync failed" : null;
 }
 
 function currentWorkspaceKey(): string | null {
@@ -358,15 +350,22 @@ export function ChatLayout() {
       }
       if (res.ok && res.data) {
         const lineNumber = res.data.line_number as number;
-        const syncError = syncFailure(res.data);
+        const syncError = remoteSyncFailure(res.data);
         // commit_only means the local commit succeeded; sync_loop retries on
         // the next cycle. Treat as sent and soften the notice — the underlying
         // race (pull-only cycle mid-fetch) usually recovers within seconds.
         markPendingSent(pendingId, lineNumber);
         if (syncError) {
-          toast.info("Saved locally, syncing to remote…", {
-            description: syncError,
-          });
+          recordRemoteSyncPending(
+            requestWorkspaceKey,
+            {
+              scope: apiChannel,
+              author: currentUser,
+              body: expandedBody,
+              lineNumber,
+            },
+            syncError,
+          );
         }
       } else {
         markPendingFailed(pendingId);

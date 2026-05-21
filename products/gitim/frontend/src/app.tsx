@@ -44,6 +44,7 @@ import {
   writeActiveChatScope,
 } from "./lib/chat-ui-state";
 import { readUiState } from "./lib/ui-state";
+import { resolveRemoteSyncFromChanges } from "./lib/remote-sync-toast";
 import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
@@ -650,6 +651,7 @@ export default function App() {
       markConnected();
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
+      resolveRemoteSyncFromChanges(requestWorkspaceKey, changes);
 
       let needChannelRefresh = false;
       let needArchivedChannelInvalidate = false;

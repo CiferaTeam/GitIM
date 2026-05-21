@@ -151,6 +151,10 @@ import {
   writeActiveChatScope,
   writeChatScopeViewAnchor,
 } from "./lib/chat-ui-state";
+import {
+  recordRemoteSyncPending,
+  resetRemoteSyncToastState,
+} from "./lib/remote-sync-toast";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -185,6 +189,7 @@ describe("App card thread toasts", () => {
     vi.useFakeTimers();
     testEnv.localStorage.clear();
     vi.clearAllMocks();
+    resetRemoteSyncToastState();
 
     mocks.client.listWorkspaces.mockResolvedValue({
       ok: true,
@@ -323,6 +328,7 @@ describe("App card thread toasts", () => {
       root = null;
     }
     document.body.innerHTML = "";
+    resetRemoteSyncToastState();
     vi.useRealTimers();
   });
 
@@ -364,6 +370,67 @@ describe("App card thread toasts", () => {
     });
 
     expect(currentPath).toBe("/cards/general/card-123456789");
+  });
+
+  it("shows success when poll confirms a queued local message reached remote", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mocks.client.poll.mockResolvedValue({
+      ok: true,
+      data: {
+        commit_id: "remote-after-push",
+        changes: [
+          {
+            kind: "new_messages",
+            channel: "general",
+            entries: [
+              {
+                line_number: 3,
+                point_to: 0,
+                author: "lewis",
+                timestamp: "20260516T000002Z",
+                body: "queued locally",
+              } satisfies Message,
+            ],
+          },
+        ],
+      },
+    });
+
+    recordRemoteSyncPending(
+      "runtime:room",
+      {
+        scope: "general",
+        author: "lewis",
+        body: "queued locally",
+        lineNumber: 3,
+      },
+      "push cycle completed without success",
+    );
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/docs"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    expect(mocks.toast.success).toHaveBeenCalledWith(
+      "Synced to remote",
+      expect.objectContaining({
+        id: "remote-sync:runtime:room",
+        description: "Queued local changes uploaded after retry.",
+      }),
+    );
   });
 
   it("does not refresh local or fleet agents on every poll tick", async () => {

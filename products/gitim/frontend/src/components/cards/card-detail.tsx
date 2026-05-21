@@ -19,6 +19,10 @@ import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
 import {
+  recordRemoteSyncPending,
+  remoteSyncFailure,
+} from "@/lib/remote-sync-toast";
+import {
   readChatScopeViewAnchor,
   writeChatScopeViewAnchor,
   type ChatViewportAnchor,
@@ -31,17 +35,6 @@ type LoadStatus = "loading" | "ok" | "not_found" | "error";
 // Stable empty-array reference: zustand compares selector output by Object.is,
 // so `?? []` would return a fresh array every call and loop useSyncExternalStore.
 const EMPTY_MESSAGES: Message[] = [];
-
-function syncFailure(data: Record<string, unknown> | undefined): string | null {
-  if (!data) return null;
-  const status = typeof data.status === "string" ? data.status : data.sync_status;
-  const error = typeof data.error === "string"
-    ? data.error
-    : typeof data.sync_error === "string"
-      ? data.sync_error
-      : null;
-  return status === "commit_only" || error ? error ?? "Sync failed" : null;
-}
 
 export function CardDetail() {
   const params = useParams();
@@ -228,15 +221,22 @@ export function CardDetail() {
       );
       if (res.ok && res.data) {
         const lineNumber = res.data.line_number as number;
-        const syncError = syncFailure(res.data);
+        const syncError = remoteSyncFailure(res.data);
         // commit_only means the local commit succeeded; sync_loop retries on
         // the next cycle. Treat as sent and soften the notice — the underlying
         // race (pull-only cycle mid-fetch) usually recovers within seconds.
         markPendingCardSent(pathKey, pendingId, lineNumber);
         if (syncError) {
-          toast.info("Saved locally, syncing to remote…", {
-            description: syncError,
-          });
+          recordRemoteSyncPending(
+            workspaceKey,
+            {
+              scope: `card:${channel}/${cardId}`,
+              author: currentUser,
+              body,
+              lineNumber,
+            },
+            syncError,
+          );
         }
       } else {
         markPendingCardFailed(pathKey, pendingId);
@@ -248,6 +248,7 @@ export function CardDetail() {
       channel,
       cardId,
       pathKey,
+      workspaceKey,
       currentUser,
       addPendingCardMessage,
       markPendingCardSent,
