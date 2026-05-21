@@ -548,6 +548,79 @@ describe("App card thread toasts", () => {
     });
   });
 
+  it("counts unread messages for other DMs while chat is not visible", async () => {
+    mocks.client.channels.mockResolvedValue({
+      ok: true,
+      data: {
+        channels: [
+          {
+            name: "general",
+            kind: "channel",
+            unreadCount: 0,
+            hasMention: false,
+            members: ["lewis", "alice"],
+          },
+          {
+            name: "cfo--flame4",
+            kind: "dm",
+            unreadCount: 0,
+            hasMention: false,
+            members: ["cfo", "flame4"],
+          },
+        ],
+      },
+    });
+    mocks.client.poll.mockResolvedValue({
+      ok: true,
+      data: {
+        commit_id: "next-head",
+        changes: [
+          {
+            kind: "dm",
+            channel: "dm:cfo,flame4",
+            entries: [
+              {
+                line_number: 7,
+                point_to: 0,
+                author: "cfo",
+                timestamp: "20260516T000007Z",
+                body: "handoff",
+              } satisfies Message,
+            ],
+          },
+        ],
+      },
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/crons"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    const dm = useChatStore
+      .getState()
+      .channels.find((channel) => channel.name === "cfo--flame4");
+    expect(dm?.unreadCount).toBe(1);
+    expect(readChatScopeState("runtime:room", "dm:cfo--flame4")).toMatchObject({
+      unreadCount: 1,
+      hasMention: false,
+      firstUnreadLine: 7,
+    });
+  });
+
   it("reads around the persisted channel anchor on a fresh /chat bootstrap", async () => {
     writeActiveChatScope("runtime:room", "channel:general");
     writeChatScopeViewAnchor("runtime:room", "channel:general", {

@@ -86,6 +86,7 @@ pub async fn handle_onboard(
         &handler,
         &display_name,
         &git_server,
+        admin,
         github_email.as_deref(),
     ) {
         return resp;
@@ -200,6 +201,7 @@ fn write_me_json(
     handler: &str,
     display_name: &str,
     git_server: &str,
+    admin: bool,
     github_email: Option<&str>,
 ) -> Result<(), Response> {
     let gitim_dir = state.repo_root.join(".gitim");
@@ -219,6 +221,7 @@ fn write_me_json(
         display_name: Some(display_name.to_string()),
         git_server: Some(git_server.to_string()),
         onboarded_at: Some(now),
+        admin: Some(admin),
         github_email: github_email.map(str::to_string),
         ..Default::default()
     };
@@ -586,6 +589,7 @@ mod tests {
             "alice",
             "Alice W",
             "github",
+            true,
             Some("alice@example.com"),
         )
         .unwrap();
@@ -598,6 +602,7 @@ mod tests {
         assert_eq!(content["git_server"], "github");
         assert_eq!(content["display_name"], "Alice W");
         assert_eq!(content["github_email"], "alice@example.com");
+        assert_eq!(content["admin"], true);
         assert!(content["onboarded_at"].as_str().is_some());
     }
 
@@ -628,7 +633,7 @@ mod tests {
 
         // Re-onboard without an email — simulates a token that no longer
         // exposes the verified email.
-        write_me_json(&state, "alice", "Alice W", "github", None).unwrap();
+        write_me_json(&state, "alice", "Alice W", "github", true, None).unwrap();
 
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(repo.join(".gitim/me.json")).unwrap())
@@ -642,6 +647,7 @@ mod tests {
             "runtime-only fields must survive re-onboard"
         );
         assert_eq!(content["model"], "sonnet-4-6");
+        assert_eq!(content["admin"], true);
     }
 
     #[tokio::test]
@@ -652,7 +658,7 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState::new(repo.clone(), Config::default(), tx, None));
 
-        write_me_json(&state, "alice", "Alice W", "git", None).unwrap();
+        write_me_json(&state, "alice", "Alice W", "git", false, None).unwrap();
 
         let me_path = repo.join(".gitim").join("me.json");
         let content: serde_json::Value =
@@ -661,6 +667,7 @@ mod tests {
             content.get("github_email").is_none(),
             "github_email should be absent when no email inferred"
         );
+        assert_eq!(content["admin"], false);
     }
 
     #[tokio::test]
@@ -1221,6 +1228,11 @@ mod tests {
             state.is_admin.load(std::sync::atomic::Ordering::SeqCst),
             "is_admin should be true"
         );
+        let content: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state.repo_root.join(".gitim/me.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(content["admin"], true);
     }
 
     #[tokio::test]

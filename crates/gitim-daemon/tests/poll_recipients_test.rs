@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the routing-recipients field that daemon poll
 //! attaches to each message entry.
 //!
@@ -257,6 +258,68 @@ async fn poll_attaches_recipients_to_dm_message_entries() {
         .collect();
     // Sorted member pair.
     assert_eq!(recipients, vec!["alice".to_string(), "bob".to_string()]);
+}
+
+/// Active DM polling is participant-scoped for normal agents, but admin human
+/// daemons intentionally see every DM so the WebUI can surface "Others" DM
+/// unread state. This is the behavior that depends on admin mode surviving
+/// daemon restarts.
+#[tokio::test]
+async fn poll_admin_sees_other_dm_message_entries() {
+    let (_tmp, state, cursor) = setup_repo().await;
+    let root = state.repo_root.clone();
+
+    std::fs::write(
+        root.join("dm/bob--charlie.thread"),
+        "[L000001][P000000][@bob][20260517T100000Z] hey charlie\n",
+    )
+    .unwrap();
+
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "add other dm"]);
+
+    let non_admin_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor.clone()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(non_admin_resp.ok, "poll failed: {:?}", non_admin_resp.error);
+    let non_admin_changes = non_admin_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    assert!(
+        non_admin_changes
+            .iter()
+            .all(|c| c["channel"] != "dm:bob,charlie"),
+        "non-admin @alice must not see bob<->charlie DM changes"
+    );
+
+    state
+        .is_admin
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let admin_resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(admin_resp.ok, "poll failed: {:?}", admin_resp.error);
+
+    let changes = admin_resp.data.unwrap()["changes"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    let dm = changes
+        .iter()
+        .find(|c| c["channel"] == "dm:bob,charlie" && c["kind"] == "dm")
+        .expect("admin should see other DM changes");
+    let entries = dm["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
 }
 
 /// Event entries (join, leave, etc.) must NOT carry recipients —

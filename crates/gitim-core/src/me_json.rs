@@ -38,6 +38,12 @@ pub struct MeJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<bool>,
 
+    /// Admin-mode flag for the human daemon. This is persisted so a daemon-only
+    /// restart can restore the WebUI's workspace-wide visibility without a
+    /// fresh onboard call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin: Option<bool>,
+
     // -- Agent runtime config (per-clone, not git-synced; written by
     // gitim-runtime `add_agent`. Daemon does not read these.) --
     /// Agent provider name: `claude` / `hermes` / `gemini` / `opencode` / ...
@@ -98,6 +104,9 @@ impl MeJson {
         if patch.guest.is_some() {
             self.guest = patch.guest;
         }
+        if patch.admin.is_some() {
+            self.admin = patch.admin;
+        }
         if patch.provider.is_some() {
             self.provider = patch.provider;
         }
@@ -141,7 +150,8 @@ mod tests {
             "display_name": "Alice W",
             "git_server": "github",
             "onboarded_at": "20260506T120000Z",
-            "github_email": "alice@example.com"
+            "github_email": "alice@example.com",
+            "admin": true
         }"#;
         let me: MeJson = serde_json::from_str(raw).unwrap();
         assert_eq!(me.handler.as_deref(), Some("alice"));
@@ -150,6 +160,7 @@ mod tests {
         assert_eq!(me.onboarded_at.as_deref(), Some("20260506T120000Z"));
         assert_eq!(me.github_email.as_deref(), Some("alice@example.com"));
         assert_eq!(me.guest, None);
+        assert_eq!(me.admin, Some(true));
     }
 
     /// Wire shape produced by daemon `write_guest_me_json`. `handler` is
@@ -217,17 +228,20 @@ mod tests {
             handler: Some("alice".into()),
             display_name: Some("old name".into()),
             github_email: Some("old@example.com".into()),
+            admin: Some(false),
             ..Default::default()
         };
         let patch = MeJson {
             display_name: Some("new name".into()),
             github_email: Some("new@example.com".into()),
+            admin: Some(true),
             ..Default::default()
         };
         let merged = base.merged_with(patch);
         assert_eq!(merged.handler.as_deref(), Some("alice"));
         assert_eq!(merged.display_name.as_deref(), Some("new name"));
         assert_eq!(merged.github_email.as_deref(), Some("new@example.com"));
+        assert_eq!(merged.admin, Some(true));
     }
 
     /// CLAUDE.md merge semantics: re-onboard without `github_email` must keep
@@ -239,6 +253,7 @@ mod tests {
             display_name: Some("Alice W".into()),
             git_server: Some("github".into()),
             github_email: Some("alice@example.com".into()),
+            admin: Some(true),
             provider: Some("claude".into()),
             model: Some("sonnet-4-6".into()),
             ..Default::default()

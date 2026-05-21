@@ -1,10 +1,30 @@
 #![allow(dead_code, clippy::print_stdout, clippy::print_stderr)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tokio::sync::broadcast;
 use tracing::info;
 
 use gitim_daemon::{api, http, lifecycle, server, state};
+
+type DaemonIdentity = (Option<String>, bool, bool, Option<String>);
+
+fn read_identity_from_me(repo_root: &Path) -> Result<DaemonIdentity, Box<dyn std::error::Error>> {
+    let me_path = repo_root.join(".gitim").join("me.json");
+    if !me_path.exists() {
+        return Ok((None, false, false, None));
+    }
+
+    let me_content = std::fs::read_to_string(&me_path)?;
+    let me: gitim_core::me_json::MeJson = serde_json::from_str(&me_content)?;
+    let email = me.github_email.filter(|s| !s.is_empty());
+    Ok((
+        me.handler,
+        me.guest.unwrap_or(false),
+        me.admin.unwrap_or(false),
+        email,
+    ))
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,15 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Read identity from .gitim/me.json (written by CLI onboard)
     // Absence is normal on first startup before onboard — not an error
-    let me_path = repo_root.join(".gitim").join("me.json");
-    let (current_user, is_guest_from_me, github_email) = if me_path.exists() {
-        let me_content = std::fs::read_to_string(&me_path)?;
-        let me: gitim_core::me_json::MeJson = serde_json::from_str(&me_content)?;
-        let email = me.github_email.filter(|s| !s.is_empty());
-        (me.handler, me.guest.unwrap_or(false), email)
-    } else {
-        (None, false, None)
-    };
+    let (current_user, is_guest_from_me, is_admin_from_me, github_email) =
+        read_identity_from_me(&repo_root)?;
 
     if let Some(ref user) = current_user {
         tracing::info!("daemon identity: @{}", user);
@@ -99,6 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_guest
             .store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("daemon identity: guest mode");
+    }
+    if is_admin_from_me {
+        app_state
+            .is_admin
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tracing::info!("daemon identity: admin mode (from me.json)");
     }
 
     lifecycle.ensure_run_dir()?;
@@ -297,5 +316,43 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await.ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_identity_from_me_restores_admin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gitim_dir = tmp.path().join(".gitim");
+        std::fs::create_dir_all(&gitim_dir).unwrap();
+        std::fs::write(
+            gitim_dir.join("me.json"),
+            r#"{
+                "handler": "alice",
+                "admin": true,
+                "guest": false,
+                "github_email": "alice@example.com"
+            }"#,
+        )
+        .unwrap();
+
+        let (handler, guest, admin, email) = read_identity_from_me(tmp.path()).unwrap();
+        assert_eq!(handler.as_deref(), Some("alice"));
+        assert!(!guest);
+        assert!(admin);
+        assert_eq!(email.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn read_identity_from_me_missing_file_defaults_to_non_admin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (handler, guest, admin, email) = read_identity_from_me(tmp.path()).unwrap();
+        assert_eq!(handler, None);
+        assert!(!guest);
+        assert!(!admin);
+        assert_eq!(email, None);
     }
 }
