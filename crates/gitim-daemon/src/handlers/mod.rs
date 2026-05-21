@@ -190,7 +190,30 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 status: "running".to_string(),
                 guest: is_guest,
             };
-            Response::json(payload)
+            // Wire-additive: attach the parsed gitim.epoch.yaml snapshot as
+            // an `epoch` sibling on the StatusResponse data object so clients
+            // can observe Active vs Redirected and read the migration target.
+            // `StatusResponse` lives in gitim-core; layer the field into the
+            // serialized JSON value here to keep the gitim-core wire contract
+            // additive. Absent epoch file → no field, identical wire shape.
+            // Matches `Response::json` error handling: log + structured error
+            // instead of unwrap-panic.
+            match serde_json::to_value(payload) {
+                Ok(mut data) => {
+                    if let Some(epoch_file) = state.epoch_status_snapshot() {
+                        if let Some(obj) = data.as_object_mut() {
+                            if let Ok(epoch_value) = serde_json::to_value(epoch_file) {
+                                obj.insert("epoch".to_string(), epoch_value);
+                            }
+                        }
+                    }
+                    Response::success(data)
+                }
+                Err(e) => {
+                    tracing::error!("serializing status response: {e}");
+                    Response::error("internal serialization error")
+                }
+            }
         }
         Request::Send {
             channel,
