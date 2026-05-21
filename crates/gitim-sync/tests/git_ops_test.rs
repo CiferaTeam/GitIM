@@ -447,3 +447,145 @@ fn count_commits_on_branch_errs_for_missing_branch() {
         res
     );
 }
+
+#[test]
+fn create_orphan_commit_produces_root_commit_on_new_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    let sha = storage
+        .create_orphan_commit(
+            "main-epoch-2",
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: active\nepoch: 2\nbranch: main-epoch-2\n",
+            "snapshot: epoch 2 from main",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("orphan");
+    assert!(!sha.is_empty(), "orphan commit must return sha");
+
+    // Verify branch exists and is a root commit (no parents).
+    let parents = std::process::Command::new("git")
+        .args(["rev-list", "--parents", "-n", "1", "main-epoch-2"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let parents_str = String::from_utf8_lossy(&parents.stdout);
+    let parts: Vec<&str> = parents_str.split_whitespace().collect();
+    assert_eq!(
+        parts.len(),
+        1,
+        "orphan must have zero parents, got {:?}",
+        parts
+    );
+
+    // Verify the new file is in the orphan tree AND existing working tree files are too.
+    let ls = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "main-epoch-2"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let names: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(names.contains(&"gitim.epoch.yaml".to_string()));
+    assert!(
+        names.contains(&"a.txt".to_string()),
+        "orphan must include existing working tree files, got {:?}",
+        names
+    );
+}
+
+#[test]
+fn write_redirect_commit_appends_to_current_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    let sha = storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: redirected\nepoch: 1\nbranch: main\n",
+            "redirect: seal epoch 1",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("redirect");
+    assert!(!sha.is_empty());
+
+    // Verify main is one commit ahead of the previous tip.
+    let log = Command::new("git")
+        .args(["log", "--format=%H", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let commits: Vec<&str> = std::str::from_utf8(&log.stdout)
+        .unwrap()
+        .trim()
+        .lines()
+        .collect();
+    assert_eq!(
+        commits.len(),
+        2,
+        "expected 2 commits on main, got {:?}",
+        commits
+    );
+    assert_eq!(commits[0], sha.trim());
+}

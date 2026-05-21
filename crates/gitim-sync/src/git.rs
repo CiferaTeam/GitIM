@@ -571,6 +571,156 @@ impl GitStorage {
             .map(str::to_string)
             .ok_or_else(|| GitError::CommandFailed(format!("unexpected origin/HEAD: {full}")))
     }
+
+    /// Create an orphan commit on `new_branch` whose tree is the current
+    /// working-tree HEAD's tree, with `epoch_yaml_path` overwritten by
+    /// `epoch_yaml_content`. Returns the new commit's SHA. The branch ref
+    /// is created (or updated, if pre-existing — caller must guarantee it
+    /// does not exist for first-fire semantics).
+    pub fn create_orphan_commit(
+        &self,
+        new_branch: &str,
+        epoch_yaml_path: &str,
+        epoch_yaml_content: &str,
+        message: &str,
+        author: (&str, &str),
+    ) -> Result<String, GitError> {
+        // 1. Write epoch.yaml content to working tree.
+        let yaml_path = self.root.join(epoch_yaml_path);
+        std::fs::write(&yaml_path, epoch_yaml_content)
+            .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
+
+        // 2. Stage.
+        self.run_git(&["add", epoch_yaml_path])?;
+
+        // 3. Write-tree.
+        let tree = self.run_git_capture(&["write-tree"])?;
+        let tree = tree.trim().to_string();
+
+        // 4. Commit-tree (orphan — no -p flag).
+        let (name, email) = author;
+        let commit = self.run_git_capture_with_env(
+            &["commit-tree", &tree, "-m", message],
+            &[
+                ("GIT_AUTHOR_NAME", name),
+                ("GIT_AUTHOR_EMAIL", email),
+                ("GIT_COMMITTER_NAME", name),
+                ("GIT_COMMITTER_EMAIL", email),
+            ],
+        )?;
+        let commit = commit.trim().to_string();
+
+        // 5. Update ref.
+        self.run_git(&["update-ref", &format!("refs/heads/{new_branch}"), &commit])?;
+
+        // 6. Reset index back to HEAD so the OLD branch's working tree is clean
+        //    (the OLD branch will get its own redirect commit separately).
+        self.run_git(&["reset", "--mixed", "HEAD"])?;
+        // Also remove the epoch.yaml from working tree if it didn't exist before —
+        // checkout HEAD restores the original state.
+        self.run_git(&["checkout", "HEAD", "--", epoch_yaml_path])
+            .ok();
+        // If checkout failed (file didn't exist in HEAD), just delete it.
+        let _ = std::fs::remove_file(&yaml_path);
+
+        Ok(commit)
+    }
+
+    /// Append a single commit to the current branch that overwrites
+    /// `epoch_yaml_path` with `epoch_yaml_content`. Returns new commit SHA.
+    pub fn write_redirect_commit(
+        &self,
+        epoch_yaml_path: &str,
+        epoch_yaml_content: &str,
+        message: &str,
+        author: (&str, &str),
+    ) -> Result<String, GitError> {
+        let yaml_path = self.root.join(epoch_yaml_path);
+        std::fs::write(&yaml_path, epoch_yaml_content)
+            .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
+        self.run_git(&["add", epoch_yaml_path])?;
+
+        let (name, email) = author;
+        let output = std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| GitError::CommandFailed(format!("commit: {e}")))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "redirect commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let sha = self.run_git_capture(&["rev-parse", "HEAD"])?;
+        Ok(sha.trim().to_string())
+    }
+
+    /// Return the current branch name (`git symbolic-ref --short HEAD`).
+    /// Errors on detached HEAD.
+    pub fn current_branch(&self) -> Result<String, GitError> {
+        let out = self.run_git_capture(&["symbolic-ref", "--short", "HEAD"])?;
+        Ok(out.trim().to_string())
+    }
+
+    fn run_git(&self, args: &[&str]) -> Result<(), GitError> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn run_git_capture(&self, args: &[&str]) -> Result<String, GitError> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn run_git_capture_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<String, GitError> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args).current_dir(&self.root);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 fn is_rate_limited(stderr: &str) -> bool {
