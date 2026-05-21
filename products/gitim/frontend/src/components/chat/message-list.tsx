@@ -104,6 +104,7 @@ export function MessageList({
   const scrollRef = externalScrollRef ?? internalScrollRef;
   const previousTimelineRef = useRef<TimelineSnapshot | null>(null);
   const suppressAutoBottomRef = useRef(false);
+  const suppressTopPagingOnceRef = useRef(false);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
@@ -165,6 +166,7 @@ export function MessageList({
           `[data-line="${decision.line}"]`,
         ) as HTMLElement | null;
         if (target) {
+          suppressTopPagingOnceRef.current = true;
           target.scrollIntoView({ behavior: "smooth", block: "center" });
           reportViewportAnchor(scrollRef.current);
           onHighlightLineChange(decision.line);
@@ -178,6 +180,7 @@ export function MessageList({
           `[data-line="${decision.line}"]`,
         ) as HTMLElement | null;
         if (target) {
+          suppressTopPagingOnceRef.current = true;
           target.scrollIntoView({ behavior: "auto", block: "start" });
           scrollRef.current.scrollTop += decision.offsetPx;
           suppressAutoBottomRef.current = true;
@@ -213,11 +216,16 @@ export function MessageList({
     if (distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD_PX) {
       suppressAutoBottomRef.current = false;
     }
+    if (suppressTopPagingOnceRef.current) {
+      suppressTopPagingOnceRef.current = false;
+      return;
+    }
     maybeLoadOlderFromTop(event.currentTarget);
   }
 
   function handleWheelEvent(event: React.WheelEvent<HTMLDivElement>) {
     if (event.deltaY >= 0) return;
+    suppressTopPagingOnceRef.current = false;
     maybeLoadOlderFromTop(event.currentTarget);
   }
 

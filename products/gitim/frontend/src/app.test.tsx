@@ -641,7 +641,7 @@ describe("App card thread toasts", () => {
       await flushPromises();
     });
 
-    expect(mocks.client.read).toHaveBeenCalledWith("room", "general", 50, 320);
+    expect(mocks.client.read).toHaveBeenCalledWith("room", "general", 50, 308);
   });
 
   it("restores unread state after a refresh once the poll cursor already advanced", async () => {

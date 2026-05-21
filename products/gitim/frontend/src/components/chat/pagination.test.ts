@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeLoadOlderSince, MESSAGES_PAGE_SIZE } from "./pagination";
+import {
+  computeAnchoredReadSince,
+  computeLoadOlderSince,
+  MESSAGES_PAGE_SIZE,
+} from "./pagination";
 
 describe("computeLoadOlderSince", () => {
   it("returns skip when there are no messages on screen", () => {
@@ -38,5 +42,15 @@ describe("computeLoadOlderSince", () => {
       kind: "fetch",
       since: 0,
     });
+  });
+});
+
+describe("computeAnchoredReadSince", () => {
+  it("reads context before the target line instead of starting at the target", () => {
+    expect(computeAnchoredReadSince(101)).toBe(88);
+  });
+
+  it("clamps at 0 near the start of the channel", () => {
+    expect(computeAnchoredReadSince(5)).toBe(0);
   });
 });

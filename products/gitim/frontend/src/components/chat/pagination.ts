@@ -1,6 +1,7 @@
 /** Page size for both initial channel load and history paging. Single
  *  source of truth: changing this here changes every read call. */
 export const MESSAGES_PAGE_SIZE = 50;
+const ANCHORED_READ_CONTEXT_BEFORE = 12;
 
 export type LoadOlderDecision =
   | { kind: "fetch"; since: number }
@@ -31,4 +32,8 @@ export function computeLoadOlderSince(
   if (oldestLine <= 1) return { kind: "skip", reason: "at_top" };
   const since = Math.max(0, oldestLine - pageSize - 1);
   return { kind: "fetch", since };
+}
+
+export function computeAnchoredReadSince(targetLine: number): number {
+  return Math.max(0, Math.floor(targetLine) - ANCHORED_READ_CONTEXT_BEFORE - 1);
 }

@@ -494,6 +494,7 @@ describe("ChatLayout all mention send", () => {
 
     expect(useChatStore.getState().currentChannel).toBe("random");
     expect(useChatStore.getState().pendingScrollLine).toBe(88);
+    expect(mocks.client.read).toHaveBeenLastCalledWith("room", "random", 50, 75);
     expect(readActiveChatScope("runtime:room")).toBe("channel:random");
     expect(readChatScopeState("runtime:room", "channel:random")).toMatchObject({
       unreadCount: 0,

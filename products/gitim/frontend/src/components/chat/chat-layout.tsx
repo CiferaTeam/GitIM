@@ -38,7 +38,11 @@ import { ScrollToBottomButton } from "./scroll-to-bottom-button";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
 import { UserCard } from "./user-card";
-import { MESSAGES_PAGE_SIZE, computeLoadOlderSince } from "./pagination";
+import {
+  MESSAGES_PAGE_SIZE,
+  computeAnchoredReadSince,
+  computeLoadOlderSince,
+} from "./pagination";
 import { useScrollAtBottom } from "../../hooks/use-scroll-at-bottom";
 
 /** "alice--lewis" → "dm:alice,lewis" */
@@ -225,7 +229,7 @@ export function ChatLayout() {
         requestSlug,
         apiChannel,
         MESSAGES_PAGE_SIZE,
-        targetLine ? Math.max(0, targetLine - 1) : undefined,
+        targetLine ? computeAnchoredReadSince(targetLine) : undefined,
       );
       if (
         res.ok &&
@@ -477,7 +481,7 @@ export function ChatLayout() {
       requestSlug,
       apiChannel,
       MESSAGES_PAGE_SIZE,
-      Math.max(0, entry.anchor.line - 1),
+      computeAnchoredReadSince(entry.anchor.line),
     );
     if (
       res.ok &&

@@ -100,6 +100,46 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
+  it("does not load older history from the scroll event caused by programmatic line positioning", async () => {
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      value: vi.fn(),
+      configurable: true,
+    });
+    const onLoadOlder = vi.fn();
+
+    try {
+      const rendered = await renderList({
+        messages: [msg(88, "first unread"), msg(89, "next")],
+        pendingScrollLine: 88,
+        onLoadOlder,
+      });
+      root = rendered.root;
+
+      await act(async () => {
+        fireScroll(rendered.container, 0);
+        await Promise.resolve();
+      });
+
+      expect(onLoadOlder).not.toHaveBeenCalled();
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+          value: originalScrollIntoView,
+          configurable: true,
+        });
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+          .scrollIntoView;
+      }
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("fires onLoadOlder on an upward wheel gesture even when the list cannot scroll", async () => {
     const onLoadOlder = vi.fn();
     const rendered = await renderList({ onLoadOlder });

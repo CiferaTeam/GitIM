@@ -7,6 +7,7 @@ import { RunDetail } from "./components/flows/run-detail";
 import { CardDetail } from "./components/cards/card-detail";
 import { CardKanban } from "./components/cards/card-kanban";
 import { ChatLayout } from "./components/chat/chat-layout";
+import { computeAnchoredReadSince } from "./components/chat/pagination";
 import { CronCalendar } from "./components/crons/cron-calendar";
 import { AppShell } from "./components/layout/app-shell";
 import { AgentDetail } from "./components/management/agent-detail";
@@ -484,7 +485,7 @@ export default function App() {
           const targetLine =
             pendingLineForChannel ?? scopeState.viewAnchorLine ?? null;
           readSinceForChannel = targetLine
-            ? Math.max(0, targetLine - 1)
+            ? computeAnchoredReadSince(targetLine)
             : undefined;
         }
       }
