@@ -3,9 +3,9 @@ import type { ApiResponse, WorkspaceSummary } from "@/lib/types";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import {
   readActiveChatScope,
-  readChatScopeScrollTop,
+  readChatScopeViewAnchor,
   writeActiveChatScope,
-  writeChatScopeScrollTop,
+  writeChatScopeViewAnchor,
 } from "@/lib/chat-ui-state";
 import { writeUiState } from "@/lib/ui-state";
 
@@ -216,7 +216,10 @@ describe("useWorkspaceStore", () => {
     const key = workspaceIdentity("remote", ws);
     writeUiState(key, { boardHandler: null, cardsShowArchived: false });
     writeActiveChatScope(key, "channel:general");
-    writeChatScopeScrollTop(key, "channel:general", 120);
+    writeChatScopeViewAnchor(key, "channel:general", {
+      line: 120,
+      offsetPx: 0,
+    });
     expect(localStorage.getItem("gitim-ui-state:" + key)).not.toBeNull();
     expect(readActiveChatScope(key)).toBe("channel:general");
 
@@ -226,7 +229,7 @@ describe("useWorkspaceStore", () => {
 
     expect(localStorage.getItem("gitim-ui-state:" + key)).toBeNull();
     expect(readActiveChatScope(key)).toBeNull();
-    expect(readChatScopeScrollTop(key, "channel:general")).toBeNull();
+    expect(readChatScopeViewAnchor(key, "channel:general")).toBeNull();
   });
 
   it("does not refresh when an old workspace reports unavailable after switching", async () => {

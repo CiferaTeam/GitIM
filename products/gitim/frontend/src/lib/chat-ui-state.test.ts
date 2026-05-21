@@ -17,9 +17,9 @@ import {
   mergeChatUnreadIntoChannels,
   readActiveChatScope,
   readChatScopeState,
-  readChatScopeScrollTop,
+  readChatScopeViewAnchor,
   writeActiveChatScope,
-  writeChatScopeScrollTop,
+  writeChatScopeViewAnchor,
 } from "./chat-ui-state";
 
 describe("chat-ui-state", () => {
@@ -29,10 +29,16 @@ describe("chat-ui-state", () => {
 
   it("stores active scope separately from per-scope state", () => {
     writeActiveChatScope("runtime:room", "channel:general");
-    writeChatScopeScrollTop("runtime:room", "channel:general", 240);
+    writeChatScopeViewAnchor("runtime:room", "channel:general", {
+      line: 240,
+      offsetPx: 12,
+    });
 
     expect(readActiveChatScope("runtime:room")).toBe("channel:general");
-    expect(readChatScopeScrollTop("runtime:room", "channel:general")).toBe(240);
+    expect(readChatScopeViewAnchor("runtime:room", "channel:general")).toEqual({
+      line: 240,
+      offsetPx: 12,
+    });
     expect(localStorage.getItem("gitim:ui:v2:runtime%3Aroom:activeScope")).toBe(
       "channel:general",
     );
@@ -42,7 +48,7 @@ describe("chat-ui-state", () => {
           "gitim:ui:v2:runtime%3Aroom:scope:channel%3Ageneral",
         )!,
       ),
-    ).toMatchObject({ scrollTop: 240 });
+    ).toMatchObject({ viewAnchorLine: 240, viewAnchorOffsetPx: 12 });
   });
 
   it("tracks unread count, mention state, and first unread line per scope", () => {
@@ -70,7 +76,8 @@ describe("chat-ui-state", () => {
       unreadCount: 0,
       hasMention: false,
       firstUnreadLine: null,
-      scrollTop: null,
+      viewAnchorLine: null,
+      viewAnchorOffsetPx: 0,
     });
   });
 
@@ -116,27 +123,37 @@ describe("chat-ui-state", () => {
 
     expect(readActiveChatScope("runtime:room")).toBeNull();
     expect(readChatScopeState("runtime:room", "channel:general")).toEqual({
-      scrollTop: null,
       unreadCount: 0,
       hasMention: false,
       firstUnreadLine: null,
+      viewAnchorLine: null,
+      viewAnchorOffsetPx: 0,
       updatedAt: 0,
     });
-    expect(readChatScopeScrollTop("runtime:room", "card:general/card-1")).toBeNull();
+    expect(readChatScopeViewAnchor("runtime:room", "card:general/card-1")).toBeNull();
   });
 
   it("clears v2 active and scope keys for one workspace only", () => {
     writeActiveChatScope("runtime:room", "channel:general");
-    writeChatScopeScrollTop("runtime:room", "channel:general", 10);
+    writeChatScopeViewAnchor("runtime:room", "channel:general", {
+      line: 10,
+      offsetPx: 4,
+    });
     writeActiveChatScope("runtime:other", "channel:leaders");
-    writeChatScopeScrollTop("runtime:other", "channel:leaders", 20);
+    writeChatScopeViewAnchor("runtime:other", "channel:leaders", {
+      line: 20,
+      offsetPx: 8,
+    });
 
     clearChatUiState("runtime:room");
 
     expect(readActiveChatScope("runtime:room")).toBeNull();
-    expect(readChatScopeScrollTop("runtime:room", "channel:general")).toBeNull();
+    expect(readChatScopeViewAnchor("runtime:room", "channel:general")).toBeNull();
     expect(readActiveChatScope("runtime:other")).toBe("channel:leaders");
-    expect(readChatScopeScrollTop("runtime:other", "channel:leaders")).toBe(20);
+    expect(readChatScopeViewAnchor("runtime:other", "channel:leaders")).toEqual({
+      line: 20,
+      offsetPx: 8,
+    });
   });
 
   it("normalizes channel and dm scope keys", () => {

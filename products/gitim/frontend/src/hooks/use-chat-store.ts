@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import type { ArchivedDmEntry } from "../lib/client";
+import type { ChatViewportAnchor } from "../lib/chat-ui-state";
 import type { Channel, Message } from "../lib/types";
 
 interface NavEntry {
   channel: string;
-  scrollTop: number;
+  anchor: ChatViewportAnchor;
 }
 
 /** Paginated, prefix-filtered view of archived DMs.

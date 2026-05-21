@@ -191,6 +191,23 @@ function stubScrollTop(el: HTMLElement, value: number) {
   });
 }
 
+function stubRect(el: HTMLElement, top: number, bottom: number) {
+  Object.defineProperty(el, "getBoundingClientRect", {
+    value: () => ({
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    }),
+    configurable: true,
+  });
+}
+
 async function rerender(
   root: Root,
   props: Parameters<typeof MessageList>[0],
@@ -268,42 +285,34 @@ describe("MessageList scroll position on message mutations", () => {
     expect(scroll.scrollTop).toBe(600);
   });
 
-  it("reports programmatic bottom scrolls so parents can persist route returns", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const r = createRoot(container);
-    root = r;
-    const onScrollTopChange = vi.fn();
-
-    await act(async () => {
-      r.render(
-        <MessageList
-          {...baseProps}
-          onScrollTopChange={onScrollTopChange}
-          messages={[msg(0, "__placeholder__")]}
-        />,
-      );
-      await Promise.resolve();
+  it("reports the first visible message as a line anchor instead of a raw scrollTop", async () => {
+    const onViewportAnchorChange = vi.fn();
+    const rendered = await renderList({
+      messages: [msg(10, "a"), msg(11, "b"), msg(12, "c")],
+      onViewportAnchorChange,
     });
-    const scroll = document.querySelector<HTMLDivElement>(
+    root = rendered.root;
+
+    const scroll = rendered.container.querySelector<HTMLDivElement>(
       "[data-message-scroll]",
     )!;
-    stubScrollHeight(scroll, 600);
-    onScrollTopChange.mockClear();
+    stubRect(scroll, 100, 500);
+    const line10 = scroll.querySelector<HTMLElement>("[data-line='10']")!;
+    const line11 = scroll.querySelector<HTMLElement>("[data-line='11']")!;
+    const line12 = scroll.querySelector<HTMLElement>("[data-line='12']")!;
+    stubRect(line10, 40, 90);
+    stubRect(line11, 80, 130);
+    stubRect(line12, 140, 190);
 
     await act(async () => {
-      r.render(
-        <MessageList
-          {...baseProps}
-          onScrollTopChange={onScrollTopChange}
-          messages={[msg(1, "a"), msg(2, "b"), msg(3, "c")]}
-        />,
-      );
+      fireScroll(rendered.container, 120);
       await Promise.resolve();
     });
 
-    expect(scroll.scrollTop).toBe(600);
-    expect(onScrollTopChange).toHaveBeenLastCalledWith(600);
+    expect(onViewportAnchorChange).toHaveBeenLastCalledWith({
+      line: 11,
+      offsetPx: 20,
+    });
   });
 
   it("scrolls to the bottom when a pending outbound message is appended (line_number = -1)", async () => {
@@ -383,6 +392,56 @@ describe("MessageList scroll position on message mutations", () => {
     expect(scroll.scrollTop).toBe(800);
   });
 
+  it("does NOT pull a restored historical viewport down when an inbound message arrives", async () => {
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      value: vi.fn(),
+      configurable: true,
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const r = createRoot(container);
+    root = r;
+
+    try {
+      await rerender(r, {
+        ...baseProps,
+        messages: [msg(43, "a"), msg(44, "b")],
+        restoreAnchor: { line: 43, offsetPx: 0 },
+      });
+      const scroll = container.querySelector<HTMLDivElement>(
+        "[data-message-scroll]",
+      )!;
+      stubScrollTop(scroll, 0);
+      stubClientHeight(scroll, 640);
+      stubScrollHeight(scroll, 560);
+
+      await rerender(r, {
+        ...baseProps,
+        messages: [msg(43, "a"), msg(44, "b"), msg(45, "new inbound")],
+        restoreAnchor: { line: 43, offsetPx: 0 },
+      });
+
+      expect(scroll.scrollTop).toBe(0);
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+          value: originalScrollIntoView,
+          configurable: true,
+        });
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+          .scrollIntoView;
+      }
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("preserves the visual anchor when older messages are prepended", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -449,28 +508,4 @@ describe("MessageList scroll position on message mutations", () => {
     expect(scroll.scrollTop).toBe(700);
   });
 
-  it("restores a stored scrollTop on scope change when one is provided", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const r = createRoot(container);
-    root = r;
-
-    const scroll = await mountWithHeight(
-      r,
-      [msg(50, "a"), msg(51, "b"), msg(52, "c"), msg(53, "d"), msg(54, "e")],
-      500,
-    );
-    stubScrollTop(scroll, 20);
-    stubClientHeight(scroll, 400);
-    stubScrollHeight(scroll, 700);
-
-    await rerender(r, {
-      ...baseProps,
-      scopeKey: "random",
-      restoreScrollTop: 120,
-      messages: [msg(1, "new-a"), msg(2, "new-b"), msg(3, "new-c")],
-    } as Parameters<typeof MessageList>[0]);
-
-    expect(scroll.scrollTop).toBe(120);
-  });
 });

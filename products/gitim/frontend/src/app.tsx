@@ -40,6 +40,7 @@ import {
   incrementChatScopeUnread,
   mergeChatUnreadIntoChannels,
   readActiveChatScope,
+  readChatScopeState,
   writeActiveChatScope,
 } from "./lib/chat-ui-state";
 import { readUiState } from "./lib/ui-state";
@@ -174,6 +175,7 @@ export default function App() {
   const addMessages = useChatStore((s) => s.addMessages);
   const setMessages = useChatStore((s) => s.setMessages);
   const selectChannel = useChatStore((s) => s.selectChannel);
+  const setPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
@@ -463,9 +465,31 @@ export default function App() {
         null;
 
       let messagesForChannel: Message[] | null = null;
+      let pendingLineForChannel: number | null = null;
+      let readSinceForChannel: number | undefined;
+      const nextChannelScopeKey = nextChannel
+        ? chatScopeKeyForName(
+            nextChannel,
+            selectableChannels.find((c) => c.name === nextChannel)?.kind,
+          )
+        : null;
+      if (nextChannel && nextChannelScopeKey) {
+        const shouldRestoreStoredPosition =
+          !options.preserveSelection || previousChannel !== nextChannel;
+        if (shouldRestoreStoredPosition) {
+          const scopeState = readChatScopeState(workspaceKey, nextChannelScopeKey);
+          pendingLineForChannel =
+            scopeState.unreadCount > 0 ? scopeState.firstUnreadLine : null;
+          const targetLine =
+            pendingLineForChannel ?? scopeState.viewAnchorLine ?? null;
+          readSinceForChannel = targetLine
+            ? Math.max(0, targetLine - 1)
+            : undefined;
+        }
+      }
       const [readRes, selectedBoardRes, cardDetailRes] = await Promise.all([
         nextChannel
-          ? client.read(slug, toApiChannel(nextChannel), 50)
+          ? client.read(slug, toApiChannel(nextChannel), 50, readSinceForChannel)
           : Promise.resolve(null),
         selectedBoardHandler
           ? client.showBoard(slug, selectedBoardHandler)
@@ -518,8 +542,11 @@ export default function App() {
       if (nextChannel && nextChannel !== previousChannel) {
         selectChannel(nextChannel);
       }
+      if (pendingLineForChannel) {
+        setPendingScrollLine(pendingLineForChannel);
+      }
       if (nextChannel) {
-        writeActiveChatScope(workspaceKey, chatScopeKeyForName(nextChannel));
+        writeActiveChatScope(workspaceKey, nextChannelScopeKey);
       }
       if (messagesForChannel) {
         setMessages(messagesForChannel);
@@ -557,6 +584,7 @@ export default function App() {
       setBoards,
       setSelectedBoard,
       selectChannel,
+      setPendingScrollLine,
       setMessages,
     ],
   );

@@ -13,7 +13,7 @@ import {
   readActiveChatScope,
   readChatScopeState,
   writeActiveChatScope,
-  writeChatScopeScrollTop,
+  writeChatScopeViewAnchor,
 } from "../../lib/chat-ui-state";
 
 const mocks = vi.hoisted(() => ({
@@ -98,14 +98,15 @@ vi.mock("./header", () => ({
 vi.mock("./message-list", () => ({
   MessageList: ({
     onMessageLinkClick,
-    restoreScrollTop,
+    restoreAnchor,
   }: {
     onMessageLinkClick?: (channel: string, line: number) => void;
-    restoreScrollTop?: number | null;
+    restoreAnchor?: { line: number; offsetPx: number } | null;
   }) => (
     <div
       data-testid="message-list"
-      data-restore-scroll-top={restoreScrollTop ?? ""}
+      data-restore-anchor-line={restoreAnchor?.line ?? ""}
+      data-restore-anchor-offset={restoreAnchor?.offsetPx ?? ""}
     >
       <button
         data-testid="message-link"
@@ -421,11 +422,14 @@ describe("ChatLayout all mention send", () => {
     });
 
     expect(useChatStore.getState().currentChannel).toBe("random");
-    expect(mocks.client.read).toHaveBeenCalledWith("room", "random", 50);
+    expect(mocks.client.read).toHaveBeenCalledWith("room", "random", 50, undefined);
   });
 
-  it("restores persisted scroll when /chat remounts with an existing current channel", async () => {
-    writeChatScopeScrollTop("runtime:room", "channel:general", 321);
+  it("restores persisted line anchor when /chat remounts with an existing current channel", async () => {
+    writeChatScopeViewAnchor("runtime:room", "channel:general", {
+      line: 321,
+      offsetPx: 18,
+    });
 
     await act(async () => {
       root!.render(<ChatLayout />);
@@ -435,7 +439,8 @@ describe("ChatLayout all mention send", () => {
     const list = document.querySelector<HTMLElement>(
       "[data-testid='message-list']",
     );
-    expect(list?.dataset.restoreScrollTop).toBe("321");
+    expect(list?.dataset.restoreAnchorLine).toBe("321");
+    expect(list?.dataset.restoreAnchorOffset).toBe("18");
   });
 
   it("uses firstUnreadLine when opening a channel with persisted unread state", async () => {

@@ -19,8 +19,9 @@ import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
 import {
-  readChatScopeScrollTop,
-  writeChatScopeScrollTop,
+  readChatScopeViewAnchor,
+  writeChatScopeViewAnchor,
+  type ChatViewportAnchor,
 } from "@/lib/chat-ui-state";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import { CardMetaBar } from "./card-meta-bar";
@@ -94,13 +95,13 @@ export function CardDetail() {
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [highlightLine, setHighlightLine] = useState<number | null>(null);
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
-  const restoreScrollTop = useMemo(
-    () => readChatScopeScrollTop(workspaceKey, scopeKey),
+  const restoreAnchor = useMemo(
+    () => readChatScopeViewAnchor(workspaceKey, scopeKey),
     [workspaceKey, scopeKey],
   );
-  const handleMessageScrollTopChange = useCallback(
-    (scrollTop: number) => {
-      writeChatScopeScrollTop(workspaceKey, scopeKey, scrollTop);
+  const handleViewportAnchorChange = useCallback(
+    (anchor: ChatViewportAnchor) => {
+      writeChatScopeViewAnchor(workspaceKey, scopeKey, anchor);
     },
     [workspaceKey, scopeKey],
   );
@@ -392,10 +393,10 @@ export function CardDetail() {
         replyTo={replyTo}
         highlightLine={highlightLine}
         pendingScrollLine={pendingScrollLine}
-        restoreScrollTop={restoreScrollTop}
+        restoreAnchor={restoreAnchor}
         onHighlightLineChange={setHighlightLine}
         onPendingScrollClear={() => setPendingScrollLine(null)}
-        onScrollTopChange={handleMessageScrollTopChange}
+        onViewportAnchorChange={handleViewportAnchorChange}
         emptyHint={archived ? "No notes to add — card is archived." : "Write the first note…"}
         onReply={setReplyTo}
         onShowThread={() => {

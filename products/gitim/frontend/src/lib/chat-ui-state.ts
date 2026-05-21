@@ -1,5 +1,11 @@
+export interface ChatViewportAnchor {
+  line: number;
+  offsetPx: number;
+}
+
 export interface ChatScopeUiState {
-  scrollTop: number | null;
+  viewAnchorLine: number | null;
+  viewAnchorOffsetPx: number;
   unreadCount: number;
   hasMention: boolean;
   firstUnreadLine: number | null;
@@ -26,7 +32,8 @@ function nowMs(): number {
 
 function emptyScopeState(): ChatScopeUiState {
   return {
-    scrollTop: null,
+    viewAnchorLine: null,
+    viewAnchorOffsetPx: 0,
     unreadCount: 0,
     hasMention: false,
     firstUnreadLine: null,
@@ -50,10 +57,17 @@ function readStoredScopeState(
 function parseScopeState(raw: unknown): ChatScopeUiState {
   if (!raw || typeof raw !== "object") return emptyScopeState();
   const obj = raw as Record<string, unknown>;
-  const scrollTop =
-    typeof obj.scrollTop === "number" && Number.isFinite(obj.scrollTop)
-      ? Math.max(0, obj.scrollTop)
+  const viewAnchorLine =
+    typeof obj.viewAnchorLine === "number" &&
+    Number.isFinite(obj.viewAnchorLine) &&
+    obj.viewAnchorLine > 0
+      ? Math.floor(obj.viewAnchorLine)
       : null;
+  const viewAnchorOffsetPx =
+    typeof obj.viewAnchorOffsetPx === "number" &&
+    Number.isFinite(obj.viewAnchorOffsetPx)
+      ? Math.max(0, Math.floor(obj.viewAnchorOffsetPx))
+      : 0;
   const unreadCount =
     typeof obj.unreadCount === "number" && Number.isFinite(obj.unreadCount)
       ? Math.max(0, Math.floor(obj.unreadCount))
@@ -70,7 +84,8 @@ function parseScopeState(raw: unknown): ChatScopeUiState {
       ? Math.max(0, obj.updatedAt)
       : 0;
   return {
-    scrollTop,
+    viewAnchorLine,
+    viewAnchorOffsetPx,
     unreadCount,
     hasMention: unreadCount > 0 && obj.hasMention === true,
     firstUnreadLine,
@@ -137,23 +152,40 @@ export function readChatScopeState(
   return readStoredScopeState(workspaceKey, scopeKey) ?? emptyScopeState();
 }
 
-export function readChatScopeScrollTop(
+export function readChatScopeViewAnchor(
   workspaceKey: string | null,
   scopeKey: string | null,
-): number | null {
-  return readChatScopeState(workspaceKey, scopeKey).scrollTop;
+): ChatViewportAnchor | null {
+  const state = readChatScopeState(workspaceKey, scopeKey);
+  if (state.viewAnchorLine === null) return null;
+  return {
+    line: state.viewAnchorLine,
+    offsetPx: state.viewAnchorOffsetPx,
+  };
 }
 
-export function writeChatScopeScrollTop(
+export function writeChatScopeViewAnchor(
   workspaceKey: string | null,
   scopeKey: string | null,
-  scrollTop: number,
+  anchor: ChatViewportAnchor | null,
 ): void {
-  if (!workspaceKey || !scopeKey || !Number.isFinite(scrollTop)) return;
+  if (!workspaceKey || !scopeKey) return;
   const state = readChatScopeState(workspaceKey, scopeKey);
+  if (!anchor || !Number.isFinite(anchor.line) || anchor.line <= 0) {
+    writeScopeState(workspaceKey, scopeKey, {
+      ...state,
+      viewAnchorLine: null,
+      viewAnchorOffsetPx: 0,
+      updatedAt: nowMs(),
+    });
+    return;
+  }
   writeScopeState(workspaceKey, scopeKey, {
     ...state,
-    scrollTop: Math.max(0, scrollTop),
+    viewAnchorLine: Math.floor(anchor.line),
+    viewAnchorOffsetPx: Number.isFinite(anchor.offsetPx)
+      ? Math.max(0, Math.floor(anchor.offsetPx))
+      : 0,
     updatedAt: nowMs(),
   });
 }

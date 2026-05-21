@@ -10,8 +10,8 @@ export interface TimelineSnapshot {
 export type ScrollDecision =
   | { kind: "none" }
   | { kind: "line"; line: number }
+  | { kind: "anchor"; line: number; offsetPx: number }
   | { kind: "bottom" }
-  | { kind: "scroll-top"; top: number }
   | { kind: "preserve-prepend-anchor"; heightDelta: number };
 
 export function decideTimelineScroll({
@@ -20,7 +20,8 @@ export function decideTimelineScroll({
   scrollTop,
   clientHeight,
   pendingScrollLine,
-  restoreScrollTop,
+  restoreAnchor,
+  suppressAutoBottom,
   lastMessageIsOutbound,
 }: {
   previous: TimelineSnapshot | null;
@@ -28,7 +29,8 @@ export function decideTimelineScroll({
   scrollTop: number;
   clientHeight: number;
   pendingScrollLine: number | null;
-  restoreScrollTop?: number | null;
+  restoreAnchor?: { line: number; offsetPx: number } | null;
+  suppressAutoBottom?: boolean;
   lastMessageIsOutbound: boolean;
 }): ScrollDecision {
   if (pendingScrollLine !== null && next.length > 0) {
@@ -39,9 +41,18 @@ export function decideTimelineScroll({
     return { kind: "none" };
   }
 
-  if (!previous || previous.scopeKey !== next.scopeKey) {
-    if (restoreScrollTop !== null && restoreScrollTop !== undefined) {
-      return { kind: "scroll-top", top: restoreScrollTop };
+  const isFreshTimeline =
+    !previous ||
+    previous.scopeKey !== next.scopeKey ||
+    previous.length === 0;
+
+  if (isFreshTimeline) {
+    if (restoreAnchor) {
+      return {
+        kind: "anchor",
+        line: restoreAnchor.line,
+        offsetPx: restoreAnchor.offsetPx,
+      };
     }
     return { kind: "bottom" };
   }
@@ -61,7 +72,7 @@ export function decideTimelineScroll({
     const wasAtBottom =
       previous.scrollHeight === 0 ||
       previous.scrollHeight - scrollTop - clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
-    if (wasAtBottom || lastMessageIsOutbound) {
+    if (lastMessageIsOutbound || (wasAtBottom && !suppressAutoBottom)) {
       return { kind: "bottom" };
     }
   }

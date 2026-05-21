@@ -1,8 +1,21 @@
-import { useRef, useEffect, useLayoutEffect, useMemo, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type RefObject,
+} from "react";
 import type { Message } from "../../lib/types";
+import type { ChatViewportAnchor } from "../../lib/chat-ui-state";
 import { MessageItem } from "./message-item";
 import { MessageSquare, Hash } from "lucide-react";
-import { decideTimelineScroll, type TimelineSnapshot } from "./message-scroll";
+import {
+  SCROLL_BOTTOM_THRESHOLD_PX,
+  decideTimelineScroll,
+  type TimelineSnapshot,
+} from "./message-scroll";
 
 interface MessageListProps {
   messages: Message[];
@@ -13,10 +26,10 @@ interface MessageListProps {
   replyTo: Message | null;
   highlightLine: number | null;
   pendingScrollLine: number | null;
-  restoreScrollTop?: number | null;
+  restoreAnchor?: ChatViewportAnchor | null;
   onHighlightLineChange: (line: number | null) => void;
   onPendingScrollClear: () => void;
-  onScrollTopChange?: (scrollTop: number) => void;
+  onViewportAnchorChange?: (anchor: ChatViewportAnchor) => void;
   /** Custom empty-state hint when scope is selected but has no messages. */
   emptyHint?: string;
   /** Custom empty-state hint when scope is null. */
@@ -44,6 +57,26 @@ interface MessageListProps {
  *  Anything beyond this is regarded as still browsing the current page. */
 const SCROLL_TOP_THRESHOLD_PX = 50;
 
+function viewportAnchorFromElement(
+  scrollEl: HTMLDivElement,
+): ChatViewportAnchor | null {
+  const containerRect = scrollEl.getBoundingClientRect();
+  const items = Array.from(
+    scrollEl.querySelectorAll<HTMLElement>("[data-line]"),
+  );
+  for (const item of items) {
+    const line = Number(item.dataset.line);
+    if (!Number.isFinite(line) || line <= 0) continue;
+    const rect = item.getBoundingClientRect();
+    if (rect.bottom <= containerRect.top) continue;
+    return {
+      line: Math.floor(line),
+      offsetPx: Math.max(0, Math.floor(containerRect.top - rect.top)),
+    };
+  }
+  return null;
+}
+
 export function MessageList({
   messages,
   currentUser,
@@ -51,10 +84,10 @@ export function MessageList({
   replyTo,
   highlightLine,
   pendingScrollLine,
-  restoreScrollTop,
+  restoreAnchor,
   onHighlightLineChange,
   onPendingScrollClear,
-  onScrollTopChange,
+  onViewportAnchorChange,
   emptyHint,
   noScopeHint,
   onReply,
@@ -70,8 +103,15 @@ export function MessageList({
   const internalScrollRef = useRef<HTMLDivElement>(null);
   const scrollRef = externalScrollRef ?? internalScrollRef;
   const previousTimelineRef = useRef<TimelineSnapshot | null>(null);
+  const suppressAutoBottomRef = useRef(false);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
+
+  const reportViewportAnchor = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const anchor = viewportAnchorFromElement(el);
+    if (anchor) onViewportAnchorChange?.(anchor);
+  }, [onViewportAnchorChange]);
 
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
@@ -103,7 +143,8 @@ export function MessageList({
       scrollTop: el.scrollTop,
       clientHeight: el.clientHeight,
       pendingScrollLine,
-      restoreScrollTop,
+      restoreAnchor,
+      suppressAutoBottom: suppressAutoBottomRef.current,
       lastMessageIsOutbound: !!messages[messages.length - 1]?._pendingId,
     });
 
@@ -115,34 +156,53 @@ export function MessageList({
         ) as HTMLElement | null;
         if (target) {
           target.scrollIntoView({ behavior: "smooth", block: "center" });
-          onScrollTopChange?.(scrollRef.current.scrollTop);
+          reportViewportAnchor(scrollRef.current);
           onHighlightLineChange(decision.line);
         }
         onPendingScrollClear();
       });
+    } else if (decision.kind === "anchor") {
+      requestAnimationFrame(() => {
+        if (!scrollRef.current) return;
+        const target = scrollRef.current.querySelector(
+          `[data-line="${decision.line}"]`,
+        ) as HTMLElement | null;
+        if (target) {
+          target.scrollIntoView({ behavior: "auto", block: "start" });
+          scrollRef.current.scrollTop += decision.offsetPx;
+          suppressAutoBottomRef.current = true;
+          reportViewportAnchor(scrollRef.current);
+        }
+      });
     } else if (decision.kind === "preserve-prepend-anchor") {
       el.scrollTop = el.scrollTop + decision.heightDelta;
-      onScrollTopChange?.(el.scrollTop);
+      reportViewportAnchor(el);
     } else if (decision.kind === "bottom") {
+      suppressAutoBottomRef.current = false;
       el.scrollTop = nextTimeline.scrollHeight;
-      onScrollTopChange?.(el.scrollTop);
-    } else if (decision.kind === "scroll-top") {
-      el.scrollTop = decision.top;
-      onScrollTopChange?.(el.scrollTop);
+      reportViewportAnchor(el);
     }
   }, [
     messages,
     pendingScrollLine,
-    restoreScrollTop,
+    restoreAnchor,
     scopeKey,
     scrollRef,
-    onScrollTopChange,
+    reportViewportAnchor,
     onHighlightLineChange,
     onPendingScrollClear,
   ]);
 
   function handleScrollEvent(event: React.UIEvent<HTMLDivElement>) {
-    onScrollTopChange?.(event.currentTarget.scrollTop);
+    const anchor = viewportAnchorFromElement(event.currentTarget);
+    if (anchor) onViewportAnchorChange?.(anchor);
+    const distanceFromBottom =
+      event.currentTarget.scrollHeight -
+      event.currentTarget.scrollTop -
+      event.currentTarget.clientHeight;
+    if (distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD_PX) {
+      suppressAutoBottomRef.current = false;
+    }
     if (!onLoadOlder) return;
     if (event.currentTarget.scrollTop <= SCROLL_TOP_THRESHOLD_PX) {
       onLoadOlder();

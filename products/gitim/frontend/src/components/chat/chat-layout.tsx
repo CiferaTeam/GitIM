@@ -15,9 +15,10 @@ import {
   clearChatScopeUnread,
   readActiveChatScope,
   readChatScopeState,
-  readChatScopeScrollTop,
+  readChatScopeViewAnchor,
   writeActiveChatScope,
-  writeChatScopeScrollTop,
+  writeChatScopeViewAnchor,
+  type ChatViewportAnchor,
 } from "../../lib/chat-ui-state";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { Button } from "../ui/button";
@@ -167,8 +168,8 @@ export function ChatLayout() {
 
   // Card drawer state — auto-close when switching channels.
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
-  const [restoreScrollTop, setRestoreScrollTop] = useState<number | null>(null);
-  const scrollPositionsRef = useRef<Map<string, number>>(new Map());
+  const [restoreAnchor, setRestoreAnchor] = useState<ChatViewportAnchor | null>(null);
+  const viewAnchorsRef = useRef<Map<string, ChatViewportAnchor>>(new Map());
   useEffect(() => {
     // Intentional: UX contract is "switching context closes transient overlays".
     setCardDrawerOpen(false);
@@ -176,37 +177,37 @@ export function ChatLayout() {
 
   const rememberCurrentScroll = useCallback(() => {
     if (!currentScopeKey) return;
-    const el = messageScrollRef.current;
-    if (el) {
-      scrollPositionsRef.current.set(currentScopeKey, el.scrollTop);
-      writeChatScopeScrollTop(workspaceKey, currentScopeKey, el.scrollTop);
+    const anchor = viewAnchorsRef.current.get(currentScopeKey);
+    if (anchor) {
+      writeChatScopeViewAnchor(workspaceKey, currentScopeKey, anchor);
     }
   }, [currentScopeKey, workspaceKey]);
 
-  const restoreForChannel = useCallback((name: string): number | null => {
+  const restoreForChannel = useCallback((name: string): ChatViewportAnchor | null => {
     const scopeKey = scopeKeyForChannelName(name);
-    return scrollPositionsRef.current.has(scopeKey)
-      ? (scrollPositionsRef.current.get(scopeKey) ?? null)
-      : readChatScopeScrollTop(workspaceKey, scopeKey);
+    return viewAnchorsRef.current.get(scopeKey) ??
+      readChatScopeViewAnchor(workspaceKey, scopeKey);
   }, [scopeKeyForChannelName, workspaceKey]);
-  const persistedRestoreScrollTop = useMemo(
-    () => readChatScopeScrollTop(workspaceKey, currentScopeKey),
+  const persistedRestoreAnchor = useMemo(
+    () => readChatScopeViewAnchor(workspaceKey, currentScopeKey),
     [workspaceKey, currentScopeKey],
   );
-  const messageRestoreScrollTop =
-    restoreScrollTop ?? persistedRestoreScrollTop;
+  const messageRestoreAnchor = restoreAnchor ?? persistedRestoreAnchor;
 
-  const handleMessageScrollTopChange = useCallback(
-    (scrollTop: number) => {
+  const handleViewportAnchorChange = useCallback(
+    (anchor: ChatViewportAnchor) => {
       if (!currentScopeKey) return;
-      scrollPositionsRef.current.set(currentScopeKey, scrollTop);
-      writeChatScopeScrollTop(workspaceKey, currentScopeKey, scrollTop);
+      viewAnchorsRef.current.set(currentScopeKey, anchor);
+      writeChatScopeViewAnchor(workspaceKey, currentScopeKey, anchor);
     },
     [currentScopeKey, workspaceKey],
   );
 
   const handleChannelSelect = useCallback(
-    async (name: string, options: { markRead?: boolean } = {}) => {
+    async (
+      name: string,
+      options: { markRead?: boolean; targetLine?: number } = {},
+    ) => {
       if (!activeSlug) return;
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
@@ -216,15 +217,23 @@ export function ChatLayout() {
         options.markRead !== false && targetState.unreadCount > 0
           ? targetState.firstUnreadLine
           : null;
+      const targetAnchor = unreadTargetLine ? null : restoreForChannel(name);
+      const pendingTargetLine = options.targetLine ?? unreadTargetLine ?? null;
+      const targetLine = pendingTargetLine ?? targetAnchor?.line ?? null;
       rememberCurrentScroll();
-      setRestoreScrollTop(unreadTargetLine ? null : restoreForChannel(name));
+      setRestoreAnchor(pendingTargetLine ? null : targetAnchor);
       selectChannel(name);
-      setPendingScrollLine(unreadTargetLine);
+      setPendingScrollLine(pendingTargetLine);
       writeActiveChatScope(requestWorkspaceKey, targetScopeKey);
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
-      const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
+      const res = await client.read(
+        requestSlug,
+        apiChannel,
+        MESSAGES_PAGE_SIZE,
+        targetLine ? Math.max(0, targetLine - 1) : undefined,
+      );
       if (
         res.ok &&
         res.data &&
@@ -419,30 +428,32 @@ export function ChatLayout() {
     []
   );
 
-  const getScrollTop = useCallback(() => {
-    const el = document.querySelector("[data-message-scroll]");
-    return el ? el.scrollTop : 0;
-  }, []);
+  const getCurrentAnchor = useCallback((): ChatViewportAnchor | null => {
+    if (!currentScopeKey) return null;
+    return viewAnchorsRef.current.get(currentScopeKey) ??
+      readChatScopeViewAnchor(workspaceKey, currentScopeKey);
+  }, [currentScopeKey, workspaceKey]);
 
   const handleChannelClick = useCallback(
     (channel: string) => {
-      if (currentChannel) {
-        pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
+      const anchor = getCurrentAnchor();
+      if (currentChannel && anchor) {
+        pushNav({ channel: currentChannel, anchor });
       }
       handleChannelSelect(channel);
     },
-    [currentChannel, pushNav, getScrollTop, handleChannelSelect]
+    [currentChannel, pushNav, getCurrentAnchor, handleChannelSelect]
   );
 
   const handleMessageLinkClick = useCallback(
     (channel: string, line: number) => {
-      if (currentChannel) {
-        pushNav({ channel: currentChannel, scrollTop: getScrollTop() });
+      const anchor = getCurrentAnchor();
+      if (currentChannel && anchor) {
+        pushNav({ channel: currentChannel, anchor });
       }
-      handleChannelSelect(channel);
-      setPendingScrollLine(line);
+      handleChannelSelect(channel, { targetLine: line });
     },
-    [currentChannel, pushNav, getScrollTop, setPendingScrollLine, handleChannelSelect]
+    [currentChannel, pushNav, getCurrentAnchor, handleChannelSelect]
   );
 
   const handleNavBack = useCallback(async () => {
@@ -452,14 +463,19 @@ export function ChatLayout() {
     const requestWorkspaceKey = workspaceKey;
     const entryScopeKey = scopeKeyForChannelName(entry.channel);
     rememberCurrentScroll();
-    setRestoreScrollTop(entry.scrollTop);
+    setRestoreAnchor(entry.anchor);
     setPendingScrollLine(null);
     selectChannel(entry.channel);
     writeActiveChatScope(requestWorkspaceKey, entryScopeKey);
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
-    const res = await client.read(requestSlug, apiChannel, MESSAGES_PAGE_SIZE);
+    const res = await client.read(
+      requestSlug,
+      apiChannel,
+      MESSAGES_PAGE_SIZE,
+      Math.max(0, entry.anchor.line - 1),
+    );
     if (
       res.ok &&
       res.data &&
@@ -718,10 +734,10 @@ export function ChatLayout() {
           replyTo={replyTo}
           highlightLine={highlightLine}
           pendingScrollLine={pendingScrollLine}
-          restoreScrollTop={messageRestoreScrollTop}
+          restoreAnchor={messageRestoreAnchor}
           onHighlightLineChange={setHighlightLine}
           onPendingScrollClear={handlePendingScrollClear}
-          onScrollTopChange={handleMessageScrollTopChange}
+          onViewportAnchorChange={handleViewportAnchorChange}
           onReply={handleReply}
           onShowThread={handleShowThread}
           onMentionClick={handleMentionClick}

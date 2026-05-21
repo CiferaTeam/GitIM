@@ -146,7 +146,11 @@ import { useCardStore } from "./hooks/use-card-store";
 import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
-import { readChatScopeState } from "./lib/chat-ui-state";
+import {
+  readChatScopeState,
+  writeActiveChatScope,
+  writeChatScopeViewAnchor,
+} from "./lib/chat-ui-state";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -475,6 +479,29 @@ describe("App card thread toasts", () => {
       hasMention: false,
       firstUnreadLine: 2,
     });
+  });
+
+  it("reads around the persisted channel anchor on a fresh /chat bootstrap", async () => {
+    writeActiveChatScope("runtime:room", "channel:general");
+    writeChatScopeViewAnchor("runtime:room", "channel:general", {
+      line: 321,
+      offsetPx: 18,
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    expect(mocks.client.read).toHaveBeenCalledWith("room", "general", 50, 320);
   });
 
   it("restores unread state after a refresh once the poll cursor already advanced", async () => {

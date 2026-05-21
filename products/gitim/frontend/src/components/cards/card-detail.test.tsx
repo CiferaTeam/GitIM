@@ -10,8 +10,8 @@ import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import {
-  readChatScopeScrollTop,
-  writeChatScopeScrollTop,
+  readChatScopeViewAnchor,
+  writeChatScopeViewAnchor,
 } from "@/lib/chat-ui-state";
 import type { Card, Message } from "@/lib/types";
 
@@ -157,8 +157,11 @@ describe("CardDetail message scroll state", () => {
     document.body.innerHTML = "";
   });
 
-  it("passes persisted card discussion scrollTop into MessageList and stores new positions", async () => {
-    writeChatScopeScrollTop("runtime:room", "card:general/card-1", 240);
+  it("passes persisted card discussion anchor into MessageList and stores new anchors", async () => {
+    writeChatScopeViewAnchor("runtime:room", "card:general/card-1", {
+      line: 240,
+      offsetPx: 12,
+    });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -176,17 +179,20 @@ describe("CardDetail message scroll state", () => {
     });
 
     const props = mocks.messageListProps.at(-1)!;
-    expect(props.restoreScrollTop).toBe(240);
+    expect(props.restoreAnchor).toEqual({ line: 240, offsetPx: 12 });
 
-    const onScrollTopChange = props.onScrollTopChange as
-      | ((scrollTop: number) => void)
+    const onViewportAnchorChange = props.onViewportAnchorChange as
+      | ((anchor: { line: number; offsetPx: number }) => void)
       | undefined;
-    expect(onScrollTopChange).toBeTypeOf("function");
+    expect(onViewportAnchorChange).toBeTypeOf("function");
 
     act(() => {
-      onScrollTopChange?.(360);
+      onViewportAnchorChange?.({ line: 360, offsetPx: 24 });
     });
 
-    expect(readChatScopeScrollTop("runtime:room", "card:general/card-1")).toBe(360);
+    expect(readChatScopeViewAnchor("runtime:room", "card:general/card-1")).toEqual({
+      line: 360,
+      offsetPx: 24,
+    });
   });
 });
