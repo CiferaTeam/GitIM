@@ -31,4 +31,4 @@ pub use labels::{
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
 pub use meta::{validate_user_meta, ChannelMeta, UserMeta, UserMetaError, MAX_INTRODUCTION_LEN};
-pub use project::{ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
+pub use project::{ProjectMeta, ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
