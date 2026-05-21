@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(clippy::print_stderr)]
 //! End-to-end test for the full `POST /agents/add` + hermes profile flow.
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Verifies workspace init (local mode) writes the curated default
 //! .gitignore pattern set and commits it exactly once. `.env` is the
 //! canary pattern checked here; the full set is in `gitignore::DEFAULT_PATTERNS`.

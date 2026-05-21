@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `hermes_llm::list_providers`.
 //!
 //! All tests use `tempfile::TempDir` for fixture isolation and run without any

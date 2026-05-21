@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `HermesProvider` over fake `hermes acp` scripts.
 
 use std::collections::HashMap;

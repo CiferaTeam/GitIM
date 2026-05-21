@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::validator::{
     validate_channel_meta, validate_channel_name, validate_config, validate_user_meta,
 };

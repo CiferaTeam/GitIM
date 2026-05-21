@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `KimiProvider` over fake `kimi acp` scripts.
 //!
 //! These exist to pin behaviours that the inline unit tests can't reach

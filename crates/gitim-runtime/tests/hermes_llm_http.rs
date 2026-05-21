@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `GET /hermes/llm/providers`,
 //! `GET /hermes/llm/providers/{id}/models`, and
 //! `POST /workspaces/{slug}/agents/add` (hermes LLM provider validation).

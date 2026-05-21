@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_runtime::cli::cmd_fleet::{
     build_add_body, build_tunnel_node_body, extract_nodes_array, extract_status_array, AddArgs,
     TunnelUpArgs,

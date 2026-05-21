@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `preflight_pi_with` — covers the four error
 //! branches against controlled fake binaries, plus a real end-to-end test
 //! against the live pi CLI.

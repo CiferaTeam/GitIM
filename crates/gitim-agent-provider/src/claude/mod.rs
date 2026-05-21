@@ -98,8 +98,12 @@ impl Provider for ClaudeProvider {
         let pid = child.id().unwrap_or(0);
         info!(pid, cwd = ?opts.cwd, model = ?opts.model, "claude started");
 
+        // piped stdio: guaranteed present because we set Stdio::piped() above
+        #[allow(clippy::expect_used)]
         let stdout = child.stdout.take().expect("stdout piped");
+        #[allow(clippy::expect_used)]
         let stdin = child.stdin.take().expect("stdin piped");
+        #[allow(clippy::expect_used)]
         let stderr = child.stderr.take().expect("stderr piped");
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
@@ -166,6 +170,8 @@ async fn drive_session(
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "claude:stderr", "{}", line);
+            // Mutex: only poisoned if a thread panicked while holding it, which we treat as unrecoverable
+            #[allow(clippy::unwrap_used)]
             let mut tail = stderr_tail_clone.lock().unwrap();
             tail.push(line);
             if tail.len() > TAIL_LINES {

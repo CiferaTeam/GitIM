@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::formatter::{format_event, format_message};
 use gitim_core::types::Handler;
 

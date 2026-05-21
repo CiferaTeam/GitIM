@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_unarchive_channel`.
 //!
 //! Flow: set up a git-backed repo with two users, create a channel as alice,

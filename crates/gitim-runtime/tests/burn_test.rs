@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `POST /workspaces/{slug}/agents/burn` (Task B.3).
 //!
 //! Per `docs/plans/2026-05-09-archive-protocol/03-runtime.md`, the burn endpoint

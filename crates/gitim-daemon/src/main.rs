@@ -1,4 +1,5 @@
 #![allow(dead_code, clippy::print_stdout, clippy::print_stderr)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::sync::Arc;
 use tokio::sync::broadcast;

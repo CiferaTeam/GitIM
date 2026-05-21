@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_agent_provider::{create, PromptContext, ProviderConfig};
 use gitim_runtime::{format_changes_as_prompt, ChannelChange};
 

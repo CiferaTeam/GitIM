@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Flow run handler integration tests. Tempdir repo + in-process daemon state.
 //! Follows the same setup pattern as flow_handlers.rs.
 

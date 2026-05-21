@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_depart_user` — the composite "burn"
 //! operation defined in archive-protocol plan A.4.
 //!

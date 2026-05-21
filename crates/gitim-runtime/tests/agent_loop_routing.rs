@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for the recipients-based routing filter in
 //! `format_changes_as_prompt`. Pure-function tests — no daemon needed.
 //!

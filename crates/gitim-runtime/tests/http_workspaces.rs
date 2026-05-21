@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! HTTP integration tests for the runtime's workspace lifecycle routes
 //! (`GET /workspaces`, `POST /workspaces`, `GET /workspaces/{slug}`,
 //! `DELETE /workspaces/{slug}`) plus the `WorkspaceSlug` extractor applied to

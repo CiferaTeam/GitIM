@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_runtime::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };

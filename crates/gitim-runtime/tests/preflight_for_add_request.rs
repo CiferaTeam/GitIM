@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `preflight_for_add_request` and
 //! `classify_preflight_error_code`.
 //!

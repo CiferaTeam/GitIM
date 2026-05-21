@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end coverage for the agent token usage statistics pipeline:
 //!
 //!   provider → agent_loop::update_session_usage

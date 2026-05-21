@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Regression test: poll must surface channel archival as a `channel_meta`
 //! event so the UI can refetch the archived list.
 //!

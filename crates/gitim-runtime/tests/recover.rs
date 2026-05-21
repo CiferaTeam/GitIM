@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for `recover_agents_for_workspace` — the per-workspace scan that
 //! `recover_from_config` delegates to on startup.
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_create_cron`.
 //!
 //! Pattern mirrors `archive_dm_test.rs` / `archive_user_test.rs`: temp git

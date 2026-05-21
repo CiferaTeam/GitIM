@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(clippy::doc_lazy_continuation, clippy::print_stderr)]
 //! Performance baseline for `handle_depart_user` — archive-protocol plan A.9.
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_list_agents::run`.
 //!
 //! Pattern mirrors `cli_status` / `cli_workspaces`: spin up the real runtime

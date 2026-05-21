@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Cross-clone propagation test for `handle_depart_user` (archive-protocol
 //! plan A.8, P1.b case 5).
 //!
