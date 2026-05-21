@@ -315,6 +315,7 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
             created_at: now.clone(),
             introduction: "默认频道".to_string(),
             members: vec![handler.to_string()],
+            project: None,
         };
         let meta_str = Response::yaml_string(&meta, "general channel meta")?;
         std::fs::write(&meta_path, &meta_str)

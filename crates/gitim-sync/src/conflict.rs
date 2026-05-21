@@ -199,5 +199,6 @@ pub fn merge_channel_meta(local: &ChannelMeta, remote: &ChannelMeta) -> ChannelM
         created_at: remote.created_at.clone(),
         introduction: remote.introduction.clone(),
         members,
+        project: remote.project.clone(),
     }
 }

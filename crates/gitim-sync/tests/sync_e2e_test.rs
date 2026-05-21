@@ -279,6 +279,7 @@ fn test_sync_resolves_concurrent_meta_changes() {
         created_at: "20260317T100000Z".to_string(),
         introduction: "General channel".to_string(),
         members: vec!["god".to_string()],
+        project: None,
     };
     std::fs::write(&meta_a, serde_yaml::to_string(&initial_meta).unwrap()).unwrap();
     repo_a
