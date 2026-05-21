@@ -292,8 +292,11 @@ fn save_to_path_round_trip() {
 }
 
 #[test]
-fn save_to_path_is_atomic_no_partial_on_existing() {
-    // Existing valid file is preserved on overwrite (atomic rename).
+fn save_to_path_overwrites_existing_with_valid_content() {
+    // Verifies clean overwrite end-to-end: write an Active file, then save a
+    // Redirected file at the same path, and read back the second one in full.
+    // Crash-safety (no partial file mid-write) is a property of the OS
+    // `rename` syscall, not something this test can prove.
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("gitim.epoch.yaml");
     let f1 = EpochFile::new_active(
