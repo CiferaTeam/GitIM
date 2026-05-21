@@ -12,12 +12,21 @@ thiserror.workspace = true
 chrono.workspace = true
 chrono-tz = { workspace = true }
 croner = { workspace = true }
-getrandom = "0.2"
+getrandom = { version = "0.2", features = ["std"] }
 hex.workspace = true
+humantime = "2"
+tempfile = "3"
+tracing.workspace = true
+
+# `fs2` is a thin libc wrapper for advisory file locking; no wasm32 backend
+# exists. The timer module that uses it is gated `#[cfg(not(target_arch =
+# "wasm32"))]` in lib.rs, and this dep is gated the same way to keep the
+# wasm-pack build (gitim-wasm → gitim-sync → gitim-core) green.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2 = "0.4"
 
 [dev-dependencies]
 pretty_assertions = "1"
-tempfile = "3"
 
 [lints]
 workspace = true

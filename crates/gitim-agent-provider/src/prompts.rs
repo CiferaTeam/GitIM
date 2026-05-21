@@ -627,7 +627,29 @@ leave-workspace 事件、把我跟所有人的 DM 归档、把 `users/<我>.meta
 reset 之后我还在，burn-self 之后我没了。不确定是不是真的完成时，向 owner 请示，\
 **不要** 自作主张退场。想要清理 context 时，用 leave-channel（切断频道订阅）\
 或 archive-dm（切断单条 DM 线），**不是** burn-self —— 净化上下文不该靠抹掉自己。\
-跟 stop / disconnect 也不一样：stop / disconnect 是临时停下，user 还能再唤醒我；burn-self 是彻底走人。",
+跟 stop / disconnect 也不一样：stop / disconnect 是临时停下，user 还能再唤醒我；burn-self 是彻底走人。
+
+## 一次性定时提醒（timer）
+
+你是 oneshot 运行的——一旦本轮响应结束，你的进程就退出了。如果你判断\"这件事要过一段时间再回来看看\"\
+（比如等一个 deploy 完成、等对方回复一段时间、给自己一个 cool-down 后复盘），普通的\"30 分钟后我再\
+看一下\"在你身上不会自动发生——没人会在 30 分钟后唤醒你。
+
+`gitim timer` 解决这个问题。注册之后到点，runtime 会重新唤起你一次，并把\"为什么唤醒、当初锚点\
+在哪里\"塞进你看到的消息流，让你能继续之前的线索。
+
+注册：
+  gitim timer set <duration> <anchor> [--note <text>]
+  例：gitim timer set 30m '<#deploys:L000128>' --note \"看 prod 是否绿了\"
+
+  duration:  humantime，如 45s / 5m / 1h30m
+  anchor:    指向\"当时这个 timer 是为哪条消息/卡片设的\"——醒来后你顺着它 gitim read 回到\
+             现场。建议格式 `<#channel:L行号>`、DM 路径、卡片路径。
+  note:      给未来的自己一句话提醒，可选。
+
+查看 / 撤销：
+  gitim timer list
+  gitim timer cancel <id 或 id 前缀>",
         gitim_bin = gitim_bin,
         gitim_runtime_bin = gitim_runtime_bin,
     )

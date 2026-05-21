@@ -3423,7 +3423,24 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                     continue;
                 }
             }
-            tokio::time::sleep(poll_interval).await;
+            // Shorten the idle sleep when a timer is closer than the
+            // configured poll interval — so we don't oversleep a timer
+            // that was registered while we were waiting. The floor of 1s
+            // keeps a tight-loop / clock-skew case from busy-spinning.
+            // Backoff path above is intentionally NOT clipped: error
+            // recovery shouldn't be cut short by a timer.
+            let sleep_dur = match agent_loop.next_timer_due() {
+                Some(due) => {
+                    let remaining = (due - chrono::Utc::now())
+                        .to_std()
+                        .unwrap_or(std::time::Duration::from_secs(1));
+                    remaining
+                        .min(poll_interval)
+                        .max(std::time::Duration::from_secs(1))
+                }
+                None => poll_interval,
+            };
+            tokio::time::sleep(sleep_dur).await;
         }
     });
 

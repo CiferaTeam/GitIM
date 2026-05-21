@@ -8,6 +8,7 @@ pub mod dm;
 pub mod flow;
 pub mod messaging;
 pub mod onboard;
+pub mod timer;
 pub mod update;
 
 use gitim_client::find_repo_root;

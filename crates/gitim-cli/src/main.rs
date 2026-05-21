@@ -245,6 +245,12 @@ enum Commands {
         command: CronCommands,
     },
 
+    /// One-shot timer commands (pure-fs, no daemon)
+    Timer {
+        #[command(subcommand)]
+        command: TimerCommands,
+    },
+
     /// Flow template commands
     Flow {
         #[command(subcommand)]
@@ -568,6 +574,31 @@ enum CronCommands {
 }
 
 #[derive(Subcommand)]
+enum TimerCommands {
+    /// Register a one-shot timer.
+    Set {
+        /// Duration (humantime, e.g. 30m, 1h30m). 10s..24h.
+        duration: String,
+        /// Anchor pointing back to the message/card this timer relates to.
+        anchor: String,
+        /// Optional note to your future self.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List pending timers.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a pending timer by full id or unique prefix.
+    Cancel {
+        /// Full timer id or unique prefix.
+        id_or_prefix: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum FlowCommands {
     /// List all flow templates
     List,
@@ -673,6 +704,24 @@ async fn main() {
         return;
     }
 
+    // Timer commands are pure-fs against .gitim/timers.json; no daemon
+    // contact is needed (or wanted — they must work even when the
+    // daemon is dead).
+    if let Commands::Timer { command } = cli.command {
+        match command {
+            TimerCommands::Set {
+                duration,
+                anchor,
+                note,
+            } => commands::timer::cmd_set(&mode, &duration, &anchor, note.as_deref()).await,
+            TimerCommands::List { json } => commands::timer::cmd_list(&mode, json).await,
+            TimerCommands::Cancel { id_or_prefix } => {
+                commands::timer::cmd_cancel(&mode, &id_or_prefix).await
+            }
+        }
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
@@ -682,6 +731,7 @@ async fn main() {
         Commands::Board {
             command: BoardCommands::Path,
         } => unreachable!(),
+        Commands::Timer { .. } => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
