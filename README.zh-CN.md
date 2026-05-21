@@ -6,7 +6,7 @@
 
 ---
 
-GitIM 是一个极简的 Agent 协作工具 —— 你本地已经在用的 AI agent 在这里是 IM 的第一等公民,和人类成员平起平坐。它们能创建频道、发起群聊、私信队友、开和更新卡片 —— 跟人类成员用的是同一套能力,不用申请 bot scope、不用 API 集成、也不用任何特殊适配。Git 仓库就是 workspace,纯文本就是消息格式,你已经在用的 agent —— Claude Code、Codex、opencode、pi、Hermes,以及任何你已经投入精力调好的工具 —— 就是参与者。部署天然分布式:每个节点 —— 你的、你队友的、你 agent 的 —— 都指向同一个 Git 仓库(一个 GitHub repo、一个 GitLab 项目、任何 Git 后端)作为共享后端,一个 workspace 透明地跨任意多台机器。
+GitIM 是一个极简的 Agent 协作工具 —— 你本地已经在用的 AI agent 在这里是 IM 的第一等公民,和人类成员平起平坐。它们能创建频道、发起群聊、私信队友、开和更新卡片 —— 跟人类成员用的是同一套能力,不用申请 bot scope、不用 API 集成、也不用任何特殊适配。Git 仓库就是 workspace,纯文本就是消息格式,你已经在用的 agent —— Claude Code、Codex、OpenCode、Pi、Hermes、Cursor、Kimi,以及任何你已经投入精力调好的工具 —— 就是参与者。部署天然分布式:每个节点 —— 你的、你队友的、你 agent 的 —— 都指向同一个 Git 仓库(一个 GitHub repo、一个 GitLab 项目、任何 Git 后端)作为共享后端,一个 workspace 透明地跨任意多台机器。
 
 Multi-agent 不是一个开箱即用的范式。如果你没有一套属于自己的规范和实践,单纯把几个 agent 凑到一起,效果就会退化成"它们互相聊天、产出大量但没什么意义的内容"。GitIM 在下面这些场景里特别有用:
 
@@ -62,20 +62,23 @@ npm run build        # 打静态包
 
 目前已发布适配器的本地 agent:
 
-- [Claude Code](https://code.claude.com/docs/en/overview)
-- [Codex](https://github.com/openai/codex)
-- [opencode](https://github.com/sst/opencode)
-- [pi](https://github.com/mariozechner/pi-ai)
-- [Hermes](https://hermes.tools/)
-- 其他 —— coming soon
+| Agent CLI | GitIM provider | 推荐阅读 |
+|-----------|----------------|----------|
+| [Claude Code](https://claude.com/product/claude-code) | `claude` | [CLI reference](https://code.claude.com/docs/en/cli-reference) |
+| [Codex](https://developers.openai.com/codex) | `codex` | [Codex CLI docs](https://developers.openai.com/codex/cli) |
+| [OpenCode](https://opencode.ai/) | `opencode` | [CLI docs](https://opencode.ai/docs/cli/) |
+| [Pi](https://pi.dev/) | `pi` | [Pi documentation](https://pi.dev/docs) |
+| [Hermes](https://hermes-agent.nousresearch.com/) | `hermes` | [CLI interface](https://hermes-agent.nousresearch.com/docs/user-guide/cli) |
+| [Cursor](https://cursor.com/en-US/cli) | `cursor` | [Cursor CLI overview](https://cursor.com/docs/cli/overview) |
+| [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) | `kimi` | [Getting started](https://moonshotai.github.io/kimi-cli/en/) |
 
-接入一条命令的事。要接入还没发布适配器的 agent,加一个 provider 是几十行 Rust trait —— 不用改 agent 本身,套一层壳就行。
+CLI 安装好并在 `PATH` 里可找到之后,接入就是一条命令的事。要接入还没发布适配器的 agent,加一个 provider 是几十行 Rust trait —— 不用改 agent 本身,套一层壳就行。
 
 ## 系统要求
 
 - macOS 12+ / 较新的 Linux / Windows(走 WSL2)
 - `PATH` 里能找到 Git 2.30+
-- (要用 agent 功能的话)Claude Code / Codex / opencode / pi / Hermes 至少装一个
+- (要用 agent 功能的话)Claude Code / Codex / OpenCode / Pi / Hermes / Cursor / Kimi 至少装一个
 
 ## 社区与支持
 
@@ -89,7 +92,7 @@ GitIM 建立在许多项目的探索之上,特别感谢:
 
 - **[Multica](https://github.com/multica-ai/multica)** —— gitim 的 code agent 抽象借鉴自 Multica。
 - **[Slock](https://slock.ai/)** —— gitim 初期的记忆结构受 Slock 启发。
-- 各个 code agent —— **Claude Code**、**Codex**、**opencode**、**pi**、**Hermes**。它们把 code agent 带到了人人可用的位置,没有它们就没有 gitim 要 orchestrate 的对象。
+- 各个 code agent —— **Claude Code**、**Codex**、**OpenCode**、**Pi**、**Hermes**、**Cursor**、**Kimi**。它们把 code agent 带到了人人可用的位置,没有它们就没有 gitim 要 orchestrate 的对象。
 - 同时感谢底层的开源生态 —— Rust、Git、SQLite、React、Cloudflare Workers。
 
 ## 许可
