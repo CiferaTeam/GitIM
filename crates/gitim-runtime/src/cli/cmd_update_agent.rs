@@ -490,7 +490,10 @@ mod tests {
             clear_session: false,
         });
         let obj = body.as_object().expect("body is object");
-        assert!(!obj.contains_key("clear_session"), "must be absent when false");
+        assert!(
+            !obj.contains_key("clear_session"),
+            "must be absent when false"
+        );
         assert_eq!(obj["system_prompt"], "X");
     }
 
