@@ -55,14 +55,18 @@ Mirror `usage_log` pattern:per-agent JSON,atomic rewrite,chmod 0600。
 
 ```rust
 pub struct SaturationSummary {
-    pub today: SaturationRatio,        // 今天 working/total
-    pub last_7d: SaturationRatio,      // 过去 7 天累计
-    pub by_day_30: Vec<DaySaturation>, // 最近 30 天的 by_day entries(sparkline 用)
-    pub by_hour_24: Vec<HourSaturation>, // 过去 24h 的 by_hour entries(细粒度用)
+    pub first_seen: String,
+    pub last_updated: String,
+    pub totals: SaturationBucket,           // 生命周期累计
+    pub today: SaturationBucket,            // 今天 working/total
+    pub last_7_days: Vec<DaySaturation>,    // 过去 7 天 by_day(含零填充)
+    pub last_24_hours: Vec<HourSaturation>, // 过去 24h by_hour(含零填充)
+    pub by_day_30: Vec<DaySaturation>,      // 最近 30 天 by_day(sparkline 用)
 }
 ```
 
-跟 `usage_summary` 完全对称(usage_summary 也是 totals + 30 天 by_day)。
+Wire shape 以 `01-plan.md` Task 1 `SaturationSummary` / `SaturationBucket` / `DaySaturation` / `HourSaturation` 为 SoT。
+跟 `usage_summary` 对称(usage_summary 也是 totals + 30 天 by_day);比 usage 多 `last_7_days` / `last_24_hours` 两个零填充 projection。
 前端 reduce 多个 agent 算 fleet aggregate(沿用 `summarizeAgentWorkload` pattern)。
 
 `/runtime/health` 加 `saturation_save_failures: u64`,跟 `usage_save_failures` 并列。
@@ -84,7 +88,7 @@ pub struct SaturationSummary {
 
 ### 命名
 - 模块:`saturation_log.rs`(per-agent disk store)+ `saturation_sampler.rs`(background task)
-- 类型:`AgentSaturationLog` / `SaturationBucket` / `SaturationSummary` / `SaturationRatio`
+- 类型:`AgentSaturationLog` / `SaturationBucket` / `SaturationSummary` / `DaySaturation` / `HourSaturation`
 - 字段:`saturation_summary` / `saturation_save_failures`
 - 路径:`<workspace>/.gitim-runtime/saturation/<handler>.json`
 
@@ -179,7 +183,7 @@ COVERAGE MAP
   └── 加 "Today saturation X.X%" + 7-day sparkline
       └── [ ] 多 agent reduce 出 fleet ratio (按 Σworking / Σtotal)
 
-COVERAGE: 16 test entries planned, 0 GAP
+COVERAGE: 16 test entries listed here (high-level); 01-plan.md Task 1–6 总计 23 个新测试(以 plan 为准)
 ```
 
 ## 验收
