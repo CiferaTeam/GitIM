@@ -97,6 +97,7 @@ fn create_test_channel_with_members(
         created_at: "20260323T000000Z".to_string(),
         introduction: "test channel".to_string(),
         members: members.iter().map(|m| m.to_string()).collect(),
+        project: None,
     };
     std::fs::write(
         ch_dir.join(format!("{}.meta.yaml", name)),

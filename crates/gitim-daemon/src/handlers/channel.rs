@@ -104,6 +104,7 @@ pub async fn handle_create_channel(
         created_at: now.clone(),
         introduction: introduction.unwrap_or_default(),
         members,
+        project: None,
     };
     let meta_str = match Response::yaml_string(&meta, "channel meta") {
         Ok(meta_str) => meta_str,
