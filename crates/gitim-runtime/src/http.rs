@@ -4235,7 +4235,6 @@ async fn agents_burn(
     }
 }
 
-
 /// Steps 4-7 of the burn workflow, factored out so the self-departed
 /// self-heal path (B.4) can reuse it. Both call sites must converge on
 /// identical end state: agent daemon dead, clone dir gone, hermes profile
