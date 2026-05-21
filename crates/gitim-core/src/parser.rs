@@ -20,6 +20,9 @@ pub enum ParseError {
 // part of the alphabet (e.g. `leave-workspace`) — the original `[a-z_]+`
 // rejected anything compound and silently fell through the parser
 // (offending lines were treated as continuation text).
+// SAFETY: The regex pattern is a statically-verified literal; Regex::new
+// can only fail on invalid syntax, which is impossible here.
+#[allow(clippy::unwrap_used)]
 static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z][a-z0-9_-]*)\])? (.+)$",
@@ -41,7 +44,12 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
         if let Some(caps) = MSG_RE.captures(line) {
             finalize_entry(&mut entries, current_body.take());
 
+            // INVARIANT: `caps[1]` and `caps[2]` are guaranteed to be valid capture
+            // groups because we are inside `if let Some(caps) = MSG_RE.captures(line)`.
+            // The regex guarantees these groups are numeric strings that parse successfully.
+            #[allow(clippy::unwrap_used)]
             let line_number: u64 = caps[1].parse().unwrap();
+            #[allow(clippy::unwrap_used)]
             let point_to: u64 = caps[2].parse().unwrap();
             // `system` is rejected by `Handler::new` (it's reserved so no
             // user can claim it), but the daemon's cron engine emits

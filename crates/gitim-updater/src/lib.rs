@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 //! gitim-updater: shared core for GitIM self-update.
 //!
 //! Pure helpers (version parsing, platform detection, URL formatting) sit

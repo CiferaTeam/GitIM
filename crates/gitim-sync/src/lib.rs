@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod conflict;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod git;

@@ -119,8 +119,14 @@ impl Provider for HermesProvider {
         let pid = child.id().unwrap_or(0);
         info!(pid, cwd = ?opts.cwd, "hermes started");
 
+        // INVARIANT: `Command::stdout()`/`stdin()`/`stderr()` return `Some` when
+        // the corresponding `Stdio` is set to `piped()`. We always configure
+        // `stdout(Stdio::piped())` etc., so these are always `Some`.
+        #[allow(clippy::expect_used)]
         let stdout = child.stdout.take().expect("stdout piped");
+        #[allow(clippy::expect_used)]
         let stdin = child.stdin.take().expect("stdin piped");
+        #[allow(clippy::expect_used)]
         let stderr = child.stderr.take().expect("stderr piped");
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
@@ -238,6 +244,8 @@ async fn drive_session(
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "hermes:stderr", "{}", line);
+            // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+            #[allow(clippy::unwrap_used)]
             let mut tail = stderr_tail_clone.lock().unwrap();
             tail.push(line);
             if tail.len() > TAIL_LINES {
@@ -458,6 +466,8 @@ async fn drive_session(
 
     // If failed with no error message, fall back to stderr tail
     if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
+        // INVARIANT: `Mutex::lock()` only fails on poisoned mutex.
+        #[allow(clippy::unwrap_used)]
         let tail = stderr_tail.lock().unwrap();
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 #![allow(dead_code, clippy::print_stdout, clippy::print_stderr)]
 
 use std::sync::Arc;

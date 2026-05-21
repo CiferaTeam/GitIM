@@ -60,6 +60,9 @@ pub fn validate_channel_meta(yaml: &str) -> Result<ChannelMeta, ValidationError>
         field: "created_by".into(),
         reason: "must be a valid handler".into(),
     })?;
+    // SAFETY: The regex pattern is a statically-verified literal; Regex::new
+    // can only fail on invalid syntax, which is impossible here.
+    #[allow(clippy::unwrap_used)]
     let ts_re = regex::Regex::new(r"^\d{8}T\d{6}Z$").unwrap();
     if !ts_re.is_match(&meta.created_at) {
         return Err(ValidationError::FieldConstraint {
