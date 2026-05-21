@@ -151,6 +151,7 @@ daemon 的 push/fetch 连续 3 次 auth 失败（401 / 403） → `auth_failed` 
 - 提交标题沿用现有 Conventional Commits 风格：`<type>(<scope>): <summary>`，如 `fix(runtime): retry provider failures`；无明确 scope 时可省略。
 - 提交正文按 Google-style footer 记录验证信息，至少包含 `Test: <command>`；如果没有运行测试，写 `Test: not run (<reason>)`。
 - AI agent 参与的提交必须在 footer 把自己带进去，使用标准 Git trailer：`Co-authored-by: <agent-name> <<agent-email>>`。Codex 提交使用 `Co-authored-by: Codex <codex@openai.com>`。
+- AI agent 禁止使用 `git commit --no-verify`。如果 pre-commit hook 失败，必须停止并报告失败命令和错误原因，先修复 hook 报错后再用普通 `git commit` 提交。
 
 ## Rust toolchain policy
 
