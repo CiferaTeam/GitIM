@@ -574,9 +574,12 @@ impl GitStorage {
 
     /// Create an orphan commit on `new_branch` whose tree is the current
     /// working-tree HEAD's tree, with `epoch_yaml_path` overwritten by
-    /// `epoch_yaml_content`. Returns the new commit's SHA. The branch ref
-    /// is created (or updated, if pre-existing — caller must guarantee it
-    /// does not exist for first-fire semantics).
+    /// `epoch_yaml_content`. Returns the new commit's SHA.
+    ///
+    /// Caller must hold the workspace `commit_lock` to serialize index writes.
+    ///
+    /// The branch ref is created (or updated, if pre-existing — caller must
+    /// guarantee it does not exist for first-fire semantics).
     pub fn create_orphan_commit(
         &self,
         new_branch: &str,
@@ -616,18 +619,26 @@ impl GitStorage {
         // 6. Reset index back to HEAD so the OLD branch's working tree is clean
         //    (the OLD branch will get its own redirect commit separately).
         self.run_git(&["reset", "--mixed", "HEAD"])?;
-        // Also remove the epoch.yaml from working tree if it didn't exist before —
-        // checkout HEAD restores the original state.
-        self.run_git(&["checkout", "HEAD", "--", epoch_yaml_path])
-            .ok();
-        // If checkout failed (file didn't exist in HEAD), just delete it.
-        let _ = std::fs::remove_file(&yaml_path);
+        // If the file existed in HEAD, `checkout` restores it. If it did NOT exist,
+        // `checkout` fails (path not in HEAD's tree) and we must remove the
+        // orphan-only file we placed in the working tree at step 1.
+        match self.run_git(&["checkout", "HEAD", "--", epoch_yaml_path]) {
+            Ok(()) => {
+                // File restored from HEAD — leave it.
+            }
+            Err(_) => {
+                // File was not in HEAD — delete our working-tree copy.
+                let _ = std::fs::remove_file(&yaml_path);
+            }
+        }
 
         Ok(commit)
     }
 
     /// Append a single commit to the current branch that overwrites
     /// `epoch_yaml_path` with `epoch_yaml_content`. Returns new commit SHA.
+    ///
+    /// Caller must hold the workspace `commit_lock` to serialize index writes.
     pub fn write_redirect_commit(
         &self,
         epoch_yaml_path: &str,
@@ -661,8 +672,12 @@ impl GitStorage {
     }
 
     /// Return the current branch name (`git symbolic-ref --short HEAD`).
-    /// Errors on detached HEAD.
+    /// Returns `GitError::DetachedHead` if HEAD is not on a branch — caller
+    /// must handle this case before assuming a branch name is available.
     pub fn current_branch(&self) -> Result<String, GitError> {
+        if !self.head_is_on_branch()? {
+            return Err(GitError::DetachedHead);
+        }
         let out = self.run_git_capture(&["symbolic-ref", "--short", "HEAD"])?;
         Ok(out.trim().to_string())
     }

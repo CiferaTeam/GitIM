@@ -524,6 +524,92 @@ fn create_orphan_commit_produces_root_commit_on_new_branch() {
         "orphan must include existing working tree files, got {:?}",
         names
     );
+
+    // After the orphan op, OLD branch's working tree must be clean.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "working tree must be clean after orphan op, got: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn create_orphan_commit_restores_existing_epoch_yaml_in_head() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    // Seed: gitim.epoch.yaml ALREADY exists in HEAD with "ORIGINAL" content.
+    std::fs::write(
+        dir.path().join("gitim.epoch.yaml"),
+        "schema_version: 1\nstatus: active\nepoch: 2\nbranch: main\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "seed"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let original = std::fs::read_to_string(dir.path().join("gitim.epoch.yaml")).unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    storage
+        .create_orphan_commit(
+            "main-epoch-3",
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: active\nepoch: 3\nbranch: main-epoch-3\n",
+            "snapshot: epoch 3",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("orphan");
+
+    // OLD branch's working tree must still contain the ORIGINAL content.
+    let after = std::fs::read_to_string(dir.path().join("gitim.epoch.yaml"))
+        .expect("file must still exist (restored from HEAD)");
+    assert_eq!(
+        after, original,
+        "epoch.yaml content must be restored from HEAD"
+    );
+
+    // git status clean.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "working tree must be clean after orphan op, got: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
 }
 
 #[test]
