@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 // End-to-end tests for `gitim timer set | list | cancel`.
 //
 // Each test gets its own tempdir with a fake clone layout (a `.gitim/`

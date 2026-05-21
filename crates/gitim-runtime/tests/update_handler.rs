@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `POST /runtime/update-and-restart` (Task 6 sync phase).
 //!
 //! ## What's covered

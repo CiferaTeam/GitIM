@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Parse + validate tests for `gitim.epoch.yaml`.
 //!
 //! Fixture YAML mirrors the design at `docs/plans/2026-05-06-git-history-snapshot-pack.md`

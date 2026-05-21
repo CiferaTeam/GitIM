@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for gitim-updater IO helpers:
 //! `install_update` and `replace_binaries`.
 

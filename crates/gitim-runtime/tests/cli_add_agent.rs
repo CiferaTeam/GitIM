@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_add_agent::run`.
 //!
 //! Pattern: spin up the real runtime router on an ephemeral loopback port,

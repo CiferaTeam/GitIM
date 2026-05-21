@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Binary-level subprocess smoke tests for `gitim-runtime`.
 //!
 //! Counterpart to T13's in-process clap parse catalog (`argv_subcommand_tests`

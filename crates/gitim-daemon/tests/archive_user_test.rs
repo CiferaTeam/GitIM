@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_archive_user`, `handle_unarchive_user`,
 //! and `handle_list_archived_users`.
 //!

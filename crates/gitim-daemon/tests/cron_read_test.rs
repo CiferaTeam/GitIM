@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_list_crons`, `handle_show_cron`, and
 //! `handle_history_cron`.
 //!

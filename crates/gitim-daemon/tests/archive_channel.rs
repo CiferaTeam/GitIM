@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_archive_channel` — specifically the cards-
 //! subtree behaviour introduced in Task 3.1.
 

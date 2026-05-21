@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! HTTP integration tests for the runtime's flow read endpoints.
 //!
 //! Mirrors the `cron_http.rs` pattern: a fake Unix-socket daemon answers

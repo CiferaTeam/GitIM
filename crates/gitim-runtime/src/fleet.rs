@@ -111,6 +111,8 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
     let runtime = FleetNodeRuntime::new(state.clone(), entry.clone());
     let mut initial_statuses = Vec::new();
     {
+        // Mutex: only poisoned if a thread panicked while holding it, which we treat as unrecoverable
+        #[allow(clippy::unwrap_used)]
         let mut s = state.lock().unwrap();
         s.fleet_nodes.insert(entry.node_id.clone(), runtime);
         for subscription in workspace_subscriptions(&entry) {

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Regression test: concurrent thread writers must never produce duplicate
 //! line numbers in a .thread file.
 //!

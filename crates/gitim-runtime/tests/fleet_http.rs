@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Fleet observer HTTP tests.
 //!
 //! These target the optional multi-node observer path: adding a remote node via

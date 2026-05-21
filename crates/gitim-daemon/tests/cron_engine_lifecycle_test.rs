@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Lifecycle / spawn tests for `cron_engine`.
 //!
 //! These exercise `spawn_cron_engine` end-to-end: the task is created,

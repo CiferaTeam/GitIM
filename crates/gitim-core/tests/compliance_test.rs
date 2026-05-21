@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::validator::compliance::validate_append;
 
 fn make_existing() -> &'static str {

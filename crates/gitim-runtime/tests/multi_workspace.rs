@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Multi-workspace integration tests (Task 11).
 //!
 //! Covers the pieces that only matter once the runtime hosts more than one

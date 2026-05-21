@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Task 22: E2E smoke — synthetic provider usage flows through the agent
 //! loop's snapshot path, lands on disk, and exposes the right shape.
 //!

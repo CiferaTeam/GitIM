@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_workspaces::run`.
 //!
 //! Pattern mirrors `cli_status`: spin up the real runtime router on an

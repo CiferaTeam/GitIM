@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{Handler, LinkKind, ThreadEntry};
 

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_agent_provider::claude::{parse_line, ParsedMessage};
 use gitim_agent_provider::Event;
 use serde_json::json;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::types::config::Config;
 use gitim_core::types::{ChannelMeta, UserMeta};
 use gitim_daemon::api::Request;

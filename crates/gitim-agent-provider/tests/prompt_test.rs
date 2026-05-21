@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use async_trait::async_trait;
 use gitim_agent_provider::{
     ExecOptions, PromptContext, Provider, ProviderConfig, ProviderError, Session,

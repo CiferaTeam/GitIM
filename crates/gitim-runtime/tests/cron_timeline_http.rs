@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! HTTP integration tests for `GET /workspaces/{slug}/crons/timeline`.
 //!
 //! Same scripted-fake-daemon harness as `cron_http.rs`, plus on-disk seeding
