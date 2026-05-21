@@ -336,10 +336,14 @@ impl GitStorage {
     }
 
     /// Return the number of commits reachable from `branch` head.
-    /// Equivalent to `git rev-list --count <branch>`. Missing branch → Err.
+    /// Equivalent to `git rev-list --count <branch>`. Missing or unborn branch
+    /// (no commits yet) → `Err`. The trailing `--` separator forces git to
+    /// treat `branch` as a revision, not a flag, so a caller-side mistake
+    /// like `--foo` produces a clean "bad revision" error rather than git's
+    /// multi-line usage screen.
     pub fn count_commits_on_branch(&self, branch: &str) -> Result<u64, GitError> {
         let output = Command::new("git")
-            .args(["rev-list", "--count", branch])
+            .args(["rev-list", "--count", branch, "--"])
             .current_dir(&self.root)
             .output()?;
         if !output.status.success() {
@@ -348,10 +352,11 @@ impl GitStorage {
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        trimmed
             .parse::<u64>()
-            .map_err(|e| GitError::CommandFailed(format!("parse count: {e}")))
+            .map_err(|e| GitError::CommandFailed(format!("parse count {trimmed:?}: {e}")))
     }
 
     pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {

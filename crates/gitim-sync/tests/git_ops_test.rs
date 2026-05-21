@@ -427,7 +427,7 @@ fn count_commits_on_branch_returns_total_reachable_count() {
 }
 
 #[test]
-fn count_commits_on_branch_zero_for_missing_branch() {
+fn count_commits_on_branch_errs_for_missing_branch() {
     use gitim_sync::git::GitStorage;
     use std::process::Command;
 
