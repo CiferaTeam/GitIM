@@ -51,25 +51,32 @@ pub struct ProjectMeta {
 
 ### 1.3 Filesystem layout
 
+对齐**现有** channel meta 扁平 layout (`channels/<n>.meta.yaml` + `channels/<n>.thread` + `channels/<n>/cards/*`):
+
 ```
 <repo>/
 ├── channels/
+│   ├── <ch>.meta.yaml         # 加 project: <slug> 字段(optional)
+│   ├── <ch>.thread
 │   └── <ch>/
-│       ├── meta.yaml         # 加 project: <slug> 字段(optional)
-│       └── ...
-└── projects/                 # 新顶层目录
-    └── <slug>/
-        └── meta.yaml         # ProjectMeta
+│       └── cards/
+└── projects/                  # 新顶层目录
+    └── <slug>.meta.yaml       # ProjectMeta — 扁平,跟 channel meta convention 对齐
 ```
+
+为什么扁平:跟 `channels/<n>.meta.yaml` 一致;`projects/` 目录下只放 meta,没有其他 per-project artifact (没 thread、没 cards);glob `projects/*.meta.yaml` 跟 `channels/*.meta.yaml` 对称。
+
+Archive 路径(v1 不用,留 anchor):`archive/projects/<slug>.meta.yaml`。
 
 ### 1.4 Slug 规则
 
-跟 channel slug 对齐:
-- 小写 `a-z 0-9 -`,1–39 字符
-- 不能纯数字
-- 含大写字母 → 拒绝(不做 normalize,直接 reject)
-- Reserved: 取现有 channel reserved 列表(`gitim-core::validator` 已定义)+ 追加 `projects` 一项,作为 project slug 共用 reserved set
-- 校验函数复用 channel slug 校验路径(`gitim-core::validator`),实施时实测它是 channel-only 还是 generic slug;若 channel-only 则抽出 `is_valid_slug(s, reserved: &[&str])` 通用版,channel 校验改走通用版 + channel-specific reserved set
+跟现有 `ChannelName` newtype 规则对齐 + 加 reserved set:
+- 小写 `a-z 0-9 -`,1–32 字符 (跟 ChannelName 一致)
+- 含大写字母 / 下划线 / 空格 / 斜杠 → 拒绝
+- 不能以 `-` 开头/结尾,不能连续 `--`
+- **Reserved set**:`["archive", "channels", "projects", "users", "dms", "cards", "flows", "system"]`(跟系统保留目录名 + 系统 handler 重名禁止)
+- 现有 `ChannelName::new` **无 reserved set 检查**,但 v1 不动 channel 行为
+- 实施路径:`ProjectSlug` 新 newtype 在 `crates/gitim-core/src/types/project.rs`,内部用 `ChannelName::new` 同款字符集校验,然后追加 reserved 检查;**不抽 generic helper**(YAGNI,两个 newtype 共 20 行代码,提取的代价比重复高)
 
 ## 2. Mutation surface (v1)
 
