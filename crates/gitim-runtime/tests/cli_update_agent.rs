@@ -114,6 +114,7 @@ fn baseline_args(workspace: Option<String>, id: &str) -> cmd_update_agent::Args 
         introduction: None,
         env: Vec::new(),
         dotenv_file: None,
+        clear_session: false,
     }
 }
 
@@ -397,6 +398,7 @@ fn args_struct_smoke() {
         introduction: Some("i".to_string()),
         env: vec!["A=1".to_string()],
         dotenv_file: Some(PathBuf::from("/tmp/.env")),
+        clear_session: false,
     };
     assert_eq!(args.id, "alice");
     assert_eq!(args.env.len(), 1);
