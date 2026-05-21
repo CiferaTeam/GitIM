@@ -41,4 +41,15 @@ describe("computeDraftRecipients", () => {
 
     expect(recipients).toEqual(["cfo", "flame4"]);
   });
+
+  it("does not route protocol mentions to users outside the channel", () => {
+    const recipients = computeDraftRecipients({
+      body: "member <@flame4>, reference outsider <@robin>",
+      channel: baseChannel,
+      replyTo: null,
+      messages: [],
+    });
+
+    expect(recipients).toEqual(["cfo", "flame4"]);
+  });
 });

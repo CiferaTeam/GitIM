@@ -8,6 +8,7 @@ import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
 import { expandAllMentions } from "../../lib/expand-all-mentions";
+import { buildMentionCandidates } from "../../lib/mention-candidates";
 import type { Channel, Message } from "../../lib/types";
 import {
   chatScopeKeyForName,
@@ -128,11 +129,11 @@ export function ChatLayout() {
     [currentChannelData],
   );
   const mentionCandidates = useMemo(() => {
-    const agentIds = agents.map((a) => a.id);
-    const set = new Set([...users, ...agentIds]);
-    const candidates = [...set];
-    if (allMentionRecipients.length === 0) return candidates;
-    return candidates.includes("all") ? candidates : [...candidates, "all"];
+    return buildMentionCandidates({
+      users,
+      agents: agents.map((a) => a.id),
+      includeAll: allMentionRecipients.length > 0,
+    });
   }, [users, agents, allMentionRecipients]);
 
   const activeWorkspace = activeSlug
@@ -323,7 +324,9 @@ export function ChatLayout() {
     async (body: string, pointTo: number = 0) => {
       if (!currentChannel) return { ok: false, error: "No channel selected" };
       if (!activeSlug) return { ok: false, error: "No workspace selected" };
-      const expandedBody = expandAllMentions(body, allMentionRecipients);
+      const expandedBody = expandAllMentions(body, allMentionRecipients, {
+        referenceNonRecipients: currentChannelData?.kind === "channel",
+      });
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;
       const requestChannel = currentChannel;
@@ -376,6 +379,7 @@ export function ChatLayout() {
       currentChannel,
       currentUser,
       allMentionRecipients,
+      currentChannelData?.kind,
       addPendingMessage,
       markPendingSent,
       markPendingFailed,

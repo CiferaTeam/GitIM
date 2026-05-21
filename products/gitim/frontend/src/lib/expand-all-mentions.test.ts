@@ -23,4 +23,14 @@ describe("expandAllMentions", () => {
       ]),
     ).toBe("mail me at ops@all.example or ping <@alice> <@bob>");
   });
+
+  it("converts protocol mentions outside the channel members to profile links", () => {
+    expect(
+      expandAllMentions(
+        "cc <@alice> <@carol> and @all",
+        ["alice", "bob"],
+        { referenceNonRecipients: true },
+      ),
+    ).toBe("cc <@alice> <~carol> and <@alice> <@bob>");
+  });
 });

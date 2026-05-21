@@ -62,7 +62,12 @@ export function computeDraftRecipients({
 
   addRecipient(recipients, channel.created_by);
   addParentChainRecipients(recipients, replyTo, messages);
-  addMentionRecipients(recipients, expandAllMentions(body, channel.members));
+  addMentionRecipients(
+    recipients,
+    expandAllMentions(body, channel.members, {
+      referenceNonRecipients: true,
+    }),
+  );
 
   return [...recipients].sort();
 }
