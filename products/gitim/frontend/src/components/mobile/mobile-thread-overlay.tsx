@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { X, MessageSquare, ArrowLeft } from "lucide-react";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -25,6 +26,7 @@ interface MobileThreadOverlayProps {
 }
 
 export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }: MobileThreadOverlayProps) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const msg of messages) {
@@ -92,7 +94,7 @@ export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }
                 </div>
                 <div className="flex items-baseline gap-2 min-w-0">
                   <span className="font-medium text-foreground truncate text-sm">@{msg.author}</span>
-                  <span className="text-[11px] text-text-muted">{formatTimestamp(msg.timestamp)}</span>
+                  <span className="text-[11px] text-text-muted">{formatTimestamp(msg.timestamp, timezone)}</span>
                 </div>
               </div>
 

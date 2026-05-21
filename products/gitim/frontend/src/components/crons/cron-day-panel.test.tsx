@@ -43,6 +43,7 @@ vi.mock("@/lib/client", () => ({
 }));
 
 import { CronDayPanel } from "./cron-day-panel";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { CronTimelineEntry } from "@/lib/types";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -88,6 +89,7 @@ describe("CronDayPanel", () => {
   beforeEach(() => {
     getCronRunBodyMock.mockReset();
     showCronMock.mockReset();
+    useTimezoneStore.getState().setTimezone("utc");
   });
 
   afterEach(() => {
@@ -272,7 +274,7 @@ describe("CronDayPanel", () => {
       "daily-standup",
       expect.any(AbortSignal),
     );
-    expect(container.textContent).toContain("missed at 2026-05-12T09:30:00Z");
+    expect(container.textContent).toContain("missed at 2026-05-12 09:30");
     expect(container.textContent).toContain("runtime 当时未运行");
     expect(container.textContent).toContain("standup ping");
   });

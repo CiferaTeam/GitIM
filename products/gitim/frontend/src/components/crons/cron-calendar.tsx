@@ -2,7 +2,9 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCronTimeline } from "@/hooks/use-cron-timeline";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { displayTimezoneOption, type DisplayTimezone } from "@/lib/timezone";
 import type { CronTimelineEntry, CronTimelineKind } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -12,6 +14,7 @@ import {
   distinctCronCount,
   formatMonthLabel,
   groupEntriesByDay,
+  formatEntryTime,
   monthRangeIso,
   shiftMonth,
   todayKey,
@@ -65,17 +68,24 @@ function dayCellAriaLabel(date: Date, entries: CronTimelineEntry[]): string {
 
 export function CronCalendar() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const timezone = useTimezoneStore((s) => s.timezone);
+  const timezoneLabel = displayTimezoneOption(timezone).label;
 
   // Month state is local: each navigation triggers a new fetch via the hook.
   // `currentMonth()` is captured once at mount so navigation deltas don't
   // race against the wall clock if the user leaves the page open across
   // midnight UTC.
-  const [month, setMonth] = useState<CalendarMonth>(() => currentMonth());
+  const [month, setMonth] = useState<CalendarMonth>(() =>
+    currentMonth(new Date(), timezone),
+  );
 
   // Memoize range strings so they're referentially stable per (year, month) —
   // useCronTimeline's useEffect deps include both, and a fresh object each
   // render would refetch on every parent re-render.
-  const { from, to } = useMemo(() => monthRangeIso(month), [month]);
+  const { from, to } = useMemo(
+    () => monthRangeIso(month, timezone),
+    [month, timezone],
+  );
 
   const { entries, truncated, loading, error, refetch } = useCronTimeline(
     activeSlug,
@@ -84,7 +94,10 @@ export function CronCalendar() {
   );
 
   const grid = useMemo(() => buildMonthGrid(month), [month]);
-  const grouped = useMemo(() => groupEntriesByDay(entries), [entries]);
+  const grouped = useMemo(
+    () => groupEntriesByDay(entries, timezone),
+    [entries, timezone],
+  );
 
   const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null);
   const selectedEntries = useMemo(() => {
@@ -120,7 +133,7 @@ export function CronCalendar() {
     [],
   );
 
-  const today = todayKey();
+  const today = todayKey(new Date(), timezone);
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
@@ -128,7 +141,7 @@ export function CronCalendar() {
         <div className="min-w-0">
           <h1 className="truncate text-xl font-semibold">周期任务</h1>
           <p className="truncate text-xs text-muted-foreground">
-            cron 历史 · 未来预测 · 错过的任务（UTC 日历视图）
+            cron 历史 · 未来预测 · 错过的任务（{timezoneLabel} 日历视图）
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -157,7 +170,7 @@ export function CronCalendar() {
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() => setMonth(currentMonth())}
+            onClick={() => setMonth(currentMonth(new Date(), timezone))}
           >
             今天
           </Button>
@@ -221,6 +234,7 @@ export function CronCalendar() {
                     isToday={isToday}
                     isSelected={isSelected}
                     entries={dayEntries}
+                    timezone={timezone}
                     onActivate={(button) =>
                       handleDayClick(cell.key, dayEntries.length > 0, button)
                     }
@@ -244,6 +258,7 @@ export function CronCalendar() {
             slug={activeSlug}
             dayKey={selectedDayKey}
             entries={selectedEntries}
+            timezone={timezone}
             onClose={handleClose}
           />
         </aside>
@@ -257,6 +272,7 @@ export function CronCalendar() {
               slug={activeSlug}
               dayKey={selectedDayKey}
               entries={selectedEntries}
+              timezone={timezone}
               onClose={handleClose}
             />
           </div>
@@ -272,6 +288,7 @@ interface DayCellProps {
   isToday: boolean;
   isSelected: boolean;
   entries: CronTimelineEntry[];
+  timezone: DisplayTimezone;
   /** Receives the activated button so the parent can park a ref for
    *  focus restoration on panel close. */
   onActivate: (button: HTMLButtonElement | null) => void;
@@ -283,6 +300,7 @@ function DayCell({
   isToday,
   isSelected,
   entries,
+  timezone,
   onActivate,
 }: DayCellProps) {
   const visible = entries.slice(0, MAX_VISIBLE_ENTRIES_PER_DAY);
@@ -315,7 +333,11 @@ function DayCell({
       </span>
       <div className="flex flex-col gap-0.5">
         {visible.map((entry, idx) => (
-          <CalendarEntryChip key={`${entry.cron_name}-${entry.ts}-${idx}`} entry={entry} />
+          <CalendarEntryChip
+            key={`${entry.cron_name}-${entry.ts}-${idx}`}
+            entry={entry}
+            timezone={timezone}
+          />
         ))}
         {overflow > 0 && (
           <span
@@ -333,14 +355,20 @@ function DayCell({
   );
 }
 
-function CalendarEntryChip({ entry }: { entry: CronTimelineEntry }) {
+function CalendarEntryChip({
+  entry,
+  timezone,
+}: {
+  entry: CronTimelineEntry;
+  timezone: DisplayTimezone;
+}) {
   // `kindStyle` returns the `missed` style for unknown kinds — a future
   // `kind: "failed"` arriving from the runtime won't crash the calendar.
   const style = kindStyle(entry.kind);
   const Icon = style.Icon;
   return (
     <span
-      title={`${style.label} · ${entry.cron_name} · ${entry.ts}`}
+      title={`${style.label} · ${entry.cron_name} · ${formatEntryTime(entry.ts, timezone)}`}
       // `aria-label` puts the kind into the accessible name even when the
       // visible content is just the cron name. Without it, blind users
       // can't tell past from future from missed.

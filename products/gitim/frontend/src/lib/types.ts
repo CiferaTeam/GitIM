@@ -1,4 +1,9 @@
 import type { PreflightResult, ProviderId } from "./providers";
+import {
+  DEFAULT_DISPLAY_TIMEZONE,
+  formatTimeOfDay,
+  type DisplayTimezone,
+} from "./timezone";
 
 export type AgentStatus = "running" | "idle" | "error" | "offline";
 
@@ -382,11 +387,12 @@ export interface CronRunBody {
   body: string;
 }
 
-/** Format timestamp "20260317T120000Z" → "12:00" */
-export function formatTimestamp(ts: string): string {
-  const match = ts.match(/T(\d{2})(\d{2})\d{2}Z$/);
-  if (!match) return "??:??";
-  return `${match[1]}:${match[2]}`;
+/** Format timestamp "20260317T120000Z" → "20:00" in the display timezone. */
+export function formatTimestamp(
+  ts: string,
+  timezone: DisplayTimezone = DEFAULT_DISPLAY_TIMEZONE,
+): string {
+  return formatTimeOfDay(ts, timezone, { fallback: "??:??" });
 }
 
 /** Current UTC time as a compact timestamp: "20260317T120000Z" */

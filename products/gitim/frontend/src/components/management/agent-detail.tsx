@@ -4,8 +4,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import { formatTimeOfDay } from "@/lib/timezone";
 import {
   PROVIDERS,
   resolveProviderModelCatalog,
@@ -58,6 +60,7 @@ export function AgentDetail() {
   const { agentId } = useParams<{ agentId: string }>();
   const navigate = useNavigate();
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const timezone = useTimezoneStore((s) => s.timezone);
   const agents = useAgentStore((s) => s.agents);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const [burnOpen, setBurnOpen] = useState(false);
@@ -568,7 +571,9 @@ export function AgentDetail() {
               agentEvents.map((ev, i) => (
                 <div key={i} className="flex items-start gap-3 text-sm">
                   <span className="text-text-faint shrink-0 font-mono text-xs pt-0.5">
-                    {ev.timestamp.slice(11, 16)}
+                    {formatTimeOfDay(ev.timestamp, timezone, {
+                      fallback: ev.timestamp,
+                    })}
                   </span>
                   <div className="flex-1">
                     <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-surface text-text-muted mb-0.5">

@@ -4,8 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useBoardStore } from "@/hooks/use-board-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import { formatDateTime } from "@/lib/timezone";
 import type { BoardReadResponse, BoardSummary } from "@/lib/types";
 import { writeUiState } from "@/lib/ui-state";
 import { workspaceIdentity } from "@/lib/workspace-key";
@@ -206,6 +208,7 @@ function BoardList({
   selectedHandler: string | null;
   onSelect: (handler: string) => void;
 }) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   return (
     <aside className="min-w-0 overflow-hidden border-b border-border md:border-b-0 md:border-r">
       <div className="flex w-full min-w-0 gap-2 overflow-x-auto px-4 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
@@ -238,7 +241,7 @@ function BoardList({
                 </p>
               )}
               <p className="mt-1 truncate text-[10px] text-muted-foreground/80">
-                {board.updated_at}
+                {formatDateTime(board.updated_at, timezone)}
               </p>
             </button>
           );
@@ -257,6 +260,7 @@ function BoardDetail({
   summary: BoardSummary | null;
   loading: boolean;
 }) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   if (!board) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
@@ -283,7 +287,7 @@ function BoardDetail({
             </p>
           )}
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{meta.updated_at}</span>
+            <span>{formatDateTime(meta.updated_at, timezone)}</span>
             {tags.map((tag) => (
               <Badge key={tag} variant="outline" className="max-w-full truncate">
                 {tag}

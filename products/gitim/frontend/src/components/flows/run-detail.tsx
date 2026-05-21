@@ -5,9 +5,11 @@ import {
   cancelFlowRun as apiCancelFlowRun,
   getFlowRun as apiGetFlowRun,
 } from "@/lib/client";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import { useFlowRunStore } from "@/hooks/use-flow-run-store";
 import { Button } from "@/components/ui/button";
+import { formatDateTime } from "@/lib/timezone";
 import { cn } from "@/lib/utils";
 import type { NodeStatus, RunStatus } from "@/lib/types";
 
@@ -35,6 +37,7 @@ const STATUS_BG: Record<NodeStatus | RunStatus, string> = {
 export function RunDetail() {
   const { runId } = useParams<{ runId: string }>();
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const timezone = useTimezoneStore((s) => s.timezone);
   const selectedRun = useFlowRunStore((s) => s.selectedRun);
   const setSelectedRun = useFlowRunStore((s) => s.setSelectedRun);
 
@@ -118,7 +121,8 @@ export function RunDetail() {
               @{selectedRun.started_by}
             </p>
             <p className="text-xs text-muted-foreground">
-              started {selectedRun.started_at} · updated {selectedRun.updated_at}
+              started {formatDateTime(selectedRun.started_at, timezone)} · updated{" "}
+              {formatDateTime(selectedRun.updated_at, timezone)}
             </p>
           </div>
           <div className="flex gap-2 items-center">

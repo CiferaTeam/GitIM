@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MessageBody } from "@/components/chat/message-body";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import * as client from "@/lib/client";
 import { parseThread, type ThreadEntry } from "@/daemon-web/parser";
 // `entry.timestamp` from `parseThread` is the LEGACY compact format
@@ -33,6 +34,7 @@ interface RunBodyState {
  * vertical list is enough; we skip the chat's reply/threading affordances.
  */
 export function CronRunViewer({ slug, cronName, ts, onBack }: CronRunViewerProps) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   const requestKey = slug ? `${slug}\0${cronName}\0${ts}` : null;
   const [runState, setRunState] = useState<RunBodyState>({
     key: null,
@@ -142,7 +144,7 @@ export function CronRunViewer({ slug, cronName, ts, onBack }: CronRunViewerProps
                 <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground font-mono">
                   <span className="text-text-secondary">@{entry.author}</span>
                   <span>·</span>
-                  <span>{formatTimestamp(entry.timestamp)}</span>
+                  <span>{formatTimestamp(entry.timestamp, timezone)}</span>
                   <span className="ml-auto opacity-60">
                     L{String(entry.line_number).padStart(6, "0")}
                   </span>

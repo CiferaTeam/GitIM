@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { Card, CardStatus } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -8,6 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { formatRelativeTimestamp } from "@/lib/timezone";
 import { cn } from "@/lib/utils";
 import { CARD_DRAG_MIME, encodeCardDrag } from "./card-drag";
 
@@ -18,29 +20,6 @@ const STATUS_CLASS: Record<CardStatus, string> = {
 };
 
 const STATUSES: CardStatus[] = ["todo", "doing", "done"];
-
-function formatRelative(iso: string): string {
-  // iso is YYYYMMDDTHHMMSSZ
-  const m = iso.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
-  if (!m) return iso;
-  const [, y, mo, d, h, mi, s] = m;
-  const date = new Date(
-    Date.UTC(
-      Number(y),
-      Number(mo) - 1,
-      Number(d),
-      Number(h),
-      Number(mi),
-      Number(s),
-    ),
-  );
-  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (diffSec < 60) return "just now";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  if (diffSec < 30 * 86400) return `${Math.floor(diffSec / 86400)}d ago`;
-  return `${mo}/${d}`;
-}
 
 export interface CardKanbanCellProps {
   card: Card;
@@ -55,6 +34,7 @@ export function CardKanbanCell({
   onStatusChange,
 }: CardKanbanCellProps) {
   const navigate = useNavigate();
+  const timezone = useTimezoneStore((s) => s.timezone);
   const [dragging, setDragging] = useState(false);
 
   const visibleLabels = card.labels.slice(0, 3);
@@ -164,7 +144,7 @@ export function CardKanbanCell({
         </div>
       )}
       <div className="text-[11px] text-muted-foreground/80">
-        {formatRelative(card.updated_at)}
+        {formatRelativeTimestamp(card.updated_at, timezone)}
       </div>
     </div>
   );

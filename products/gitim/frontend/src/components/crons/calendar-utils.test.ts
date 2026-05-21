@@ -14,9 +14,13 @@ import {
 import type { CronTimelineEntry } from "@/lib/types";
 
 describe("calendar-utils", () => {
-  it("currentMonth reads from UTC", () => {
+  it("currentMonth reads from the default UTC+8 display timezone", () => {
     const m = currentMonth(new Date("2026-05-11T03:00:00Z"));
     expect(m).toEqual({ year: 2026, month: 5 });
+    expect(currentMonth(new Date("2026-04-30T16:30:00Z"))).toEqual({
+      year: 2026,
+      month: 5,
+    });
   });
 
   it("formatMonthLabel renders English long month plus year", () => {
@@ -44,22 +48,28 @@ describe("calendar-utils", () => {
     expect(lastCell.inMonth).toBe(false);
   });
 
-  it("monthRangeIso spans the full UTC month", () => {
+  it("monthRangeIso spans the full default UTC+8 display month", () => {
     const { from, to } = monthRangeIso({ year: 2026, month: 5 });
+    expect(from).toBe("2026-04-30T16:00:00.000Z");
+    expect(to).toBe("2026-05-31T15:59:59.000Z");
+  });
+
+  it("monthRangeIso can still span a raw UTC month", () => {
+    const { from, to } = monthRangeIso({ year: 2026, month: 5 }, "utc");
     expect(from).toBe("2026-05-01T00:00:00.000Z");
-    // End is "1 second before next month start" = 23:59:59 on May 31.
     expect(to).toBe("2026-05-31T23:59:59.000Z");
   });
 
-  it("dayKey is the UTC YYYY-MM-DD form", () => {
-    expect(dayKey(new Date("2026-05-11T23:30:00Z"))).toBe("2026-05-11");
+  it("dayKey uses the default UTC+8 display date", () => {
+    expect(dayKey(new Date("2026-05-11T23:30:00Z"))).toBe("2026-05-12");
+    expect(dayKey(new Date("2026-05-11T23:30:00Z"), "utc")).toBe("2026-05-11");
   });
 
-  it("groupEntriesByDay buckets entries by UTC day and sorts within day", () => {
+  it("groupEntriesByDay buckets entries by display day and sorts within day", () => {
     const entries: CronTimelineEntry[] = [
       { ts: "2026-05-11T09:30:00Z", kind: "past", cron_name: "daily", target: "alice" },
       { ts: "2026-05-11T09:00:00Z", kind: "past", cron_name: "daily", target: "alice" },
-      { ts: "2026-05-12T09:00:00Z", kind: "future", cron_name: "daily", target: "alice" },
+      { ts: "2026-05-11T16:30:00Z", kind: "future", cron_name: "daily", target: "alice" },
     ];
     const grouped = groupEntriesByDay(entries);
     expect(grouped.size).toBe(2);
@@ -78,9 +88,10 @@ describe("calendar-utils", () => {
     expect(grouped.size).toBe(0);
   });
 
-  it("formatEntryTime returns HH:MMZ", () => {
-    expect(formatEntryTime("2026-05-11T09:30:00Z")).toBe("09:30Z");
-    expect(formatEntryTime("2026-05-11T23:00:00Z")).toBe("23:00Z");
+  it("formatEntryTime returns the selected display timezone", () => {
+    expect(formatEntryTime("2026-05-11T09:30:00Z")).toBe("17:30+8");
+    expect(formatEntryTime("2026-05-11T23:00:00Z")).toBe("07:00+8");
+    expect(formatEntryTime("2026-05-11T09:30:00Z", "utc")).toBe("09:30Z");
   });
 
   describe("groupEntriesByHour", () => {
@@ -94,20 +105,20 @@ describe("calendar-utils", () => {
       ];
       const groups = groupEntriesByHour(entries);
       expect(groups).toHaveLength(1);
-      expect(groups[0].hourKey).toBe("03");
-      expect(groups[0].label).toBe("03:00Z");
+      expect(groups[0].hourKey).toBe("11");
+      expect(groups[0].label).toBe("11:00+8");
       expect(groups[0].entries).toHaveLength(1);
     });
 
-    it("groups by UTC hour and ascends across hours", () => {
+    it("groups by display-zone hour and ascends across hours", () => {
       const entries: CronTimelineEntry[] = [
         { ts: "2026-05-18T13:45:00Z", kind: "past", cron_name: "a", target: "alice" },
         { ts: "2026-05-18T01:00:00Z", kind: "future", cron_name: "b", target: "bob" },
         { ts: "2026-05-18T13:00:00Z", kind: "missed", cron_name: "c", target: "carol" },
       ];
       const groups = groupEntriesByHour(entries);
-      expect(groups.map((g) => g.hourKey)).toEqual(["01", "13"]);
-      // Hour 13 has two entries; insertion order is preserved within a group.
+      expect(groups.map((g) => g.hourKey)).toEqual(["09", "21"]);
+      // Hour 21 has two entries; insertion order is preserved within a group.
       expect(groups[1].entries.map((e) => e.cron_name)).toEqual(["a", "c"]);
     });
 
@@ -119,7 +130,7 @@ describe("calendar-utils", () => {
       ];
       const groups = groupEntriesByHour(entries);
       expect(groups).toHaveLength(2);
-      expect(groups.map((g) => g.hourKey)).toEqual(["03", "17"]);
+      expect(groups.map((g) => g.hourKey)).toEqual(["01", "11"]);
     });
 
     it("treats 23:xx and 00:xx as separate hours (does not wrap across midnight)", () => {
@@ -128,10 +139,7 @@ describe("calendar-utils", () => {
         { ts: "2026-05-19T00:30:00Z", kind: "past", cron_name: "early", target: "alice" },
       ];
       const groups = groupEntriesByHour(entries);
-      // groupEntriesByHour only buckets by hour-of-day, so callers stay
-      // responsible for one-day-at-a-time semantics; we just assert the
-      // two entries don't collapse into the same hour bucket.
-      expect(groups.map((g) => g.hourKey)).toEqual(["00", "23"]);
+      expect(groups.map((g) => g.hourKey)).toEqual(["07", "08"]);
     });
   });
 

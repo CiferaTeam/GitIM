@@ -3,8 +3,10 @@ import { Link } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { useFlowStore } from "@/hooks/use-flow-store";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
+import { formatDateTime } from "@/lib/timezone";
 import type { FlowDocument, FlowRunSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -21,6 +23,7 @@ export function FlowDetail({
   onDeleted?: () => void;
 }) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
+  const timezone = useTimezoneStore((s) => s.timezone);
   const setSelectedSlug = useFlowStore((s) => s.setSelectedSlug);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
@@ -111,11 +114,11 @@ export function FlowDetail({
             <span>·</span>
             <span>created by @{doc.created_by}</span>
             <span>·</span>
-            <span>{doc.created_at}</span>
+            <span>{formatDateTime(doc.created_at, timezone)}</span>
             {doc.updated_at && (
               <>
                 <span>·</span>
-                <span>updated {doc.updated_at}</span>
+                <span>updated {formatDateTime(doc.updated_at, timezone)}</span>
               </>
             )}
             <span>·</span>

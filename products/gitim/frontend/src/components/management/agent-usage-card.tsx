@@ -3,8 +3,10 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { formatTokens } from "@/lib/format-tokens";
 import { sparklinePath } from "@/lib/sparkline";
+import { formatDateOnly } from "@/lib/timezone";
 import { usageBucketTokenTotal } from "@/lib/usage-totals";
 import type { Agent } from "@/lib/types";
 
@@ -17,6 +19,7 @@ interface AgentUsageCardProps {
  *  graceful "this provider does not report tokens" line when the provider
  *  flagged itself as non-reporting. */
 export function AgentUsageCard({ agent }: AgentUsageCardProps) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   const summary = agent.usageSummary;
   if (!summary) return null;
 
@@ -29,7 +32,9 @@ export function AgentUsageCard({ agent }: AgentUsageCardProps) {
     usageBucketTokenTotal(d.bucket, agent.provider),
   );
   const peak = Math.max(0, ...sparklineValues);
-  const startDate = summary.firstSeen ? summary.firstSeen.slice(0, 10) : "—";
+  const startDate = summary.firstSeen
+    ? formatDateOnly(summary.firstSeen, timezone)
+    : "—";
 
   if (!summary.providerReportsUsage) {
     return (

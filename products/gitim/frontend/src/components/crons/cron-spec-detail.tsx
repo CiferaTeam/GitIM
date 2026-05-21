@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronLeft, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import * as client from "@/lib/client";
+import { formatDateTime } from "@/lib/timezone";
 import type { CronDetail } from "@/lib/types";
 
 interface CronSpecDetailProps {
@@ -39,6 +41,7 @@ export function CronSpecDetail({
   futureTs,
   onBack,
 }: CronSpecDetailProps) {
+  const displayTimezone = useTimezoneStore((s) => s.timezone);
   const requestKey = slug ? `${slug}\0${cronName}` : null;
   const [detailState, setDetailState] = useState<CronDetailState>({
     key: null,
@@ -119,14 +122,19 @@ export function CronSpecDetail({
           >
             <AlertTriangle className="size-4 shrink-0" />
             <div>
-              <p className="font-medium">missed at {missedTs}</p>
+              <p className="font-medium">
+                missed at {formatDateTime(missedTs, displayTimezone)}
+              </p>
               <p className="mt-0.5 text-error/80">runtime 当时未运行，到点没能发出消息</p>
             </div>
           </div>
         )}
         {futureTs && (
           <div className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
-            预计 fire 时刻：<span className="font-mono">{futureTs}</span>
+            预计 fire 时刻：
+            <span className="font-mono">
+              {formatDateTime(futureTs, displayTimezone)}
+            </span>
           </div>
         )}
 
@@ -170,13 +178,15 @@ export function CronSpecDetail({
               <span className="text-xs">
                 <span className="text-text-secondary font-mono">@{createdBy}</span>
                 <span className="text-text-muted"> · </span>
-                <span className="font-mono">{createdAt}</span>
+                <span className="font-mono">
+                  {formatDateTime(createdAt, displayTimezone)}
+                </span>
               </span>
             </SpecField>
             {detail.next_fire && (
               <SpecField label="Next fire">
                 <span className="font-mono text-xs text-primary">
-                  {detail.next_fire}
+                  {formatDateTime(detail.next_fire, displayTimezone)}
                 </span>
               </SpecField>
             )}
@@ -184,7 +194,9 @@ export function CronSpecDetail({
               <SpecField label="Recent runs">
                 <ul className="space-y-0.5 font-mono text-[11px] text-text-secondary">
                   {detail.recent_runs.slice(0, 5).map((run) => (
-                    <li key={run.ts}>{run.ts}</li>
+                    <li key={run.ts}>
+                      {formatDateTime(run.ts, displayTimezone)}
+                    </li>
                   ))}
                 </ul>
               </SpecField>

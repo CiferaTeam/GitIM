@@ -45,6 +45,7 @@ vi.hoisted(() => {
 });
 
 import { CronCalendar } from "./cron-calendar";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -68,6 +69,7 @@ describe("CronCalendar", () => {
     getCronTimelineMock.mockReset();
     getCronRunBodyMock.mockReset();
     showCronMock.mockReset();
+    useTimezoneStore.getState().setTimezone("utc+8");
     useWorkspaceStore.setState({
       activeSlug: "phone",
       workspaces: [{
@@ -106,11 +108,12 @@ describe("CronCalendar", () => {
 
     expect(getCronTimelineMock).toHaveBeenCalledWith(
       "phone",
-      expect.stringMatching(/^\d{4}-\d{2}-01T00:00:00\.000Z$/),
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T23:59:59\.000Z$/),
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T16:00:00\.000Z$/),
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T15:59:59\.000Z$/),
       expect.any(AbortSignal),
     );
     expect(container.textContent).toContain("周期任务");
+    expect(container.textContent).toContain("UTC+8 日历视图");
     expect(container.textContent).toContain("这个时间窗内没有计划任务");
   });
 

@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { LayoutGrid, Clock, Hash, User } from "lucide-react";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { Card, CardStatus } from "../../lib/types";
+import { formatRelativeTimestamp } from "../../lib/timezone";
 import { cn } from "../../lib/utils";
 
 const STATUS_CONFIG: Record<CardStatus, { label: string; bg: string; text: string }> = {
@@ -17,19 +19,6 @@ const FILTERS: { key: CardStatus | "all"; label: string }[] = [
   { key: "done", label: "Done" },
 ];
 
-function formatRelative(iso: string): string {
-  const m = iso.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
-  if (!m) return iso;
-  const [, y, mo, d, h, mi, s] = m;
-  const date = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));
-  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (diffSec < 60) return "just now";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  if (diffSec < 30 * 86400) return `${Math.floor(diffSec / 86400)}d ago`;
-  return `${mo}/${d}`;
-}
-
 function StatusPill({ status }: { status: CardStatus }) {
   const cfg = STATUS_CONFIG[status];
   return (
@@ -41,6 +30,7 @@ function StatusPill({ status }: { status: CardStatus }) {
 
 function CardRow({ card }: { card: Card }) {
   const navigate = useNavigate();
+  const timezone = useTimezoneStore((s) => s.timezone);
   const visibleLabels = card.labels.slice(0, 3);
   const overflow = card.labels.length - visibleLabels.length;
 
@@ -82,7 +72,7 @@ function CardRow({ card }: { card: Card }) {
 
       <div className="flex items-center gap-1 text-[11px] text-text-faint">
         <Clock className="size-3" />
-        {formatRelative(card.updated_at)}
+        {formatRelativeTimestamp(card.updated_at, timezone)}
       </div>
     </button>
   );

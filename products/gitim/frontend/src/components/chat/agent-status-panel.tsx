@@ -3,8 +3,10 @@ import type { CSSProperties } from "react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useAgentActivityStore } from "../../hooks/use-agent-activity";
 import { fleetActivityKey, useFleetStore } from "../../hooks/use-fleet-store";
+import { useTimezoneStore } from "../../hooks/use-timezone";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { agentWorkState } from "../../lib/agent-runtime-state";
+import { formatTimeOfDay, type DisplayTimezone } from "../../lib/timezone";
 import type { Agent, AgentActivityEvent } from "../../lib/types";
 import { Button } from "../ui/button";
 import {
@@ -99,7 +101,13 @@ function StatusDot({ status }: { status: string }) {
   );
 }
 
-function ActivityLine({ event }: { event: AgentActivityEvent }) {
+function ActivityLine({
+  event,
+  timezone,
+}: {
+  event: AgentActivityEvent;
+  timezone: DisplayTimezone;
+}) {
   // TODO(E.3): replace this string with proper rendering — the "burned"
   // case (broadcast by /agents/burn and the self-departed self-heal
   // path) deserves its own visual treatment. For now we narrow the
@@ -108,7 +116,10 @@ function ActivityLine({ event }: { event: AgentActivityEvent }) {
   // errors.
   const typeLabel = event.event_type === "error" ? "err " : "";
 
-  const time = event.timestamp.slice(11, 19);
+  const time = formatTimeOfDay(event.timestamp, timezone, {
+    seconds: true,
+    fallback: event.timestamp,
+  });
 
   return (
     <div className="flex items-baseline gap-1.5 py-0.5 text-[11px] leading-tight text-text-muted">
@@ -152,11 +163,13 @@ function AgentRow({
   activities,
   sourceLabel,
   testId,
+  timezone,
 }: {
   agent: Agent;
   activities: AgentActivityEvent[];
   sourceLabel?: string;
   testId?: string;
+  timezone: DisplayTimezone;
 }) {
   const name = agentLabel(agent);
   const latest = activities[0];
@@ -245,7 +258,7 @@ function AgentRow({
           <UsageBadge agent={agent} />
         </div>
         {activities.map((evt, i) => (
-          <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} />
+          <ActivityLine key={`${evt.timestamp}-${i}`} event={evt} timezone={timezone} />
         ))}
       </HoverCardContent>
     </HoverCard>
@@ -257,6 +270,7 @@ export function AgentStatusPanel() {
   const fleetAgents = useFleetStore((s) => s.agents);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const activities = useAgentActivityStore((s) => s.activities);
+  const timezone = useTimezoneStore((s) => s.timezone);
 
   const rows: AgentStatusRow[] = [
     ...agents.map((agent) => ({
@@ -326,6 +340,7 @@ export function AgentStatusPanel() {
                     activities={activities[row.activityKey] ?? EMPTY_ACTIVITIES}
                     sourceLabel={row.sourceLabel}
                     testId="agent-full-row"
+                    timezone={timezone}
                   />
                 ))}
               </div>
@@ -341,6 +356,7 @@ export function AgentStatusPanel() {
             activities={activities[row.activityKey] ?? EMPTY_ACTIVITIES}
             sourceLabel={row.sourceLabel}
             testId="agent-preview-row"
+            timezone={timezone}
           />
         ))}
       </div>

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { X, MessageSquare } from "lucide-react";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -38,6 +39,7 @@ export function ThreadPanel({
   onMessageLinkClick,
   onUserProfileClick,
 }: ThreadPanelProps) {
+  const timezone = useTimezoneStore((s) => s.timezone);
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
     for (const msg of messages) {
@@ -110,7 +112,7 @@ export function ThreadPanel({
                 <div className="flex items-baseline gap-2 min-w-0">
                   <span className="font-medium text-foreground truncate">@{msg.author}</span>
                   <span className="text-[11px] text-text-muted">
-                    {formatTimestamp(msg.timestamp)}
+                    {formatTimestamp(msg.timestamp, timezone)}
                   </span>
                 </div>
               </div>

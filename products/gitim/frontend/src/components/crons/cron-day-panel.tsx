@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import { cn } from "@/lib/utils";
+import {
+  displayTimezoneOption,
+  type DisplayTimezone,
+} from "@/lib/timezone";
 import type { CronTimelineEntry, CronTimelineKind } from "@/lib/types";
 import { formatEntryTime, groupEntriesByHour, type HourGroup } from "./calendar-utils";
 import { CronRunViewer } from "./cron-run-viewer";
@@ -12,6 +17,7 @@ interface CronDayPanelProps {
   slug: string | null;
   dayKey: string | null;
   entries: CronTimelineEntry[] | null;
+  timezone?: DisplayTimezone;
   onClose: () => void;
 }
 
@@ -37,8 +43,17 @@ const HOUR_GROUPING_THRESHOLD = 12;
 // day list, the calendar chips, and any future kind-styled surface stay
 // in lock-step on opacities and Chinese labels.
 
-export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelProps) {
+export function CronDayPanel({
+  slug,
+  dayKey,
+  entries,
+  timezone,
+  onClose,
+}: CronDayPanelProps) {
+  const storedTimezone = useTimezoneStore((s) => s.timezone);
+  const activeTimezone = timezone ?? storedTimezone;
   const panelKey = `${slug ?? ""}\0${dayKey ?? ""}`;
+  const timezoneLabel = displayTimezoneOption(activeTimezone).label;
   const [viewState, setViewState] = useState<{ key: string; view: View }>({
     key: panelKey,
     view: LIST_VIEW,
@@ -151,7 +166,7 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
         <div className="min-w-0">
           <h2 className="text-sm font-semibold font-mono">{dayKey}</h2>
           <p className="text-xs text-muted-foreground">
-            {entries?.length ?? 0} 个任务（UTC）
+            {entries?.length ?? 0} 个任务（{timezoneLabel}）
           </p>
         </div>
         <Button
@@ -171,13 +186,14 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
         </div>
       ) : grouped ? (
         <ol className="flex-1 space-y-1 overflow-y-auto px-3 py-2">
-          {groupEntriesByHour(entries).map((group) => (
+          {groupEntriesByHour(entries, activeTimezone).map((group) => (
             <HourGroupSection
               key={group.hourKey}
               group={group}
               expanded={expandedHours.has(group.hourKey)}
               onToggle={() => toggleHour(group.hourKey)}
               onEntryClick={openEntry}
+              timezone={activeTimezone}
             />
           ))}
         </ol>
@@ -185,7 +201,11 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
         <ol className="flex-1 space-y-1 overflow-y-auto px-3 py-2">
           {entries.map((entry, idx) => (
             <li key={`${entry.cron_name}-${entry.ts}-${idx}`}>
-              <EntryRow entry={entry} onClick={() => openEntry(entry)} />
+              <EntryRow
+                entry={entry}
+                onClick={() => openEntry(entry)}
+                timezone={activeTimezone}
+              />
             </li>
           ))}
         </ol>
@@ -199,9 +219,11 @@ export function CronDayPanel({ slug, dayKey, entries, onClose }: CronDayPanelPro
 function EntryRow({
   entry,
   onClick,
+  timezone,
 }: {
   entry: CronTimelineEntry;
   onClick: () => void;
+  timezone: DisplayTimezone;
 }) {
   const style = kindStyle(entry.kind);
   return (
@@ -212,7 +234,7 @@ function EntryRow({
       className="flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left transition-colors hover:bg-surface/60 focus:outline-none focus:ring-1 focus:ring-primary/40"
     >
       <span className="shrink-0 font-mono text-[11px] tabular-nums text-text-secondary">
-        {formatEntryTime(entry.ts)}
+        {formatEntryTime(entry.ts, timezone)}
       </span>
       {/* Per-handler hue would need a new palette + colorblind audit, so
           we stay on the existing muted-foreground token. `@target` reads
@@ -243,11 +265,13 @@ function HourGroupSection({
   expanded,
   onToggle,
   onEntryClick,
+  timezone,
 }: {
   group: HourGroup;
   expanded: boolean;
   onToggle: () => void;
   onEntryClick: (entry: CronTimelineEntry) => void;
+  timezone: DisplayTimezone;
 }) {
   // Per-kind counts feed both the header dots and the aria-label so
   // screen readers hear the breakdown without seeing the visual dots.
@@ -300,7 +324,11 @@ function HourGroupSection({
         <ol className="mt-1 space-y-1 pl-4">
           {group.entries.map((entry, idx) => (
             <li key={`${entry.cron_name}-${entry.ts}-${idx}`}>
-              <EntryRow entry={entry} onClick={() => onEntryClick(entry)} />
+              <EntryRow
+                entry={entry}
+                onClick={() => onEntryClick(entry)}
+                timezone={timezone}
+              />
             </li>
           ))}
         </ol>

@@ -7,6 +7,7 @@ import { useChatStore } from "../../hooks/use-chat-store";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
+import { TimezoneToggle } from "../timezone-toggle";
 import { DonateDialog } from "../donate-dialog";
 import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
@@ -54,6 +55,7 @@ export function AppShell({ children }: AppShellProps) {
         {/* Right: theme toggle + twitter + update indicator + help + current user */}
         <div className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:min-w-[140px]">
           <ThemeToggle />
+          <TimezoneToggle />
           <a
             href="https://x.com/arknights60"
             target="_blank"

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { MessageSquare, GitBranch, Copy, Check, CheckCheck } from "lucide-react";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -77,6 +78,7 @@ export function MessageItem({
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const [isPressed, setIsPressed] = useState(false);
   const isPending = !!message._pendingId && message._status === "sending";
+  const timezone = useTimezoneStore((s) => s.timezone);
 
   useEffect(() => {
     return () => {
@@ -216,7 +218,7 @@ export function MessageItem({
           <div className="flex items-baseline gap-2 mb-0.5">
             <span className="font-semibold text-sm text-foreground">@{message.author}</span>
             <span className="text-[11px] text-text-muted font-mono">
-              {formatTimestamp(message.timestamp)}
+              {formatTimestamp(message.timestamp, timezone)}
             </span>
             {statusLabel && (
               <span
