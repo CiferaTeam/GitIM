@@ -9,7 +9,12 @@ import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
 import { expandAllMentions } from "../../lib/expand-all-mentions";
 import type { Channel, Message } from "../../lib/types";
-import { writeUiState } from "../../lib/ui-state";
+import {
+  clearStoredUnread,
+  readMessageScrollTop,
+  writeMessageScrollTop,
+  writeUiState,
+} from "../../lib/ui-state";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { Button } from "../ui/button";
 import { ChannelCardDrawer } from "../cards/channel-card-drawer";
@@ -158,14 +163,26 @@ export function ChatLayout() {
   const rememberCurrentScroll = useCallback(() => {
     if (!currentChannel) return;
     const el = messageScrollRef.current;
-    if (el) scrollPositionsRef.current.set(currentChannel, el.scrollTop);
-  }, [currentChannel]);
+    if (el) {
+      scrollPositionsRef.current.set(currentChannel, el.scrollTop);
+      writeMessageScrollTop(workspaceKey, currentChannel, el.scrollTop);
+    }
+  }, [currentChannel, workspaceKey]);
 
   const restoreForChannel = useCallback((name: string): number | null => {
     return scrollPositionsRef.current.has(name)
       ? (scrollPositionsRef.current.get(name) ?? null)
-      : null;
-  }, []);
+      : readMessageScrollTop(workspaceKey, name);
+  }, [workspaceKey]);
+
+  const handleMessageScrollTopChange = useCallback(
+    (scrollTop: number) => {
+      if (!currentChannel) return;
+      scrollPositionsRef.current.set(currentChannel, scrollTop);
+      writeMessageScrollTop(workspaceKey, currentChannel, scrollTop);
+    },
+    [currentChannel, workspaceKey],
+  );
 
   const handleChannelSelect = useCallback(
     async (name: string, options: { markRead?: boolean } = {}) => {
@@ -176,7 +193,10 @@ export function ChatLayout() {
       setRestoreScrollTop(restoreForChannel(name));
       selectChannel(name);
       if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: name });
-      if (options.markRead !== false) clearUnread(name);
+      if (options.markRead !== false) {
+        clearUnread(name);
+        clearStoredUnread(requestWorkspaceKey, name);
+      }
       setMessages([]);
       setThreadRoot(null);
       const apiChannel = toApiChannel(name);
@@ -394,6 +414,7 @@ export function ChatLayout() {
     selectChannel(entry.channel);
     if (requestWorkspaceKey) writeUiState(requestWorkspaceKey, { channel: entry.channel });
     clearUnread(entry.channel);
+    clearStoredUnread(requestWorkspaceKey, entry.channel);
     setMessages([]);
     setThreadRoot(null);
     const apiChannel = toApiChannel(entry.channel);
@@ -655,6 +676,7 @@ export function ChatLayout() {
           restoreScrollTop={restoreScrollTop}
           onHighlightLineChange={setHighlightLine}
           onPendingScrollClear={handlePendingScrollClear}
+          onScrollTopChange={handleMessageScrollTopChange}
           onReply={handleReply}
           onShowThread={handleShowThread}
           onMentionClick={handleMentionClick}

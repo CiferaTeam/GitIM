@@ -470,4 +470,88 @@ describe("App card thread toasts", () => {
       .channels.find((channel) => channel.name === "general");
     expect(general?.unreadCount).toBe(1);
   });
+
+  it("restores unread state after a refresh once the poll cursor already advanced", async () => {
+    mocks.client.poll.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        commit_id: "head-after-unread",
+        changes: [
+          {
+            kind: "new_messages",
+            channel: "general",
+            entries: [
+              {
+                line_number: 2,
+                point_to: 0,
+                author: "alice",
+                timestamp: "20260516T000002Z",
+                body: "<@lewis> ping",
+              } satisfies Message,
+            ],
+          },
+        ],
+      },
+    });
+
+    let container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/crons"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    expect(
+      useChatStore.getState().channels.find((channel) => channel.name === "general")
+        ?.unreadCount,
+    ).toBe(1);
+
+    await act(async () => {
+      root?.unmount();
+    });
+    root = null;
+    document.body.innerHTML = "";
+    useChatStore.getState().resetForWorkspaceSwitch();
+    useAgentStore.getState().resetForWorkspaceSwitch();
+    useCardStore.getState().resetForWorkspaceSwitch();
+    useBoardStore.getState().resetForWorkspaceSwitch();
+
+    mocks.client.poll.mockResolvedValue({
+      ok: true,
+      data: {
+        commit_id: "head-after-unread",
+        changes: [],
+      },
+    });
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/crons"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await flushPromises();
+    });
+
+    const general = useChatStore
+      .getState()
+      .channels.find((channel) => channel.name === "general");
+    expect(general?.unreadCount).toBe(1);
+    expect(general?.hasMention).toBe(true);
+  });
 });

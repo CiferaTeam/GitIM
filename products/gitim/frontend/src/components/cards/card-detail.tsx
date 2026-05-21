@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
+import { readMessageScrollTop, writeMessageScrollTop } from "@/lib/ui-state";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import { CardMetaBar } from "./card-meta-bar";
 
@@ -90,6 +91,16 @@ export function CardDetail() {
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [highlightLine, setHighlightLine] = useState<number | null>(null);
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
+  const restoreScrollTop = useMemo(
+    () => readMessageScrollTop(workspaceKey, scopeKey),
+    [workspaceKey, scopeKey],
+  );
+  const handleMessageScrollTopChange = useCallback(
+    (scrollTop: number) => {
+      writeMessageScrollTop(workspaceKey, scopeKey, scrollTop);
+    },
+    [workspaceKey, scopeKey],
+  );
 
   // Tracks whether this component is still mounted, for gating post-await
   // side-effects (setState, toast, navigate) in archive/unarchive handlers.
@@ -378,8 +389,10 @@ export function CardDetail() {
         replyTo={replyTo}
         highlightLine={highlightLine}
         pendingScrollLine={pendingScrollLine}
+        restoreScrollTop={restoreScrollTop}
         onHighlightLineChange={setHighlightLine}
         onPendingScrollClear={() => setPendingScrollLine(null)}
+        onScrollTopChange={handleMessageScrollTopChange}
         emptyHint={archived ? "No notes to add — card is archived." : "Write the first note…"}
         onReply={setReplyTo}
         onShowThread={() => {

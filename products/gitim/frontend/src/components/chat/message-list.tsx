@@ -16,6 +16,7 @@ interface MessageListProps {
   restoreScrollTop?: number | null;
   onHighlightLineChange: (line: number | null) => void;
   onPendingScrollClear: () => void;
+  onScrollTopChange?: (scrollTop: number) => void;
   /** Custom empty-state hint when scope is selected but has no messages. */
   emptyHint?: string;
   /** Custom empty-state hint when scope is null. */
@@ -53,6 +54,7 @@ export function MessageList({
   restoreScrollTop,
   onHighlightLineChange,
   onPendingScrollClear,
+  onScrollTopChange,
   emptyHint,
   noScopeHint,
   onReply,
@@ -135,6 +137,7 @@ export function MessageList({
   ]);
 
   function handleScrollEvent(event: React.UIEvent<HTMLDivElement>) {
+    onScrollTopChange?.(event.currentTarget.scrollTop);
     if (!onLoadOlder) return;
     if (event.currentTarget.scrollTop <= SCROLL_TOP_THRESHOLD_PX) {
       onLoadOlder();

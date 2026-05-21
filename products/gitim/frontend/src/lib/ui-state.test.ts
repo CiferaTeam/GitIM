@@ -10,7 +10,11 @@ import "@/lib/browser-workspaces";
 import {
   DEFAULT_UI_STATE,
   clearUiState,
+  clearStoredUnread,
+  incrementStoredUnread,
+  readMessageScrollTop,
   readUiState,
+  writeMessageScrollTop,
   writeUiState,
 } from "./ui-state";
 
@@ -42,6 +46,8 @@ describe("ui-state", () => {
       boardHandler: "alice",
       cardsShowArchived: true,
       usageBreakdown: "provider",
+      unreadByChannel: {},
+      messageScrollByScope: {},
     });
   });
 
@@ -55,6 +61,8 @@ describe("ui-state", () => {
       boardHandler: null,
       cardsShowArchived: false,
       usageBreakdown: "provider",
+      unreadByChannel: {},
+      messageScrollByScope: {},
     });
   });
 
@@ -66,6 +74,8 @@ describe("ui-state", () => {
       boardHandler: "alice",
       cardsShowArchived: false,
       usageBreakdown: "provider",
+      unreadByChannel: {},
+      messageScrollByScope: {},
     });
   });
 
@@ -107,5 +117,57 @@ describe("ui-state", () => {
     expect(state.usageBreakdown).toBe("provider");
     expect(state.channel).toBe("general");
     expect(state.cardsShowArchived).toBe(true);
+  });
+
+  it("persists unread state per workspace and clears individual channels", () => {
+    incrementStoredUnread("runtime:myws", "general", false);
+    incrementStoredUnread("runtime:myws", "general", true);
+    incrementStoredUnread("runtime:myws", "random", false);
+
+    expect(readUiState("runtime:myws").unreadByChannel).toEqual({
+      general: { unreadCount: 2, hasMention: true },
+      random: { unreadCount: 1, hasMention: false },
+    });
+
+    clearStoredUnread("runtime:myws", "general");
+    expect(readUiState("runtime:myws").unreadByChannel).toEqual({
+      random: { unreadCount: 1, hasMention: false },
+    });
+  });
+
+  it("ignores malformed unread and message scroll entries", () => {
+    localStorage.setItem(
+      "gitim-ui-state:runtime:myws",
+      JSON.stringify({
+        unreadByChannel: {
+          general: { unreadCount: 2, hasMention: true },
+          empty: { unreadCount: 0, hasMention: true },
+          bad: { unreadCount: "many", hasMention: true },
+        },
+        messageScrollByScope: {
+          general: 120,
+          negative: -10,
+          bad: "top",
+        },
+      }),
+    );
+
+    const state = readUiState("runtime:myws");
+    expect(state.unreadByChannel).toEqual({
+      general: { unreadCount: 2, hasMention: true },
+    });
+    expect(state.messageScrollByScope).toEqual({
+      general: 120,
+      negative: 0,
+    });
+  });
+
+  it("persists message scrollTop per workspace scope", () => {
+    writeMessageScrollTop("runtime:myws", "general", 180);
+    writeMessageScrollTop("runtime:myws", "card:general/card-1", 360);
+
+    expect(readMessageScrollTop("runtime:myws", "general")).toBe(180);
+    expect(readMessageScrollTop("runtime:myws", "card:general/card-1")).toBe(360);
+    expect(readMessageScrollTop("runtime:other", "general")).toBeNull();
   });
 });

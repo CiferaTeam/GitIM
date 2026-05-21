@@ -227,8 +227,8 @@ export const useChatStore = create<ChatState>((set) => ({
           const prev = prevMap.get(c.name);
           return {
             ...c,
-            unreadCount: prev?.unreadCount || 0,
-            hasMention: prev?.hasMention || false,
+            unreadCount: prev?.unreadCount ?? c.unreadCount ?? 0,
+            hasMention: prev?.hasMention ?? c.hasMention ?? false,
           };
         }),
       };

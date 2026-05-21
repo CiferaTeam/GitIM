@@ -34,7 +34,11 @@ import type {
 } from "./lib/types";
 import * as client from "./lib/client";
 import { loadCursor, saveCursor, clearCursor } from "./lib/cursor";
-import { readUiState } from "./lib/ui-state";
+import {
+  incrementStoredUnread,
+  mergeUnreadIntoChannels,
+  readUiState,
+} from "./lib/ui-state";
 import { workspaceIdentity } from "./lib/workspace-key";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
@@ -389,7 +393,10 @@ export default function App() {
 
       const nextChannels =
         channelsRes.ok && channelsRes.data
-          ? (channelsRes.data.channels as Channel[])
+          ? mergeUnreadIntoChannels(
+              workspaceKey,
+              channelsRes.data.channels as Channel[],
+            )
           : useChatStore.getState().channels;
       const nextBoards =
         boardsRes.ok && boardsRes.data
@@ -731,6 +738,7 @@ export default function App() {
             e.body?.includes(mentionTag)
           );
           incrementUnread(displayName, mentioned);
+          incrementStoredUnread(requestWorkspaceKey, displayName, mentioned);
         }
       }
 
@@ -738,7 +746,12 @@ export default function App() {
         const chRes = await client.channels(slug);
         if (!isCurrentPollTarget()) return;
         if (chRes.ok && chRes.data) {
-          setChannels(chRes.data.channels as Channel[]);
+          setChannels(
+            mergeUnreadIntoChannels(
+              requestWorkspaceKey,
+              chRes.data.channels as Channel[],
+            ),
+          );
         }
       }
 

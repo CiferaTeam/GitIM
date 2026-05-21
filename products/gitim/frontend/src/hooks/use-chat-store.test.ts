@@ -208,6 +208,44 @@ describe("useChatStore history pagination", () => {
   });
 });
 
+describe("useChatStore unread channel merge", () => {
+  beforeEach(() => {
+    useChatStore.getState().resetForWorkspaceSwitch();
+  });
+
+  it("keeps unread metadata from incoming channels when there is no local copy", () => {
+    useChatStore.getState().setChannels([
+      {
+        ...channel("general"),
+        unreadCount: 3,
+        hasMention: true,
+      },
+    ]);
+
+    expect(useChatStore.getState().channels).toEqual([
+      expect.objectContaining({
+        name: "general",
+        unreadCount: 3,
+        hasMention: true,
+      }),
+    ]);
+  });
+
+  it("preserves local unread metadata across channel refreshes", () => {
+    useChatStore.getState().setChannels([channel("general")]);
+    useChatStore.getState().incrementUnread("general", true);
+    useChatStore.getState().setChannels([channel("general")]);
+
+    expect(useChatStore.getState().channels).toEqual([
+      expect.objectContaining({
+        name: "general",
+        unreadCount: 1,
+        hasMention: true,
+      }),
+    ]);
+  });
+});
+
 describe("useChatStore archivedChannelsView", () => {
   beforeEach(() => {
     useChatStore.getState().resetForWorkspaceSwitch();
