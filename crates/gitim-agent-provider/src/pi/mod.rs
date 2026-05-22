@@ -372,14 +372,13 @@ fn split_provider_model(model: &str) -> Option<(&str, &str)> {
 }
 
 fn build_prompt_command(prompt: &str) -> Vec<u8> {
-    // SAFETY: `serde_json::to_vec` can only fail on serialization errors.
-    // Since we're serializing a simple static structure, this should never fail.
-    #[allow(clippy::expect_used)]
+    // SAFETY: `serde_json::to_vec` with a static struct literal can only fail on
+    // programming errors (e.g., Serialize not implemented). This is a bug if it panics.
     let mut buf = serde_json::to_vec(&serde_json::json!({
         "type": "prompt",
         "message": prompt,
     }))
-    .expect("prompt command serializes");
+    .unwrap();
     buf.push(b'\n');
     buf
 }

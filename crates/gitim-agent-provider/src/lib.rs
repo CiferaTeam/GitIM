@@ -6,6 +6,10 @@ pub mod codex;
 pub mod cursor;
 mod error;
 pub mod gemini;
+
+// System-library invariants: these helpers document and enforce invariants
+// that are guaranteed by the Rust standard library / tokio.
+pub(crate) mod preconditions;
 pub mod hermes;
 pub mod kimi;
 pub mod mock;

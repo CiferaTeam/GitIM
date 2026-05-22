@@ -24,6 +24,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::preconditions;
+
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
     ProviderUsage, ProviderUsageReport, Session,
@@ -81,8 +83,9 @@ impl Provider for CursorProvider {
         let pid = child.id().unwrap_or(0);
         info!(pid, cwd = ?opts.cwd, model = ?opts.model, "cursor-agent started");
 
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
+        // piped stdio: use preconditions helpers for system-library invariants
+        let stdout = preconditions::take_tokio_piped_stdout(&mut child);
+        let stderr = preconditions::take_tokio_piped_stderr(&mut child);
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
@@ -187,7 +190,7 @@ async fn drive_session(
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "cursor:stderr", "{}", line);
-            let mut tail = stderr_tail_clone.lock().unwrap();
+            let mut tail = preconditions::mutex_lock(&stderr_tail_clone);
             tail.push(line);
             if tail.len() > TAIL_LINES {
                 tail.remove(0);
@@ -407,7 +410,7 @@ async fn drive_session(
 
     // If failed with no error message, fall back to stderr tail.
     if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
-        let tail = stderr_tail.lock().unwrap();
+        let tail = preconditions::mutex_lock(&stderr_tail);
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
         }
