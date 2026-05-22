@@ -819,94 +819,14 @@ fn sync_pull_only(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{
+        commit_file, configure_git_identity, push_n_commits_to_bare, seed_bare_with_clone,
+    };
     use std::process::Command as ProcessCommand;
-
-    /// Bare origin + one clone with a seed commit pushed. Caller advances
-    /// the bare's branch with `push_commits_via_helper_clone` to simulate
-    /// a remote racing ahead.
-    fn seed_bare_with_clone() -> (tempfile::TempDir, tempfile::TempDir) {
-        let bare = tempfile::TempDir::new().unwrap();
-        let clone = tempfile::TempDir::new().unwrap();
-        ProcessCommand::new("git")
-            .args(["init", "--bare"])
-            .current_dir(bare.path())
-            .output()
-            .unwrap();
-        ProcessCommand::new("git")
-            .args([
-                "clone",
-                bare.path().to_str().unwrap(),
-                clone.path().to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-        for (k, v) in [("user.email", "a@test.com"), ("user.name", "A")] {
-            ProcessCommand::new("git")
-                .args(["config", k, v])
-                .current_dir(clone.path())
-                .output()
-                .unwrap();
-        }
-        std::fs::write(clone.path().join("seed.txt"), "seed").unwrap();
-        ProcessCommand::new("git")
-            .args(["add", "."])
-            .current_dir(clone.path())
-            .output()
-            .unwrap();
-        ProcessCommand::new("git")
-            .args(["commit", "-m", "seed"])
-            .current_dir(clone.path())
-            .output()
-            .unwrap();
-        ProcessCommand::new("git")
-            .args(["push", "-u", "origin", "HEAD"])
-            .current_dir(clone.path())
-            .output()
-            .unwrap();
-        (bare, clone)
-    }
-
-    /// Add `count` commits to the bare via a side clone, then push.
-    fn push_n_commits_to_bare(bare: &Path, count: u64) {
-        let helper = tempfile::TempDir::new().unwrap();
-        ProcessCommand::new("git")
-            .args([
-                "clone",
-                bare.to_str().unwrap(),
-                helper.path().to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-        for (k, v) in [("user.email", "h@test.com"), ("user.name", "H")] {
-            ProcessCommand::new("git")
-                .args(["config", k, v])
-                .current_dir(helper.path())
-                .output()
-                .unwrap();
-        }
-        for i in 1..=count {
-            std::fs::write(helper.path().join(format!("h-{i}.txt")), "x").unwrap();
-            ProcessCommand::new("git")
-                .args(["add", "."])
-                .current_dir(helper.path())
-                .output()
-                .unwrap();
-            ProcessCommand::new("git")
-                .args(["commit", "-m", &format!("H {i}")])
-                .current_dir(helper.path())
-                .output()
-                .unwrap();
-        }
-        ProcessCommand::new("git")
-            .args(["push"])
-            .current_dir(helper.path())
-            .output()
-            .unwrap();
-    }
 
     #[test]
     fn enforce_divergence_no_op_when_under_threshold() {
-        let (bare, clone) = seed_bare_with_clone();
+        let (bare, clone) = seed_bare_with_clone("A", "a@test.com");
         push_n_commits_to_bare(bare.path(), 1);
         let repo = GitStorage::new(clone.path());
         repo.fetch().unwrap();
@@ -920,7 +840,7 @@ mod tests {
 
     #[test]
     fn enforce_divergence_resets_when_at_threshold() {
-        let (bare, clone) = seed_bare_with_clone();
+        let (bare, clone) = seed_bare_with_clone("A", "a@test.com");
         push_n_commits_to_bare(bare.path(), 2);
         let repo = GitStorage::new(clone.path());
         repo.fetch().unwrap();
@@ -940,9 +860,10 @@ mod tests {
         // threshold, the clone hard-resets to upstream and recovers — at
         // the cost of any local unpushed work (which there isn't on the
         // pull-only path anyway).
-        let (bare, clone) = seed_bare_with_clone();
+        let (bare, clone) = seed_bare_with_clone("A", "a@test.com");
 
-        // Helper clone commits `notes.txt` and pushes it.
+        // Helper clone commits `notes.txt` and a padding file, pushes both
+        // so the receiving clone is 2 behind (=threshold).
         let helper = tempfile::TempDir::new().unwrap();
         ProcessCommand::new("git")
             .args([
@@ -952,36 +873,9 @@ mod tests {
             ])
             .output()
             .unwrap();
-        for (k, v) in [("user.email", "h@test.com"), ("user.name", "H")] {
-            ProcessCommand::new("git")
-                .args(["config", k, v])
-                .current_dir(helper.path())
-                .output()
-                .unwrap();
-        }
-        std::fs::write(helper.path().join("notes.txt"), "remote version").unwrap();
-        ProcessCommand::new("git")
-            .args(["add", "."])
-            .current_dir(helper.path())
-            .output()
-            .unwrap();
-        ProcessCommand::new("git")
-            .args(["commit", "-m", "add notes"])
-            .current_dir(helper.path())
-            .output()
-            .unwrap();
-        // Pad to 2 commits so behind crosses threshold=2.
-        std::fs::write(helper.path().join("h2.txt"), "x").unwrap();
-        ProcessCommand::new("git")
-            .args(["add", "."])
-            .current_dir(helper.path())
-            .output()
-            .unwrap();
-        ProcessCommand::new("git")
-            .args(["commit", "-m", "pad"])
-            .current_dir(helper.path())
-            .output()
-            .unwrap();
+        configure_git_identity(helper.path(), "H", "h@test.com");
+        commit_file(helper.path(), "notes.txt", "remote version", "add notes");
+        commit_file(helper.path(), "h2.txt", "x", "pad");
         ProcessCommand::new("git")
             .args(["push"])
             .current_dir(helper.path())

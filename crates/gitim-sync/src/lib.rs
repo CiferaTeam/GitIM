@@ -7,3 +7,6 @@ pub mod sync_loop;
 pub mod url_redact;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod watcher;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test_util;

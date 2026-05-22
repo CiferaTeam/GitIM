@@ -1128,67 +1128,7 @@ mod tests {
         );
     }
 
-    /// Provision a bare origin + one clone with a seed commit pushed. Returns
-    /// (bare_dir, clone_dir). Used by divergence tests to stamp a baseline
-    /// before A and B diverge.
-    fn seed_bare_with_clone(user: &str, email: &str) -> (tempfile::TempDir, tempfile::TempDir) {
-        let bare_dir = tempfile::TempDir::new().unwrap();
-        let clone_dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(bare_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args([
-                "clone",
-                bare_dir.path().to_str().unwrap(),
-                clone_dir.path().to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", email])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", user])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::fs::write(clone_dir.path().join("seed.txt"), "seed").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "seed"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["push", "-u", "origin", "HEAD"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        (bare_dir, clone_dir)
-    }
-
-    fn commit_file(clone: &Path, name: &str, content: &str, msg: &str) {
-        std::fs::write(clone.join(name), content).unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(clone)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", msg])
-            .current_dir(clone)
-            .output()
-            .unwrap();
-    }
+    use crate::test_util::{commit_file, configure_git_identity, seed_bare_with_clone};
 
     #[test]
     fn divergence_reports_zero_when_in_sync() {
@@ -1211,16 +1151,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "b@test.com"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "B"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
+        configure_git_identity(clone_b.path(), "B", "b@test.com");
         for i in 1..=3 {
             commit_file(
                 clone_b.path(),
@@ -1258,16 +1189,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "b@test.com"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "B"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
+        configure_git_identity(clone_b.path(), "B", "b@test.com");
         for i in 1..=4 {
             commit_file(
                 clone_b.path(),
