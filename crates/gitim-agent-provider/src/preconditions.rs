@@ -3,6 +3,8 @@
 //! These functions document and enforce invariants guaranteed by the Rust standard
 //! library or tokio. Panic on violation indicates a programming error (these
 //! should never fail in correct usage).
+#![allow(clippy::expect_used)]
+
 use std::sync::{Mutex, MutexGuard};
 use tokio::process::Child as TokioChild;
 
@@ -32,4 +34,17 @@ pub fn take_tokio_piped_stderr(child: &mut TokioChild) -> tokio::process::ChildS
 #[track_caller]
 pub fn mutex_lock<'a, T>(guard: &'a Mutex<T>) -> MutexGuard<'a, T> {
     guard.lock().expect("mutex should not be poisoned")
+}
+
+/// Unwrap a mutex inside an Arc. Same semantics as mutex_lock.
+#[track_caller]
+pub fn mutex_lock_arc<'a, T>(guard: &'a std::sync::Arc<Mutex<T>>) -> MutexGuard<'a, T> {
+    guard.lock().expect("mutex should not be poisoned")
+}
+
+/// Serialize a static JSON value to bytes. This is infallible for any Value
+/// constructed from `serde_json::json!()` or similar static literals — the
+/// Serialize impl for Value never produces an error.
+pub fn static_json_to_vec(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(value).expect("static JSON serialization is infallible")
 }

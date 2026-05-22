@@ -190,7 +190,7 @@ async fn drive_session(
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "cursor:stderr", "{}", line);
-            let mut tail = preconditions::mutex_lock(&stderr_tail_clone);
+            let mut tail = preconditions::mutex_lock_arc(&stderr_tail_clone);
             tail.push(line);
             if tail.len() > TAIL_LINES {
                 tail.remove(0);
@@ -410,7 +410,7 @@ async fn drive_session(
 
     // If failed with no error message, fall back to stderr tail.
     if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
-        let tail = preconditions::mutex_lock(&stderr_tail);
+        let tail = preconditions::mutex_lock_arc(&stderr_tail);
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
         }

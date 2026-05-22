@@ -3,6 +3,7 @@
 //! These functions document and enforce invariants guaranteed by the Rust standard
 //! library. Panic on violation indicates a programming error (these should never fail
 //! in correct usage).
+#![allow(clippy::expect_used)]
 
 use std::sync::MutexGuard;
 

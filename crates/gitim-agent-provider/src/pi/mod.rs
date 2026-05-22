@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, ProviderUsageReport, Session,
+    ProviderUsage, ProviderUsageReport, Session, preconditions,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -62,9 +62,9 @@ impl Provider for PiProvider {
         let pid = child.id().unwrap_or(0);
         info!(pid, cwd = ?opts.cwd, model = ?opts.model, resume = opts.resume_token.is_some(), "pi started");
 
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stderr = child.stderr.take().expect("stderr piped");
+        let stdout = preconditions::take_tokio_piped_stdout(&mut child);
+        let stdin = preconditions::take_tokio_piped_stdin(&mut child);
+        let stderr = preconditions::take_tokio_piped_stderr(&mut child);
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
@@ -136,7 +136,7 @@ async fn drive_session(
         let mut r = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = r.next_line().await {
             debug!(target: "pi:stderr", "{}", line);
-            let mut tail = stderr_tail_clone.lock().unwrap();
+            let mut tail = preconditions::mutex_lock_arc(&stderr_tail_clone);
             tail.push(line);
             if tail.len() > TAIL_LINES {
                 tail.remove(0);
@@ -296,7 +296,7 @@ async fn drive_session(
     stderr_handle.abort();
 
     if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
-        let tail = stderr_tail.lock().unwrap();
+        let tail = preconditions::mutex_lock_arc(&stderr_tail);
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
         }
@@ -374,11 +374,10 @@ fn split_provider_model(model: &str) -> Option<(&str, &str)> {
 fn build_prompt_command(prompt: &str) -> Vec<u8> {
     // SAFETY: `serde_json::to_vec` with a static struct literal can only fail on
     // programming errors (e.g., Serialize not implemented). This is a bug if it panics.
-    let mut buf = serde_json::to_vec(&serde_json::json!({
+    let mut buf = preconditions::static_json_to_vec(&serde_json::json!({
         "type": "prompt",
         "message": prompt,
-    }))
-    .unwrap();
+    }));
     buf.push(b'\n');
     buf
 }

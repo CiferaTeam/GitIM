@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, ProviderUsageReport, Session,
+    ProviderUsage, ProviderUsageReport, Session, preconditions,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -113,8 +113,8 @@ impl Provider for CodexProvider {
             "codex started"
         );
 
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
+        let stdout = preconditions::take_tokio_piped_stdout(&mut child);
+        let stderr = preconditions::take_tokio_piped_stderr(&mut child);
         let codex_home = codex_home_from_env(&self.config.env);
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
