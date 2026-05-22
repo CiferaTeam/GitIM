@@ -148,9 +148,9 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "autocfg"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "axum"
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-agent-provider"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-cli"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-client"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "async-stream",
  "axum",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-runtime"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "gitim-core",
  "notify",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-updater"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "flate2",
  "hex",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-wasm"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "gitim-core",
  "gitim-sync",
