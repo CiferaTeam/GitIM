@@ -4,6 +4,7 @@ import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
+import { formatDmDisplayName } from "../../lib/dm-display-name";
 import type { Channel } from "../../lib/types";
 import { Button } from "../ui/button";
 import {
@@ -61,17 +62,9 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
     );
   }
 
-  let displayName: string;
-  if (isDm) {
-    const parts = currentChannel.split("--");
-    if (parts.length === 2) {
-      displayName = parts.find((p) => p !== currentUser) ?? parts[0];
-    } else {
-      displayName = currentChannel;
-    }
-  } else {
-    displayName = currentChannel;
-  }
+  const displayName = isDm
+    ? formatDmDisplayName(currentChannel, currentUser)
+    : currentChannel;
 
   const members = channel?.members ?? [];
   const canInvite = !isDm && !!currentUser && members.includes(currentUser);

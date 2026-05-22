@@ -6,6 +6,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import * as client from "../../lib/client";
+import { formatDmDisplayName } from "../../lib/dm-display-name";
 import { expandAllMentions } from "../../lib/expand-all-mentions";
 import { buildMentionCandidates } from "../../lib/mention-candidates";
 import type { Channel, Message } from "../../lib/types";
@@ -603,7 +604,7 @@ export function ChatLayout() {
   const isDm = currentChannelData?.kind === "dm";
   const mobileChannelLabel = currentChannel
     ? isDm
-      ? currentChannel.split("--").find((p) => p !== currentUser) ?? currentChannel
+      ? formatDmDisplayName(currentChannel, currentUser)
       : currentChannel
     : "Select a channel";
 

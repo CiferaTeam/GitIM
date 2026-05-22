@@ -1,16 +1,8 @@
 import { X, Hash, AtSign, MessageSquare } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { cn } from "../../lib/utils";
+import { formatDmDisplayName } from "../../lib/dm-display-name";
 import type { Channel } from "../../lib/types";
-
-function dmDisplayName(channel: Channel, currentUser: string): string {
-  const parts = channel.name.split("--");
-  if (parts.length !== 2) return channel.name;
-  const [a, b] = parts;
-  if (a === currentUser) return b;
-  if (b === currentUser) return a;
-  return `${a} ↔ ${b}`;
-}
 
 function isMyDm(channel: Channel, currentUser: string): boolean {
   const parts = channel.name.split("--");
@@ -49,7 +41,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
   }
 
   function renderDmButton(ch: Channel) {
-    const label = dmDisplayName(ch, currentUser);
+    const label = formatDmDisplayName(ch.name, currentUser);
     return (
       <button
         key={ch.name}

@@ -7,6 +7,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { chatScopeKeyForChannel, clearChatScopeUnread } from "../../lib/chat-ui-state";
 import * as client from "../../lib/client";
+import { formatDmDisplayName } from "../../lib/dm-display-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { AgentStatusPanel } from "./agent-status-panel";
@@ -136,18 +137,6 @@ function sortUnreadThenPinned(
     if (aPinned === bPinned) return 0;
     return aPinned ? -1 : 1;
   });
-}
-
-function dmDisplayName(channel: Channel, currentUser: string): string {
-  const parts = channel.name.split("--");
-  if (parts.length !== 2) return channel.name;
-  const [a, b] = parts;
-  if (a === b || (a === currentUser && b === currentUser)) {
-    return `${currentUser} (me)`;
-  }
-  if (a === currentUser) return b;
-  if (b === currentUser) return a;
-  return `${a} ↔ ${b}`;
 }
 
 function isMyDm(channel: Channel, currentUser: string): boolean {
@@ -994,7 +983,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
         <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
           {myDmChannels.map((ch) => {
-            const label = dmDisplayName(ch, currentUser);
+            const label = formatDmDisplayName(ch.name, currentUser);
             const peer = peerFromDmName(ch.name);
             return (
               <ChannelItem
@@ -1038,7 +1027,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             </div>
           )}
           {otherDmChannels.map((ch) => {
-            const label = dmDisplayName(ch, currentUser);
+            const label = formatDmDisplayName(ch.name, currentUser);
             const peer = peerFromDmName(ch.name);
             return (
               <ChannelItem
