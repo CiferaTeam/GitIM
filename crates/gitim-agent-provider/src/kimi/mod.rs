@@ -47,8 +47,8 @@ use tracing::{debug, info, warn};
 
 use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig, ProviderError,
-    ProviderUsage, ProviderUsageReport, Session, preconditions,
+    preconditions, Event, ExecOptions, ExecResult, ExecStatus, Provider, ProviderConfig,
+    ProviderError, ProviderUsage, ProviderUsageReport, Session,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);

@@ -1,7 +1,7 @@
+use regex::Regex;
 use std::fs;
 use std::io;
 use std::path::Path;
-use regex::Regex;
 
 /// Ensure `.gitim/config.yaml` in `repo_dir` has `indexer.enabled = <enabled>`.
 ///

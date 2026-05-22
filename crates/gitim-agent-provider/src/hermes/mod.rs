@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::acp::parse::detect_api_failure;
 use crate::acp::{try_send_event, AcpClient, AcpHooks};
 use crate::{
-    Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider, ProviderConfig,
-    ProviderError, ProviderUsage, ProviderUsageReport, Session, preconditions,
+    preconditions, Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider,
+    ProviderConfig, ProviderError, ProviderUsage, ProviderUsageReport, Session,
 };
 
 pub mod prompts;
