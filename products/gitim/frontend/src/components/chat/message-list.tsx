@@ -104,7 +104,7 @@ export function MessageList({
   const scrollRef = externalScrollRef ?? internalScrollRef;
   const previousTimelineRef = useRef<TimelineSnapshot | null>(null);
   const suppressAutoBottomRef = useRef(false);
-  const suppressTopPagingOnceRef = useRef(false);
+  const suppressTopPagingUntilUserScrollRef = useRef(false);
 
   const [copiedLine, setCopiedLine] = useState<number | null>(null);
 
@@ -166,8 +166,8 @@ export function MessageList({
           `[data-line="${decision.line}"]`,
         ) as HTMLElement | null;
         if (target) {
-          suppressTopPagingOnceRef.current = true;
-          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          suppressTopPagingUntilUserScrollRef.current = true;
+          target.scrollIntoView({ behavior: "auto", block: "center" });
           reportViewportAnchor(scrollRef.current);
           onHighlightLineChange(decision.line);
         }
@@ -180,7 +180,7 @@ export function MessageList({
           `[data-line="${decision.line}"]`,
         ) as HTMLElement | null;
         if (target) {
-          suppressTopPagingOnceRef.current = true;
+          suppressTopPagingUntilUserScrollRef.current = true;
           target.scrollIntoView({ behavior: "auto", block: "start" });
           scrollRef.current.scrollTop += decision.offsetPx;
           suppressAutoBottomRef.current = true;
@@ -216,17 +216,20 @@ export function MessageList({
     if (distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD_PX) {
       suppressAutoBottomRef.current = false;
     }
-    if (suppressTopPagingOnceRef.current) {
-      suppressTopPagingOnceRef.current = false;
+    if (suppressTopPagingUntilUserScrollRef.current) {
       return;
     }
     maybeLoadOlderFromTop(event.currentTarget);
   }
 
   function handleWheelEvent(event: React.WheelEvent<HTMLDivElement>) {
+    suppressTopPagingUntilUserScrollRef.current = false;
     if (event.deltaY >= 0) return;
-    suppressTopPagingOnceRef.current = false;
     maybeLoadOlderFromTop(event.currentTarget);
+  }
+
+  function handleUserScrollIntent() {
+    suppressTopPagingUntilUserScrollRef.current = false;
   }
 
   useEffect(() => {
@@ -299,6 +302,8 @@ export function MessageList({
       className="flex-1 overflow-y-auto px-4 py-3 space-y-1"
       onScroll={handleScrollEvent}
       onWheel={handleWheelEvent}
+      onPointerDown={handleUserScrollIntent}
+      onTouchStart={handleUserScrollIntent}
     >
       {messages.map((msg) => {
         const key = msg._pendingId ?? msg.line_number;

@@ -100,7 +100,7 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
-  it("does not load older history from the scroll event caused by programmatic line positioning", async () => {
+  it("does not load older history from scroll events caused by programmatic line positioning", async () => {
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
       cb(0);
       return 0;
@@ -120,6 +120,10 @@ describe("MessageList scroll-to-top history trigger", () => {
       });
       root = rendered.root;
 
+      await act(async () => {
+        fireScroll(rendered.container, 0);
+        await Promise.resolve();
+      });
       await act(async () => {
         fireScroll(rendered.container, 0);
         await Promise.resolve();
