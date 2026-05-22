@@ -205,6 +205,35 @@ impl GitStorage {
         Ok(count > 0)
     }
 
+    /// Returns `(behind, ahead)`: how many commits HEAD is behind / ahead of
+    /// `@{upstream}`. Computed against the local remote-tracking ref, so the
+    /// caller must `fetch()` first for the numbers to reflect the actual
+    /// remote state.
+    ///
+    /// Used by sync_loop's divergence safety net: when an untracked working
+    /// tree file collides with an incoming tracked file, `git rebase` refuses
+    /// to checkout and the pull-only path has no recovery — behind grows
+    /// every cycle. Crossing a threshold triggers a hard reset to upstream.
+    pub fn divergence_from_upstream(&self) -> Result<(u64, u64), GitError> {
+        if !self.head_is_on_branch()? {
+            return Err(GitError::DetachedHead);
+        }
+        let output = Command::new("git")
+            .args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+            .current_dir(&self.root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut parts = stdout.split_whitespace();
+        let behind: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let ahead: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        Ok((behind, ahead))
+    }
+
     /// True iff `.git/HEAD` resolves to a symbolic ref (i.e. a branch),
     /// false on detached HEAD. Used as a precondition probe for any
     /// `@{upstream}`-dependent operation.
@@ -1097,5 +1126,191 @@ mod tests {
             repo_b.has_unpushed_commits().unwrap(),
             "local commit should still be unpushed"
         );
+    }
+
+    /// Provision a bare origin + one clone with a seed commit pushed. Returns
+    /// (bare_dir, clone_dir). Used by divergence tests to stamp a baseline
+    /// before A and B diverge.
+    fn seed_bare_with_clone(user: &str, email: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+        let bare_dir = tempfile::TempDir::new().unwrap();
+        let clone_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare_dir.path().to_str().unwrap(),
+                clone_dir.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", email])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", user])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(clone_dir.path().join("seed.txt"), "seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        (bare_dir, clone_dir)
+    }
+
+    fn commit_file(clone: &Path, name: &str, content: &str, msg: &str) {
+        std::fs::write(clone.join(name), content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(clone)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(clone)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn divergence_reports_zero_when_in_sync() {
+        let (_bare, clone_a) = seed_bare_with_clone("A", "a@test.com");
+        let repo = GitStorage::new(clone_a.path());
+        assert_eq!(repo.divergence_from_upstream().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn divergence_reports_behind_after_remote_advances() {
+        let (bare, clone_a) = seed_bare_with_clone("A", "a@test.com");
+
+        // Second clone pushes 3 new commits to the same remote.
+        let clone_b = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                clone_b.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "b@test.com"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "B"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        for i in 1..=3 {
+            commit_file(
+                clone_b.path(),
+                &format!("b-{i}.txt"),
+                "x",
+                &format!("B commit {i}"),
+            );
+        }
+        std::process::Command::new("git")
+            .args(["push"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+
+        // Clone A: before fetch, divergence still reads stale (0, 0).
+        let repo_a = GitStorage::new(clone_a.path());
+        assert_eq!(repo_a.divergence_from_upstream().unwrap(), (0, 0));
+
+        // After fetch, behind reflects the 3 new commits on remote.
+        repo_a.fetch().unwrap();
+        assert_eq!(repo_a.divergence_from_upstream().unwrap(), (3, 0));
+    }
+
+    #[test]
+    fn divergence_reports_both_when_diverged() {
+        let (bare, clone_a) = seed_bare_with_clone("A", "a@test.com");
+
+        // B pushes 4 commits.
+        let clone_b = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                clone_b.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "b@test.com"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "B"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+        for i in 1..=4 {
+            commit_file(
+                clone_b.path(),
+                &format!("b-{i}.txt"),
+                "x",
+                &format!("B commit {i}"),
+            );
+        }
+        std::process::Command::new("git")
+            .args(["push"])
+            .current_dir(clone_b.path())
+            .output()
+            .unwrap();
+
+        // A makes 2 local commits without pushing.
+        commit_file(clone_a.path(), "a-1.txt", "x", "A commit 1");
+        commit_file(clone_a.path(), "a-2.txt", "x", "A commit 2");
+
+        let repo_a = GitStorage::new(clone_a.path());
+        repo_a.fetch().unwrap();
+        let (behind, ahead) = repo_a.divergence_from_upstream().unwrap();
+        assert_eq!(behind, 4, "should be 4 behind (B's pushes)");
+        assert_eq!(ahead, 2, "should be 2 ahead (A's unpushed)");
+    }
+
+    #[test]
+    fn divergence_returns_detached_head_error_when_detached() {
+        let (_bare, clone_a) = seed_bare_with_clone("A", "a@test.com");
+        let sha_out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+        std::process::Command::new("git")
+            .args(["checkout", &sha])
+            .current_dir(clone_a.path())
+            .output()
+            .unwrap();
+        let repo = GitStorage::new(clone_a.path());
+        assert!(matches!(
+            repo.divergence_from_upstream(),
+            Err(GitError::DetachedHead)
+        ));
     }
 }

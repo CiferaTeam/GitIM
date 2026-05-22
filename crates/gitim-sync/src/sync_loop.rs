@@ -285,6 +285,67 @@ where
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
 
+/// Hard safety net: if HEAD falls this far behind `@{upstream}`, sync is
+/// almost certainly wedged — most plausibly by an untracked working-tree
+/// file colliding with an incoming tracked file, which `git rebase` refuses
+/// to checkout over. `enforce_max_divergence` then discards local unpushed
+/// work and resets HEAD to upstream, accepting the loss of any in-flight
+/// local commits in exchange for unsticking the sync loop. Tuned so that a
+/// normal busy day's chatter (a few new commits per cycle) never trips it.
+const MAX_BEHIND_BEFORE_HARD_RESET: u64 = 32;
+
+/// Probe divergence; if HEAD is `>= MAX_BEHIND_BEFORE_HARD_RESET` commits
+/// behind `@{upstream}`, hard-reset to upstream. Returns true iff a reset
+/// was performed. Caller must have just `fetch`ed — the divergence count is
+/// read against the local remote-tracking ref.
+///
+/// Thin wrapper around `enforce_divergence_threshold` with the production
+/// threshold baked in; the inner function takes an explicit threshold so
+/// tests can trigger the safety net with a few commits instead of 32.
+fn enforce_max_divergence(repo: &GitStorage, commit_lock: &Mutex<()>) -> bool {
+    enforce_divergence_threshold(repo, commit_lock, MAX_BEHIND_BEFORE_HARD_RESET)
+}
+
+/// Holds `commit_lock` across the reset because `discard_unpushed` mutates
+/// the local commit tree, and a handler appending to a thread while we
+/// reset would race the file out from under itself.
+///
+/// Failures (probe error, reset error) are logged and treated as "no reset
+/// performed" — the next cycle will retry. We never propagate the error up,
+/// because this is a safety net: refusing to act because the probe flaked
+/// is strictly worse than continuing the existing (already-broken) flow.
+fn enforce_divergence_threshold(
+    repo: &GitStorage,
+    commit_lock: &Mutex<()>,
+    threshold: u64,
+) -> bool {
+    let (behind, ahead) = match repo.divergence_from_upstream() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("sync: divergence probe failed: {}", e);
+            return false;
+        }
+    };
+    if behind < threshold {
+        return false;
+    }
+    error!(
+        "sync: divergence safety net tripped — HEAD is {} commits behind / {} ahead of \
+         upstream, exceeds threshold {}. Discarding local unpushed work and resetting \
+         to upstream. Likely cause: an untracked working-tree file is blocking rebase.",
+        behind, ahead, threshold
+    );
+    let _guard = commit_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(e) = repo.discard_unpushed() {
+        error!("sync: divergence safety net hard reset failed: {}", e);
+        return false;
+    }
+    info!("sync: divergence safety net hard reset complete, HEAD aligned to upstream");
+    true
+}
+
 /// Every remote operation in the sync loop funnels its result through this helper
 /// so the auth circuit observes every push/fetch. Callers check the returned flag
 /// once and trip-log if it transitioned.
@@ -360,6 +421,16 @@ where
                 return SyncOutcome::Normal;
             }
             Ok(()) => {}
+        }
+
+        // Hard safety net before we touch the commit tree: if a previous
+        // cycle wedged on (e.g.) an untracked file colliding with an
+        // incoming tracked file, behind-count keeps climbing. Once it
+        // crosses MAX_BEHIND_BEFORE_HARD_RESET we discard local unpushed
+        // work and reset to upstream, then end this cycle so the next one
+        // starts from a clean slate.
+        if enforce_max_divergence(repo, commit_lock) {
+            return SyncOutcome::Normal;
         }
 
         // Local snapshot + rebase mutates the local commit tree; hold
@@ -722,6 +793,16 @@ fn sync_pull_only(
         Ok(()) => {}
     }
 
+    // Safety net: pull-only has no recovery for the
+    // untracked-file-blocks-rebase wedge (rebase fails, abort, next cycle
+    // fails identically — forever). If we've fallen far enough behind that
+    // this is almost certainly what's happening, reset to upstream and end
+    // the cycle. No local unpushed commits exist on this path (we'd be in
+    // sync_with_push if there were), so the reset is data-safe.
+    if enforce_max_divergence(repo, commit_lock) {
+        return SyncOutcome::Normal;
+    }
+
     // Rebase mutates the local commit tree; hold commit_lock so it can't
     // interleave with a handler's read-append-commit window.
     let _rebase_guard = commit_lock
@@ -733,4 +814,213 @@ fn sync_pull_only(
     }
 
     SyncOutcome::Normal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as ProcessCommand;
+
+    /// Bare origin + one clone with a seed commit pushed. Caller advances
+    /// the bare's branch with `push_commits_via_helper_clone` to simulate
+    /// a remote racing ahead.
+    fn seed_bare_with_clone() -> (tempfile::TempDir, tempfile::TempDir) {
+        let bare = tempfile::TempDir::new().unwrap();
+        let clone = tempfile::TempDir::new().unwrap();
+        ProcessCommand::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                clone.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "a@test.com"), ("user.name", "A")] {
+            ProcessCommand::new("git")
+                .args(["config", k, v])
+                .current_dir(clone.path())
+                .output()
+                .unwrap();
+        }
+        std::fs::write(clone.path().join("seed.txt"), "seed").unwrap();
+        ProcessCommand::new("git")
+            .args(["add", "."])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        (bare, clone)
+    }
+
+    /// Add `count` commits to the bare via a side clone, then push.
+    fn push_n_commits_to_bare(bare: &Path, count: u64) {
+        let helper = tempfile::TempDir::new().unwrap();
+        ProcessCommand::new("git")
+            .args([
+                "clone",
+                bare.to_str().unwrap(),
+                helper.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "h@test.com"), ("user.name", "H")] {
+            ProcessCommand::new("git")
+                .args(["config", k, v])
+                .current_dir(helper.path())
+                .output()
+                .unwrap();
+        }
+        for i in 1..=count {
+            std::fs::write(helper.path().join(format!("h-{i}.txt")), "x").unwrap();
+            ProcessCommand::new("git")
+                .args(["add", "."])
+                .current_dir(helper.path())
+                .output()
+                .unwrap();
+            ProcessCommand::new("git")
+                .args(["commit", "-m", &format!("H {i}")])
+                .current_dir(helper.path())
+                .output()
+                .unwrap();
+        }
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn enforce_divergence_no_op_when_under_threshold() {
+        let (bare, clone) = seed_bare_with_clone();
+        push_n_commits_to_bare(bare.path(), 1);
+        let repo = GitStorage::new(clone.path());
+        repo.fetch().unwrap();
+        let lock = Mutex::new(());
+        // behind=1, threshold=2 → no reset
+        assert!(!enforce_divergence_threshold(&repo, &lock, 2));
+        // HEAD is unchanged (still on the seed commit)
+        let (behind, _) = repo.divergence_from_upstream().unwrap();
+        assert_eq!(behind, 1, "HEAD must not have moved");
+    }
+
+    #[test]
+    fn enforce_divergence_resets_when_at_threshold() {
+        let (bare, clone) = seed_bare_with_clone();
+        push_n_commits_to_bare(bare.path(), 2);
+        let repo = GitStorage::new(clone.path());
+        repo.fetch().unwrap();
+        let lock = Mutex::new(());
+        assert!(enforce_divergence_threshold(&repo, &lock, 2));
+        let (behind, ahead) = repo.divergence_from_upstream().unwrap();
+        assert_eq!(behind, 0, "HEAD should be aligned to upstream after reset");
+        assert_eq!(ahead, 0);
+    }
+
+    #[test]
+    fn enforce_divergence_unsticks_untracked_file_blocking_rebase() {
+        // The actual production scenario: an untracked working-tree file
+        // shares a name with a tracked file landed on remote. Rebase
+        // refuses (would overwrite untracked). Without the safety net,
+        // sync_pull_only loops forever. With it, once behind crosses the
+        // threshold, the clone hard-resets to upstream and recovers — at
+        // the cost of any local unpushed work (which there isn't on the
+        // pull-only path anyway).
+        let (bare, clone) = seed_bare_with_clone();
+
+        // Helper clone commits `notes.txt` and pushes it.
+        let helper = tempfile::TempDir::new().unwrap();
+        ProcessCommand::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                helper.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "h@test.com"), ("user.name", "H")] {
+            ProcessCommand::new("git")
+                .args(["config", k, v])
+                .current_dir(helper.path())
+                .output()
+                .unwrap();
+        }
+        std::fs::write(helper.path().join("notes.txt"), "remote version").unwrap();
+        ProcessCommand::new("git")
+            .args(["add", "."])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args(["commit", "-m", "add notes"])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+        // Pad to 2 commits so behind crosses threshold=2.
+        std::fs::write(helper.path().join("h2.txt"), "x").unwrap();
+        ProcessCommand::new("git")
+            .args(["add", "."])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args(["commit", "-m", "pad"])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+
+        // The receiving clone writes an UNTRACKED notes.txt that would be
+        // overwritten by the incoming tracked version.
+        std::fs::write(clone.path().join("notes.txt"), "local untracked").unwrap();
+        let repo = GitStorage::new(clone.path());
+        repo.fetch().unwrap();
+
+        // Sanity: rebase fails because of the untracked-overwrite collision.
+        assert!(
+            repo.rebase_onto_origin().is_err(),
+            "rebase must fail due to untracked file collision (precondition)"
+        );
+        let _ = repo.abort_rebase();
+
+        let lock = Mutex::new(());
+        assert!(
+            enforce_divergence_threshold(&repo, &lock, 2),
+            "safety net must trigger at threshold"
+        );
+
+        // HEAD now matches upstream — the wedge is broken.
+        let (behind, ahead) = repo.divergence_from_upstream().unwrap();
+        assert_eq!(behind, 0);
+        assert_eq!(ahead, 0);
+
+        // notes.txt now holds the remote tracked content. `git reset --hard`
+        // overwrites a working-tree file even when it was previously
+        // untracked — different from `git checkout`, which refuses. So the
+        // original collision is not just bypassed; the offending untracked
+        // residue is gone. Next rebase is a clean no-op.
+        let content = std::fs::read_to_string(clone.path().join("notes.txt")).unwrap();
+        assert_eq!(content, "remote version");
+
+        // Subsequent rebase succeeds (nothing to do).
+        assert!(repo.rebase_onto_origin().is_ok());
+    }
 }
