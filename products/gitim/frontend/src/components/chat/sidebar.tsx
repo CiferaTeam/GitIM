@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, Archive, ArchiveRestore, ChevronRight, Pin, Plus, Search } from "lucide-react";
+import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import { chatScopeKeyForChannel, clearChatScopeUnread } from "../../lib/chat-ui-state";
 import * as client from "../../lib/client";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
@@ -211,6 +212,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
+  const clearUnread = useChatStore((s) => s.clearUnread);
   const activeWorkspace = activeSlug
     ? workspaces.find((workspace) => workspace.slug === activeSlug)
     : undefined;
@@ -604,6 +606,26 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     };
   }, []);
 
+  function markChannelsRead(targets: Channel[]) {
+    const unread = targets.filter((ch) => (ch.unreadCount ?? 0) > 0);
+    if (unread.length === 0) return 0;
+    unread.forEach((ch) => {
+      clearUnread(ch.name);
+      clearChatScopeUnread(activeWorkspaceKey, chatScopeKeyForChannel(ch));
+    });
+    return unread.length;
+  }
+
+  function handleMarkAllDmsRead() {
+    const n = markChannelsRead(myDmChannels);
+    if (n > 0) toast.success(`Marked ${n} DM${n === 1 ? "" : "s"} as read`);
+  }
+
+  function handleMarkAllOthersRead() {
+    const n = markChannelsRead(otherDmChannels);
+    if (n > 0) toast.success(`Marked ${n} conversation${n === 1 ? "" : "s"} as read`);
+  }
+
   async function handleArchiveDm(dmName: string) {
     if (!activeSlug) return;
     const peer = peerFromDmName(dmName);
@@ -914,43 +936,60 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
             Direct Messages
           </p>
-          <Popover open={dmSearchOpen} onOpenChange={setDmSearchOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                title="New DM"
-                className="text-muted-foreground hover:text-foreground"
-              >
-                <Plus className="size-3.5" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent side="right" align="start" className="w-56 p-2">
-              <Input
-                ref={inputRef}
-                placeholder="Search users..."
-                value={dmQuery}
-                onChange={(e) => setDmQuery(e.target.value)}
-                className="h-8 text-xs mb-1"
-              />
-              {filteredUsers.length > 0 && (
-                <ul className="max-h-40 overflow-y-auto space-y-0.5">
-                  {filteredUsers.map((u) => (
-                    <li
-                      key={u}
-                      className="px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
-                      onMouseDown={() => handleUserSelect(u)}
-                    >
-                      @{u}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {filteredUsers.length === 0 && dmQuery.trim() && (
-                <p className="px-2 py-1.5 text-xs text-muted-foreground">No users found</p>
-              )}
-            </PopoverContent>
-          </Popover>
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title={
+                myDmChannels.some((c) => (c.unreadCount ?? 0) > 0)
+                  ? "Mark all as read"
+                  : "No unread messages"
+              }
+              disabled={!myDmChannels.some((c) => (c.unreadCount ?? 0) > 0)}
+              className="text-muted-foreground hover:text-foreground disabled:opacity-40"
+              onClick={handleMarkAllDmsRead}
+              data-testid="sidebar-mark-all-dms-read"
+            >
+              <CheckCheck className="size-3.5" />
+            </Button>
+            <Popover open={dmSearchOpen} onOpenChange={setDmSearchOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  title="New DM"
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <Plus className="size-3.5" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent side="right" align="start" className="w-56 p-2">
+                <Input
+                  ref={inputRef}
+                  placeholder="Search users..."
+                  value={dmQuery}
+                  onChange={(e) => setDmQuery(e.target.value)}
+                  className="h-8 text-xs mb-1"
+                />
+                {filteredUsers.length > 0 && (
+                  <ul className="max-h-40 overflow-y-auto space-y-0.5">
+                    {filteredUsers.map((u) => (
+                      <li
+                        key={u}
+                        className="px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
+                        onMouseDown={() => handleUserSelect(u)}
+                      >
+                        @{u}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {filteredUsers.length === 0 && dmQuery.trim() && (
+                  <p className="px-2 py-1.5 text-xs text-muted-foreground">No users found</p>
+                )}
+              </PopoverContent>
+            </Popover>
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
@@ -977,10 +1016,25 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             );
           })}
           {otherDmChannels.length > 0 && myDmChannels.length > 0 && (
-            <div className="pt-2 pb-0.5 px-2">
+            <div className="pt-2 pb-0.5 px-2 flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase text-text-faint tracking-wider">
                 Others
               </p>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                title={
+                  otherDmChannels.some((c) => (c.unreadCount ?? 0) > 0)
+                    ? "Mark all as read"
+                    : "No unread messages"
+                }
+                disabled={!otherDmChannels.some((c) => (c.unreadCount ?? 0) > 0)}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-40"
+                onClick={handleMarkAllOthersRead}
+                data-testid="sidebar-mark-all-others-read"
+              >
+                <CheckCheck className="size-3" />
+              </Button>
             </div>
           )}
           {otherDmChannels.map((ch) => {
