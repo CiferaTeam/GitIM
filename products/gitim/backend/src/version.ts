@@ -4,7 +4,7 @@ import type { Bindings } from "./types";
 const GITHUB_RELEASES_URL =
   "https://api.github.com/repos/CiferaTeam/GitIM/releases/latest";
 const VERSION_CACHE_KEY = "cache:latest_version";
-const VERSION_CACHE_TTL = 3600; // 1 hour
+const VERSION_CACHE_TTL = 60; // 1 minute
 
 async function fetchLatestVersion(kv: KVNamespace): Promise<string | null> {
   // Check KV cache first
