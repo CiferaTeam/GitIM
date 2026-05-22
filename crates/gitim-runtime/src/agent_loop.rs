@@ -610,6 +610,7 @@ impl AgentLoop {
     }
 
     /// Run one poll-and-process cycle. Returns true if messages were processed.
+    #[allow(clippy::collapsible_match)]
     pub async fn run_once(&mut self) -> Result<bool, RuntimeError> {
         let result = self.poller.poll().await?;
 

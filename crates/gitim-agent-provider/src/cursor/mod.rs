@@ -467,6 +467,7 @@ fn promote_to_failed_if_completed(
 /// Note: per-message `usage` on assistant events is intentionally ignored to
 /// avoid double-counting; cursor only reports authoritative totals on `result`
 /// (or fallback aggregate on `step_finish`). See multica/cursor.go:237-239.
+#[allow(clippy::collapsible_match)]
 fn handle_assistant_message(
     evt: &CursorStreamEvent,
     event_tx: &mpsc::Sender<Event>,
