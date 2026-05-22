@@ -1257,7 +1257,6 @@ fn combine_timer_and_changes(
 pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -> Option<String> {
     let mut prompt = String::from("以下是你上次醒来后发生的事件：\n\n");
     let mut has_external = false;
-    let mention = format!("@{self_handler}");
 
     for change in changes {
         if change.kind == "channel_meta" {
@@ -1279,11 +1278,9 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
             // listed handlers — skip if self isn't one of them.
             //
             // Empty array or missing field falls back to broadcast
-            // (legacy behavior). That covers three cases at once:
-            // (1) old daemon without the field, (2) card_thread and
-            // cron_thread which intentionally don't route, (3) the
-            // daemon-side empty-recipients warn fallback for malformed
-            // channel meta.
+            // (legacy behavior). Card changes have a separate product
+            // filter below because cards are task records, not chat
+            // threads.
             if let Some(recipients) = entry["recipients"].as_array() {
                 if !recipients.is_empty()
                     && !recipients.iter().any(|v| v.as_str() == Some(self_handler))
@@ -1292,8 +1289,15 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
                 }
             }
 
-            has_external = true;
             let body = entry["body"].as_str().unwrap_or("");
+
+            if is_card_change(change.kind.as_str())
+                && !card_entry_targets_self(change.kind.as_str(), entry, self_handler)
+            {
+                continue;
+            }
+
+            has_external = true;
             let timestamp = entry["timestamp"].as_str().unwrap_or("");
             let channel = &change.channel;
             let line_number = entry["line_number"].as_u64();
@@ -1311,14 +1315,14 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
             } else {
                 format!("[{timestamp}] ")
             };
-            let mention_tag = if body.contains(&mention) {
+            let mention_tag = if entry_mentions_handler(entry, self_handler) {
                 "[MENTION] "
             } else {
                 ""
             };
             let scope = match change.kind.as_str() {
                 "dm" => format!("[DM {}]", channel.strip_prefix("dm:").unwrap_or(channel)),
-                "card_thread" => {
+                "card_thread" | "card_meta" => {
                     format!(
                         "[CARD {}]",
                         channel.strip_prefix("card:").unwrap_or(channel)
@@ -1355,6 +1359,34 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
     } else {
         None
     }
+}
+
+fn is_card_change(kind: &str) -> bool {
+    matches!(kind, "card_thread" | "card_meta")
+}
+
+fn card_entry_targets_self(kind: &str, entry: &serde_json::Value, self_handler: &str) -> bool {
+    match kind {
+        "card_thread" => entry_mentions_handler(entry, self_handler),
+        "card_meta" => {
+            entry["assignee"].as_str() == Some(self_handler)
+                || entry_mentions_handler(entry, self_handler)
+        }
+        _ => true,
+    }
+}
+
+fn entry_mentions_handler(entry: &serde_json::Value, self_handler: &str) -> bool {
+    let mention = format!("@{self_handler}");
+    let body_mentions = entry["body"]
+        .as_str()
+        .is_some_and(|body| body.contains(&mention));
+    let field_mentions = entry["mentions"].as_array().is_some_and(|mentions| {
+        mentions
+            .iter()
+            .any(|value| value.as_str() == Some(self_handler))
+    });
+    body_mentions || field_mentions
 }
 
 /// Check whether any change contains a steering trigger.

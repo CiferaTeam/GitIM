@@ -3,8 +3,9 @@ use crate::handlers::entry_to_json;
 use crate::state::SharedState;
 
 use gitim_core::dm::parse_dm_filename;
+use gitim_core::mention::extract_mentions;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, Handler, Message, ThreadEntry};
+use gitim_core::types::{CardMeta, ChannelMeta, Handler, Message, ThreadEntry};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::warn;
@@ -196,10 +197,15 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                         }
                         let card_key = format!("card:{}/{}", ch, card_id);
                         if file == "card.meta.yaml" {
+                            let entries = card_meta_entries_for_poll(
+                                &state.repo_root,
+                                &path_str,
+                                added_content,
+                            );
                             changes.push(gitim_core::responses::PollChange {
                                 channel: card_key,
                                 kind: "card_meta".to_string(),
-                                entries: Vec::new(),
+                                entries,
                             });
                             continue;
                         }
@@ -505,14 +511,81 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
     Response::json(payload)
 }
 
+fn card_meta_entries_for_poll(
+    repo_root: &Path,
+    path_str: &str,
+    added_content: &str,
+) -> Vec<serde_json::Value> {
+    let assignee_changed = added_content
+        .lines()
+        .any(|line| line.trim_start().starts_with("assignee:"));
+    let title_changed = added_content
+        .lines()
+        .any(|line| line.trim_start().starts_with("title:"));
+
+    if !assignee_changed && !title_changed {
+        return Vec::new();
+    }
+
+    let meta_path = repo_root.join(path_str);
+    let meta = match std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<CardMeta>(&content).ok())
+    {
+        Some(meta) => meta,
+        None => return Vec::new(),
+    };
+
+    let mentions: Vec<String> = if title_changed {
+        extract_mentions(&meta.title)
+            .into_iter()
+            .map(|handler| handler.as_str().to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let assignee = if assignee_changed {
+        meta.assignee.clone()
+    } else {
+        None
+    };
+
+    if assignee.is_none() && mentions.is_empty() {
+        return Vec::new();
+    }
+
+    let event_type = if assignee.is_some() {
+        "card_assignment"
+    } else {
+        "card_mention"
+    };
+    let body = match assignee.as_deref() {
+        Some(handler) => format!("card assigned to {}: {}", handler, meta.title),
+        None => format!("card created: {}", meta.title),
+    };
+
+    let mut entry = serde_json::json!({
+        "type": "card_event",
+        "event_type": event_type,
+        "author": "system",
+        "body": body,
+        "mentions": mentions,
+    });
+    if let Some(handler) = assignee {
+        entry["assignee"] = serde_json::json!(handler);
+    }
+
+    vec![entry]
+}
+
 /// Render thread entries to JSON, attaching a `recipients` field to
 /// Message entries based on the channel kind:
 ///   - kind == "channel" → 3-rule routing via `compute_recipients`
 ///     (channel owner + parent-chain ancestors + explicit mentions)
 ///   - kind == "dm"      → recipients = sorted [member_a, member_b]
 ///   - other kinds       → no recipients (broadcast fallback applies
-///     on the runtime side; preserves prior
-///     behavior for card_thread / cron_thread)
+///     on the runtime side for legacy chat-like changes; card_thread has
+///     a runtime-side mention-only filter)
 ///
 /// Event entries (join/leave/etc.) never carry recipients regardless
 /// of kind — routing is per-message and events are workspace-wide.

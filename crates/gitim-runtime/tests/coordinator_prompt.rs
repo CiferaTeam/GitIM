@@ -144,14 +144,17 @@ fn test_format_changes_marks_card_scope() {
         kind: "card_thread".to_string(),
         entries: vec![serde_json::json!({
             "author": "alice",
-            "body": "blocked on review",
+            "body": "blocked on review <@self-agent>",
+            "mentions": ["self-agent"],
             "line_number": 12,
         })],
     }];
 
     let prompt = format_changes_as_prompt(&changes, "self-agent").unwrap();
     assert!(
-        prompt.contains("[CARD dev/20260422-abc] L12 @alice: blocked on review"),
+        prompt.contains(
+            "[MENTION] [CARD dev/20260422-abc] L12 @alice: blocked on review <@self-agent>"
+        ),
         "card discussion events should be labeled as card scope"
     );
 }

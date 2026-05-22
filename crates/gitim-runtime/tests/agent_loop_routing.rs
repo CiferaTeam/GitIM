@@ -5,9 +5,10 @@
 //!   - Skip entries where `author == self_handler` (pre-existing)
 //!   - Skip entries with a non-empty `recipients` array that does NOT
 //!     contain `self_handler` (NEW)
-//!   - Empty or missing `recipients` falls back to broadcast (legacy
-//!     behavior) so old daemons and non-routed kinds (card_thread,
-//!     cron_thread) keep working
+//!   - Empty or missing `recipients` falls back to broadcast for legacy
+//!     chat-like changes. Card changes are explicitly routed by product
+//!     semantics: card_thread only wakes on mention, and card_meta wakes
+//!     only the assignee or explicitly mentioned handlers.
 
 use gitim_runtime::format_changes_as_prompt;
 use gitim_runtime::poller::ChannelChange;
@@ -124,4 +125,110 @@ fn mixed_entries_filter_independently() {
     assert!(prompt.contains("for charlie"));
     assert!(!prompt.contains("for bob only"));
     assert!(prompt.contains("broadcast"));
+}
+
+fn typed_change(kind: &str, channel: &str, entries: Vec<serde_json::Value>) -> ChannelChange {
+    ChannelChange {
+        channel: channel.to_string(),
+        kind: kind.to_string(),
+        entries,
+    }
+}
+
+#[test]
+fn card_thread_without_self_mention_is_not_broadcast() {
+    let changes = vec![typed_change(
+        "card_thread",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "message",
+            "line_number": 1,
+            "point_to": 0,
+            "author": "alice",
+            "timestamp": "2026-05-22T00:00:00Z",
+            "body": "status note",
+            "mentions": [],
+        })],
+    )];
+
+    let prompt = format_changes_as_prompt(&changes, "bob");
+    assert!(
+        prompt.is_none(),
+        "plain card comments should not wake channel members"
+    );
+}
+
+#[test]
+fn card_thread_with_self_mention_is_included() {
+    let changes = vec![typed_change(
+        "card_thread",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "message",
+            "line_number": 1,
+            "point_to": 0,
+            "author": "alice",
+            "timestamp": "2026-05-22T00:00:00Z",
+            "body": "please check <@bob>",
+            "mentions": ["bob"],
+        })],
+    )];
+
+    let prompt = format_changes_as_prompt(&changes, "bob").expect("mention should wake bob");
+    assert!(prompt.contains("[MENTION] [CARD dev/20260522-abc] L1 @alice: please check <@bob>"));
+}
+
+#[test]
+fn card_meta_assignment_only_wakes_assignee() {
+    let changes = vec![typed_change(
+        "card_meta",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "card_event",
+            "event_type": "card_assignment",
+            "author": "system",
+            "body": "card assigned to bob",
+            "assignee": "bob",
+            "mentions": [],
+        })],
+    )];
+
+    let assignee_prompt =
+        format_changes_as_prompt(&changes, "bob").expect("assignee should be woken");
+    assert!(assignee_prompt.contains("[CARD dev/20260522-abc] @system: card assigned to bob"));
+    assert!(
+        !assignee_prompt.contains("[MENTION]"),
+        "assignment is a task event, not a mention"
+    );
+
+    let other_prompt = format_changes_as_prompt(&changes, "charlie");
+    assert!(
+        other_prompt.is_none(),
+        "card assignment should not broadcast to unrelated channel members"
+    );
+}
+
+#[test]
+fn card_meta_mention_wakes_mentioned_handler_only() {
+    let changes = vec![typed_change(
+        "card_meta",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "card_event",
+            "event_type": "card_mention",
+            "author": "system",
+            "body": "card created: follow up with <@charlie>",
+            "mentions": ["charlie"],
+        })],
+    )];
+
+    let mentioned_prompt =
+        format_changes_as_prompt(&changes, "charlie").expect("mention should wake charlie");
+    assert!(mentioned_prompt.contains("[MENTION] [CARD dev/20260522-abc] @system: card created"));
+
+    let other_prompt = format_changes_as_prompt(&changes, "bob");
+    assert!(
+        other_prompt.is_none(),
+        "card meta mention should not broadcast to unrelated channel members"
+    );
 }

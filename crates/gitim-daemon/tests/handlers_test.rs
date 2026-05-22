@@ -1461,6 +1461,182 @@ async fn test_poll_surfaces_card_meta() {
 }
 
 #[tokio::test]
+async fn test_poll_card_create_with_assignee_surfaces_assignment_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel(&state, "dev", "alice");
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("bob".to_string());
+    }
+
+    state.git_storage.push().ok();
+    let cursor = poll_cursor(&state).await;
+
+    let created = handle_request(
+        Request::CreateCard {
+            channel: "dev".to_string(),
+            title: "Implement X".to_string(),
+            labels: None,
+            assignee: Some("bob".to_string()),
+            status: None,
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(created.ok, "create_card failed: {:?}", created.error);
+    let card_id = created.data.unwrap()["card_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    state.git_storage.push().ok();
+
+    let resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp.ok, "poll failed: {:?}", resp.error);
+    let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+    let card_channel_key = format!("card:dev/{}", card_id);
+    let card_meta_change = changes
+        .iter()
+        .find(|c| c["kind"] == "card_meta" && c["channel"] == card_channel_key)
+        .expect("expected card_meta change");
+    let entries = card_meta_change["entries"]
+        .as_array()
+        .expect("card_meta should include routed entries for assignment");
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["type"], "card_event");
+    assert_eq!(entry["event_type"], "card_assignment");
+    assert_eq!(entry["assignee"], "bob");
+    assert_eq!(entry["mentions"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn test_poll_card_update_assignee_surfaces_assignment_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel(&state, "dev", "alice");
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("bob".to_string());
+    }
+
+    let card_id = do_create_card(&state, "dev", "Implement Y", "alice").await;
+    state.git_storage.push().ok();
+    let cursor = poll_cursor(&state).await;
+
+    let updated = handle_request(
+        Request::UpdateCard {
+            channel: "dev".to_string(),
+            card_id: card_id.clone(),
+            status: None,
+            labels: None,
+            assignee: Some("bob".to_string()),
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(updated.ok, "update_card failed: {:?}", updated.error);
+    state.git_storage.push().ok();
+
+    let resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp.ok, "poll failed: {:?}", resp.error);
+    let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+    let card_channel_key = format!("card:dev/{}", card_id);
+    let card_meta_change = changes
+        .iter()
+        .find(|c| c["kind"] == "card_meta" && c["channel"] == card_channel_key)
+        .expect("expected card_meta change");
+    let entries = card_meta_change["entries"]
+        .as_array()
+        .expect("card_meta should include routed entries for assignment");
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["type"], "card_event");
+    assert_eq!(entry["event_type"], "card_assignment");
+    assert_eq!(entry["assignee"], "bob");
+}
+
+#[tokio::test]
+async fn test_poll_card_create_with_title_mention_surfaces_mention_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "charlie").await;
+    create_test_channel(&state, "dev", "alice");
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("charlie".to_string());
+    }
+
+    state.git_storage.push().ok();
+    let cursor = poll_cursor(&state).await;
+
+    let created = handle_request(
+        Request::CreateCard {
+            channel: "dev".to_string(),
+            title: "Follow up with <@charlie>".to_string(),
+            labels: None,
+            assignee: None,
+            status: None,
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(created.ok, "create_card failed: {:?}", created.error);
+    let card_id = created.data.unwrap()["card_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    state.git_storage.push().ok();
+
+    let resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(resp.ok, "poll failed: {:?}", resp.error);
+    let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+    let card_channel_key = format!("card:dev/{}", card_id);
+    let card_meta_change = changes
+        .iter()
+        .find(|c| c["kind"] == "card_meta" && c["channel"] == card_channel_key)
+        .expect("expected card_meta change");
+    let entries = card_meta_change["entries"]
+        .as_array()
+        .expect("card_meta should include routed entries for title mention");
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["type"], "card_event");
+    assert_eq!(entry["event_type"], "card_mention");
+    assert_eq!(entry["assignee"], serde_json::Value::Null);
+    assert_eq!(entry["mentions"], serde_json::json!(["charlie"]));
+}
+
+#[tokio::test]
 async fn test_poll_surfaces_card_thread() {
     let tmp = tempfile::tempdir().unwrap();
     let state = setup_test_state(tmp.path());
