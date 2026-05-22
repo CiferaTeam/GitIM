@@ -52,9 +52,18 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
     ".codex/",
     ".opencode/",
     ".cursor/",
-    // User-local scratch space — kept out of git so AI tools can dump
-    // working notes here without one agent's draft leaking to others.
+    // Per-agent scratch / memory space. Two parallel directories both
+    // gitignored, both per-clone — they exist so agent-generated files
+    // (scripts, intermediate artifacts, fetched content, debug dumps,
+    // session notes) live in a stable place that never enters the shared
+    // tree. Without this, every random file an agent writes risks
+    // colliding with an incoming tracked file and wedging rebase.
+    //
+    // The agent prompt teaches the split:
+    //   - `notes/` → persistent notes that survive across sessions
+    //   - `workspace/` → throwaway working files for the current task
     "notes/",
+    "workspace/",
     // OS / editor noise.
     ".DS_Store",
     "._*",
