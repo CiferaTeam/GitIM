@@ -88,9 +88,6 @@ pub enum CronNameError {
 /// because cron names live in their own namespace and we don't want a
 /// future channel-name policy change to silently re-shape cron rules.
 pub fn validate_cron_name(name: &str) -> Result<(), CronNameError> {
-    if name.is_empty() {
-        return Err(CronNameError::Empty);
-    }
     if name.len() > 63 {
         return Err(CronNameError::TooLong(name.len()));
     }
@@ -101,7 +98,9 @@ pub fn validate_cron_name(name: &str) -> Result<(), CronNameError> {
         return Err(CronNameError::Reserved(name.to_string()));
     }
     let mut chars = name.chars();
-    let first = chars.next().expect("non-empty checked above");
+    let Some(first) = chars.next() else {
+        return Err(CronNameError::Empty);
+    };
     if !matches!(first, 'a'..='z' | '0'..='9') {
         return Err(CronNameError::BadFirstChar(name.to_string()));
     }

@@ -3,9 +3,11 @@ use crate::validator::validate_channel_name;
 use regex::Regex;
 use std::sync::LazyLock;
 
-static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([#~!])([^>\n]+)>").unwrap());
+static LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!])([^>\n]+)>"));
 
-static MSG_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.+):L(\d{6,})$").unwrap());
+static MSG_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
 
 /// 从消息 body 中提取所有协议级链接，按出现顺序返回，不去重。
 pub fn extract_links(body: &str) -> Vec<Link> {

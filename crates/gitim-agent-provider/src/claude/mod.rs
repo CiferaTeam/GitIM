@@ -347,7 +347,7 @@ async fn write_user_message(stdin: &mut ChildStdin, prompt: &str) -> Result<(), 
             "content": prompt,
         }
     });
-    let mut buf = serde_json::to_vec(&msg).expect("json serialize cannot fail");
+    let mut buf = preconditions::static_json_to_vec(&msg);
     buf.push(b'\n');
     stdin.write_all(&buf).await?;
     stdin.flush().await?;

@@ -2,7 +2,8 @@ use crate::types::Handler;
 use regex::Regex;
 use std::sync::LazyLock;
 
-static MSG_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[L\d{6,}\]").unwrap());
+static MSG_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::preconditions::regex_literal(r"^\[L\d{6,}\]"));
 
 pub fn format_message(
     line_number: u64,
