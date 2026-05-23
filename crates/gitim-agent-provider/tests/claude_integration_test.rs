@@ -178,6 +178,79 @@ async fn usage_report_splits_result_billing_from_assistant_context() {
 }
 
 #[tokio::test]
+async fn second_turn_with_resume_token_reuses_process() {
+    // The whole point of the persistent-process refactor: when agent_loop
+    // hands back the `session_token` from a prior turn, the next `execute`
+    // call must hit the *same* CLI process — that's what keeps Anthropic's
+    // prompt-cache prefix stable across turns.
+    let provider = create("claude", mock_config()).unwrap();
+
+    let s1 = provider
+        .execute("happy", ExecOptions::default())
+        .await
+        .unwrap();
+    let mut e1 = s1.events;
+    while e1.recv().await.is_some() {}
+    let r1 = s1.result.await.unwrap();
+    assert_eq!(r1.status, ExecStatus::Completed);
+    let token = r1
+        .session_token
+        .expect("session_token populated on cold start");
+
+    let s2 = provider
+        .execute(
+            "happy",
+            ExecOptions {
+                resume_token: Some(token.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut e2 = s2.events;
+    while e2.recv().await.is_some() {}
+    let r2 = s2.result.await.unwrap();
+    assert_eq!(r2.status, ExecStatus::Completed);
+    assert_eq!(
+        r2.session_token,
+        Some(token),
+        "resume turn must hit the same CLI process — same session_id is the proxy"
+    );
+}
+
+#[tokio::test]
+async fn cold_start_after_resume_respawns_process() {
+    // After [[RESET]] the agent_loop drops its session_token and asks for a
+    // cold start. The persistent process from the prior session must be
+    // killed and a fresh one spawned — otherwise the new "cold" turn would
+    // inherit the old conversation context.
+    let provider = create("claude", mock_config()).unwrap();
+
+    let s1 = provider
+        .execute("happy", ExecOptions::default())
+        .await
+        .unwrap();
+    let mut e1 = s1.events;
+    while e1.recv().await.is_some() {}
+    let r1 = s1.result.await.unwrap();
+    let first_token = r1.session_token.expect("first session_token set");
+
+    // No resume_token → cold-start semantics → respawn.
+    let s2 = provider
+        .execute("happy", ExecOptions::default())
+        .await
+        .unwrap();
+    let mut e2 = s2.events;
+    while e2.recv().await.is_some() {}
+    let r2 = s2.result.await.unwrap();
+    let second_token = r2.session_token.expect("second session_token set");
+    assert_ne!(
+        first_token, second_token,
+        "cold start after a prior session must kill the old process and spawn fresh"
+    );
+}
+
+#[tokio::test]
 async fn control_request_auto_approved() {
     let provider = create("claude", mock_config()).unwrap();
     let session = provider

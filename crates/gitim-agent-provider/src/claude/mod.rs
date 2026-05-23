@@ -1,14 +1,16 @@
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
-
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use crate::{
     preconditions, Event, ExecOptions, ExecResult, ExecStatus, PromptContext, Provider,
@@ -17,14 +19,66 @@ use crate::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const EVENT_CHANNEL_BUFFER: usize = 256;
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Long-lived Claude CLI process. Stays resident across turns so the SDK's
+/// `<system-reminder>` memoization survives, keeping prompt-cache hit rate
+/// high. Killed only on `[[RESET]]`, cancel/abort, error, or process death.
+struct PersistentClaude {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: Lines<BufReader<ChildStdout>>,
+    pid: u32,
+    /// `session_id` reported by the first `system` event after spawn.
+    /// Populated after the first turn completes — fresh-spawn from cold start
+    /// won't know it until the CLI prints it.
+    session_id: Option<String>,
+    /// Spawn-time signature; used to decide whether a new `execute()` call can
+    /// reuse this process or has to kill+respawn.
+    sig: SpawnSig,
+    stderr_tail: Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_handle: JoinHandle<()>,
+}
+
+impl PersistentClaude {
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    async fn kill(mut self) {
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
+        self.stderr_handle.abort();
+    }
+}
+
+impl Drop for PersistentClaude {
+    fn drop(&mut self) {
+        // child has kill_on_drop=true; only the detached stderr pump needs help.
+        self.stderr_handle.abort();
+    }
+}
+
+/// Fields that, if changed across turns, force a respawn (and a fresh prompt
+/// cache). `system_prompt` is intentionally absent — agent_loop only sends it
+/// on cold start, and we use `resume_token`/`session_id` to decide reuse.
+#[derive(Debug, Clone, PartialEq)]
+struct SpawnSig {
+    cwd: Option<PathBuf>,
+    model: Option<String>,
+}
 
 pub struct ClaudeProvider {
     config: ProviderConfig,
+    persistent: Arc<Mutex<Option<PersistentClaude>>>,
 }
 
 impl ClaudeProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            persistent: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -58,68 +112,28 @@ impl Provider for ClaudeProvider {
         })?;
 
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
-
-        let mut args = vec![
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--verbose".to_string(),
-            "--permission-mode".to_string(),
-            "bypassPermissions".to_string(),
-        ];
-        if let Some(model) = &opts.model {
-            args.extend(["--model".to_string(), model.clone()]);
-        }
-        if let Some(max_turns) = opts.max_turns {
-            args.extend(["--max-turns".to_string(), max_turns.to_string()]);
-        }
-        if let Some(system_prompt) = &opts.system_prompt {
-            args.extend(["--append-system-prompt".to_string(), system_prompt.clone()]);
-        }
-        if let Some(resume_token) = &opts.resume_token {
-            args.extend(["--resume".to_string(), resume_token.clone()]);
-        }
-        args.extend(["-p".to_string(), prompt.to_string()]);
-
-        let mut cmd = Command::new(&exec_path);
-        cmd.args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        if let Some(cwd) = &opts.cwd {
-            cmd.current_dir(cwd);
-        }
-        for (k, v) in &self.config.env {
-            cmd.env(k, v);
-        }
-
-        let mut child = cmd.spawn()?;
-        let pid = child.id().unwrap_or(0);
-        info!(pid, cwd = ?opts.cwd, model = ?opts.model, "claude started");
-
-        // piped stdio: use preconditions helpers for system-library invariants
-        let stdout = preconditions::take_tokio_piped_stdout(&mut child);
-        let stdin = preconditions::take_tokio_piped_stdin(&mut child);
-        let stderr = preconditions::take_tokio_piped_stderr(&mut child);
+        let env = self.config.env.clone();
+        let inner = self.persistent.clone();
+        let prompt_owned = prompt.to_string();
+        let opts_owned = opts;
+        let exec_path_owned = exec_path;
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
         let (result_tx, result_rx) = oneshot::channel();
-
         let cancel_token = CancellationToken::new();
-        let cancel_token_inner = cancel_token.clone();
+        let cancel_inner = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
-            drive_session(
-                child,
-                stdout,
-                stdin,
-                stderr,
+            run_turn(
+                inner,
+                exec_path_owned,
+                env,
+                prompt_owned,
+                opts_owned,
                 event_tx,
                 result_tx,
+                cancel_inner,
                 timeout,
-                pid,
-                cancel_token_inner,
             )
             .await;
         });
@@ -134,20 +148,248 @@ impl Provider for ClaudeProvider {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn drive_session(
-    mut child: tokio::process::Child,
-    stdout: tokio::process::ChildStdout,
-    stdin: tokio::process::ChildStdin,
-    stderr: tokio::process::ChildStderr,
+async fn run_turn(
+    inner: Arc<Mutex<Option<PersistentClaude>>>,
+    exec_path: String,
+    env: std::collections::HashMap<String, String>,
+    prompt: String,
+    opts: ExecOptions,
     event_tx: mpsc::Sender<Event>,
     result_tx: oneshot::Sender<ExecResult>,
-    timeout: Duration,
-    pid: u32,
     cancel_token: CancellationToken,
+    timeout: Duration,
 ) {
     let start = Instant::now();
+    let mut guard = inner.lock().await;
+
+    // Decide reuse vs respawn. If we have to throw out the existing process,
+    // do it before spawning the next one — both for resource accounting and
+    // so the new process doesn't inherit any stdin/stdout state.
+    let reused = match guard.take() {
+        Some(mut p) => {
+            if can_reuse(&mut p, &opts) {
+                Some(p)
+            } else {
+                debug!(pid = p.pid, "discarding incompatible persistent claude");
+                p.kill().await;
+                None
+            }
+        }
+        None => None,
+    };
+
+    let mut p = match reused {
+        Some(p) => p,
+        None => match spawn_persistent(&exec_path, &env, &opts).await {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = result_tx.send(ExecResult {
+                    status: ExecStatus::Failed,
+                    output: String::new(),
+                    error: Some(format!("failed to spawn claude: {e}")),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    session_token: None,
+                    usage_report: ProviderUsageReport::default(),
+                    usage: None,
+                });
+                return;
+            }
+        },
+    };
+
+    // Stream the user message into the running CLI.
+    if let Err(e) = write_user_message(&mut p.stdin, &prompt).await {
+        warn!(pid = p.pid, error = %e, "stdin write failed");
+        p.kill().await;
+        let _ = result_tx.send(ExecResult {
+            status: ExecStatus::Failed,
+            output: String::new(),
+            error: Some(format!("failed to write user message: {e}")),
+            duration_ms: start.elapsed().as_millis() as u64,
+            session_token: None,
+            usage_report: ProviderUsageReport::default(),
+            usage: None,
+        });
+        return;
+    }
+
+    let pid = p.pid;
+    info!(pid, cwd = ?opts.cwd, model = ?opts.model, "claude turn started");
+
+    let outcome = drive_one_turn(&mut p, &event_tx, timeout, &cancel_token).await;
+
+    if outcome.keep_process {
+        *guard = Some(p);
+    } else {
+        p.kill().await;
+    }
+
+    let duration = start.elapsed();
+    info!(
+        pid,
+        status = ?outcome.status,
+        turns = outcome.num_turns,
+        ?duration,
+        "claude turn finished"
+    );
+
+    let _ = result_tx.send(outcome.into_exec_result(duration));
+}
+
+fn can_reuse(p: &mut PersistentClaude, opts: &ExecOptions) -> bool {
+    if !p.is_alive() {
+        return false;
+    }
+    if p.sig.cwd != opts.cwd || p.sig.model != opts.model {
+        return false;
+    }
+    // Cold-start request (agent_loop passes no resume_token when starting
+    // fresh after [[RESET]] or first boot) — never reuse, the agent expects a
+    // virgin session.
+    let Some(rt) = opts.resume_token.as_ref() else {
+        return false;
+    };
+    p.session_id.as_deref() == Some(rt.as_str())
+}
+
+async fn spawn_persistent(
+    exec_path: &str,
+    env: &std::collections::HashMap<String, String>,
+    opts: &ExecOptions,
+) -> Result<PersistentClaude, std::io::Error> {
+    let mut args = vec![
+        "--print".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "bypassPermissions".to_string(),
+    ];
+    if let Some(model) = &opts.model {
+        args.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(max_turns) = opts.max_turns {
+        args.extend(["--max-turns".to_string(), max_turns.to_string()]);
+    }
+    if let Some(system_prompt) = &opts.system_prompt {
+        args.extend(["--append-system-prompt".to_string(), system_prompt.clone()]);
+    }
+    if let Some(resume_token) = &opts.resume_token {
+        args.extend(["--resume".to_string(), resume_token.clone()]);
+    }
+
+    let mut cmd = Command::new(exec_path);
+    cmd.args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    if let Some(cwd) = &opts.cwd {
+        cmd.current_dir(cwd);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+
+    let mut child = cmd.spawn()?;
+    let pid = child.id().unwrap_or(0);
+
+    let stdout = preconditions::take_tokio_piped_stdout(&mut child);
+    let stdin = preconditions::take_tokio_piped_stdin(&mut child);
+    let stderr = preconditions::take_tokio_piped_stderr(&mut child);
+
+    let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_handle = spawn_stderr_pump(stderr, stderr_tail.clone());
+
+    info!(pid, "claude spawned (persistent)");
+
+    Ok(PersistentClaude {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout).lines(),
+        pid,
+        session_id: opts.resume_token.clone(),
+        sig: SpawnSig {
+            cwd: opts.cwd.clone(),
+            model: opts.model.clone(),
+        },
+        stderr_tail,
+        stderr_handle,
+    })
+}
+
+fn spawn_stderr_pump(
+    stderr: ChildStderr,
+    tail: Arc<std::sync::Mutex<Vec<String>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut r = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = r.next_line().await {
+            debug!(target: "claude:stderr", "{}", line);
+            // mutex_lock documents and enforces the poisoned-guard invariant
+            let mut t = preconditions::mutex_lock(&tail);
+            t.push(line);
+            if t.len() > STDERR_TAIL_LINES {
+                t.remove(0);
+            }
+        }
+    })
+}
+
+async fn write_user_message(stdin: &mut ChildStdin, prompt: &str) -> Result<(), std::io::Error> {
+    let msg = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": prompt,
+        }
+    });
+    let mut buf = serde_json::to_vec(&msg).expect("json serialize cannot fail");
+    buf.push(b'\n');
+    stdin.write_all(&buf).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+struct TurnOutcome {
+    status: ExecStatus,
+    output: String,
+    error: Option<String>,
+    session_id: Option<String>,
+    num_turns: u32,
+    context_usage: Option<ProviderUsage>,
+    billing_usage: Option<ProviderUsage>,
+    keep_process: bool,
+}
+
+impl TurnOutcome {
+    fn into_exec_result(self, duration: std::time::Duration) -> ExecResult {
+        let report_billing = self.billing_usage.or_else(|| self.context_usage.clone());
+        let usage_report = ProviderUsageReport::new(report_billing, self.context_usage);
+        let usage = usage_report.billing.clone();
+        ExecResult {
+            status: self.status,
+            output: self.output,
+            error: self.error,
+            duration_ms: duration.as_millis() as u64,
+            session_token: self.session_id,
+            usage_report,
+            usage,
+        }
+    }
+}
+
+async fn drive_one_turn(
+    p: &mut PersistentClaude,
+    event_tx: &mpsc::Sender<Event>,
+    timeout: Duration,
+    cancel_token: &CancellationToken,
+) -> TurnOutcome {
     let mut output = String::new();
-    let mut session_id = String::new();
+    let mut session_id: Option<String> = p.session_id.clone();
     let mut final_status = ExecStatus::Completed;
     let mut final_error: Option<String> = None;
     let mut saw_result = false;
@@ -155,31 +397,10 @@ async fn drive_session(
     let mut context_usage: Option<ProviderUsage> = None;
     let mut billing_usage: Option<ProviderUsage> = None;
 
-    let mut reader = BufReader::new(stdout).lines();
-    let mut stdin = stdin;
-
-    // Collect stderr tail for error reporting
-    let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stderr_tail_clone = stderr_tail.clone();
-    let stderr_handle = tokio::spawn(async move {
-        const TAIL_LINES: usize = 20;
-        let mut r = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = r.next_line().await {
-            debug!(target: "claude:stderr", "{}", line);
-            // mutex_lock documents and enforces the poisoned-guard invariant
-            let mut tail = preconditions::mutex_lock(&stderr_tail_clone);
-            tail.push(line);
-            if tail.len() > TAIL_LINES {
-                tail.remove(0);
-            }
-        }
-    });
-
     let read_result = tokio::time::timeout(timeout, async {
         loop {
             tokio::select! {
-                line = reader.next_line() => {
+                line = p.stdout.next_line() => {
                     match line {
                         Ok(Some(line)) => {
                             let line = line.trim().to_string();
@@ -190,23 +411,20 @@ async fn drive_session(
                             let parsed = match parse_line(&line) {
                                 Some(p) => p,
                                 None => {
-                                    debug!(pid, line_len = line.len(), "unparsed line");
+                                    debug!(pid = p.pid, line_len = line.len(), "unparsed line");
                                     continue;
                                 }
                             };
 
                             match parsed {
                                 ParsedMessage::System { session_id: sid } => {
-                                    session_id = sid;
-                                    try_send_event(&event_tx, Event::Status {
+                                    session_id = Some(sid);
+                                    try_send_event(event_tx, Event::Status {
                                         status: "running".to_string(),
                                     });
                                 }
                                 ParsedMessage::AssistantEvents { events, usage } => {
                                     num_turns += 1;
-                                    // Per-iteration usage reflects actual window occupancy
-                                    // at this step. Result.usage sums across iterations and
-                                    // is the billing signal.
                                     if usage.as_ref().is_some_and(usage_has_reported_tokens) {
                                         context_usage = usage;
                                     }
@@ -214,12 +432,12 @@ async fn drive_session(
                                         if let Event::Text { ref content } = event {
                                             output.push_str(content);
                                         }
-                                        try_send_event(&event_tx, event);
+                                        try_send_event(event_tx, event);
                                     }
                                 }
                                 ParsedMessage::UserEvents(events) => {
                                     for event in events {
-                                        try_send_event(&event_tx, event);
+                                        try_send_event(event_tx, event);
                                     }
                                 }
                                 ParsedMessage::Result {
@@ -229,24 +447,13 @@ async fn drive_session(
                                     usage: result_usage,
                                 } => {
                                     saw_result = true;
-                                    session_id = sid;
+                                    session_id = Some(sid);
                                     if result_usage.as_ref().is_some_and(usage_has_reported_tokens) {
                                         billing_usage = result_usage.clone();
                                     }
-                                    // Fall back to result.usage for context when no assistant
-                                    // message surfaced real per-iteration usage. Some
-                                    // Anthropic-compatible endpoints emit zero-filled assistant
-                                    // usage placeholders and put real counts on the final result.
                                     if should_replace_captured_usage(&context_usage, &result_usage) {
                                         context_usage = result_usage;
                                     }
-                                    info!(
-                                        pid,
-                                        is_error,
-                                        turns = num_turns,
-                                        result_len = result_text.len(),
-                                        "claude result received"
-                                    );
                                     if is_error {
                                         final_status = ExecStatus::Failed;
                                         final_error = if result_text.is_empty() {
@@ -257,31 +464,41 @@ async fn drive_session(
                                     } else if !result_text.is_empty() {
                                         output = result_text;
                                     }
+                                    // `result` marks the end of one turn — return control to the
+                                    // caller without killing the CLI.
+                                    return;
                                 }
                                 ParsedMessage::ControlRequest { request_id, input } => {
                                     let response = build_auto_approve_response(&request_id, &input);
                                     if let Ok(data) = serde_json::to_vec(&response) {
                                         let mut buf = data;
                                         buf.push(b'\n');
-                                        if let Err(e) = stdin.write_all(&buf).await {
+                                        if let Err(e) = p.stdin.write_all(&buf).await {
                                             warn!("failed to write control response: {e}");
                                         }
                                     }
                                 }
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            // stdout closed — CLI exited mid-turn.
+                            final_status = ExecStatus::Failed;
+                            final_error = Some("claude stdout closed before result".to_string());
+                            return;
+                        }
                         Err(e) => {
-                            warn!(pid, error = %e, "stdout read error");
-                            break;
+                            warn!(pid = p.pid, error = %e, "stdout read error");
+                            final_status = ExecStatus::Failed;
+                            final_error = Some(format!("stdout read error: {e}"));
+                            return;
                         }
                     }
                 }
                 _ = cancel_token.cancelled() => {
-                    info!(pid, "cancelled by steering");
+                    info!(pid = p.pid, "cancelled by steering");
                     final_status = ExecStatus::Aborted;
                     final_error = Some("cancelled by steering".to_string());
-                    break;
+                    return;
                 }
             }
         }
@@ -291,66 +508,36 @@ async fn drive_session(
     if read_result.is_err() {
         final_status = ExecStatus::Timeout;
         final_error = Some(format!("claude timed out after {timeout:?}"));
-        // Kill the child process — kill_on_drop only fires on Drop,
-        // but we still hold the Child reference.
-        let _ = child.start_kill();
-    } else if final_status == ExecStatus::Aborted {
-        let _ = child.start_kill();
-    } else if !saw_result && final_status == ExecStatus::Completed {
-        // Stream ended without a result message — truncated or protocol error
-        final_status = ExecStatus::Failed;
-        final_error = Some("claude stream ended without a result message".to_string());
     }
 
-    if final_status != ExecStatus::Timeout {
-        match child.wait().await {
-            Ok(status) if !status.success() && final_status == ExecStatus::Completed => {
-                final_status = ExecStatus::Failed;
-                final_error = Some(format!("claude exited with status: {status}"));
-            }
-            Err(e) if final_status == ExecStatus::Completed => {
-                final_status = ExecStatus::Failed;
-                final_error = Some(format!("failed to wait for claude: {e}"));
-            }
-            _ => {}
-        }
-    }
-
-    let duration = start.elapsed();
-    info!(
-        pid,
-        ?final_status,
-        turns = num_turns,
-        ?duration,
-        "claude finished"
-    );
-
-    stderr_handle.abort();
-
-    // If failed with no error message, fall back to stderr tail
+    // Fall back to stderr tail for empty error messages.
     if final_status == ExecStatus::Failed && final_error.as_ref().is_none_or(|e| e.is_empty()) {
-        let tail = preconditions::mutex_lock(&stderr_tail);
+        let tail = preconditions::mutex_lock(&p.stderr_tail);
         if !tail.is_empty() {
             final_error = Some(format!("(stderr) {}", tail.join("\n")));
         }
     }
 
-    let report_billing = billing_usage.or_else(|| context_usage.clone());
-    let usage_report = ProviderUsageReport::new(report_billing, context_usage);
-    let usage = usage_report.billing.clone();
-    let _ = result_tx.send(ExecResult {
+    // Stream truncated without a `result` event but no other error path
+    // triggered — treat as failure.
+    if !saw_result && final_status == ExecStatus::Completed {
+        final_status = ExecStatus::Failed;
+        final_error = Some("claude stream ended without a result message".to_string());
+    }
+
+    let keep_process = final_status == ExecStatus::Completed && saw_result && p.is_alive();
+    p.session_id = session_id.clone();
+
+    TurnOutcome {
         status: final_status,
         output,
         error: final_error,
-        duration_ms: duration.as_millis() as u64,
-        session_token: if session_id.is_empty() {
-            None
-        } else {
-            Some(session_id)
-        },
-        usage_report,
-        usage,
-    });
+        session_id,
+        num_turns,
+        context_usage,
+        billing_usage,
+        keep_process,
+    }
 }
 
 fn try_send_event(tx: &mpsc::Sender<Event>, event: Event) {
