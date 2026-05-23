@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_archive_dm`, `handle_unarchive_dm`,
 //! and `handle_list_archived_dms`.
 //!

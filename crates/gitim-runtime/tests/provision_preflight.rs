@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the provisioning preflight gate wired into
 //! `POST /workspaces/{slug}/agents/add`.
 //!

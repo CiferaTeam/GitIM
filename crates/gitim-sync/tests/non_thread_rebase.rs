@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Verify how sync_loop handles non-thread, non-meta files (e.g. cron
 //! `crons/<name>/spec.yaml`) on the rebase-conflict path.
 //!

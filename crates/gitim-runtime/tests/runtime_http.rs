@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! In-process HTTP tests for the runtime's `/preflight/{provider}` route.
 //!
 //! Uses `tower::ServiceExt::oneshot` to dispatch a single request through the

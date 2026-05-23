@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `handle_disable_cron`, `handle_enable_cron`,
 //! and `handle_delete_cron`.
 

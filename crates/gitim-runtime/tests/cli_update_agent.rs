@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_update_agent::run`.
 //!
 //! Two-layer coverage strategy:

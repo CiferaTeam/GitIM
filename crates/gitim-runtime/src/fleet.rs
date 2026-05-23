@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::AbortHandle;
 
 use crate::http::{AgentActivityEvent, AgentInfo, SharedRuntimeState};
+use crate::preconditions;
 use crate::user_config::{FleetNodeEntry, FleetWorkspaceMapping};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -111,7 +112,8 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
     let runtime = FleetNodeRuntime::new(state.clone(), entry.clone());
     let mut initial_statuses = Vec::new();
     {
-        let mut s = state.lock().unwrap();
+        // mutex_lock documents the poisoned-guard invariant
+        let mut s = preconditions::mutex_lock(&state);
         s.fleet_nodes.insert(entry.node_id.clone(), runtime);
         for subscription in workspace_subscriptions(&entry) {
             let status = FleetNodeStatus {
@@ -144,7 +146,7 @@ pub fn activate_node(state: SharedRuntimeState, entry: FleetNodeEntry) {
 }
 
 pub fn remove_node(state: &SharedRuntimeState, node_id: &str) -> bool {
-    let mut s = state.lock().unwrap();
+    let mut s = preconditions::mutex_lock(state);
     s.fleet_status
         .retain(|_, status| status.node_id.as_str() != node_id);
     s.fleet_nodes.remove(node_id).is_some()
@@ -312,7 +314,7 @@ pub async fn resolve_workspace_mappings(
 
 pub async fn fetch_agent_snapshots(state: &SharedRuntimeState) -> Vec<FleetAgentSnapshot> {
     let nodes: Vec<_> = {
-        let s = state.lock().unwrap();
+        let s = preconditions::mutex_lock(state);
         s.fleet_nodes
             .values()
             .map(|runtime| runtime.entry.clone())
@@ -374,7 +376,7 @@ pub async fn fetch_agent_snapshots(state: &SharedRuntimeState) -> Vec<FleetAgent
 
 fn local_remote_identities(state: &SharedRuntimeState) -> Vec<(String, String)> {
     let mut identities: Vec<_> = {
-        let s = state.lock().unwrap();
+        let s = preconditions::mutex_lock(state);
         s.workspaces
             .values()
             .filter_map(|ctx| {
@@ -547,7 +549,7 @@ fn publish_event(
         event,
     });
     let tx = {
-        let s = state.lock().unwrap();
+        let s = preconditions::mutex_lock(state);
         s.fleet_tx.clone()
     };
     let _ = tx.send(envelope);
@@ -597,7 +599,7 @@ fn update_status(
     update: impl FnOnce(&mut FleetNodeStatus),
 ) {
     let status = {
-        let mut s = state.lock().unwrap();
+        let mut s = preconditions::mutex_lock(state);
         let key = status_key(
             &entry.node_id,
             &subscription.local_workspace_id,
@@ -627,7 +629,7 @@ fn update_status(
 
 fn publish_status(state: &SharedRuntimeState, status: FleetNodeStatus) {
     let tx = {
-        let s = state.lock().unwrap();
+        let s = preconditions::mutex_lock(state);
         s.fleet_tx.clone()
     };
     let _ = tx.send(FleetEventEnvelope::NodeStatus(status));

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for sync_loop auth circuit breaker.
 //!
 //! Strategy: feed the `AuthCircuit` the same `Result<(), GitError>` values

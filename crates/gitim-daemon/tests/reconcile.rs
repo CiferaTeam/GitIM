@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `reconcile_orphan_cards`.
 
 use std::sync::Arc;

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cron_engine::fire`.
 //!
 //! Mirrors the harness pattern from `cron_create_test.rs` /

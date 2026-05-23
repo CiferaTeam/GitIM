@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Task 23: E2E crossing detection — two scripted turns at 55% then 82%
 //! drive the 80% threshold state machine. Turn 1 stays silent; Turn 2 flips
 //! `usage_notice_pending` to true.

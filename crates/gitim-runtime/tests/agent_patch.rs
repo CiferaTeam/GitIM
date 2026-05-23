@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for PATCH /workspaces/{slug}/agents/{id}
 //!
 //! Follows the `tests/http_workspaces.rs` pattern: tower::ServiceExt::oneshot

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Integration test — eprintln! used for test diagnostics.
 #![allow(clippy::print_stderr)]
 

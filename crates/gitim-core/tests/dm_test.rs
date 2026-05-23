@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_core::dm::{dm_filename, parse_dm_filename};
 use gitim_core::types::Handler;
 

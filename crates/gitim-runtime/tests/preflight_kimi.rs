@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `preflight_kimi_with_config`.
 //!
 //! Driven by fake `kimi` shell scripts under `tests/fixtures/`:

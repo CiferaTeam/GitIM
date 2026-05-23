@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the cron-fire branch of `handle_poll`.
 //!
 //! Without this branch, `crons/<name>/<ts>.thread` files committed by

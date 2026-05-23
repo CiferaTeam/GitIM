@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Pin every provider's `reports_usage()` and `usage_is_cumulative()`
 //! declarations so accidental drift in defaults shows up here, not in the
 //! token statistics layer where the symptom is silent under-counting.

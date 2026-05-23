@@ -1,5 +1,6 @@
 // gitim-runtime binary: printing to stderr is the interface for status/errors.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

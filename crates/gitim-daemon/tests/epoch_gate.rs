@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for `AppState`'s epoch-status field, refresh on boot, and refresh
 //! after each sync cycle (Subtask B of Phase A "Snapshot Pack" rollout).
 //!

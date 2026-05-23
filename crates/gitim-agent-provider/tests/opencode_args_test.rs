@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_agent_provider::opencode::build_invocation;
 use gitim_agent_provider::ExecOptions;
 use std::time::Duration;

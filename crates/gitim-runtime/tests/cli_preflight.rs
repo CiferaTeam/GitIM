@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_preflight::run`.
 //!
 //! Mirrors the spawn-real-router pattern from `cli_workspaces` / `cli_status`:

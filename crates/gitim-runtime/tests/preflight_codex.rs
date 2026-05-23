@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `preflight_codex_with` — covers the four error
 //! branches against controlled fake binaries, plus an ignored end-to-end
 //! test against a real Codex CLI login.

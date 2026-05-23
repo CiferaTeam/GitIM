@@ -1,15 +1,21 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 mod error;
 pub mod gemini;
+
+// System-library invariants: these helpers document and enforce invariants
+// that are guaranteed by the Rust standard library / tokio.
 pub mod hermes;
 pub mod kimi;
 pub mod mock;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;
+pub(crate) mod preconditions;
 pub(crate) mod prompts;
 mod provider;
 mod types;

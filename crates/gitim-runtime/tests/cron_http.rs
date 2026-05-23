@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(clippy::print_stderr)]
 //! HTTP integration tests for the runtime's cron read endpoints.
 //!

@@ -1,8 +1,7 @@
+use regex::Regex;
 use std::fs;
 use std::io;
 use std::path::Path;
-
-use regex::Regex;
 
 /// Ensure `.gitim/config.yaml` in `repo_dir` has `indexer.enabled = <enabled>`.
 ///
@@ -16,6 +15,7 @@ pub fn ensure_config_indexer_enabled(repo_dir: &Path, enabled: bool) -> io::Resu
 
     if config_path.exists() {
         let mut content = fs::read_to_string(&config_path)?;
+        // SAFETY: literal regex pattern, verified at compile time
         let re = Regex::new(r"(?m)(indexer:\s*\n\s*enabled:)\s*(true|false)").unwrap();
         if re.is_match(&content) {
             content = re.replace(&content, format!("$1 {value}")).to_string();

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `cli::cmd_status::run` and `cli::cmd_runtime_id::run`.
 //!
 //! Pattern: spin up a real `axum::serve` against the runtime router on an

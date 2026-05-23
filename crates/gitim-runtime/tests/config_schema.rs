@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use gitim_runtime::git_config::{
     validate_workspace_path, ConfigError, GitConfig, GitProvider, WorkspaceConfig,
     WorkspacePathError,

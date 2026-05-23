@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `hermes_profile::ensure_profile` / `delete_profile`
 //! / `apply_model_config`.
 //!

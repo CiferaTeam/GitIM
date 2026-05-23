@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `preflight_hermes_with`.
 
 use std::collections::HashMap;

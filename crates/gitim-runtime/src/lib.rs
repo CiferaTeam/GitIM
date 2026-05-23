@@ -1,3 +1,8 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
+// System-library invariants: see preconditions module
+pub(crate) mod preconditions;
+
 pub mod agent;
 pub mod agent_loop;
 pub mod background;

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Tests for `read_default_profile_llm` / `read_default_profile_llm_from`.
 //!
 //! These exercise the helper that resolves the `(provider, model)` pair from

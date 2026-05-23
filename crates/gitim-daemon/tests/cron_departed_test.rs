@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the departed-author guard on cron mutation
 //! handlers (create / enable / disable / delete) and the delete/fire
 //! race re-check in `cron_engine::fire`.

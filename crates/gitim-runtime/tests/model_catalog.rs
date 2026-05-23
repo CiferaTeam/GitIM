@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::os::unix::fs::PermissionsExt;
 
 use gitim_runtime::model_catalog::{

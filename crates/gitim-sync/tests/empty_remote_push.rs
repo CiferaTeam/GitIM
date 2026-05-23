@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Cover the "clone empty GitHub repo" onboarding path.
 //!
 //! Scenario: a brand-new remote has no HEAD yet. A clone lands with an unborn

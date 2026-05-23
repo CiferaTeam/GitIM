@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Verifies that timer file content surfaces in the helper layer that
 //! agent_loop uses to build the LLM prompt. Goes through the same
 //! gitim-core APIs the production agent_loop uses — no provider mock,
