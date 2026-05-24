@@ -220,8 +220,12 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
                             if parsed.entries.is_empty() {
                                 continue;
                             }
-                            let entries: Vec<serde_json::Value> =
-                                parsed.entries.iter().map(entry_to_json).collect();
+                            let entries = enrich_card_thread_entries_with_recipients(
+                                &parsed.entries,
+                                &state.repo_root,
+                                ch,
+                                card_id,
+                            );
                             changes.push(gitim_core::responses::PollChange {
                                 channel: card_key,
                                 kind: "card_thread".to_string(),
@@ -578,14 +582,57 @@ fn card_meta_entries_for_poll(
     vec![entry]
 }
 
+/// Attach `recipients` to each Message in a card discussion thread.
+///
+/// Recipients route by the card's task roles, not channel membership:
+/// reporter (`CardMeta.created_by`) + current assignee + explicit
+/// mentions. See [`gitim_core::recipients::compute_card_thread_recipients`].
+///
+/// If the card meta is missing or unparseable (e.g. the card was
+/// archived between commit and poll), we fall back to no recipients
+/// — runtime then drops to its mention-only filter, which is the
+/// safer default than broadcasting to the whole channel.
+fn enrich_card_thread_entries_with_recipients(
+    entries: &[ThreadEntry],
+    repo_root: &Path,
+    channel: &str,
+    card_id: &str,
+) -> Vec<serde_json::Value> {
+    let meta_path = repo_root
+        .join("channels")
+        .join(channel)
+        .join("cards")
+        .join(card_id)
+        .join("card.meta.yaml");
+    let card_meta = std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<CardMeta>(&content).ok());
+
+    entries
+        .iter()
+        .map(|entry| {
+            let mut json = entry_to_json(entry);
+            if let (ThreadEntry::Message(msg), Some(meta)) = (entry, card_meta.as_ref()) {
+                let recipients = gitim_core::recipients::compute_card_thread_recipients(msg, meta);
+                if !recipients.is_empty() {
+                    json["recipients"] = serde_json::json!(recipients);
+                }
+            }
+            json
+        })
+        .collect()
+}
+
 /// Render thread entries to JSON, attaching a `recipients` field to
 /// Message entries based on the channel kind:
 ///   - kind == "channel" → 3-rule routing via `compute_recipients`
 ///     (channel owner + parent-chain ancestors + explicit mentions)
 ///   - kind == "dm"      → recipients = sorted [member_a, member_b]
 ///   - other kinds       → no recipients (broadcast fallback applies
-///     on the runtime side for legacy chat-like changes; card_thread has
-///     a runtime-side mention-only filter)
+///     on the runtime side for legacy chat-like changes; card_thread
+///     gets its task-role recipients via
+///     `enrich_card_thread_entries_with_recipients` in the card
+///     branch above, not here)
 ///
 /// Event entries (join/leave/etc.) never carry recipients regardless
 /// of kind — routing is per-message and events are workspace-wide.

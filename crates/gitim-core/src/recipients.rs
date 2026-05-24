@@ -10,9 +10,13 @@
 //!
 //! DM channels are NOT handled here — callers inline `recipients =
 //! members` for DM threads. This function is for channel threads only.
+//!
+//! Card discussion threads use [`compute_card_thread_recipients`]
+//! instead, which routes by the card's task roles (reporter +
+//! assignee) plus mentions — not by channel membership.
 
 use crate::types::message::Message;
-use crate::types::ChannelMeta;
+use crate::types::{CardMeta, ChannelMeta};
 use std::collections::{BTreeSet, HashSet};
 
 pub fn compute_recipients(
@@ -51,9 +55,43 @@ pub fn compute_recipients(
     recipients.into_iter().collect()
 }
 
+/// Compute the recipients set for a card discussion message.
+///
+/// Cards are task records, not chat threads, so routing is by task
+/// roles rather than channel membership:
+///   1. Reporter (`CardMeta.created_by`) — wants progress on what they filed
+///   2. Current assignee (`CardMeta.assignee`) — owns the work
+///   3. Explicit @mentions in the message body
+///
+/// Channel members who aren't the reporter, assignee, or mentioned
+/// are NOT notified — that would be a fanout broadcast, which is
+/// explicitly out of scope (see the "narrow card wakeups" commit).
+///
+/// The runtime's `author == self_handler` skip handles the case
+/// where the message author is also the reporter/assignee (the
+/// author won't be woken by their own message).
+pub fn compute_card_thread_recipients(message: &Message, card_meta: &CardMeta) -> Vec<String> {
+    let mut recipients: BTreeSet<String> = BTreeSet::new();
+
+    if !card_meta.created_by.is_empty() {
+        recipients.insert(card_meta.created_by.clone());
+    }
+    if let Some(assignee) = &card_meta.assignee {
+        if !assignee.is_empty() {
+            recipients.insert(assignee.clone());
+        }
+    }
+    for handler in &message.mentions {
+        recipients.insert(handler.as_str().to_string());
+    }
+
+    recipients.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::card::CardStatus;
     use crate::types::Handler;
 
     fn meta(created_by: &str) -> ChannelMeta {
@@ -174,5 +212,68 @@ mod tests {
         let m = msg(1, 0, "alice", vec!["alice"]);
         let r = compute_recipients(&m, &meta("owner"), &[]);
         assert_eq!(r, vec!["alice".to_string(), "owner".to_string()]);
+    }
+
+    fn card(created_by: &str, assignee: Option<&str>) -> CardMeta {
+        CardMeta {
+            title: "demo".into(),
+            channel: "dev".into(),
+            status: CardStatus::Todo,
+            labels: vec![],
+            assignee: assignee.map(|s| s.to_string()),
+            created_by: created_by.into(),
+            created_at: "2026-05-22T00:00:00Z".into(),
+            updated_at: "2026-05-22T00:00:00Z".into(),
+            archived_via: None,
+        }
+    }
+
+    #[test]
+    fn card_thread_routes_to_reporter_and_assignee() {
+        // Most common case: A files a card and assigns B, B drops
+        // a progress note. Recipients should be {A, B}; the runtime
+        // skips B as the author, leaving A woken — closing the loop.
+        let m = msg(1, 0, "bob", vec![]);
+        let r = compute_card_thread_recipients(&m, &card("alice", Some("bob")));
+        assert_eq!(r, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn card_thread_unassigned_routes_to_reporter_only() {
+        let m = msg(1, 0, "charlie", vec![]);
+        let r = compute_card_thread_recipients(&m, &card("alice", None));
+        assert_eq!(r, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn card_thread_mention_unions_with_roles() {
+        let m = msg(1, 0, "bob", vec!["charlie"]);
+        let r = compute_card_thread_recipients(&m, &card("alice", Some("bob")));
+        assert_eq!(
+            r,
+            vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "charlie".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn card_thread_dedupes_when_reporter_is_assignee() {
+        // Self-filed task: same handler is reporter and assignee.
+        // Only one entry in recipients.
+        let m = msg(1, 0, "alice", vec![]);
+        let r = compute_card_thread_recipients(&m, &card("alice", Some("alice")));
+        assert_eq!(r, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn card_thread_empty_reporter_skipped() {
+        // Defensive: corrupt card.meta.yaml with empty created_by
+        // shouldn't inject a blank handler into recipients.
+        let m = msg(1, 0, "bob", vec![]);
+        let r = compute_card_thread_recipients(&m, &card("", Some("bob")));
+        assert_eq!(r, vec!["bob".to_string()]);
     }
 }

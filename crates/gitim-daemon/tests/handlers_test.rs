@@ -1693,6 +1693,155 @@ async fn test_poll_surfaces_card_thread() {
 }
 
 #[tokio::test]
+async fn test_poll_card_thread_attaches_reporter_assignee_recipients() {
+    // Closing the reporter ↔ assignee loop: alice files a card and
+    // assigns bob, bob posts progress, alice (reporter) must learn
+    // of it. Daemon attaches recipients=[alice, bob] to the message
+    // entry so the runtime can route to alice without bob having
+    // to remember to @ her every reply.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel(&state, "dev", "alice");
+
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("alice".to_string());
+    }
+    let created = handle_request(
+        Request::CreateCard {
+            channel: "dev".to_string(),
+            title: "Implement X".to_string(),
+            labels: None,
+            assignee: Some("bob".to_string()),
+            status: None,
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(created.ok, "create_card failed: {:?}", created.error);
+    let card_id = created.data.unwrap()["card_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    state.git_storage.push().ok();
+    let cursor = poll_cursor(&state).await;
+
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("bob".to_string());
+    }
+    let send = handle_request(
+        Request::SendCardMessage {
+            channel: "dev".to_string(),
+            card_id: card_id.clone(),
+            body: "progress 50%".to_string(),
+            reply_to: None,
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(send.ok, "send_card_message failed: {:?}", send.error);
+    state.git_storage.push().ok();
+
+    let resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+    let card_channel_key = format!("card:dev/{}", card_id);
+    let thread_change = changes
+        .iter()
+        .find(|c| c["kind"] == "card_thread" && c["channel"] == card_channel_key)
+        .expect("expected card_thread change");
+    let entries = thread_change["entries"].as_array().unwrap();
+    let progress = entries
+        .iter()
+        .find(|e| e["author"] == "bob" && e["body"] == "progress 50%")
+        .expect("expected bob's progress entry");
+    let recipients = progress["recipients"]
+        .as_array()
+        .expect("card_thread message should carry recipients");
+    let mut handlers: Vec<&str> = recipients.iter().filter_map(|v| v.as_str()).collect();
+    handlers.sort();
+    assert_eq!(handlers, vec!["alice", "bob"]);
+}
+
+#[tokio::test]
+async fn test_poll_card_thread_unassigned_routes_to_reporter_only() {
+    // Card without an assignee: recipients = [reporter] only.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup_test_state(tmp.path());
+    register_test_user(&state, "alice").await;
+    register_test_user(&state, "bob").await;
+    create_test_channel(&state, "dev", "alice");
+
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("alice".to_string());
+    }
+    let card_id = do_create_card(&state, "dev", "Open question", "alice").await;
+    state.git_storage.push().ok();
+    let cursor = poll_cursor(&state).await;
+
+    {
+        let mut cu = state.current_user.write().await;
+        *cu = Some("bob".to_string());
+    }
+    let send = handle_request(
+        Request::SendCardMessage {
+            channel: "dev".to_string(),
+            card_id: card_id.clone(),
+            body: "I might pick this up".to_string(),
+            reply_to: None,
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(send.ok);
+    state.git_storage.push().ok();
+
+    let resp = handle_request(
+        Request::Poll {
+            since: Some(cursor),
+        },
+        state.clone(),
+    )
+    .await;
+    let changes = resp.data.unwrap()["changes"].as_array().unwrap().clone();
+
+    let card_channel_key = format!("card:dev/{}", card_id);
+    let thread_change = changes
+        .iter()
+        .find(|c| c["kind"] == "card_thread" && c["channel"] == card_channel_key)
+        .expect("expected card_thread change");
+    let entry = thread_change["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["author"] == "bob")
+        .expect("expected bob's entry");
+    let recipients = entry["recipients"]
+        .as_array()
+        .expect("card_thread message should carry recipients");
+    assert_eq!(
+        recipients
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alice"]
+    );
+}
+
+#[tokio::test]
 async fn test_poll_filters_card_by_channel_membership() {
     let tmp = tempfile::tempdir().unwrap();
     let state = setup_test_state(tmp.path());

@@ -233,3 +233,67 @@ fn card_meta_mention_wakes_mentioned_handler_only() {
         "card meta mention should not broadcast to unrelated channel members"
     );
 }
+
+#[test]
+fn card_thread_recipients_wake_reporter_without_mention() {
+    // Closing the task-loop case: alice filed the card and assigned
+    // bob; bob drops a progress note with no explicit mention.
+    // Daemon attaches recipients=[alice, bob] from the card's roles
+    // — alice must be woken so the reporter learns of the progress.
+    let changes = vec![typed_change(
+        "card_thread",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "message",
+            "line_number": 4,
+            "point_to": 0,
+            "author": "bob",
+            "timestamp": "2026-05-22T00:00:00Z",
+            "body": "progress 50%",
+            "mentions": [],
+            "recipients": ["alice", "bob"],
+        })],
+    )];
+
+    let reporter_prompt =
+        format_changes_as_prompt(&changes, "alice").expect("reporter should be woken");
+    assert!(reporter_prompt.contains("[CARD dev/20260522-abc] L4 @bob: progress 50%"));
+    assert!(
+        !reporter_prompt.contains("[MENTION]"),
+        "role-based routing is not a mention"
+    );
+
+    // Channel members who aren't reporter or assignee stay quiet.
+    let bystander = format_changes_as_prompt(&changes, "charlie");
+    assert!(
+        bystander.is_none(),
+        "card thread should not fanout beyond reporter/assignee/mentions"
+    );
+}
+
+#[test]
+fn card_thread_recipients_skip_author_self() {
+    // The author of the message must not be woken by their own
+    // progress note even when they appear in recipients (e.g. bob
+    // is both assignee and the one writing the update).
+    let changes = vec![typed_change(
+        "card_thread",
+        "card:dev/20260522-abc",
+        vec![serde_json::json!({
+            "type": "message",
+            "line_number": 4,
+            "point_to": 0,
+            "author": "bob",
+            "timestamp": "2026-05-22T00:00:00Z",
+            "body": "progress 50%",
+            "mentions": [],
+            "recipients": ["alice", "bob"],
+        })],
+    )];
+
+    let self_prompt = format_changes_as_prompt(&changes, "bob");
+    assert!(
+        self_prompt.is_none(),
+        "author of the entry should never be woken by their own write"
+    );
+}

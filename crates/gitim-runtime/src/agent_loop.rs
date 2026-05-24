@@ -1367,13 +1367,29 @@ fn is_card_change(kind: &str) -> bool {
 
 fn card_entry_targets_self(kind: &str, entry: &serde_json::Value, self_handler: &str) -> bool {
     match kind {
-        "card_thread" => entry_mentions_handler(entry, self_handler),
+        // Card discussion: wake the reporter, the current assignee,
+        // or anyone explicitly @mentioned. Daemon attaches recipients
+        // for the role-based routing; mention is the bare-metal
+        // fallback when daemon didn't (older daemon, missing card
+        // meta, etc.) — both paths converge here.
+        "card_thread" => {
+            entry_recipients_target_self(entry, self_handler)
+                || entry_mentions_handler(entry, self_handler)
+        }
         "card_meta" => {
             entry["assignee"].as_str() == Some(self_handler)
                 || entry_mentions_handler(entry, self_handler)
         }
         _ => true,
     }
+}
+
+fn entry_recipients_target_self(entry: &serde_json::Value, self_handler: &str) -> bool {
+    entry["recipients"].as_array().is_some_and(|recipients| {
+        recipients
+            .iter()
+            .any(|value| value.as_str() == Some(self_handler))
+    })
 }
 
 fn entry_mentions_handler(entry: &serde_json::Value, self_handler: &str) -> bool {
