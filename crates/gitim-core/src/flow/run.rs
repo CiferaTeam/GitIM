@@ -32,7 +32,7 @@ impl RunId {
         let now = chrono::Utc::now();
         let timestamp = now.format("%Y%m%dT%H%M%S");
         let mut hash_bytes = [0u8; 3];
-        getrandom::getrandom(&mut hash_bytes).expect("getrandom failed");
+        crate::preconditions::random_bytes(&mut hash_bytes);
         let hash = hex::encode(hash_bytes);
         Self(format!("{}-{}", timestamp, hash))
     }

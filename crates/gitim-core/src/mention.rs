@@ -3,7 +3,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 static MENTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>").unwrap());
+    LazyLock::new(|| crate::preconditions::regex_literal(r"<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>"));
 
 /// 从消息 body 中提取协议级 mention，去重，按首次出现顺序返回。
 pub fn extract_mentions(body: &str) -> Vec<Handler> {

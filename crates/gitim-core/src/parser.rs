@@ -21,10 +21,9 @@ pub enum ParseError {
 // rejected anything compound and silently fell through the parser
 // (offending lines were treated as continuation text).
 static MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+    crate::preconditions::regex_literal(
         r"^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z][a-z0-9_-]*)\])? (.+)$",
     )
-    .unwrap()
 });
 
 pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
@@ -41,8 +40,8 @@ pub fn parse_thread(input: &str) -> Result<ThreadFile, ParseError> {
         if let Some(caps) = MSG_RE.captures(line) {
             finalize_entry(&mut entries, current_body.take());
 
-            let line_number: u64 = caps[1].parse().unwrap();
-            let point_to: u64 = caps[2].parse().unwrap();
+            let line_number: u64 = crate::preconditions::parse_u64(&caps[1]);
+            let point_to: u64 = crate::preconditions::parse_u64(&caps[2]);
             // `system` is rejected by `Handler::new` (it's reserved so no
             // user can claim it), but the daemon's cron engine emits
             // `[@system]` lines for cron fires. Reading those back has to

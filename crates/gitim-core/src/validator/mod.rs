@@ -60,7 +60,7 @@ pub fn validate_channel_meta(yaml: &str) -> Result<ChannelMeta, ValidationError>
         field: "created_by".into(),
         reason: "must be a valid handler".into(),
     })?;
-    let ts_re = regex::Regex::new(r"^\d{8}T\d{6}Z$").unwrap();
+    let ts_re = crate::preconditions::regex_literal(r"^\d{8}T\d{6}Z$");
     if !ts_re.is_match(&meta.created_at) {
         return Err(ValidationError::FieldConstraint {
             field: "created_at".into(),

@@ -11,6 +11,7 @@ pub mod link;
 pub mod me_json;
 pub mod mention;
 pub mod parser;
+pub mod preconditions;
 pub mod recipients;
 pub mod responses;
 // timer uses fs2 for advisory file locking, which has no wasm32 backend.

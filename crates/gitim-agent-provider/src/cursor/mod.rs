@@ -486,26 +486,22 @@ fn handle_assistant_message(
 
     for block in parsed.content {
         match block.r#type.as_str() {
-            "output_text" | "text" => {
-                if !block.text.is_empty() {
-                    output.push_str(&block.text);
-                    try_send_event(
-                        event_tx,
-                        Event::Text {
-                            content: block.text,
-                        },
-                    );
-                }
+            "output_text" | "text" if !block.text.is_empty() => {
+                output.push_str(&block.text);
+                try_send_event(
+                    event_tx,
+                    Event::Text {
+                        content: block.text,
+                    },
+                );
             }
-            "thinking" => {
-                if !block.text.is_empty() {
-                    try_send_event(
-                        event_tx,
-                        Event::Thinking {
-                            content: block.text,
-                        },
-                    );
-                }
+            "thinking" if !block.text.is_empty() => {
+                try_send_event(
+                    event_tx,
+                    Event::Thinking {
+                        content: block.text,
+                    },
+                );
             }
             "tool_use" => {
                 let input = block
