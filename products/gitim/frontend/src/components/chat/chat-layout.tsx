@@ -181,17 +181,6 @@ export function ChatLayout() {
     }
   }, [currentScopeKey, workspaceKey]);
 
-  const restoreForChannel = useCallback((name: string): ChatViewportAnchor | null => {
-    const scopeKey = scopeKeyForChannelName(name);
-    return viewAnchorsRef.current.get(scopeKey) ??
-      readChatScopeViewAnchor(workspaceKey, scopeKey);
-  }, [scopeKeyForChannelName, workspaceKey]);
-  const persistedRestoreAnchor = useMemo(
-    () => readChatScopeViewAnchor(workspaceKey, currentScopeKey),
-    [workspaceKey, currentScopeKey],
-  );
-  const messageRestoreAnchor = restoreAnchor ?? persistedRestoreAnchor;
-
   const handleViewportAnchorChange = useCallback(
     (anchor: ChatViewportAnchor) => {
       if (!currentScopeKey) return;
@@ -215,11 +204,9 @@ export function ChatLayout() {
         options.markRead !== false && targetState.unreadCount > 0
           ? targetState.firstUnreadLine
           : null;
-      const targetAnchor = unreadTargetLine ? null : restoreForChannel(name);
       const pendingTargetLine = options.targetLine ?? unreadTargetLine ?? null;
-      const targetLine = pendingTargetLine ?? targetAnchor?.line ?? null;
       rememberCurrentScroll();
-      setRestoreAnchor(pendingTargetLine ? null : targetAnchor);
+      setRestoreAnchor(null);
       selectChannel(name);
       setPendingScrollLine(pendingTargetLine);
       writeActiveChatScope(requestWorkspaceKey, targetScopeKey);
@@ -230,7 +217,7 @@ export function ChatLayout() {
         requestSlug,
         apiChannel,
         MESSAGES_PAGE_SIZE,
-        targetLine ? computeAnchoredReadSince(targetLine) : undefined,
+        pendingTargetLine ? computeAnchoredReadSince(pendingTargetLine) : undefined,
       );
       if (
         res.ok &&
@@ -249,7 +236,6 @@ export function ChatLayout() {
       activeSlug,
       workspaceKey,
       rememberCurrentScroll,
-      restoreForChannel,
       scopeKeyForChannelName,
       selectChannel,
       clearUnread,
@@ -742,7 +728,7 @@ export function ChatLayout() {
           replyTo={replyTo}
           highlightLine={highlightLine}
           pendingScrollLine={pendingScrollLine}
-          restoreAnchor={messageRestoreAnchor}
+          restoreAnchor={restoreAnchor}
           onHighlightLineChange={setHighlightLine}
           onPendingScrollClear={handlePendingScrollClear}
           onViewportAnchorChange={handleViewportAnchorChange}

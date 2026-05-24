@@ -482,10 +482,8 @@ export default function App() {
           const scopeState = readChatScopeState(workspaceKey, nextChannelScopeKey);
           pendingLineForChannel =
             scopeState.unreadCount > 0 ? scopeState.firstUnreadLine : null;
-          const targetLine =
-            pendingLineForChannel ?? scopeState.viewAnchorLine ?? null;
-          readSinceForChannel = targetLine
-            ? computeAnchoredReadSince(targetLine)
+          readSinceForChannel = pendingLineForChannel
+            ? computeAnchoredReadSince(pendingLineForChannel)
             : undefined;
         }
       }

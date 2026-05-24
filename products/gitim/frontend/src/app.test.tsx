@@ -621,7 +621,7 @@ describe("App card thread toasts", () => {
     });
   });
 
-  it("reads around the persisted channel anchor on a fresh /chat bootstrap", async () => {
+  it("reads the latest page on a fresh /chat bootstrap despite a persisted channel anchor", async () => {
     writeActiveChatScope("runtime:room", "channel:general");
     writeChatScopeViewAnchor("runtime:room", "channel:general", {
       line: 321,
@@ -641,7 +641,7 @@ describe("App card thread toasts", () => {
       await flushPromises();
     });
 
-    expect(mocks.client.read).toHaveBeenCalledWith("room", "general", 50, 308);
+    expect(mocks.client.read).toHaveBeenCalledWith("room", "general", 50, undefined);
   });
 
   it("restores unread state after a refresh once the poll cursor already advanced", async () => {

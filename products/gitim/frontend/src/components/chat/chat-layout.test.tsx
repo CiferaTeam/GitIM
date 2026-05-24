@@ -425,7 +425,7 @@ describe("ChatLayout all mention send", () => {
     expect(mocks.client.read).toHaveBeenCalledWith("room", "random", 50, undefined);
   });
 
-  it("restores persisted line anchor when /chat remounts with an existing current channel", async () => {
+  it("does not restore a persisted line anchor on normal /chat remount", async () => {
     writeChatScopeViewAnchor("runtime:room", "channel:general", {
       line: 321,
       offsetPx: 18,
@@ -439,8 +439,67 @@ describe("ChatLayout all mention send", () => {
     const list = document.querySelector<HTMLElement>(
       "[data-testid='message-list']",
     );
-    expect(list?.dataset.restoreAnchorLine).toBe("321");
-    expect(list?.dataset.restoreAnchorOffset).toBe("18");
+    expect(list?.dataset.restoreAnchorLine).toBe("");
+    expect(list?.dataset.restoreAnchorOffset).toBe("");
+  });
+
+  it("opens a channel at the latest page despite a persisted line anchor", async () => {
+    useChatStore.setState({
+      channels: [
+        {
+          name: "general",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis"],
+          created_by: "lewis",
+        },
+        {
+          name: "random",
+          kind: "channel",
+          unreadCount: 0,
+          hasMention: false,
+          members: ["lewis"],
+          created_by: "lewis",
+        },
+      ],
+      currentChannel: "general",
+      messages: [],
+    });
+    writeChatScopeViewAnchor("runtime:room", "channel:random", {
+      line: 321,
+      offsetPx: 18,
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const selectRandom = document.querySelector<HTMLButtonElement>(
+      "[data-testid='select-random-channel']",
+    );
+    expect(selectRandom).not.toBeNull();
+
+    await act(async () => {
+      selectRandom!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().currentChannel).toBe("random");
+    expect(useChatStore.getState().pendingScrollLine).toBeNull();
+    expect(mocks.client.read).toHaveBeenLastCalledWith(
+      "room",
+      "random",
+      50,
+      undefined,
+    );
+    const list = document.querySelector<HTMLElement>(
+      "[data-testid='message-list']",
+    );
+    expect(list?.dataset.restoreAnchorLine).toBe("");
+    expect(list?.dataset.restoreAnchorOffset).toBe("");
   });
 
   it("uses firstUnreadLine when opening a channel with persisted unread state", async () => {
