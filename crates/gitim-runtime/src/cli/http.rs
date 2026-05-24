@@ -165,11 +165,10 @@ impl Client {
         //
         // Default reqwest builder has NO timeout, so leaving `.timeout(...)`
         // off would let the CLI hang indefinitely — both regimes are explicit.
-        let inner = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(DEFAULT_REQUEST_TIMEOUT)
-            .build()
-            .expect("reqwest client builds with default settings");
+        let inner = crate::preconditions::reqwest_client_with_defaults(
+            CONNECT_TIMEOUT,
+            DEFAULT_REQUEST_TIMEOUT,
+        );
         Self { base_url, inner }
     }
 

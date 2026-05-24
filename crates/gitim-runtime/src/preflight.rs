@@ -931,8 +931,8 @@ pub async fn preflight_pi_with_config(
         }
     };
 
-    let mut stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
+    let mut stdin = crate::preconditions::take_tokio_piped_stdin(&mut child);
+    let stdout = crate::preconditions::take_tokio_piped_stdout(&mut child);
 
     // Send the prompt.
     let prompt_msg = b"{\"type\":\"prompt\",\"message\":\"Reply with exactly: GITIM_OK\"}\n";
@@ -1167,8 +1167,8 @@ async fn preflight_hermes_acp(
         }
     };
 
-    let mut stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
+    let mut stdin = crate::preconditions::take_tokio_piped_stdin(&mut child);
+    let stdout = crate::preconditions::take_tokio_piped_stdout(&mut child);
     let mut reader = BufReader::new(stdout).lines();
 
     // Send ACP initialize and wait for a valid response.
@@ -1452,8 +1452,8 @@ pub async fn preflight_kimi_with_config(
         }
     };
 
-    let mut stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
+    let mut stdin = crate::preconditions::take_tokio_piped_stdin(&mut child);
+    let stdout = crate::preconditions::take_tokio_piped_stdout(&mut child);
     let mut reader = BufReader::new(stdout).lines();
 
     // 3. Drive initialize → session/new → optional set_model → prompt,
@@ -1790,7 +1790,7 @@ pub async fn preflight_cursor_with_config(
     };
 
     // 3. Read until first terminal event or timeout.
-    let stdout = child.stdout.take().expect("piped stdout");
+    let stdout = crate::preconditions::take_tokio_piped_stdout(&mut child);
     let mut reader = BufReader::new(stdout).lines();
 
     enum HelloOutcome {

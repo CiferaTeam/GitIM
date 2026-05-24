@@ -133,13 +133,18 @@ pub fn parse_github_url(url: &str) -> Result<(String, String), GithubError> {
     // here so callers don't silently hit the wrong API.
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
-            .expect("static regex compiles")
+        crate::preconditions::regex_compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
     });
     let caps = re
         .captures(url)
         .ok_or_else(|| GithubError::ParseError(format!("not a github.com repo url: {url}")))?;
-    let owner = caps.get(1).unwrap().as_str().to_string();
-    let repo = caps.get(2).unwrap().as_str().to_string();
+    let owner = caps
+        .get(1)
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| GithubError::ParseError(format!("regex capture failed for owner: {url}")))?;
+    let repo = caps
+        .get(2)
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| GithubError::ParseError(format!("regex capture failed for repo: {url}")))?;
     Ok((owner, repo))
 }

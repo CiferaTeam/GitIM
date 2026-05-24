@@ -406,10 +406,7 @@ impl Default for RuntimeState {
         let (fleet_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             last_activity: std::sync::atomic::AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
+                crate::preconditions::unix_timestamp_now(),
             ),
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
@@ -431,19 +428,16 @@ pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
 
 /// Update the last-activity timestamp to now.
 pub fn touch_activity(state: &SharedRuntimeState) {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(state);
     s.last_activity.store(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        crate::preconditions::unix_timestamp_now(),
         std::sync::atomic::Ordering::Relaxed,
     );
 }
 
 /// Check if any agent is currently running across all workspaces.
 pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(state);
     s.workspaces
         .values()
         .flat_map(|w| w.agents.values())
@@ -451,7 +445,7 @@ pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
 }
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(&state);
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
@@ -518,7 +512,7 @@ fn with_workspace_snapshot<F, R>(
 where
     F: FnOnce(&crate::workspace::WorkspaceContext) -> R,
 {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(state);
     let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
     Ok(f(ctx))
 }
@@ -532,7 +526,7 @@ fn with_workspace_mut<F, R>(
 where
     F: FnOnce(&mut crate::workspace::WorkspaceContext) -> R,
 {
-    let mut s = state.lock().unwrap();
+    let mut s = crate::preconditions::arc_mutex_lock(state);
     let ctx = s.workspaces.get_mut(slug).ok_or_else(not_found_workspace)?;
     Ok(f(ctx))
 }
@@ -606,7 +600,7 @@ fn human_client(
     slug: &str,
 ) -> Result<GitimClient, axum::response::Response> {
     use axum::response::IntoResponse;
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(state);
     let ctx = s.workspaces.get(slug).ok_or_else(not_found_workspace)?;
     match &ctx.human_repo {
         Some(p) => Ok(GitimClient::new(p)),
@@ -1785,28 +1779,22 @@ struct TimelineResponse {
 fn default_window_now(
     now: chrono::DateTime<chrono::Utc>,
 ) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
-    use chrono::{Datelike, NaiveDate, TimeZone};
+    use chrono::{Datelike, TimeZone};
     let year = now.year();
     let month = now.month();
     // First day of current month, 00:00:00 UTC.
-    let from_date = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");
-    let from = chrono::Utc.from_utc_datetime(
-        &from_date
-            .and_hms_opt(0, 0, 0)
-            .expect("00:00:00 always valid"),
-    );
+    let from = chrono::Utc.from_utc_datetime(&crate::preconditions::naive_datetime(
+        year, month, 1, 0, 0, 0,
+    ));
     // First day of NEXT month, then minus one second → end of current month.
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
     };
-    let next_date = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid next month");
-    let next_start = chrono::Utc.from_utc_datetime(
-        &next_date
-            .and_hms_opt(0, 0, 0)
-            .expect("00:00:00 always valid"),
-    );
+    let next_start = chrono::Utc.from_utc_datetime(&crate::preconditions::naive_datetime(
+        next_year, next_month, 1, 0, 0, 0,
+    ));
     let to = next_start - chrono::Duration::seconds(1);
     (from, to)
 }
@@ -2594,7 +2582,7 @@ async fn agents_add(
     }
 
     let (workspace, human_repo, already_exists) = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get(&slug) {
             Some(c) => c,
             None => return not_found_workspace(),
@@ -2802,7 +2790,7 @@ async fn agents_add(
         Ok(handle) => {
             // Recheck after async provision to prevent duplicate loops from concurrent requests
             {
-                let s = state.lock().unwrap();
+                let s = crate::preconditions::arc_mutex_lock(&state);
                 if let Some(ctx) = s.workspaces.get(&slug) {
                     if ctx.agents.contains_key(&req.handler) {
                         return Json(AgentAddResponse {
@@ -2844,8 +2832,10 @@ async fn agents_add(
                         ..Default::default()
                     };
                     let merged = existing.merged_with(patch);
-                    let _ =
-                        std::fs::write(&me_path, serde_json::to_string_pretty(&merged).unwrap());
+                    let _ = std::fs::write(
+                        &me_path,
+                        crate::preconditions::json_to_string_pretty(&merged),
+                    );
                 }
             }
 
@@ -3056,7 +3046,7 @@ async fn agents_add(
                 loop_handle: None,
             };
             {
-                let mut s = state.lock().unwrap();
+                let mut s = crate::preconditions::arc_mutex_lock(&state);
                 if let Some(ctx) = s.workspaces.get_mut(&slug) {
                     ctx.agents.insert(req.handler.clone(), info);
                 } else {
@@ -3193,7 +3183,7 @@ struct AgentRemoveRequest {
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
     let (repo_root, handler, provider, model, system_prompt, env, activity_tx, workspace_root) = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(state);
         let ctx = s
             .workspaces
             .get(slug)
@@ -3253,7 +3243,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                     "agent self-departed before runtime startup, triggering cleanup"
                 );
                 let cleanup_inputs = {
-                    let s = state_clone.lock().unwrap();
+                    let s = crate::preconditions::arc_mutex_lock(&state_clone);
                     s.workspaces.get(&owned_slug).and_then(|ctx| {
                         ctx.agents.get(&owned_id).map(|info| {
                             (
@@ -3295,7 +3285,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
             }
             Err(e) => {
                 tracing::error!(error = %e, "agent loop init failed");
-                let mut s = state_clone.lock().unwrap();
+                let mut s = crate::preconditions::arc_mutex_lock(&state_clone);
                 if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                     if let Some(info) = ctx.agents.get_mut(&owned_id) {
                         info.loop_handle = None;
@@ -3341,7 +3331,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                         "agent self-departed, triggering runtime cleanup"
                     );
                     let cleanup_inputs = {
-                        let s = state_clone.lock().unwrap();
+                        let s = crate::preconditions::arc_mutex_lock(&state_clone);
                         s.workspaces.get(&owned_slug).and_then(|ctx| {
                             ctx.agents.get(&owned_id).map(|info| {
                                 (
@@ -3446,7 +3436,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
 
     let abort_handle = handle.abort_handle();
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(state);
         if let Some(ctx) = s.workspaces.get_mut(slug) {
             if let Some(info) = ctx.agents.get_mut(agent_id) {
                 info.loop_handle = Some(abort_handle);
@@ -3484,7 +3474,7 @@ async fn agents_get(
         )
             .into_response();
     }
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(&state);
     let ctx = match s.workspaces.get(&slug) {
         Some(c) => c,
         None => return not_found_workspace(),
@@ -3572,7 +3562,7 @@ async fn agents_patch(
 
     // 1. Look up agent; clone repo_path so we can release the lock before I/O.
     let repo_root = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get(&slug) {
             Some(c) => c,
             None => return not_found_workspace(),
@@ -3703,7 +3693,7 @@ async fn agents_patch(
         }
     }
 
-    if let Err(e) = std::fs::write(&me_path, serde_json::to_string_pretty(&me).unwrap()) {
+    if let Err(e) = std::fs::write(&me_path, crate::preconditions::json_to_string_pretty(&me)) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorBody::new(format!("write me.json failed: {e}"))),
@@ -3908,7 +3898,7 @@ async fn agents_patch(
     // me.json write is harmless residual since the agent dir gets cleaned up
     // on remove anyway.
     let response = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         if let Some(ctx) = s.workspaces.get_mut(&slug) {
             if let Some(info) = ctx.agents.get_mut(&agent_id) {
                 if let Some(sp_opt) = &req.system_prompt {
@@ -3985,7 +3975,7 @@ async fn agents_remove(
     );
 
     let (workspace_path, repo_path, loop_handle, provider) = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
             None => return not_found_workspace(),
@@ -4038,7 +4028,7 @@ async fn agents_remove(
         }
     }
 
-    let mut s = state.lock().unwrap();
+    let mut s = crate::preconditions::arc_mutex_lock(&state);
     let ctx = match s.workspaces.get_mut(&slug) {
         Some(c) => c,
         None => return not_found_workspace(),
@@ -4095,7 +4085,7 @@ async fn agents_burn(
     // somehow types a human handler — it can't accidentally archive a
     // human user via this path.
     let (workspace_path, repo_path, loop_handle, provider, activity_tx) = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
             None => return not_found_workspace(),
@@ -4303,7 +4293,7 @@ pub(crate) async fn cleanup_agent_runtime_side(
     // this stage is a no-op (workspace was dropped concurrently — rare,
     // and the agent is already gone from a user-visible standpoint).
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(state);
         if let Some(ctx) = s.workspaces.get_mut(slug) {
             ctx.agents.remove(agent_id);
         }
@@ -4429,7 +4419,7 @@ async fn agents_stop(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let abort_handle = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
             None => return not_found_workspace(),
@@ -4481,7 +4471,7 @@ async fn fleet_events(
     State(state): State<SharedRuntimeState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.fleet_tx.subscribe()
     };
 
@@ -4500,7 +4490,7 @@ async fn fleet_events(
 
 async fn fleet_nodes_list(State(state): State<SharedRuntimeState>) -> Json<FleetNodesListResponse> {
     let nodes = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.fleet_nodes
             .values()
             .map(|node| node.entry.clone())
@@ -4511,7 +4501,7 @@ async fn fleet_nodes_list(State(state): State<SharedRuntimeState>) -> Json<Fleet
 
 async fn fleet_status(State(state): State<SharedRuntimeState>) -> Json<FleetStatusResponse> {
     let mut nodes: Vec<_> = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.fleet_status.values().cloned().collect()
     };
     nodes.sort_by(|a, b| {
@@ -4584,7 +4574,7 @@ async fn fleet_nodes_delete(
     let mut cfg = crate::user_config::read();
     let config_existed = cfg.remove_fleet_node(&node_id);
     let runtime_existed = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.fleet_nodes.contains_key(&node_id)
     };
     if !config_existed && !runtime_existed {
@@ -4656,7 +4646,7 @@ async fn recover_single_workspace(
     workspace: PathBuf,
 ) {
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         if s.workspaces.contains_key(&slug) {
             tracing::warn!(slug=%slug, "slug already present; skipping duplicate recovery");
             return;
@@ -4708,7 +4698,7 @@ async fn recover_single_workspace(
         };
         match provision_human(&workspace, &remote_url, &git_server, auth).await {
             Ok(dir) => {
-                let mut s = state.lock().unwrap();
+                let mut s = crate::preconditions::arc_mutex_lock(&state);
                 if let Some(ctx) = s.workspaces.get_mut(&slug) {
                     ctx.human_repo = Some(dir);
                 }
@@ -4729,7 +4719,7 @@ async fn recover_single_workspace(
 /// caller inserts it before calling us).
 pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str, workspace: &Path) {
     {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         if !s.workspaces.contains_key(slug) {
             tracing::warn!(slug=%slug, "workspace missing during agent recovery; skipping scan");
             return;
@@ -4803,7 +4793,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 model.as_deref(),
             );
             let activity_tx = {
-                let s = state.lock().unwrap();
+                let s = crate::preconditions::arc_mutex_lock(&state);
                 match s.workspaces.get(slug) {
                     Some(ctx) => ctx.activity_tx.clone(),
                     None => {
@@ -4823,7 +4813,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 detail: msg.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
-            let mut s = state.lock().unwrap();
+            let mut s = crate::preconditions::arc_mutex_lock(&state);
             match s.workspaces.get_mut(slug) {
                 Some(ctx) => {
                     ctx.agents.insert(
@@ -4888,7 +4878,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 provider_raw,
                 model.as_deref(),
             );
-            let mut s = state.lock().unwrap();
+            let mut s = crate::preconditions::arc_mutex_lock(&state);
             match s.workspaces.get_mut(slug) {
                 Some(ctx) => {
                     ctx.agents.insert(
@@ -5082,7 +5072,7 @@ fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSumma
 }
 
 async fn workspaces_list(State(state): State<SharedRuntimeState>) -> Json<WorkspacesListResponse> {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(&state);
     let mut workspaces: Vec<WorkspaceSummary> =
         s.workspaces.values().map(workspace_summary).collect();
     // Deterministic order makes the response stable for tests and WebUI.
@@ -5097,7 +5087,7 @@ async fn workspaces_get(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(&state);
     match s.workspaces.get(&slug) {
         Some(ctx) => {
             let provider = ctx
@@ -5140,7 +5130,7 @@ async fn workspaces_delete(
     use axum::response::IntoResponse;
 
     let mut removed = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         match s.workspaces.remove(&slug) {
             Some(ctx) => ctx,
             None => {
@@ -5302,7 +5292,7 @@ async fn provision_github_workspace(
     #[cfg(not(windows))]
     {
         let (github_api, clone_override) = {
-            let s = state.lock().unwrap();
+            let s = crate::preconditions::arc_mutex_lock(state);
             (s.github_api.clone(), s.clone_url_override.clone())
         };
 
@@ -5466,7 +5456,7 @@ async fn workspaces_create(
     // the shared directory — killing the live workspace's daemon and deleting
     // its `.gitim-runtime/` tree.
     let slug = {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
 
         if let Some(existing) = s.workspaces.values().find(|w| w.path == workspace) {
             let existing_slug = existing.slug.clone();
@@ -5518,7 +5508,9 @@ async fn workspaces_create(
             let token = match req.git.token.as_ref() {
                 Some(t) if !t.is_empty() => t.clone(),
                 _ => {
-                    state.lock().unwrap().workspaces.remove(&slug);
+                    crate::preconditions::arc_mutex_lock(&state)
+                        .workspaces
+                        .remove(&slug);
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
@@ -5533,7 +5525,9 @@ async fn workspaces_create(
             let remote_url = match req.git.remote_url.as_ref() {
                 Some(u) if !u.is_empty() => u.clone(),
                 _ => {
-                    state.lock().unwrap().workspaces.remove(&slug);
+                    crate::preconditions::arc_mutex_lock(&state)
+                        .workspaces
+                        .remove(&slug);
                     cleanup_partial_workspace(&workspace);
                     return (
                         StatusCode::BAD_REQUEST,
@@ -5548,7 +5542,9 @@ async fn workspaces_create(
             provision_github_workspace(&state, &workspace, remote_url, token).await
         }
         other => {
-            state.lock().unwrap().workspaces.remove(&slug);
+            crate::preconditions::arc_mutex_lock(&state)
+                .workspaces
+                .remove(&slug);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorBody::with_code(
@@ -5563,7 +5559,9 @@ async fn workspaces_create(
     let (human_dir, config) = match provisioned {
         Ok(x) => x,
         Err((error_code, message)) => {
-            state.lock().unwrap().workspaces.remove(&slug);
+            crate::preconditions::arc_mutex_lock(&state)
+                .workspaces
+                .remove(&slug);
             cleanup_partial_workspace(&workspace);
             // All provisioning failures surface as 400: they're all "your input
             // or environment caused this" (bad token, bad URL, clone failed).
@@ -5580,7 +5578,7 @@ async fn workspaces_create(
     // persist to ~/.gitim/runtime.json so the workspace survives a restart.
     let provider_for_response;
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
         match s.workspaces.get_mut(&slug) {
             Some(ctx) => {
                 ctx.human_repo = Some(human_dir);
@@ -5611,7 +5609,9 @@ async fn workspaces_create(
     });
     if let Err(e) = crate::user_config::write(&user_cfg) {
         tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
-        state.lock().unwrap().workspaces.remove(&slug);
+        crate::preconditions::arc_mutex_lock(&state)
+            .workspaces
+            .remove(&slug);
         cleanup_partial_workspace(&workspace);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6087,7 +6087,7 @@ mod tests {
 
         let (router, state) = create_router();
         {
-            let mut s = state.lock().unwrap();
+            let mut s = crate::preconditions::arc_mutex_lock(&state);
             s.workspaces.insert(
                 "room".to_string(),
                 crate::workspace::WorkspaceContext::new(
@@ -6153,7 +6153,7 @@ mod tests {
 
         let (router, state) = create_router();
         {
-            let mut s = state.lock().unwrap();
+            let mut s = crate::preconditions::arc_mutex_lock(&state);
             s.workspaces.insert(
                 "room".to_string(),
                 crate::workspace::WorkspaceContext::new(
