@@ -90,7 +90,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         no_join_general: args.no_join_general,
         llm_provider: args.llm_provider.as_deref(),
         llm_model: args.llm_model.as_deref(),
-    });
+    })?;
 
     // `add-agent` opts into the long-form timeout: the runtime handler
     // `git clone`s the workspace remote inline before responding, and a
@@ -221,13 +221,15 @@ struct BuildArgs<'a> {
 /// - `join_general`: only emitted when the user explicitly passed
 ///   `--no-join-general`. Default behavior at the runtime is "join", so we
 ///   simply don't send the field unless we're overriding to false.
-fn build_add_agent_body(args: BuildArgs<'_>) -> serde_json::Value {
+fn build_add_agent_body(args: BuildArgs<'_>) -> Result<serde_json::Value, CliError> {
     let mut body = json!({
         "handler": args.handler,
         "display_name": args.display_name,
         "provider": args.provider,
     });
-    let obj = body.as_object_mut().expect("starting body is an object");
+    let obj = body
+        .as_object_mut()
+        .ok_or_else(|| CliError::InvalidConfig("failed to build agent body".to_string()))?;
 
     if let Some(model) = args.model {
         obj.insert("model".to_string(), json!(model));
@@ -250,7 +252,7 @@ fn build_add_agent_body(args: BuildArgs<'_>) -> serde_json::Value {
     if let Some(m) = args.llm_model {
         obj.insert("llm_model".to_string(), json!(m));
     }
-    body
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -274,7 +276,8 @@ mod tests {
             no_join_general: false,
             llm_provider: None,
             llm_model: None,
-        });
+        })
+        .unwrap();
         let obj = body.as_object().expect("body is object");
         assert_eq!(obj["handler"], "alice");
         assert_eq!(obj["display_name"], "Alice");
@@ -314,7 +317,8 @@ mod tests {
             no_join_general: false,
             llm_provider: Some("anthropic"),
             llm_model: Some("claude-opus-4-7"),
-        });
+        })
+        .unwrap();
         let obj = body.as_object().expect("body is object");
         assert_eq!(obj["provider"], "hermes");
         assert_eq!(obj["llm_provider"], "anthropic");
@@ -338,7 +342,8 @@ mod tests {
             no_join_general: true,
             llm_provider: None,
             llm_model: None,
-        });
+        })
+        .unwrap();
         assert_eq!(body["join_general"], false);
     }
 
@@ -359,7 +364,8 @@ mod tests {
             no_join_general: false,
             llm_provider: None,
             llm_model: None,
-        });
+        })
+        .unwrap();
         assert!(body.get("env").is_none());
     }
 
@@ -383,6 +389,7 @@ mod tests {
             llm_provider: None,
             llm_model: None,
         });
+        let body = body.unwrap();
         let env_obj = body["env"].as_object().expect("env is object");
         assert_eq!(env_obj["DEBUG"], "1");
         assert_eq!(env_obj["PORT"], "8080");

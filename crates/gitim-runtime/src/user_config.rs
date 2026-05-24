@@ -99,7 +99,7 @@ pub fn write_to(cfg: &UserConfig, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(cfg).unwrap();
+    let json = crate::preconditions::json_to_string_pretty(cfg);
     std::fs::write(path, json)
 }
 
