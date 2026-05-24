@@ -5,7 +5,6 @@ use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use regex::Regex;
 use serde_json::json;
 
 use gitim_client::{ensure_daemon, is_daemon_running, GitimClient};
@@ -91,36 +90,57 @@ fn validate_params(git_server: &GitServer, args: &OnboardArgs) {
 }
 
 fn build_auth(git_server: &GitServer, args: &OnboardArgs) -> AuthPayload {
-    // If handler + display_name are provided, use Git-style auth
-    // (works for both git and github modes with shared credentials)
-    if let (Some(handler), Some(display_name)) = (&args.handler, &args.display_name) {
-        return AuthPayload::Git {
-            handler: handler.clone(),
-            display_name: display_name.clone(),
-            github_email: None,
-        };
-    }
-
     match git_server {
         GitServer::Git => {
-            // validate_params guarantees handler+display_name for git mode
-            AuthPayload::Git {
-                handler: args.handler.as_ref().unwrap().clone(),
-                display_name: args.display_name.as_ref().unwrap().clone(),
-                github_email: None,
+            if let (Some(handler), Some(display_name)) = (&args.handler, &args.display_name) {
+                AuthPayload::Git {
+                    handler: handler.clone(),
+                    display_name: display_name.clone(),
+                    github_email: None,
+                }
+            } else {
+                eprintln!("Error: git mode requires --handler and --display-name");
+                process::exit(1);
             }
         }
-        GitServer::Github => AuthPayload::GitHub {
-            token: args.token.as_ref().unwrap().clone(),
-        },
-        GitServer::Gitea => AuthPayload::Gitea {
-            token: args.token.as_ref().unwrap().clone(),
-            url: args.url.as_ref().unwrap().clone(),
-        },
-        GitServer::Gitlab => AuthPayload::GitLab {
-            token: args.token.as_ref().unwrap().clone(),
-            url: args.url.as_ref().unwrap().clone(),
-        },
+        GitServer::Github => {
+            if let (Some(handler), Some(display_name)) = (&args.handler, &args.display_name) {
+                AuthPayload::Git {
+                    handler: handler.clone(),
+                    display_name: display_name.clone(),
+                    github_email: None,
+                }
+            } else if let Some(token) = &args.token {
+                AuthPayload::GitHub {
+                    token: token.clone(),
+                }
+            } else {
+                eprintln!("Error: github mode requires --handler + --display-name or --token");
+                process::exit(1);
+            }
+        }
+        GitServer::Gitea => {
+            if let (Some(token), Some(url)) = (&args.token, &args.url) {
+                AuthPayload::Gitea {
+                    token: token.clone(),
+                    url: url.clone(),
+                }
+            } else {
+                eprintln!("Error: gitea mode requires --token and --url");
+                process::exit(1);
+            }
+        }
+        GitServer::Gitlab => {
+            if let (Some(token), Some(url)) = (&args.token, &args.url) {
+                AuthPayload::GitLab {
+                    token: token.clone(),
+                    url: url.clone(),
+                }
+            } else {
+                eprintln!("Error: gitlab mode requires --token and --url");
+                process::exit(1);
+            }
+        }
     }
 }
 
@@ -275,7 +295,10 @@ fn clone_or_create_repo(
                 process::exit(1);
             });
 
-            let base_url = args.url.as_deref().unwrap();
+            let Some(base_url) = args.url.as_deref() else {
+                eprintln!("Error: gitea/gitlab mode requires --url");
+                process::exit(1);
+            };
             let repo_url = format!("{base_url}/{org}/{repo_name}.git");
 
             // Try clone
@@ -298,10 +321,19 @@ fn clone_or_create_repo(
                 }
 
                 // Gitea: create via API then clone
-                let token = args.token.as_deref().unwrap();
+                let Some(token) = args.token.as_deref() else {
+                    eprintln!("Error: gitea mode requires --token");
+                    process::exit(1);
+                };
                 let create_url = format!("{base_url}/api/v1/orgs/{org}/repos");
-                let body =
-                    serde_json::to_string(&json!({"name": repo_name, "private": true})).unwrap();
+                let body = match serde_json::to_string(&json!({"name": repo_name, "private": true}))
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error: failed to serialize JSON: {e}");
+                        process::exit(1);
+                    }
+                };
 
                 let api_ok = Command::new("curl")
                     .args([
@@ -356,7 +388,7 @@ fn ensure_config_debug_http(repo_dir: &Path, enabled: bool) {
         let mut content = fs::read_to_string(&config_path).unwrap_or_default();
         if content.contains("debug_http:") {
             // Replace existing value using regex to handle variable whitespace
-            let re = Regex::new(r"debug_http:\s*(true|false)").unwrap();
+            let re = gitim_core::preconditions::regex_literal(r"debug_http:\s*(true|false)");
             content = re
                 .replace(&content, format!("debug_http: {value}"))
                 .to_string();
