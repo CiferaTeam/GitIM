@@ -75,7 +75,7 @@ pub fn kill_daemons_blocking(ctx: &WorkspaceContext) {
 /// mutex against other HTTP handlers.
 pub fn kill_managed_daemons(state: &crate::http::SharedRuntimeState) {
     let snapshot: Vec<(Option<PathBuf>, Vec<PathBuf>)> = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(state);
         s.workspaces
             .values()
             .map(|w| {

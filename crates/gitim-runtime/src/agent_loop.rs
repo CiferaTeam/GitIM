@@ -893,13 +893,14 @@ impl AgentLoop {
                 }
                 _ = steering_check.tick() => {
                     match self.poller.peek().await {
-                        Ok(peek_result) if !peek_result.changes.is_empty() => {
-                            if detect_steering_trigger(&peek_result.changes, &self.handler) {
-                                info!("steering trigger detected, cancelling session");
-                                self.emit_activity("steering", "urgent message detected, interrupting");
-                                session.cancel();
-                                break;
-                            }
+                        Ok(peek_result)
+                            if !peek_result.changes.is_empty()
+                                && detect_steering_trigger(&peek_result.changes, &self.handler) =>
+                        {
+                            info!("steering trigger detected, cancelling session");
+                            self.emit_activity("steering", "urgent message detected, interrupting");
+                            session.cancel();
+                            break;
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "steering peek failed, continuing");

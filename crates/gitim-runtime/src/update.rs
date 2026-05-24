@@ -337,7 +337,7 @@ pub async fn update_and_restart(State(state): State<SharedRuntimeState>) -> Resp
     // 1. Strict install-dir check. Done first so dev-tree `cargo run`
     //    invocations of the endpoint fail loudly before we do any network IO.
     let exe_path = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.canonical_exe_path.clone()
     };
     if let Err(err) = strict_install_dir_check(&exe_path) {
@@ -354,7 +354,7 @@ pub async fn update_and_restart(State(state): State<SharedRuntimeState>) -> Resp
     // `tests/update_handler.rs::atomic_swap_supports_guard_contract` which
     // exercises the swap primitive directly instead.
     let guard = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         s.update_in_progress.clone()
     };
     if guard.swap(true, Ordering::SeqCst) {
@@ -461,7 +461,7 @@ pub async fn run_async_install_and_spawn(
     // Snapshot the bits the async phase needs *before* any failure branch so
     // we don't hold the mutex across blocking work.
     let (install_dir, canonical_exe, listen_port, guard) = {
-        let s = state.lock().unwrap();
+        let s = crate::preconditions::arc_mutex_lock(&state);
         let install = s
             .canonical_exe_path
             .parent()
@@ -591,7 +591,7 @@ fn record_async_error(
 ) {
     tracing::error!(%job_id, %detail, "update_and_restart: async phase failed");
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(state);
         s.update_last_error = Some(detail);
     }
     guard.store(false, Ordering::SeqCst);
@@ -610,7 +610,7 @@ fn record_async_error(
 async fn respawn_daemons_after_failure(state: &SharedRuntimeState, job_id: &str) {
     tracing::warn!(%job_id, "update_and_restart: respawning daemons after async-phase failure");
     {
-        let mut s = state.lock().unwrap();
+        let mut s = crate::preconditions::arc_mutex_lock(state);
         s.workspaces.clear();
     }
     crate::http::recover_from_config(state.clone()).await;

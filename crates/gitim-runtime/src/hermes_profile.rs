@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gitim_agent_provider::{create, PromptContext, ProviderConfig};
+use gitim_agent_provider::PromptContext;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -249,8 +249,7 @@ pub fn build_hermes_soul_body(
     // `ProviderConfig::default` is fine here — we only need the trait's
     // prompt methods, not the executable path / env. The trait surface
     // for system-prompt assembly is stateless wrt config.
-    let provider =
-        create("hermes", ProviderConfig::default()).expect("hermes is a built-in provider");
+    let provider = crate::preconditions::hermes_provider();
     let ctx = PromptContext { handler, model };
     let mut body = provider.build_system_prompt(&ctx);
     if let Some(custom) = custom_system_prompt {

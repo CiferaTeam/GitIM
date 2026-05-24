@@ -1,0 +1,69 @@
+# Clippy merge gate
+#
+# Operational semantics:
+# - Add label `ready-for-clippy` to a PR when you are ready for the final
+#   clippy check before merging.
+# - The workflow runs once per label application. If you push new commits
+#   after the check passes, remove and re-add the label to trigger a new
+#   check. A previous passing result does NOT apply after new commits.
+# - This workflow does NOT run on push/synchronize, only on labeled events.
+# - No `cargo test` is executed; this is a clippy-only gate.
+#
+# Design doc: <#gitim-quality-gate-0521:L000066>
+
+name: clippy-merge-gate
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    if: github.event.label.name == 'ready-for-clippy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Post result
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const success = '${{ job.status }}' === 'success';
+            const body = success
+              ? '✅ Clippy merge gate passed. Ready to merge.'
+              : '❌ Clippy merge gate failed. See job logs for details.';
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
