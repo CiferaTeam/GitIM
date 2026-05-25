@@ -425,12 +425,25 @@ describe("ChatLayout all mention send", () => {
     expect(mocks.client.read).toHaveBeenCalledWith("room", "random", 50, undefined);
   });
 
-  it("does not restore a persisted line anchor on normal /chat remount", async () => {
+  it("restores the persisted line anchor on /chat remount", async () => {
     writeChatScopeViewAnchor("runtime:room", "channel:general", {
       line: 321,
       offsetPx: 18,
     });
 
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const list = document.querySelector<HTMLElement>(
+      "[data-testid='message-list']",
+    );
+    expect(list?.dataset.restoreAnchorLine).toBe("321");
+    expect(list?.dataset.restoreAnchorOffset).toBe("18");
+  });
+
+  it("falls back to the latest page on remount when no anchor is persisted", async () => {
     await act(async () => {
       root!.render(<ChatLayout />);
       await Promise.resolve();

@@ -166,7 +166,29 @@ export function ChatLayout() {
 
   // Card drawer state — auto-close when switching channels.
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
-  const [restoreAnchor, setRestoreAnchor] = useState<ChatViewportAnchor | null>(null);
+  // Lazy init so a tab switch (chat ↔ cards) — which unmounts/remounts this
+  // route — lands back on the same scroll position instead of snapping to the
+  // bottom. User-initiated channel switches still clear this via
+  // setRestoreAnchor(null) inside handleChannelSelect so they show the latest.
+  const [restoreAnchor, setRestoreAnchor] = useState<ChatViewportAnchor | null>(
+    () => {
+      const chatStateNow = useChatStore.getState();
+      const channelName = chatStateNow.currentChannel;
+      if (!channelName) return null;
+      const channelKind = chatStateNow.channels.find(
+        (c) => c.name === channelName,
+      )?.kind;
+      const scopeKey = chatScopeKeyForName(channelName, channelKind);
+      const wsStateNow = useWorkspaceStore.getState();
+      const modeNow = useConnectionStore.getState().mode;
+      const active = wsStateNow.activeSlug
+        ? wsStateNow.workspaces.find((w) => w.slug === wsStateNow.activeSlug)
+        : null;
+      if (!active) return null;
+      const wsKey = workspaceIdentity(modeNow, active);
+      return readChatScopeViewAnchor(wsKey, scopeKey);
+    },
+  );
   const viewAnchorsRef = useRef<Map<string, ChatViewportAnchor>>(new Map());
   useEffect(() => {
     // Intentional: UX contract is "switching context closes transient overlays".
