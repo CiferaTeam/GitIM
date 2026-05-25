@@ -93,9 +93,7 @@ fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError
             {
                 // On non-Unix, try the portable kill. This is best-effort;
                 // the child will be reaped when it eventually exits.
-                let _ = Command::new("kill")
-                    .args([&pid.to_string()])
-                    .output();
+                let _ = Command::new("kill").args([&pid.to_string()]).output();
             }
             Err(GitError::Timeout(GIT_COMMAND_TIMEOUT))
         }
@@ -161,9 +159,12 @@ impl GitStorage {
 
     pub fn pull_rebase(&self) -> Result<(), GitError> {
         let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
-            "pull", "--rebase",
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "pull",
+            "--rebase",
         ];
         let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
@@ -227,9 +228,14 @@ impl GitStorage {
 
     pub fn push(&self) -> Result<(), GitError> {
         let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
-            "push", "-u", "origin", "HEAD",
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "-u",
+            "origin",
+            "HEAD",
         ];
         let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
@@ -246,9 +252,12 @@ impl GitStorage {
 
     pub fn fetch(&self) -> Result<(), GitError> {
         let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
-            "fetch", "origin",
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "fetch",
+            "origin",
         ];
         let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
@@ -289,7 +298,10 @@ impl GitStorage {
         if !self.head_is_on_branch()? {
             return Err(GitError::DetachedHead);
         }
-        let output = run_git(&["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], &self.root)?;
+        let output = run_git(
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            &self.root,
+        )?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut parts = stdout.split_whitespace();
         let behind: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -348,7 +360,10 @@ impl GitStorage {
     }
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
-        let output = run_git(&["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern], &self.root)?;
+        let output = run_git(
+            &["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern],
+            &self.root,
+        )?;
         Ok(Self::parse_diff_output(&String::from_utf8_lossy(
             &output.stdout,
         )))
@@ -395,7 +410,10 @@ impl GitStorage {
     /// List files changed between upstream and HEAD, matching a pattern.
     /// Returns relative paths (e.g. "channels/general.meta.yaml").
     pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
-        let output = run_git(&["diff", "--name-only", "@{upstream}..HEAD", "--", pattern], &self.root)?;
+        let output = run_git(
+            &["diff", "--name-only", "@{upstream}..HEAD", "--", pattern],
+            &self.root,
+        )?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -419,9 +437,14 @@ impl GitStorage {
 
     pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
         let merge_base_output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
-        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout).trim().to_string();
+        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
+            .trim()
+            .to_string();
         let range = format!("{}..HEAD", merge_base);
-        let output = run_git(&["diff", "--name-only", "--no-renames", &range, "--", pattern], &self.root)?;
+        let output = run_git(
+            &["diff", "--name-only", "--no-renames", &range, "--", pattern],
+            &self.root,
+        )?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -705,12 +728,8 @@ mod tests {
 
     #[test]
     fn disk_full_detection_matches_known_patterns() {
-        assert!(is_disk_full(
-            "fatal: cannot write: No space left on device"
-        ));
-        assert!(is_disk_full(
-            "error: No space left on device (os error 28)"
-        ));
+        assert!(is_disk_full("fatal: cannot write: No space left on device"));
+        assert!(is_disk_full("error: No space left on device (os error 28)"));
         assert!(is_disk_full("ENOSPC: write failed"));
         assert!(is_disk_full("disk full: cannot allocate"));
     }
