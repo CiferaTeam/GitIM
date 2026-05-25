@@ -26,6 +26,13 @@ pub const AUTH_FAILURE_TRIP_THRESHOLD: u32 = 3;
 /// Tracks consecutive auth failures and latches the `tripped` flag shared with daemon state.
 /// A successful remote op resets the counter; once tripped, the flag stays set
 /// until the daemon clears it (v1: restart = fresh state).
+///
+/// Clone is shallow: the latched `tripped` flag is `Arc<AtomicBool>` (shared),
+/// `consecutive_failures` is `u32` (copied). `start_sync_loop` clones the
+/// circuit into each `spawn_blocking` cycle, then copies the inner state back
+/// out — the counter survives across cycles via the return path, the latch
+/// survives via the shared Arc.
+#[derive(Clone)]
 pub struct AuthCircuit {
     pub tripped: Arc<AtomicBool>,
     consecutive_failures: u32,
@@ -105,10 +112,10 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     on_cycle_done: F4,
     rebase_author: Option<(String, String)>,
 ) where
-    F1: Fn() + Send + 'static,
-    F2: Fn(PathBuf, u64, u64) + Send + 'static,
-    F3: Fn(String) + Send + 'static,
-    F4: Fn() + Send + 'static,
+    F1: Fn() + Send + Sync + 'static,
+    F2: Fn(PathBuf, u64, u64) + Send + Sync + 'static,
+    F3: Fn(String) + Send + Sync + 'static,
+    F4: Fn() + Send + Sync + 'static,
 {
     if interval_secs == 0 {
         info!("sync_interval=0, auto-sync disabled");
@@ -126,6 +133,18 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     let jitter_range = base_ms / 3;
     let mut consecutive_rate_limits: u32 = 0;
     let mut circuit = AuthCircuit::new(auth_failed);
+
+    // Box callbacks into Arc<dyn Fn> so each cycle's spawn_blocking can
+    // own a cheap reference-counted clone — `run_sync_cycle` takes them as
+    // `&dyn Fn(..)` deref'd from the Arc. Sync bound on the F* params is
+    // load-bearing here: `Arc<F>: Sync` requires `F: Sync`, which the daemon's
+    // closures satisfy (they capture `Arc<AppState>`, itself Sync).
+    let on_pushed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(on_pushed);
+    let on_renumbered: Arc<dyn Fn(PathBuf, u64, u64) + Send + Sync + 'static> =
+        Arc::new(on_renumbered);
+    let on_synced: Arc<dyn Fn(String) + Send + Sync + 'static> = Arc::new(on_synced);
+    let on_cycle_done: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(on_cycle_done);
+    let rebase_author = Arc::new(rebase_author);
 
     info!(
         "sync loop started, interval={}s (jitter +0..{}ms)",
@@ -147,16 +166,53 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
             }
         }
 
-        let outcome = run_sync_cycle(
-            &repo,
-            &mut circuit,
-            &commit_lock,
-            &on_pushed,
-            &on_renumbered,
-            &on_synced,
-            &on_cycle_done,
-            rebase_author.as_ref(),
-        );
+        // Run the cycle on tokio's blocking thread pool. `run_sync_cycle`
+        // shells out to `git push`/`fetch` via `std::process::Command::output()`,
+        // which can stall for minutes on a slow GitHub remote (HTTP2 framing
+        // errors, partial fetches). Doing that on a regular tokio worker
+        // pins the worker for the full duration; on the blocking pool the
+        // async runtime stays responsive for chat reads/polls. `circuit`
+        // moves into the closure and a fresh copy comes back so the
+        // consecutive_failures counter persists across cycles.
+        let repo_clone = repo.clone();
+        let commit_lock_clone = commit_lock.clone();
+        let on_pushed_clone = on_pushed.clone();
+        let on_renumbered_clone = on_renumbered.clone();
+        let on_synced_clone = on_synced.clone();
+        let on_cycle_done_clone = on_cycle_done.clone();
+        let rebase_author_clone = rebase_author.clone();
+        let circuit_in = circuit.clone();
+
+        let join_result = tokio::task::spawn_blocking(move || {
+            let mut circuit_inner = circuit_in;
+            let outcome = run_sync_cycle(
+                &repo_clone,
+                &mut circuit_inner,
+                &commit_lock_clone,
+                &*on_pushed_clone,
+                &*on_renumbered_clone,
+                &*on_synced_clone,
+                &*on_cycle_done_clone,
+                rebase_author_clone.as_ref().as_ref(),
+            );
+            (outcome, circuit_inner)
+        })
+        .await;
+
+        let outcome = match join_result {
+            Ok((o, circuit_back)) => {
+                circuit = circuit_back;
+                o
+            }
+            Err(e) => {
+                // spawn_blocking only panics on JoinError if the closure
+                // panicked. run_sync_cycle is documented as "never panics,
+                // always logs", so this is a contract violation — log and
+                // treat as Normal so the loop survives.
+                error!("sync_cycle spawn_blocking failed: {e}");
+                SyncOutcome::Normal
+            }
+        };
 
         next_delay = match outcome {
             SyncOutcome::Normal => {
@@ -194,23 +250,22 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
 /// Execute one sync cycle. Completely self-contained — never panics, always logs.
 /// Made `pub` so integration tests can drive cycles deterministically without
 /// spawning the async loop.
+///
+/// Callbacks take `&dyn Fn(...)` rather than generic `F: Fn(...)` so the call
+/// site can pass deref'd `Arc<dyn Fn(...)>` from inside a `spawn_blocking`
+/// closure — `start_sync_loop` runs each cycle on the blocking thread pool to
+/// prevent slow `git push`/`fetch` subprocesses from pinning a tokio worker.
 #[allow(clippy::too_many_arguments)]
-pub fn run_sync_cycle<F1, F2, F3, F4>(
+pub fn run_sync_cycle(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &F1,
-    on_renumbered: &F2,
-    on_synced: &F3,
-    on_cycle_done: &F4,
+    on_pushed: &dyn Fn(),
+    on_renumbered: &dyn Fn(PathBuf, u64, u64),
+    on_synced: &dyn Fn(String),
+    on_cycle_done: &dyn Fn(),
     rebase_author: Option<&(String, String)>,
-) -> SyncOutcome
-where
-    F1: Fn(),
-    F2: Fn(PathBuf, u64, u64),
-    F3: Fn(String),
-    F4: Fn(),
-{
+) -> SyncOutcome {
     if circuit.is_tripped() {
         on_cycle_done();
         return SyncOutcome::AuthCircuitOpen;
@@ -359,18 +414,14 @@ fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
     }
 }
 
-fn sync_with_push<F1, F2>(
+fn sync_with_push(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &F1,
-    on_renumbered: &F2,
+    on_pushed: &dyn Fn(),
+    on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
-) -> SyncOutcome
-where
-    F1: Fn(),
-    F2: Fn(PathBuf, u64, u64),
-{
+) -> SyncOutcome {
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
         let push_result = repo.push();

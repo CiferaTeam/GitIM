@@ -32,27 +32,43 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         }
     }
 
-    // Use @{upstream} (current branch's tracking ref) when available, else HEAD.
-    let ref_name =
-        if state.git_storage.has_remote() && state.git_storage.rev_parse("@{upstream}").is_ok() {
-            "@{upstream}"
-        } else {
-            "HEAD"
-        };
+    // git subprocess invocations go through spawn_blocking so a slow fork
+    // (system busy, sync_loop holding /tmp pack-file locks, etc.) can't pin
+    // the tokio worker thread. Each call hands a cheap `GitStorage` clone
+    // (just a PathBuf inside) into the blocking thread pool.
+    let git_for_remote = state.git_storage.clone();
+    let (has_remote, upstream_ok) = match tokio::task::spawn_blocking(move || {
+        let has_remote = git_for_remote.has_remote();
+        let upstream_ok = has_remote && git_for_remote.rev_parse("@{upstream}").is_ok();
+        (has_remote, upstream_ok)
+    })
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return Response::error(format!("git probe task failed: {}", e)),
+    };
+    let _ = has_remote;
+    let ref_name = if upstream_ok { "@{upstream}" } else { "HEAD" };
 
     // Get current commit hash
-    let current_commit = match state.git_storage.rev_parse(ref_name) {
-        Ok(hash) => hash,
-        Err(e) => return Response::error(format!("failed to get commit: {}", e)),
-    };
+    let git_for_head = state.git_storage.clone();
+    let head_ref = ref_name.to_string();
+    let current_commit =
+        match tokio::task::spawn_blocking(move || git_for_head.rev_parse(&head_ref)).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(e)) => return Response::error(format!("failed to get commit: {}", e)),
+            Err(e) => return Response::error(format!("git rev-parse task failed: {}", e)),
+        };
 
     // No cursor → start from parent commit so the first poll picks up recent messages
     let since_commit = match since {
         Some(s) if !s.is_empty() => s,
         _ => {
-            match state.git_storage.rev_parse(&format!("{}~1", ref_name)) {
-                Ok(parent) => parent,
-                Err(_) => {
+            let git_for_parent = state.git_storage.clone();
+            let parent_ref = format!("{}~1", ref_name);
+            match tokio::task::spawn_blocking(move || git_for_parent.rev_parse(&parent_ref)).await {
+                Ok(Ok(parent)) => parent,
+                Ok(Err(_)) | Err(_) => {
                     // No parent (initial commit) — return sync point with no changes
                     let payload = gitim_core::responses::PollResponse {
                         commit_id: current_commit,
@@ -78,22 +94,21 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
         return Response::json(payload);
     }
 
-    // Compute diff
-    let diff = match state.git_storage.diff_range(&since_commit, &current_commit) {
-        Ok(d) => d,
-        Err(e) => return Response::error(format!("diff failed (commit may not exist): {}", e)),
-    };
-    let changed_files = match state
-        .git_storage
-        .changed_files_range(&since_commit, &current_commit)
+    // Compute diff + changed files in one blocking task — two git subprocesses
+    // back-to-back save half the spawn_blocking + tokio scheduling overhead.
+    let git_for_diff = state.git_storage.clone();
+    let since_clone = since_commit.clone();
+    let current_clone = current_commit.clone();
+    let (diff, changed_files) = match tokio::task::spawn_blocking(move || {
+        let diff = git_for_diff.diff_range(&since_clone, &current_clone)?;
+        let files = git_for_diff.changed_files_range(&since_clone, &current_clone)?;
+        Ok::<_, gitim_sync::git::GitError>((diff, files))
+    })
+    .await
     {
-        Ok(files) => files,
-        Err(e) => {
-            return Response::error(format!(
-                "changed files failed (commit may not exist): {}",
-                e
-            ))
-        }
+        Ok(Ok((d, f))) => (d, f),
+        Ok(Err(e)) => return Response::error(format!("diff failed (commit may not exist): {}", e)),
+        Err(e) => return Response::error(format!("git diff task failed: {}", e)),
     };
 
     // Parse changed files into entries

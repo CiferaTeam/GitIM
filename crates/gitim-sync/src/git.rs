@@ -31,6 +31,7 @@ pub enum GitError {
     DetachedHead,
 }
 
+#[derive(Clone)]
 pub struct GitStorage {
     root: PathBuf,
 }
