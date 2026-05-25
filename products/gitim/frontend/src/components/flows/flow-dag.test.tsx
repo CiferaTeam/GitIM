@@ -65,12 +65,12 @@ describe("FlowDAG node hover tooltip", () => {
   const nodes: FlowNodeSummary[] = [
     {
       id: "scope-gate",
-      type: "manual",
+      type: "human_review",
       prompt: "Validate scope before starting implementation.",
     },
     {
       id: "requirements",
-      type: "manual",
+      type: "human_review",
       needs: ["scope-gate"],
       prompt: "",
     },
