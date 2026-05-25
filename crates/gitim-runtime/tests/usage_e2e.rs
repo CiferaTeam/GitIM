@@ -70,6 +70,8 @@ fn harness(
             llm_provider: None,
             llm_model: None,
             usage_summary: None,
+            saturation_summary: None,
+            is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loop_handle: None,
         },
     );

@@ -89,6 +89,8 @@ fn insert_agent(state: &SharedRuntimeState, slug: &str, id: &str, repo_path: &Pa
             llm_provider: None,
             llm_model: None,
             usage_summary: None,
+            saturation_summary: None,
+            is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loop_handle: None,
         },
     );
