@@ -3241,6 +3241,19 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     agent_loop.set_runtime_state(state.clone());
     agent_loop.set_workspace_root(workspace_root);
 
+    // Inject the same Arc<AtomicBool> stored on AgentInfo so the sampler
+    // and the loop read/write the same flag without a lock.
+    let is_working = {
+        let s = crate::preconditions::arc_mutex_lock(state);
+        s.workspaces
+            .get(slug)
+            .and_then(|ctx| ctx.agents.get(agent_id))
+            .map(|info| info.is_working.clone())
+    };
+    if let Some(flag) = is_working {
+        agent_loop.set_is_working(flag);
+    }
+
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
     let state_clone = state.clone();
