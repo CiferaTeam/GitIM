@@ -22,6 +22,7 @@ pub mod model_catalog;
 pub mod poller;
 pub mod preflight;
 pub mod saturation_log;
+pub mod saturation_sampler;
 pub mod slug;
 pub mod state;
 pub mod token_propagation;
