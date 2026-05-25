@@ -239,6 +239,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     let board_to_rel = format!("archive/showboards/{}/board.md", handler);
     let board_active_path = state.repo_root.join(&board_from_rel);
     let mut commit_paths: Vec<&str> = vec![&to_rel];
+    let mut board_moved = false;
     if board_active_path.exists() {
         let board_archive_dir = state.repo_root.join("archive/showboards");
         if let Err(e) = std::fs::create_dir_all(board_archive_dir.join(&handler)) {
@@ -256,6 +257,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
                 e
             ));
         }
+        board_moved = true;
         commit_paths.push(&board_to_rel);
     }
 
@@ -267,7 +269,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
-        if board_active_path.exists() {
+        if board_moved {
             let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
         }
         if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
@@ -415,6 +417,7 @@ pub async fn handle_unarchive_user(
     let board_to_rel = format!("showboards/{}/board.md", handler);
     let board_archive_path = state.repo_root.join(&board_from_rel);
     let mut commit_paths: Vec<&str> = vec![&to_rel];
+    let mut board_moved = false;
     if board_archive_path.exists() {
         let showboards_dir = state.repo_root.join("showboards");
         if let Err(e) = std::fs::create_dir_all(showboards_dir.join(&handler)) {
@@ -431,6 +434,7 @@ pub async fn handle_unarchive_user(
                 e
             ));
         }
+        board_moved = true;
         commit_paths.push(&board_to_rel);
     }
 
@@ -442,7 +446,7 @@ pub async fn handle_unarchive_user(
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
-        if board_archive_path.exists() {
+        if board_moved {
             let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
         }
         if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
@@ -615,8 +619,14 @@ mod tests {
 
         assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
         assert!(!state.repo_root.join("showboards/alice/board.md").exists());
-        assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
-        assert!(state.repo_root.join("archive/showboards/alice/board.md").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
+        assert!(state
+            .repo_root
+            .join("archive/showboards/alice/board.md")
+            .exists());
     }
 
     #[tokio::test]
@@ -630,8 +640,14 @@ mod tests {
         assert!(resp.ok, "archive_user failed: {:?}", resp.error);
 
         assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
-        assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
-        assert!(!state.repo_root.join("archive/showboards/alice/board.md").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
+        assert!(!state
+            .repo_root
+            .join("archive/showboards/alice/board.md")
+            .exists());
     }
 
     #[tokio::test]
@@ -645,13 +661,20 @@ mod tests {
         let resp = handle_archive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
         assert!(resp.ok, "archive_user failed: {:?}", resp.error);
 
-        let resp = handle_unarchive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        let resp =
+            handle_unarchive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
         assert!(resp.ok, "unarchive_user failed: {:?}", resp.error);
 
         assert!(state.repo_root.join("users/alice.meta.yaml").exists());
         assert!(state.repo_root.join("showboards/alice/board.md").exists());
-        assert!(!state.repo_root.join("archive/users/alice.meta.yaml").exists());
-        assert!(!state.repo_root.join("archive/showboards/alice/board.md").exists());
+        assert!(!state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
+        assert!(!state
+            .repo_root
+            .join("archive/showboards/alice/board.md")
+            .exists());
     }
 
     #[tokio::test]
@@ -776,6 +799,68 @@ mod tests {
         assert!(
             stdout.contains("update introduction @alice"),
             "expected an update commit in:\n{stdout}"
+        );
+    }
+
+    fn install_failing_precommit_hook(repo: &std::path::Path) {
+        let hook = repo.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook, perms).unwrap();
+        }
+    }
+
+    fn remove_precommit_hook(repo: &std::path::Path) {
+        let _ = std::fs::remove_file(repo.join(".git/hooks/pre-commit"));
+    }
+
+    #[tokio::test]
+    async fn archive_user_rollbacks_board_on_commit_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        init_board_for(&state, "alice");
+
+        install_failing_precommit_hook(&state.repo_root);
+
+        let resp = handle_archive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        assert!(!resp.ok, "expected commit failure, got ok");
+        let err = resp.error.unwrap_or_default();
+        assert!(
+            err.contains("commit failed"),
+            "expected 'commit failed' in error, got: {}",
+            err
+        );
+
+        remove_precommit_hook(&state.repo_root);
+
+        // Both meta and board must be rolled back to active locations.
+        assert!(
+            state.repo_root.join("users/alice.meta.yaml").exists(),
+            "meta should be rolled back to users/"
+        );
+        assert!(
+            state.repo_root.join("showboards/alice/board.md").exists(),
+            "board should be rolled back to showboards/"
+        );
+        assert!(
+            !state
+                .repo_root
+                .join("archive/users/alice.meta.yaml")
+                .exists(),
+            "archive meta should not exist after rollback"
+        );
+        assert!(
+            !state
+                .repo_root
+                .join("archive/showboards/alice/board.md")
+                .exists(),
+            "archive board should not exist after rollback"
         );
     }
 }

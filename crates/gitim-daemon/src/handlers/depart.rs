@@ -626,6 +626,7 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
         let board_to_rel = format!("archive/showboards/{}/board.md", handler);
         let board_active_path = state.repo_root.join(&board_from_rel);
         let mut commit_paths: Vec<&str> = vec![&to_rel];
+        let mut board_moved = false;
         if board_active_path.exists() {
             let board_archive_dir = state.repo_root.join("archive/showboards");
             if let Err(e) = std::fs::create_dir_all(board_archive_dir.join(handler)) {
@@ -642,6 +643,7 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
                     e
                 )));
             }
+            board_moved = true;
             commit_paths.push(&board_to_rel);
         }
 
@@ -652,7 +654,7 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
                 .git_storage
                 .add_and_commit_as(&commit_paths, &commit_msg, Some((&an, &ae)))
         {
-            if board_active_path.exists() {
+            if board_moved {
                 let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
             }
             if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
@@ -721,4 +723,138 @@ fn push_with_retry(state: &SharedState, phase: &str) -> Result<(), Response> {
         "{}: push still conflicting after {} retries",
         phase, MAX_PUSH_RETRIES
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gitim_core::types::config::Config;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    fn setup_state(tmp: &std::path::Path) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo, Config::default(), tx, None))
+    }
+
+    fn register_user(state: &SharedState, handler: &str) {
+        let users_dir = state.repo_root.join("users");
+        std::fs::create_dir_all(&users_dir).unwrap();
+        std::fs::write(
+            users_dir.join(format!("{}.meta.yaml", handler)),
+            format!(
+                "display_name: {}\nrole: member\nintroduction: hi\n",
+                handler
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("git")
+            .args(["add", &format!("users/{}.meta.yaml", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", &format!("user: register @{}", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
+    fn init_board_for(state: &SharedState, handler: &str) {
+        let board_dir = state.repo_root.join(format!("showboards/{}", handler));
+        std::fs::create_dir_all(&board_dir).unwrap();
+        let content = format!(
+            "---\nversion: 1\nhandler: {}\nupdated_at: 20260525T000000Z\nstatus: active\nsummary: test\ntags: []\n---\n",
+            handler
+        );
+        std::fs::write(board_dir.join("board.md"), &content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", &format!("showboards/{}/board.md", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", &format!("board: init @{}", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn depart_user_phase4_archives_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_user(&state, "alice");
+        init_board_for(&state, "alice");
+
+        {
+            let mut users = state.users.write().await;
+            users.push("alice".to_string());
+        }
+
+        let resp = handle_depart_user(state.clone(), "alice".to_string()).await;
+        assert!(resp.ok, "depart_user failed: {:?}", resp.error);
+
+        // Meta archived.
+        assert!(
+            !state.repo_root.join("users/alice.meta.yaml").exists(),
+            "active meta should be gone"
+        );
+        assert!(
+            state
+                .repo_root
+                .join("archive/users/alice.meta.yaml")
+                .exists(),
+            "archive meta should exist"
+        );
+
+        // Board archived.
+        assert!(
+            !state.repo_root.join("showboards/alice/board.md").exists(),
+            "active board should be gone"
+        );
+        assert!(
+            state
+                .repo_root
+                .join("archive/showboards/alice/board.md")
+                .exists(),
+            "archive board should exist"
+        );
+    }
 }
