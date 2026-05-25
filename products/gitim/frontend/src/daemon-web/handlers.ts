@@ -291,6 +291,10 @@ export async function health(): Promise<ApiResponse> {
       workspace: s.workspaceId,
       sync_enabled: !!s.token,
       needs_token: !s.token,
+      sync_status: s.syncStatus,
+      cors_proxy: s.corsProxy,
+      remote_url: s.remoteUrl,
+      head_commit: s.headCommit,
     });
   } catch {
     return ok({ service: "daemon-web", initialized: false });

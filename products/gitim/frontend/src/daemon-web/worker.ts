@@ -4,7 +4,7 @@
 import "./browser-polyfills";
 import * as handlers from "./handlers";
 import { reconcileOrphanCards } from "./handlers";
-import { startSyncLoop, stopSyncLoop } from "./sync";
+import { runSync, startSyncLoop, stopSyncLoop } from "./sync";
 
 export interface WorkerRequest {
   id: number;
@@ -188,6 +188,10 @@ const handler: Record<
     startSyncLoop();
     return Promise.resolve({ ok: true });
   },
+  syncNow: async () => ({
+    ok: true,
+    data: await runSync({ forceNewCycle: true }),
+  }),
   stopSync: () => {
     stopSyncLoop();
     return Promise.resolve({ ok: true });

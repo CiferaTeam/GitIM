@@ -21,6 +21,7 @@ import { useChatStore } from "./hooks/use-chat-store";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useFleetSSE, useFleetStore } from "./hooks/use-fleet-store";
 import { useIsMobile } from "./hooks/use-media-query";
+import { useConnectionDiagnosticsStore } from "./hooks/use-connection-diagnostics-store";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import type {
   Agent,
@@ -205,6 +206,15 @@ export default function App() {
   const setHeadCommit = useConnectionStore((s) => s.setHeadCommit);
   const setConnectionStatus = useConnectionStore((s) => s.setStatus);
   const setConnectionError = useConnectionStore((s) => s.setError);
+  const recordPollSuccess = useConnectionDiagnosticsStore(
+    (s) => s.recordPollSuccess,
+  );
+  const recordPollFailure = useConnectionDiagnosticsStore(
+    (s) => s.recordPollFailure,
+  );
+  const resetConnectionDiagnostics = useConnectionDiagnosticsStore(
+    (s) => s.reset,
+  );
   const isMobile = useIsMobile();
   const location = useLocation();
   const navigate = useNavigate();
@@ -269,26 +279,29 @@ export default function App() {
     fetchWorkspaces();
   }, [mode, port, localReady, fetchWorkspaces]);
 
-  const markConnected = useCallback(() => {
+  const markConnected = useCallback((commitId?: string | null) => {
     consecutiveTransportFailuresRef.current = 0;
     consecutiveWorkspaceFailuresRef.current = 0;
+    recordPollSuccess(commitId);
     if (!useChatStore.getState().connected) {
       setConnected(true);
     }
-  }, [setConnected]);
+  }, [recordPollSuccess, setConnected]);
 
-  const markWorkspaceUnavailable = useCallback(() => {
+  const markWorkspaceUnavailable = useCallback((error?: unknown) => {
     consecutiveWorkspaceFailuresRef.current += 1;
+    recordPollFailure("workspace", error ?? "Workspace routes are unavailable");
     if (
       consecutiveWorkspaceFailuresRef.current === FAILS_UNTIL_DISCONNECTED &&
       useChatStore.getState().connected
     ) {
       setConnected(false);
     }
-  }, [setConnected]);
+  }, [recordPollFailure, setConnected]);
 
-  const markTransportUnavailable = useCallback(() => {
+  const markTransportUnavailable = useCallback((error?: unknown) => {
     consecutiveTransportFailuresRef.current += 1;
+    recordPollFailure("transport", error ?? "Runtime transport is unavailable");
     if (
       consecutiveTransportFailuresRef.current === FAILS_UNTIL_DISCONNECTED &&
       useChatStore.getState().connected
@@ -302,7 +315,7 @@ export default function App() {
       // poll interval via the effect's cleanup.
       setConnectionStatus("disconnected");
     }
-  }, [setConnected, setConnectionStatus]);
+  }, [recordPollFailure, setConnected, setConnectionStatus]);
 
   const fetchAgentSnapshots = useCallback(
     (slug: string, workspaceKey: string): Promise<AgentSnapshotResponses | null> => {
@@ -610,7 +623,7 @@ export default function App() {
           clearCursor(workspaceRef.current);
           sinceRef.current = undefined;
         }
-        markWorkspaceUnavailable();
+        markWorkspaceUnavailable(pollRes.error ?? "Poll failed");
         return;
       }
 
@@ -620,6 +633,7 @@ export default function App() {
         sinceRef.current = nextCommitId;
         saveCursor(requestWorkspaceKey, sinceRef.current);
         setHeadCommit(sinceRef.current);
+        recordPollFailure("token", "Reconnect token to sync this browser workspace.");
         setConnected(false);
         setConnectionStatus("disconnected");
         setConnectionError("Reconnect token to sync this browser workspace.");
@@ -639,7 +653,7 @@ export default function App() {
           sinceRef.current = nextCommitId;
           saveCursor(requestWorkspaceKey, sinceRef.current);
           setHeadCommit(sinceRef.current);
-          markConnected();
+          markConnected(nextCommitId);
         }
         return;
       }
@@ -647,7 +661,7 @@ export default function App() {
       sinceRef.current = nextCommitId;
       saveCursor(requestWorkspaceKey, sinceRef.current);
       setHeadCommit(sinceRef.current);
-      markConnected();
+      markConnected(nextCommitId);
 
       const changes = (pollRes.data.changes ?? []) as PollChange[];
       resolveRemoteSyncFromChanges(requestWorkspaceKey, changes);
@@ -859,7 +873,7 @@ export default function App() {
       // switched workspaces mid-request.
       if (slug !== activeSlugRef.current) return;
 
-      markTransportUnavailable();
+      markTransportUnavailable(err);
     }
   }, [
     addMessages,
@@ -882,6 +896,7 @@ export default function App() {
     markConnected,
     markWorkspaceUnavailable,
     markTransportUnavailable,
+    recordPollFailure,
     reloadActiveWorkspaceState,
     navigate,
     mode,
@@ -905,6 +920,7 @@ export default function App() {
     resetAgentsForSwitch();
     resetFleetForSwitch();
     resetCardsForSwitch();
+    resetConnectionDiagnostics();
     resetBoardsForSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
@@ -935,6 +951,10 @@ export default function App() {
         if (!activation.ok) {
           setConnectionStatus("disconnected");
           setConnectionError(activation.error ?? "Failed to activate browser workspace");
+          recordPollFailure(
+            "activation",
+            activation.error ?? "Failed to activate browser workspace",
+          );
           setConnected(false);
           return false;
         }
@@ -956,6 +976,7 @@ export default function App() {
       if (cancelled) return false;
 
       if (activationNeedsToken) {
+        recordPollFailure("token", "Reconnect token to sync this browser workspace.");
         setConnected(false);
         setConnectionStatus("disconnected");
         setConnectionError("Reconnect token to sync this browser workspace.");
@@ -964,7 +985,7 @@ export default function App() {
       }
 
       if (bootstrapOk) {
-        markConnected();
+        markConnected(sinceRef.current ?? null);
       }
       return true;
     }
@@ -992,8 +1013,8 @@ export default function App() {
         }, pollInterval);
       };
       schedulePoll();
-    }).catch(() => {
-      if (!cancelled) markTransportUnavailable();
+    }).catch((err) => {
+      if (!cancelled) markTransportUnavailable(err);
     });
 
     return () => {
@@ -1020,12 +1041,14 @@ export default function App() {
     resetFleetForSwitch,
     resetCardsForSwitch,
     resetBoardsForSwitch,
+    resetConnectionDiagnostics,
     setConnected,
     setConnectionStatus,
     setConnectionError,
     fetchWorkspaces,
     markConnected,
     markTransportUnavailable,
+    recordPollFailure,
     reloadActiveWorkspaceState,
     runPoll,
   ]);

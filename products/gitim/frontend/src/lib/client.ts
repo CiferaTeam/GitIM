@@ -65,6 +65,7 @@ import {
 } from "./browser-workspaces";
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { useConnectionDiagnosticsStore } from "@/hooks/use-connection-diagnostics-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
@@ -270,6 +271,36 @@ export async function health(signal?: AbortSignal): Promise<ApiResponse> {
   if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
   const data = await res.json();
   return { ok: true, data };
+}
+
+export async function retryBrowserSync(): Promise<ApiResponse> {
+  if (!isLocalMode()) return health();
+  if (!activeLocalBackend) {
+    return {
+      ok: false,
+      error: "Browser workspace is not active",
+    };
+  }
+
+  const diagnostics = useConnectionDiagnosticsStore.getState();
+  diagnostics.recordBrowserSyncEvent({ status: "syncing" });
+  const result = await activeLocalBackend.syncNow();
+  if (result.ok) {
+    const data = result.data as Record<string, unknown> | undefined;
+    const status =
+      data?.status === "reconnect_required" ? "reconnect_required" : "idle";
+    diagnostics.recordBrowserSyncEvent({
+      status,
+      needsToken: status === "reconnect_required",
+      headCommit: typeof data?.afterHead === "string" ? data.afterHead : null,
+    });
+  } else {
+    diagnostics.recordBrowserSyncEvent({
+      status: "error",
+      error: result.error ?? "Browser sync failed",
+    });
+  }
+  return result;
 }
 
 // --- Runtime self-update ---
@@ -482,8 +513,10 @@ export async function poll(
 ): Promise<ApiResponse<PollResponse>> {
   if (isLocalMode()) {
     void slug;
-    void signal;
-    return activeBackend.poll(since) as unknown as Promise<ApiResponse<PollResponse>>;
+    return activeBackend.poll(
+      since,
+      signal,
+    ) as unknown as Promise<ApiResponse<PollResponse>>;
   }
   const res = await fetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",

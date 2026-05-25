@@ -146,6 +146,9 @@ describe("LocalBackend", () => {
 
   it("clears the session token on scoped reconnect_required events", async () => {
     const { loadSessionToken, saveSessionToken } = await import("./browser-workspaces");
+    const { useConnectionDiagnosticsStore } = await import(
+      "@/hooks/use-connection-diagnostics-store"
+    );
     saveSessionToken("ws_current", "github_pat_stale");
     const backend = new LocalBackend({
       workspaceId: "ws_current",
@@ -169,6 +172,72 @@ describe("LocalBackend", () => {
     });
 
     expect(loadSessionToken("ws_current")).toBeUndefined();
+    expect(useConnectionDiagnosticsStore.getState().browserSync.status).toBe(
+      "reconnect_required",
+    );
+    expect(useConnectionDiagnosticsStore.getState().browserSync.needsToken).toBe(
+      true,
+    );
+    backend.terminate();
+  });
+
+  it("records scoped browser sync errors for diagnostics", async () => {
+    const { useConnectionDiagnosticsStore } = await import(
+      "@/hooks/use-connection-diagnostics-store"
+    );
+    useConnectionDiagnosticsStore.getState().reset();
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+
+    worker.emit({
+      type: "sync_error",
+      workspaceId: "ws_current",
+      generation: 1,
+      error: "stale proxy failure",
+    });
+    expect(useConnectionDiagnosticsStore.getState().browserSync.lastError).toBeNull();
+
+    worker.emit({
+      type: "sync_error",
+      workspaceId: "ws_current",
+      generation: 2,
+      error: "Failed to fetch via CORS proxy",
+    });
+
+    const diagnostics = useConnectionDiagnosticsStore.getState().browserSync;
+    expect(diagnostics.status).toBe("error");
+    expect(diagnostics.lastError).toBe("Failed to fetch via CORS proxy");
+    expect(diagnostics.lastErrorAt).not.toBeNull();
+    backend.terminate();
+  });
+
+  it("settles a local poll when its abort signal fires", async () => {
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+    const worker = StubWorker.instances[0];
+    const controller = new AbortController();
+
+    const result = backend.poll("old-head", controller.signal);
+    expect(worker.messages[0]).toEqual({
+      id: 1,
+      method: "poll",
+      args: ["old-head"],
+      workspaceId: "ws_current",
+      generation: 2,
+    });
+
+    controller.abort();
+
+    await expect(result).resolves.toEqual({
+      ok: false,
+      error: "browser worker poll aborted",
+    });
+    expect(worker.messages).toHaveLength(1);
     backend.terminate();
   });
 

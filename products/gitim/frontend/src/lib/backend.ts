@@ -17,6 +17,10 @@ import type {
   WorkerEvent,
 } from "../daemon-web/worker";
 import { clearSessionToken } from "./browser-workspaces";
+import {
+  useConnectionDiagnosticsStore,
+  type BrowserSyncStatus,
+} from "@/hooks/use-connection-diagnostics-store";
 
 interface LocalBackendConfig {
   workspaceId: string;
@@ -54,7 +58,7 @@ function responseNeedsReconnect(response: ApiResponse): boolean {
 export interface Backend {
   health(): Promise<ApiResponse>;
   me(): Promise<ApiResponse>;
-  poll(since?: string): Promise<ApiResponse>;
+  poll(since?: string, signal?: AbortSignal): Promise<ApiResponse>;
   channels(): Promise<ApiResponse>;
   read(channel: string, limit?: number, since?: number): Promise<ApiResponse>;
   send(
@@ -66,6 +70,34 @@ export interface Backend {
   thread(channel: string, line: number): Promise<ApiResponse>;
   users(): Promise<ApiResponse>;
   joinChannel(channel: string): Promise<ApiResponse>;
+}
+
+function isBrowserSyncStatus(value: unknown): value is BrowserSyncStatus {
+  return (
+    value === "idle" ||
+    value === "syncing" ||
+    value === "error" ||
+    value === "reconnect_required"
+  );
+}
+
+function recordBrowserHealth(response: ApiResponse): void {
+  const data = response.data as Record<string, unknown> | undefined;
+  if (!response.ok || data?.service !== "daemon-web") return;
+
+  const syncStatus = isBrowserSyncStatus(data.sync_status)
+    ? data.sync_status
+    : data.needs_token === true
+      ? "reconnect_required"
+      : "unknown";
+
+  useConnectionDiagnosticsStore.getState().recordBrowserSyncEvent({
+    status: syncStatus,
+    needsToken: data.needs_token === true,
+    corsProxy: typeof data.cors_proxy === "string" ? data.cors_proxy : null,
+    remoteUrl: typeof data.remote_url === "string" ? data.remote_url : null,
+    headCommit: typeof data.head_commit === "string" ? data.head_commit : null,
+  });
 }
 
 export interface CreateCardOptions {
@@ -176,11 +208,12 @@ export class HttpBackend implements Backend {
     return await res.json();
   }
 
-  async poll(since?: string): Promise<ApiResponse> {
+  async poll(since?: string, signal?: AbortSignal): Promise<ApiResponse> {
     const res = await fetch(`${this.baseUrl()}/im/poll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ since }),
+      signal,
     });
     return await res.json();
   }
@@ -287,6 +320,10 @@ export class LocalBackend implements Backend {
 
       if ("type" in data) {
         if (data.type === "sync_reset" || data.type === "repo_changed") {
+          useConnectionDiagnosticsStore.getState().recordBrowserSyncEvent({
+            status: "idle",
+            headCommit: data.commit_id ?? null,
+          });
           this.onSyncReset?.();
           const reset = (globalThis as unknown as Record<string, unknown>)
             .__gitimSyncReset;
@@ -295,9 +332,19 @@ export class LocalBackend implements Backend {
         }
         if (data.type === "reconnect_required") {
           clearSessionToken(this.workspaceId);
+          useConnectionDiagnosticsStore.getState().recordBrowserSyncEvent({
+            status: "reconnect_required",
+            error: data.error ?? "Reconnect token to sync this browser workspace.",
+            needsToken: true,
+            headCommit: data.commit_id ?? null,
+          });
           return;
         }
         if (data.type === "sync_error") {
+          useConnectionDiagnosticsStore.getState().recordBrowserSyncEvent({
+            status: "error",
+            error: data.error ?? "Browser sync failed",
+          });
           return;
         }
       }
@@ -337,16 +384,55 @@ export class LocalBackend implements Backend {
     method: string,
     ...args: unknown[]
   ): Promise<ApiResponse<T>> {
+    return this.callWithOptions(method, args);
+  }
+
+  private callWithOptions<T = Record<string, unknown>>(
+    method: string,
+    args: unknown[],
+    options: {
+      signal?: AbortSignal;
+      abortError?: string;
+    } = {},
+  ): Promise<ApiResponse<T>> {
     if (this.closed) {
       return Promise.resolve({
         ok: false,
         error: LOCAL_BACKEND_CLOSED_ERROR,
       });
     }
+    if (options.signal?.aborted) {
+      return Promise.resolve({
+        ok: false,
+        error: options.abortError ?? "browser worker request aborted",
+      });
+    }
 
     return new Promise<ApiResponse<T>>((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve: resolve as (v: ApiResponse) => void, reject });
+      const cleanup = () => {
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        this.pending.delete(id);
+        cleanup();
+        resolve({
+          ok: false,
+          error: options.abortError ?? "browser worker request aborted",
+        });
+      };
+      this.pending.set(id, {
+        resolve: (value) => {
+          cleanup();
+          if (method === "health") recordBrowserHealth(value);
+          resolve(value as ApiResponse<T>);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+      });
+      options.signal?.addEventListener("abort", onAbort, { once: true });
       const request: WorkerRequest = {
         id,
         method,
@@ -358,6 +444,7 @@ export class LocalBackend implements Backend {
         this.worker.postMessage(request);
       } catch (error) {
         this.pending.delete(id);
+        cleanup();
         resolve({
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -380,14 +467,21 @@ export class LocalBackend implements Backend {
     await this.call("startSync");
   }
 
+  async syncNow(): Promise<ApiResponse> {
+    return this.call("syncNow");
+  }
+
   health(): Promise<ApiResponse> {
     return this.call("health");
   }
   me(): Promise<ApiResponse> {
     return this.call("me");
   }
-  poll(since?: string): Promise<ApiResponse> {
-    return this.call("poll", since);
+  poll(since?: string, signal?: AbortSignal): Promise<ApiResponse> {
+    return this.callWithOptions("poll", [since], {
+      signal,
+      abortError: "browser worker poll aborted",
+    });
   }
   channels(): Promise<ApiResponse> {
     return this.call("channels");

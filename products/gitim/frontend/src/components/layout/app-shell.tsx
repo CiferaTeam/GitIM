@@ -11,6 +11,7 @@ import { TimezoneToggle } from "../timezone-toggle";
 import { DonateDialog } from "../donate-dialog";
 import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
+import { ConnectionStatusButton } from "./connection-status-button";
 
 interface AppShellProps {
   children?: ReactNode;
@@ -18,7 +19,6 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   const navigate = useNavigate();
-  const connected = useChatStore((s) => s.connected);
   const currentUser = useChatStore((s) => s.currentUser);
 
   return (
@@ -33,15 +33,7 @@ export function AppShell({ children }: AppShellProps) {
           <span className="font-bold text-sm tracking-tight text-foreground shrink-0">
             gitim
           </span>
-          <span
-            className={[
-              "inline-block w-2 h-2 rounded-full shrink-0",
-              connected
-                ? "bg-success shadow-[0_0_6px_var(--color-glow-success)]"
-                : "bg-error",
-            ].join(" ")}
-            title={connected ? "Connected" : "Disconnected"}
-          />
+          <ConnectionStatusButton />
           <div className="ml-0.5 min-w-0 flex-1 md:ml-1 md:flex-none">
             <WorkspaceSwitcher />
           </div>
