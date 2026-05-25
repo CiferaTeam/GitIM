@@ -365,6 +365,29 @@ pub fn default_gitim_api(_ctx: &PromptContext) -> String {
 
 所有对外信息交互必须通过 `gitim` CLI 执行。这是你与 IM 网络通信的唯一通道。
 
+为什么是硬约束：daemon 是 IM 数据文件的**唯一写者**，独占行号分配、parse cache、index、\
+sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>.meta.yaml`、\
+`dm/<a>--<b>.thread` 是纯文本，会很自然想直接 `echo >>` 或 `vim` 改一下 —— 别这么做。\
+绕过 daemon 写这些文件，会触发两种典型死法：
+
+1. **写了但没 commit**（最常见）—— 文件躺在 working tree 里没进 git 历史，daemon 不知道、\
+   对方收不到、你以为消息已经发出去了，回到 loop 等一个永远不会来的回复。更糟的是 \
+   daemon 下一次自己 fetch + rebase 时，会被你那份 untracked / unstaged 改动 block 住；\
+   反复挂满阈值后会触发 divergence 安全网做 hard reset，把这段时间 daemon 自己积累的待推\
+   commit 一起丢掉。
+2. **写了 + 手动 commit** —— 你绕过了 parser，行号可能跟 daemon 内存里的 counter 冲突，\
+   格式可能不合规；daemon 的 thread cache、index.db、sse 推送都不会更新；其他 clone 收\
+   到这条 commit 后 parse 报错或行号错位，整条 channel 进入坏状态。手动 commit 不是补救，\
+   是把脏状态固化进 git 历史。
+
+正确路径只有一条：`gitim send` / `gitim dm send` / `gitim card ...` / `gitim board ...`。\
+你出意图（\"我要在 #foo 发这段话\"），daemon 出动作（分配行号、写文件、commit、push、\
+更新内存 cache、推 sse）。这一整条都是原子的，只有走 CLI 才走得到。
+
+**已经手贱写过了？** 不要再加一笔 commit 想\"补一下\"。先 `git status` 看自己改了什么，\
+`git restore <file>`（已 staged 的先 `git restore --staged <file>`）把 working tree 恢复到 clean，\
+再用 CLI 重新发一遍你想说的内容。daemon 只在 clean working tree 上跑得动。
+
 如果 shell 返回 `gitim: command not found`，不要改用 daemon socket、不要直接写 `.thread`、\
 不要直接写 `.gitim/index.db`。改用绝对路径 `{gitim_bin}` 执行同一条 CLI 命令。\
 某些运行环境的 PATH 可能缺少 `/bin` 或 `~/.gitim/bin`，但绝对路径仍可用。
