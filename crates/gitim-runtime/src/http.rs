@@ -6793,22 +6793,4 @@ mod tests {
             "false must not trigger clear"
         );
     }
-
-    #[tokio::test]
-    async fn hard_delete_removes_saturation_log_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        // Seed a saturation log file as if the sampler already ran.
-        let mut log =
-            crate::saturation_log::AgentSaturationLog::load_or_default(dir.path(), "alice");
-        log.accumulate("2026-05-21", "2026-05-21T08", true, "2026-05-21T08:00:00Z");
-        log.save(dir.path(), "2026-05-21").expect("seed");
-        assert!(crate::saturation_log::AgentSaturationLog::path(dir.path(), "alice").exists());
-
-        // hard_delete_agent_dir is for the agent's git clone; the saturation
-        // file lives at <workspace>/.gitim-runtime/saturation/alice.json which
-        // is OUTSIDE the agent clone. We need the agents_remove path to
-        // explicitly call AgentSaturationLog::delete; verify it does.
-        crate::saturation_log::AgentSaturationLog::delete(dir.path(), "alice").expect("delete");
-        assert!(!crate::saturation_log::AgentSaturationLog::path(dir.path(), "alice").exists());
-    }
 }

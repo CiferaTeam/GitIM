@@ -472,6 +472,48 @@ async fn test_agents_remove_hard_delete_removes_agent_directory() {
     );
 }
 
+#[tokio::test]
+async fn hard_delete_removes_saturation_log_file() {
+    let tmp = tempfile::tempdir().expect("workspace tempdir");
+    let agent_dir = tmp.path().join("alice");
+    std::fs::create_dir_all(agent_dir.join(".gitim/run")).expect("agent dir");
+    std::fs::write(agent_dir.join("state.txt"), "local state").expect("agent file");
+    let (router, state) = create_router();
+    inject_ws_at(&state, tmp.path().to_path_buf());
+    insert_agent(&state, "alice", &agent_dir);
+
+    // Seed a saturation log file as if the sampler already ran.
+    let mut log =
+        gitim_runtime::saturation_log::AgentSaturationLog::load_or_default(tmp.path(), "alice");
+    log.accumulate("2026-05-21", "2026-05-21T08", true, "2026-05-21T08:00:00Z");
+    log.save(tmp.path(), "2026-05-21").expect("seed");
+    assert!(gitim_runtime::saturation_log::AgentSaturationLog::path(tmp.path(), "alice").exists());
+
+    let response = router
+        .oneshot(agents_remove_request(serde_json::json!({
+            "id": "alice",
+            "hard_delete": true,
+        })))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body["ok"], serde_json::Value::Bool(true));
+    assert!(
+        !agent_dir.exists(),
+        "hard delete should remove the local agent directory"
+    );
+    assert!(
+        !gitim_runtime::saturation_log::AgentSaturationLog::path(tmp.path(), "alice").exists(),
+        "hard delete should remove the saturation log file"
+    );
+    let s = state.lock().unwrap();
+    assert!(
+        !s.workspaces["test-ws"].agents.contains_key("alice"),
+        "hard delete should remove the agent from runtime state"
+    );
+}
 // -- Archive / unarchive route dispatch --
 //
 // These tests don't spin up a daemon — the router hits `human_client()` /
