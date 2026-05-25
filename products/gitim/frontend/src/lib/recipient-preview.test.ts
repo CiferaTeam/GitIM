@@ -52,4 +52,51 @@ describe("computeDraftRecipients", () => {
 
     expect(recipients).toEqual(["cfo", "flame4"]);
   });
+
+  it("excludes self from the recipients", () => {
+    const ownerSelfChannel: Channel = {
+      ...baseChannel,
+      created_by: "lewis",
+    };
+    const recipients = computeDraftRecipients({
+      body: "hello",
+      channel: ownerSelfChannel,
+      replyTo: null,
+      messages: [],
+      excludeSelf: "lewis",
+    });
+
+    expect(recipients).toEqual([]);
+  });
+
+  it("strips self from @all expansion when computing recipients", () => {
+    const recipients = computeDraftRecipients({
+      body: "<@all> ping",
+      channel: baseChannel,
+      replyTo: null,
+      messages: [],
+      excludeSelf: "lewis",
+    });
+
+    expect(recipients).toEqual(["cfo", "flame4"]);
+  });
+
+  it("strips self from DM recipients", () => {
+    const dmChannel: Channel = {
+      name: "alice--lewis",
+      kind: "dm",
+      unreadCount: 0,
+      hasMention: false,
+      members: ["alice", "lewis"],
+    };
+    const recipients = computeDraftRecipients({
+      body: "hi",
+      channel: dmChannel,
+      replyTo: null,
+      messages: [],
+      excludeSelf: "lewis",
+    });
+
+    expect(recipients).toEqual(["alice"]);
+  });
 });

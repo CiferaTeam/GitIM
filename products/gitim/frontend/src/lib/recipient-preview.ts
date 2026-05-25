@@ -45,29 +45,33 @@ export function computeDraftRecipients({
   channel,
   replyTo,
   messages,
+  excludeSelf,
 }: {
   body: string;
   channel: Channel | null | undefined;
   replyTo: Message | null;
   messages: Message[];
+  excludeSelf?: string | null;
 }): string[] {
   if (!channel || !body.trim()) return [];
 
   const recipients = new Set<string>();
+  const self = excludeSelf?.trim() || undefined;
 
   if (channel.kind === "dm") {
     for (const member of channel.members) addRecipient(recipients, member);
-    return [...recipients].sort();
+  } else {
+    addRecipient(recipients, channel.created_by);
+    addParentChainRecipients(recipients, replyTo, messages);
+    addMentionRecipients(
+      recipients,
+      expandAllMentions(body, channel.members, {
+        referenceNonRecipients: true,
+        excludeSelf: self,
+      }),
+    );
   }
 
-  addRecipient(recipients, channel.created_by);
-  addParentChainRecipients(recipients, replyTo, messages);
-  addMentionRecipients(
-    recipients,
-    expandAllMentions(body, channel.members, {
-      referenceNonRecipients: true,
-    }),
-  );
-
+  if (self) recipients.delete(self);
   return [...recipients].sort();
 }

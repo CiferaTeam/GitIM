@@ -4,14 +4,16 @@ const PROTOCOL_MENTION_RE = /<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>/g;
 
 interface ExpandAllMentionOptions {
   referenceNonRecipients?: boolean;
+  excludeSelf?: string;
 }
 
-function concreteMentions(recipients: string[]): string {
+function concreteMentions(recipients: string[], excludeSelf?: string): string {
   const seen = new Set<string>();
   const mentions: string[] = [];
 
   for (const recipient of recipients) {
     if (!recipient || seen.has(recipient)) continue;
+    if (excludeSelf && recipient === excludeSelf) continue;
     seen.add(recipient);
     mentions.push(`<@${recipient}>`);
   }
@@ -24,7 +26,7 @@ export function expandAllMentions(
   recipients: string[],
   options: ExpandAllMentionOptions = {},
 ): string {
-  const replacement = concreteMentions(recipients);
+  const replacement = concreteMentions(recipients, options.excludeSelf);
   const recipientSet = new Set(recipients.filter(Boolean));
 
   const expanded = replacement

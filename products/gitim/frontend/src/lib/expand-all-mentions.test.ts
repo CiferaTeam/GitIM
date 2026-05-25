@@ -33,4 +33,26 @@ describe("expandAllMentions", () => {
       ),
     ).toBe("cc <@alice> <~carol> and <@alice> <@bob>");
   });
+
+  it("excludes self from @all expansion", () => {
+    expect(
+      expandAllMentions("@all heads up", ["lewis", "alice", "bob"], {
+        excludeSelf: "lewis",
+      }),
+    ).toBe("<@alice> <@bob> heads up");
+  });
+
+  it("excludes self from <@all> protocol expansion", () => {
+    expect(
+      expandAllMentions("<@all> please review", ["lewis", "alice", "bob"], {
+        excludeSelf: "lewis",
+      }),
+    ).toBe("<@alice> <@bob> please review");
+  });
+
+  it("leaves body unchanged when @all expands to only self", () => {
+    expect(
+      expandAllMentions("@all hi", ["lewis"], { excludeSelf: "lewis" }),
+    ).toBe("@all hi");
+  });
 });

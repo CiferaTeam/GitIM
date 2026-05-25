@@ -331,6 +331,7 @@ export function ChatLayout() {
       if (!activeSlug) return { ok: false, error: "No workspace selected" };
       const expandedBody = expandAllMentions(body, allMentionRecipients, {
         referenceNonRecipients: currentChannelData?.kind === "channel",
+        excludeSelf: currentUser,
       });
       const requestSlug = activeSlug;
       const requestWorkspaceKey = workspaceKey;

@@ -4,6 +4,15 @@ import type { ApiResponse, Channel, Message } from "../../lib/types";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
 import { CornerDownLeft, SendHorizontal, UserCheck, X } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import { Button } from "../ui/button";
 
 interface InputAreaProps {
   /** Workspace identity from workspaceIdentity(mode, activeWorkspace). */
@@ -60,6 +69,7 @@ export function InputArea({
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
   const [mentionStart, setMentionStart] = useState(0);
+  const [confirmingEmpty, setConfirmingEmpty] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeScopeRef = useRef({ workspaceKey, scopeKey });
@@ -72,19 +82,10 @@ export function InputArea({
         channel: recipientChannel,
         replyTo,
         messages,
+        excludeSelf: currentUser,
       }),
-    [text, recipientChannel, replyTo, messages],
+    [text, recipientChannel, replyTo, messages, currentUser],
   );
-  const displayedRecipients = useMemo(() => {
-    const current = currentUser?.trim();
-    if (!current) return draftRecipients;
-    const recipientsWithoutCurrent = draftRecipients.filter(
-      (recipient) => recipient !== current,
-    );
-    return recipientsWithoutCurrent.length > 0
-      ? recipientsWithoutCurrent
-      : draftRecipients;
-  }, [draftRecipients, currentUser]);
 
   // Restore draft when scope changes
   useEffect(() => {
@@ -130,7 +131,18 @@ export function InputArea({
     detectMention(value, cursor);
   }
 
-  async function doSend() {
+  function requestSend() {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (draftRecipients.length === 0) {
+      setMentionOpen(false);
+      setConfirmingEmpty(true);
+      return;
+    }
+    void performSend();
+  }
+
+  async function performSend() {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -175,6 +187,11 @@ export function InputArea({
     }
   }
 
+  function handleConfirmSend() {
+    setConfirmingEmpty(false);
+    void performSend();
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Escape" && !mentionOpen) {
       onReplyToChange(null);
@@ -185,7 +202,7 @@ export function InputArea({
 
     if (!isMobile && e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      void doSend();
+      requestSend();
     }
   }
 
@@ -260,7 +277,7 @@ export function InputArea({
         {isMobile ? (
           <button
             type="button"
-            onClick={() => void doSend()}
+            onClick={() => requestSend()}
             onMouseDown={(e) => e.preventDefault()}
             disabled={!canSend}
             aria-label="Send message"
@@ -289,10 +306,10 @@ export function InputArea({
             <UserCheck className="size-3" />
             Routes to
           </span>
-          {displayedRecipients.length > 0 ? (
-            displayedRecipients.map((recipient) => (
+          {draftRecipients.length > 0 ? (
+            draftRecipients.map((recipient) => (
               <span
-                key={`${recipient}-${replyTo?.line_number ?? 0}-${displayedRecipients.join("|")}`}
+                key={`${recipient}-${replyTo?.line_number ?? 0}-${draftRecipients.join("|")}`}
                 data-recipient-chip
                 className="route-recipient-nudge inline-flex h-6 items-center rounded-md border border-primary/45 bg-primary/15 px-2 font-mono text-[10px] font-semibold text-primary shadow-[0_0_0_1px_rgba(96,165,250,0.10)]"
               >
@@ -300,7 +317,10 @@ export function InputArea({
               </span>
             ))
           ) : (
-            <span className="inline-flex h-6 items-center rounded-md border border-warning/30 bg-warning/10 px-2 font-medium text-warning">
+            <span
+              data-recipient-empty
+              className="inline-flex h-6 items-center rounded-md border border-warning/30 bg-warning/10 px-2 font-medium text-warning"
+            >
               no one else
             </span>
           )}
@@ -313,6 +333,37 @@ export function InputArea({
           {error}
         </p>
       )}
+
+      <Dialog open={confirmingEmpty} onOpenChange={setConfirmingEmpty}>
+        <DialogContent
+          data-testid="empty-recipients-dialog"
+          className="sm:max-w-md"
+          showCloseButton={false}
+        >
+          <DialogHeader>
+            <DialogTitle>No one will receive this</DialogTitle>
+            <DialogDescription>
+              This message routes to no other handlers — only you would see it.
+              Send anyway?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setConfirmingEmpty(false)}
+              autoFocus
+            >
+              Cancel
+            </Button>
+            <Button
+              data-testid="empty-recipients-confirm"
+              onClick={handleConfirmSend}
+            >
+              Send anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

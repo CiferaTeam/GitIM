@@ -252,7 +252,7 @@ describe("ChatLayout all mention send", () => {
     expect(mocks.client.send).toHaveBeenCalledWith(
       "room",
       "general",
-      "<@lewis> <@alice> <@bob> please review",
+      "<@alice> <@bob> please review",
       "lewis",
       0,
     );
@@ -278,7 +278,7 @@ describe("ChatLayout all mention send", () => {
     expect(preview?.textContent).not.toContain("@bob");
   });
 
-  it("shows the current user when they are the only routed recipient", async () => {
+  it("shows 'no one else' when self is the only routable recipient", async () => {
     await act(async () => {
       root!.render(<ChatLayout />);
       await Promise.resolve();
@@ -293,8 +293,87 @@ describe("ChatLayout all mention send", () => {
     });
 
     const preview = document.querySelector("[data-recipient-preview]");
-    expect(preview?.textContent).toContain("@lewis");
-    expect(preview?.textContent).not.toContain("no one else");
+    expect(preview?.textContent).not.toContain("@lewis");
+    expect(preview?.textContent).toContain("no one else");
+  });
+
+  it("prompts confirmation when the message has no effective recipients", async () => {
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const textarea = document.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "talking to myself");
+      textarea!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mocks.client.send).not.toHaveBeenCalled();
+    const dialog = document.querySelector(
+      "[data-testid='empty-recipients-dialog']",
+    );
+    expect(dialog).not.toBeNull();
+
+    const confirm = document.querySelector<HTMLButtonElement>(
+      "[data-testid='empty-recipients-confirm']",
+    );
+    expect(confirm).not.toBeNull();
+
+    await act(async () => {
+      confirm!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.client.send).toHaveBeenCalledWith(
+      "room",
+      "general",
+      "talking to myself",
+      "lewis",
+      0,
+    );
+  });
+
+  it("closes the empty-recipients dialog on Escape without sending", async () => {
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    const textarea = document.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+
+    await act(async () => {
+      setTextareaValue(textarea!, "talking to myself");
+      textarea!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const dialog = document.querySelector(
+      "[data-testid='empty-recipients-dialog']",
+    );
+    expect(dialog).not.toBeNull();
+
+    await act(async () => {
+      dialog!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector("[data-testid='empty-recipients-dialog']"),
+    ).toBeNull();
+    expect(mocks.client.send).not.toHaveBeenCalled();
+    expect(textarea!.value).toBe("talking to myself");
   });
   it("renders high-visibility routed recipient chips while replying", async () => {
     useChatStore.setState({
