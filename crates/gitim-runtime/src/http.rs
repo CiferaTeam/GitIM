@@ -320,6 +320,19 @@ pub struct AgentInfo {
     /// place by the agent loop after each turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_summary: Option<crate::usage_log::UsageSummary>,
+    /// Per-agent saturation summary loaded at recovery from
+    /// `<workspace>/.gitim-runtime/saturation/<handler>.json`. Refreshed on
+    /// every `/agents` list response. None until the sampler has ticked at
+    /// least once for this agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturation_summary: Option<crate::saturation_log::SaturationSummary>,
+    /// Set to true by `AgentLoop` for the duration of `provider.execute()`.
+    /// Cleared by the `WorkingGuard` RAII drop on every exit path including
+    /// `?` bubble and panic. Read by `SaturationSampler::take_snapshot`.
+    /// Not serialized — this is per-process truth, recovery restores it as
+    /// `Arc::new(AtomicBool::new(false))`.
+    #[serde(skip)]
+    pub is_working: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
 }
@@ -373,6 +386,10 @@ pub struct RuntimeState {
     /// repeatedly-failing FS shows up without scraping logs. Best-effort
     /// observability — no alerting / threshold logic in v1.
     pub usage_save_failures: std::sync::atomic::AtomicU64,
+    /// Sister counter to `usage_save_failures`. Incremented every time
+    /// `AgentSaturationLog::save` returns an error from the sampler tick.
+    /// Surfaced on `/runtime/health`. Best-effort observability.
+    pub saturation_save_failures: std::sync::atomic::AtomicU64,
 }
 
 impl RuntimeState {
@@ -420,6 +437,7 @@ impl Default for RuntimeState {
             listen_port: DEFAULT_PORT,
             runtime_id: String::new(),
             usage_save_failures: std::sync::atomic::AtomicU64::new(0),
+            saturation_save_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -3043,6 +3061,8 @@ async fn agents_add(
                     None
                 },
                 usage_summary: None,
+                saturation_summary: None,
+                is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 loop_handle: None,
             };
             {
@@ -3220,6 +3240,19 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
     agent_loop.set_runtime_state(state.clone());
     agent_loop.set_workspace_root(workspace_root);
+
+    // Inject the same Arc<AtomicBool> stored on AgentInfo so the sampler
+    // and the loop read/write the same flag without a lock.
+    let is_working = {
+        let s = crate::preconditions::arc_mutex_lock(state);
+        s.workspaces
+            .get(slug)
+            .and_then(|ctx| ctx.agents.get(agent_id))
+            .map(|info| info.is_working.clone())
+    };
+    if let Some(flag) = is_working {
+        agent_loop.set_is_working(flag);
+    }
 
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
@@ -4838,6 +4871,10 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             llm_provider: llm_provider_val.clone(),
                             llm_model: llm_model_val.clone(),
                             usage_summary,
+                            saturation_summary: None,
+                            is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                                false,
+                            )),
                             loop_handle: None,
                         },
                     );
@@ -4903,6 +4940,10 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             llm_provider: llm_provider_val,
                             llm_model: llm_model_val,
                             usage_summary,
+                            saturation_summary: None,
+                            is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                                false,
+                            )),
                             loop_handle: None,
                         },
                     );

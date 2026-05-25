@@ -21,6 +21,72 @@ use crate::usage_log::{AgentUsageLog, UsageSummary};
 
 pub(crate) const MAX_FAILURE_RECOVERY_ATTEMPTS: u32 = 3;
 
+/// RAII guard that resets `is_working` to `false` on drop, covering:
+/// - normal scope exit
+/// - `?`-bubbled error from `provider.execute()` or await
+/// - panic (Drop still runs during stack unwind)
+///
+/// Without this, an error path or panic during `provider.execute()` would
+/// leave `is_working = true` permanently, causing the saturation sampler
+/// to over-count the agent as working until the runtime restarts.
+struct WorkingGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WorkingGuard {
+    fn arm(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self { flag }
+    }
+}
+
+impl Drop for WorkingGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod working_guard_tests {
+    use super::*;
+
+    #[test]
+    fn arm_sets_true_drop_sets_false() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let _g = WorkingGuard::arm(flag.clone());
+            assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn drop_runs_on_panic_unwind() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = WorkingGuard::arm(flag_clone);
+            panic!("synthetic panic during work");
+        }));
+        assert!(result.is_err());
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "guard must reset on unwind"
+        );
+    }
+
+    #[test]
+    fn error_bubble_still_resets() {
+        fn boom(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<(), &'static str> {
+            let _g = WorkingGuard::arm(flag);
+            Err("simulated provider failure")
+        }
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _ = boom(flag.clone());
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AgentLoopConfig {
     pub provider_type: String,
@@ -66,6 +132,10 @@ pub struct AgentLoop {
     /// outside the runtime HTTP shell (CLI / unit tests); the accumulator
     /// path is skipped in that case.
     workspace_root: Option<PathBuf>,
+    /// Shared with `AgentInfo.is_working` so `SaturationSampler` reads the
+    /// same truth without locking. `None` for legacy callers / tests; the
+    /// production path injects via `set_is_working`.
+    is_working: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl AgentLoop {
@@ -114,6 +184,7 @@ impl AgentLoop {
             workspace_id: String::new(),
             runtime_state: None,
             workspace_root: None,
+            is_working: None,
         })
     }
 
@@ -152,6 +223,7 @@ impl AgentLoop {
             workspace_id: String::new(),
             runtime_state: None,
             workspace_root: None,
+            is_working: None,
         })
     }
 
@@ -169,6 +241,13 @@ impl AgentLoop {
     /// on the field being `Some`.
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
+    }
+
+    /// Inject the shared `Arc<AtomicBool>` so `WorkingGuard` can toggle the
+    /// flag across `provider.execute()`. Must be called before the loop
+    /// spawns; tests that don't drive HTTP handlers can skip this entirely.
+    pub fn set_is_working(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.is_working = Some(flag);
     }
 
     /// Test-only seam to swap the underlying provider after construction.
@@ -794,6 +873,10 @@ impl AgentLoop {
             }
         }
         state.save(&self.repo_root)?;
+
+        // RAII guard: is_working stays true until run_once returns,
+        // covering the entire execute + streaming loop + accumulation.
+        let _working_guard = self.is_working.clone().map(WorkingGuard::arm);
 
         let mut session = self
             .provider
@@ -1989,6 +2072,8 @@ mod tests {
                 llm_provider: None,
                 llm_model: None,
                 usage_summary: None,
+                saturation_summary: None,
+                is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 loop_handle: None,
             },
         );
