@@ -383,7 +383,15 @@ fn gitim_api_exposes_fleet_runtime_management() {
 }
 
 #[test]
-fn reset_protocol_handles_lost_gitim_output_contract() {
+fn reset_protocol_does_not_own_cli_amnesia_recovery() {
+    // The reset section used to carry a bullet that told agents to
+    // [[RESET]] when they had forgotten the gitim CLI surface. That's
+    // a circular fallback: the bullet and the CLI surface live in the
+    // same system-prompt string, so any compression that drops one is
+    // overwhelmingly likely to drop the other. The actual recovery is
+    // re-injected on every wake by the runtime (see
+    // `format_changes_as_prompt`), where it can't be compacted away.
+    // Lock the section against accidentally re-acquiring that role.
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
         handler: "bot",
@@ -392,21 +400,16 @@ fn reset_protocol_handles_lost_gitim_output_contract() {
     let reset = provider.prompt_reset_protocol(&ctx);
 
     assert!(
-        reset.contains("不确定如何用 `gitim send`"),
-        "reset protocol should cover a lost gitim send contract"
+        !reset.contains("不确定如何用 `gitim send`"),
+        "CLI-amnesia bullet must stay out — wake-time reminder owns this"
     );
     assert!(
-        reset.contains("普通回复里写了对外消息"),
-        "reset protocol should cover accidental plain assistant replies"
+        !reset.contains("未调用 gitim CLI"),
+        "CLI-amnesia bullet must stay out — wake-time reminder owns this"
     );
-    assert!(
-        reset.contains("未调用 gitim CLI"),
-        "reset protocol should require reset when the CLI contract is missing"
-    );
-    assert!(
-        reset.contains("[[RESET]]"),
-        "reset protocol should still point to the runtime reset marker"
-    );
+    // The marker itself still belongs to this section for its
+    // legitimate uses (context bloat, phase switches).
+    assert!(reset.contains("[[RESET]]"));
 }
 
 #[test]

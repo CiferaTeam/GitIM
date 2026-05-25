@@ -299,8 +299,6 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 - 这是你与运行时之间的**私有协议**。不要 @ 任何人说你要重置，\
   不要在 channel 或 dm 里提起这个动作。整个过程对外不可见，静默执行。
 - 不要用来躲避困难任务。reset 是为了保持上下文清洁，不是为了放弃手头的问题。
-- 若你不确定如何用 `gitim send` / `gitim dm send` / `gitim card ...` / `gitim board ...` 对外发送，\
-  或发现自己在普通回复里写了对外消息而未调用 gitim CLI，先写好必要记忆，再输出 `[[RESET]]`。
 - **先写记忆，再发 `[[RESET]]`**。顺序颠倒 = 你下次醒来会失忆。
 
 ### 别人退出 workspace 的信号

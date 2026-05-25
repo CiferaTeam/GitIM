@@ -1439,6 +1439,16 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
     }
 
     if has_external {
+        // Wake-time reminder: re-injected every cycle so it survives
+        // session compression. The system-prompt CLI surface can be
+        // (and has been) compacted away mid-session; this one line
+        // restates the load-bearing rule + the self-help fallback
+        // every time, so an agent that just lost its CLI memory still
+        // sees the rule before it generates a reply.
+        prompt.push_str(
+            "\n（对外说话只能走 `gitim` CLI —— 直接写文件 / 手动 commit \
+             不算；忘了用法 `gitim --help` 现查。）\n",
+        );
         Some(prompt)
     } else {
         None
@@ -2166,6 +2176,58 @@ mod tests {
             !AgentState::state_path(tmp.path()).exists(),
             "live HUD refresh must not persist agent-state; final turn accounting owns disk writes"
         );
+    }
+
+    #[test]
+    fn format_changes_appends_gitim_cli_reminder_when_events_exist() {
+        // The reminder lives here (not in the system prompt) so it
+        // survives session compression. Every wake with real events
+        // must carry both halves of the rule: the CLI is the only
+        // outbound channel, and `--help` is the self-recovery path.
+        // Without this, an agent whose system-prompt CLI surface got
+        // compacted away has nothing to fall back on.
+        let change = ChannelChange {
+            channel: "general".to_string(),
+            kind: "message".to_string(),
+            entries: vec![serde_json::json!({
+                "author": "bob",
+                "body": "ping",
+                "timestamp": "20260102T090000Z",
+                "line_number": 1u64,
+                "point_to": 0u64,
+            })],
+        };
+        let out = format_changes_as_prompt(&[change], "alice").expect("renders");
+        assert!(
+            out.contains("`gitim` CLI"),
+            "reminder must restate that gitim CLI is the only outbound path; got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("`gitim --help`"),
+            "reminder must point to --help as the self-recovery path; got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn format_changes_omits_reminder_when_no_external_events() {
+        // No external events → no wake → no reply → no reminder needed.
+        // Self-authored events are filtered out earlier, so this case
+        // would otherwise return Some(prompt) with only the prefix +
+        // a dangling reminder — useless and confusing.
+        let change = ChannelChange {
+            channel: "general".to_string(),
+            kind: "message".to_string(),
+            entries: vec![serde_json::json!({
+                "author": "alice",
+                "body": "self-talk",
+                "timestamp": "20260102T090000Z",
+                "line_number": 1u64,
+                "point_to": 0u64,
+            })],
+        };
+        assert!(format_changes_as_prompt(&[change], "alice").is_none());
     }
 
     #[test]
