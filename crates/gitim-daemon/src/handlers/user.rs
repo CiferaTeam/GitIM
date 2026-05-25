@@ -234,14 +234,42 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         return Response::error(format!("git mv failed: {}", e));
     }
 
-    // 7. Commit. On failure, reverse the git mv to leave the tree clean.
+    // 6b. If the user has a board, git mv it into archive/showboards/ as well.
+    let board_from_rel = format!("showboards/{}/board.md", handler);
+    let board_to_rel = format!("archive/showboards/{}/board.md", handler);
+    let board_active_path = state.repo_root.join(&board_from_rel);
+    let mut commit_paths: Vec<&str> = vec![&to_rel];
+    if board_active_path.exists() {
+        let board_archive_dir = state.repo_root.join("archive/showboards");
+        if let Err(e) = std::fs::create_dir_all(board_archive_dir.join(&handler)) {
+            // Rollback the meta git mv so the tree stays clean.
+            let _ = state.git_storage.mv(&to_rel, &from_rel);
+            return Response::error(format!(
+                "archive_user: failed to create archive/showboards dir: {}",
+                e
+            ));
+        }
+        if let Err(e) = state.git_storage.mv(&board_from_rel, &board_to_rel) {
+            let _ = state.git_storage.mv(&to_rel, &from_rel);
+            return Response::error(format!(
+                "archive_user: board git mv failed: {}; rolled back meta git mv",
+                e
+            ));
+        }
+        commit_paths.push(&board_to_rel);
+    }
+
+    // 7. Commit. On failure, reverse all git mv operations to leave the tree clean.
     let commit_msg = format!("archive: depart user @{}", handler);
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
-        &[&to_rel],
+        &commit_paths,
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
+        if board_active_path.exists() {
+            let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
+        }
         if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
             warn!("archive_user: rollback git mv also failed: {}", rb);
         }
@@ -382,14 +410,41 @@ pub async fn handle_unarchive_user(
         return Response::error(format!("git mv failed: {}", e));
     }
 
+    // 6b. If the user has an archived board, restore it.
+    let board_from_rel = format!("archive/showboards/{}/board.md", handler);
+    let board_to_rel = format!("showboards/{}/board.md", handler);
+    let board_archive_path = state.repo_root.join(&board_from_rel);
+    let mut commit_paths: Vec<&str> = vec![&to_rel];
+    if board_archive_path.exists() {
+        let showboards_dir = state.repo_root.join("showboards");
+        if let Err(e) = std::fs::create_dir_all(showboards_dir.join(&handler)) {
+            let _ = state.git_storage.mv(&to_rel, &from_rel);
+            return Response::error(format!(
+                "unarchive_user: failed to create showboards dir: {}",
+                e
+            ));
+        }
+        if let Err(e) = state.git_storage.mv(&board_from_rel, &board_to_rel) {
+            let _ = state.git_storage.mv(&to_rel, &from_rel);
+            return Response::error(format!(
+                "unarchive_user: board git mv failed: {}; rolled back meta git mv",
+                e
+            ));
+        }
+        commit_paths.push(&board_to_rel);
+    }
+
     // 7. Commit. Rollback git mv on failure.
     let commit_msg = format!("archive: restore user @{}", handler);
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
-        &[&to_rel],
+        &commit_paths,
         &commit_msg,
         Some((&author_name, &author_email)),
     ) {
+        if board_archive_path.exists() {
+            let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
+        }
         if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
             warn!("unarchive_user: rollback git mv also failed: {}", rb);
         }
@@ -525,6 +580,78 @@ mod tests {
         )
         .await;
         assert!(resp.ok, "register_user failed: {:?}", resp.error);
+    }
+
+    fn init_board_for(state: &SharedState, handler: &str) {
+        let board_dir = state.repo_root.join(format!("showboards/{}", handler));
+        std::fs::create_dir_all(&board_dir).unwrap();
+        let content = format!(
+            "---\nversion: 1\nhandler: {}\nupdated_at: 20260525T000000Z\nstatus: active\nsummary: test\ntags: []\n---\n",
+            handler
+        );
+        std::fs::write(board_dir.join("board.md"), &content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", &format!("showboards/{}/board.md", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", &format!("board: init @{}", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_user_moves_board_to_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        init_board_for(&state, "alice");
+
+        let resp = handle_archive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        assert!(resp.ok, "archive_user failed: {:?}", resp.error);
+
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(!state.repo_root.join("showboards/alice/board.md").exists());
+        assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
+        assert!(state.repo_root.join("archive/showboards/alice/board.md").exists());
+    }
+
+    #[tokio::test]
+    async fn archive_user_without_board_skips_board_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+
+        let resp = handle_archive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        assert!(resp.ok, "archive_user failed: {:?}", resp.error);
+
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state.repo_root.join("archive/users/alice.meta.yaml").exists());
+        assert!(!state.repo_root.join("archive/showboards/alice/board.md").exists());
+    }
+
+    #[tokio::test]
+    async fn unarchive_user_restores_board_from_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        init_board_for(&state, "alice");
+
+        let resp = handle_archive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        assert!(resp.ok, "archive_user failed: {:?}", resp.error);
+
+        let resp = handle_unarchive_user(state.clone(), "alice".to_string(), "bob".to_string()).await;
+        assert!(resp.ok, "unarchive_user failed: {:?}", resp.error);
+
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state.repo_root.join("showboards/alice/board.md").exists());
+        assert!(!state.repo_root.join("archive/users/alice.meta.yaml").exists());
+        assert!(!state.repo_root.join("archive/showboards/alice/board.md").exists());
     }
 
     #[tokio::test]

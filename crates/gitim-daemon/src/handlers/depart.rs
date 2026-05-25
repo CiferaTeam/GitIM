@@ -620,13 +620,41 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
             return Err(Response::error(format!("phase4: git mv failed: {}", e)));
         }
+
+        // Archive the user's board if it exists.
+        let board_from_rel = format!("showboards/{}/board.md", handler);
+        let board_to_rel = format!("archive/showboards/{}/board.md", handler);
+        let board_active_path = state.repo_root.join(&board_from_rel);
+        let mut commit_paths: Vec<&str> = vec![&to_rel];
+        if board_active_path.exists() {
+            let board_archive_dir = state.repo_root.join("archive/showboards");
+            if let Err(e) = std::fs::create_dir_all(board_archive_dir.join(handler)) {
+                let _ = state.git_storage.mv(&to_rel, &from_rel);
+                return Err(Response::error(format!(
+                    "phase4: failed to create archive/showboards dir: {}",
+                    e
+                )));
+            }
+            if let Err(e) = state.git_storage.mv(&board_from_rel, &board_to_rel) {
+                let _ = state.git_storage.mv(&to_rel, &from_rel);
+                return Err(Response::error(format!(
+                    "phase4: board git mv failed: {}; rolled back meta git mv",
+                    e
+                )));
+            }
+            commit_paths.push(&board_to_rel);
+        }
+
         let commit_msg = format!("archive: depart user @{}", handler);
         let (an, ae) = state.author_for(handler);
         if let Err(e) =
             state
                 .git_storage
-                .add_and_commit_as(&[&to_rel], &commit_msg, Some((&an, &ae)))
+                .add_and_commit_as(&commit_paths, &commit_msg, Some((&an, &ae)))
         {
+            if board_active_path.exists() {
+                let _ = state.git_storage.mv(&board_to_rel, &board_from_rel);
+            }
             if let Err(rb) = state.git_storage.mv(&to_rel, &from_rel) {
                 warn!("phase4: rollback git mv also failed: {}", rb);
             }
