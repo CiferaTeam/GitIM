@@ -275,6 +275,11 @@ impl AppState {
     /// Spawn the sync loop for this state.  Safe to call from both main (on
     /// restart) and from handle_onboard (after first-time identity setup).
     /// The AtomicBool ensures the loop is only ever started once.
+    ///
+    /// A supervisor task watches the worker: if the worker panics or is
+    /// cancelled, the daemon exits so runtime can restart a fresh instance.
+    /// Normal early return (auto-sync disabled / no remote) clears
+    /// `sync_started` without exiting.
     pub fn spawn_sync_loop(state: SharedState) {
         // CAS: only the first caller proceeds; all others return immediately.
         if state
@@ -302,7 +307,8 @@ impl AppState {
         // unauthenticated → None → legacy git-config fallback.
         let rebase_author_state = state.clone();
 
-        tokio::spawn(async move {
+        let supervisor_state = state.clone();
+        let worker = tokio::spawn(async move {
             let rebase_author = {
                 let current = rebase_author_state.current_user.read().await.clone();
                 current.map(|u| rebase_author_state.author_for(&u))
@@ -479,6 +485,29 @@ impl AppState {
                 rebase_author,
             )
             .await;
+        });
+
+        tokio::spawn(async move {
+            match worker.await {
+                Ok(()) => {
+                    supervisor_state.sync_started.store(false, Ordering::SeqCst);
+                    tracing::info!(
+                        "sync loop task finished (auto-sync disabled or no remote configured)"
+                    );
+                }
+                Err(join_error) => {
+                    supervisor_state.sync_started.store(false, Ordering::SeqCst);
+                    if join_error.is_panic() {
+                        tracing::error!("sync loop task panicked: {join_error}");
+                    } else if join_error.is_cancelled() {
+                        tracing::error!("sync loop task cancelled: {join_error}");
+                    } else {
+                        tracing::error!("sync loop task failed: {join_error}");
+                    }
+                    tracing::error!("daemon shutting down due to sync loop failure");
+                    std::process::exit(1);
+                }
+            }
         });
 
         tracing::info!("sync loop started");

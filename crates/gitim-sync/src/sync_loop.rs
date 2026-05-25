@@ -80,6 +80,10 @@ impl AuthCircuit {
     }
 }
 
+/// Warn at most once per interval while the auth circuit is open so a
+/// live-but-idle sync loop is visible in logs.
+const AUTH_CIRCUIT_HEARTBEAT_SECS: u64 = 300;
+
 /// Start the sync loop with push-first strategy.
 ///
 /// - `commit_lock`: serializes every mutation of the local commit tree. Held
@@ -153,8 +157,17 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
 
     // Initial delay before first cycle (skip immediate fire)
     let mut next_delay = Duration::from_millis(base_ms);
+    let mut last_auth_idle_warn = std::time::Instant::now();
 
     loop {
+        if circuit.is_tripped() {
+            let elapsed = last_auth_idle_warn.elapsed();
+            if elapsed >= Duration::from_secs(AUTH_CIRCUIT_HEARTBEAT_SECS) {
+                warn!("sync: auth circuit open — idling (no git operations) until daemon restart");
+                last_auth_idle_warn = std::time::Instant::now();
+            }
+        }
+
         if consecutive_rate_limits > 0 || circuit.is_tripped() {
             // During rate-limit backoff or tripped auth circuit, ignore
             // push_notify: hammering the remote just burns rate-limit budget.
