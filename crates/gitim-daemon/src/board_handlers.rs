@@ -50,6 +50,7 @@ pub async fn handle_board_show(state: SharedState, handler: String) -> Response 
 pub async fn handle_board_list(state: SharedState) -> Response {
     let root = state.repo_root.join("showboards");
     let mut boards = Vec::new();
+    let users = state.users.read().await;
 
     if root.exists() {
         let entries = match std::fs::read_dir(&root) {
@@ -60,6 +61,9 @@ pub async fn handle_board_list(state: SharedState) -> Response {
         for entry in entries.flatten() {
             let handler = entry.file_name().to_string_lossy().to_string();
             if Handler::new(&handler).is_err() {
+                continue;
+            }
+            if !users.iter().any(|u| u == &handler) {
                 continue;
             }
             let rel = match board_path(&handler) {
@@ -312,4 +316,103 @@ fn board_meta_summary(meta: &BoardMeta) -> BoardMetaSummary {
 
 fn current_timestamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use gitim_core::types::config::Config;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    fn setup_state(tmp: &std::path::Path) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo, Config::default(), tx, None))
+    }
+
+    fn write_board(state: &SharedState, handler: &str) {
+        let board_dir = state.repo_root.join(format!("showboards/{}", handler));
+        std::fs::create_dir_all(&board_dir).unwrap();
+        let content = format!(
+            "---\nversion: 1\nhandler: {}\nupdated_at: 20260525T000000Z\nstatus: active\nsummary: test\ntags: []\n---\n",
+            handler
+        );
+        std::fs::write(board_dir.join("board.md"), &content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", &format!("showboards/{}/board.md", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", &format!("board: init @{}", handler)])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn board_list_excludes_archived_users() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+
+        // alice and bob are active; carol is archived.
+        {
+            let mut users = state.users.write().await;
+            users.push("alice".to_string());
+            users.push("bob".to_string());
+            users.sort();
+        }
+
+        write_board(&state, "alice");
+        write_board(&state, "bob");
+        write_board(&state, "carol");
+
+        let resp = handle_board_list(state.clone()).await;
+        assert!(resp.ok, "board_list failed: {:?}", resp.error);
+        let data: ListBoardsResponse = serde_json::from_value(resp.data.unwrap()).unwrap();
+        let handlers: Vec<String> = data.boards.iter().map(|b| b.handler.clone()).collect();
+
+        assert!(handlers.contains(&"alice".to_string()));
+        assert!(handlers.contains(&"bob".to_string()));
+        assert!(
+            !handlers.contains(&"carol".to_string()),
+            "archived user's board should be excluded, got: {:?}",
+            handlers
+        );
+    }
 }
