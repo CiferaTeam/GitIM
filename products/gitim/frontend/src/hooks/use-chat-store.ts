@@ -113,7 +113,7 @@ interface ChatState {
    *  sidebar's name-keyed render picks it up immediately. Idempotent
    *  against a DM that's already in `channels`. */
   markDmUnarchived: (name: string) => void;
-  selectChannel: (name: string) => void;
+  selectChannel: (name: string | null) => void;
   incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
   setMessages: (m: Message[]) => void;

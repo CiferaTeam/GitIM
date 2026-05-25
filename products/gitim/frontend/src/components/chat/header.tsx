@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { AtSign, Crown, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
+import { Archive, AtSign, Crown, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
+import { toast } from "sonner";
 import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
@@ -30,7 +31,11 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
   const currentUser = useChatStore((s) => s.currentUser);
   const allUsers = useChatStore((s) => s.users);
   const setChannels = useChatStore((s) => s.setChannels);
+  const markChannelArchived = useChatStore((s) => s.markChannelArchived);
+  const selectChannel = useChatStore((s) => s.selectChannel);
   const cards = useCardStore((s) => s.cards);
+
+  const [archiving, setArchiving] = useState(false);
 
   const [inviteOpen, setInviteOpen] = useState(false);
 
@@ -51,6 +56,32 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
     const chRes = await client.channels(activeSlug);
     if (chRes.ok && chRes.data) {
       setChannels(chRes.data.channels as Channel[]);
+    }
+  }
+
+  async function handleArchive() {
+    if (!activeSlug || !currentChannel || isDm || archiving) return;
+    if (channel?.created_by?.trim() !== currentUser) return;
+    const ok = window.confirm(
+      `Archive #${currentChannel}? Members will lose access. You can restore it later from the sidebar's "Archived" section.`,
+    );
+    if (!ok) return;
+    setArchiving(true);
+    try {
+      const res = await client.archiveChannel(activeSlug, currentChannel);
+      if (!res.ok) {
+        toast.error(`Failed to archive #${currentChannel}: ${res.error ?? "unknown"}`);
+        return;
+      }
+      const archived = currentChannel;
+      const fallback = channels.find(
+        (c) => c.name !== archived && c.kind === "channel",
+      );
+      markChannelArchived(archived);
+      selectChannel(fallback?.name ?? null);
+      toast.success(`#${archived} archived`);
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -174,6 +205,19 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
                       )}
                     </DropdownMenuItem>
                   ))}
+                </>
+              )}
+              {!isDm && creator === currentUser && (
+                <>
+                  <DropdownMenuSeparator className="bg-border" />
+                  <DropdownMenuItem
+                    onSelect={handleArchive}
+                    disabled={archiving}
+                    className="gap-2 cursor-pointer text-destructive focus:bg-destructive/10 focus:text-destructive"
+                  >
+                    <Archive className="size-3.5" />
+                    <span>Archive channel</span>
+                  </DropdownMenuItem>
                 </>
               )}
             </DropdownMenuContent>
