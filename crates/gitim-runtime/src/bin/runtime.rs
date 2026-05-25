@@ -802,6 +802,14 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     gitim_runtime::http::recover_from_config(state.clone()).await;
     gitim_runtime::fleet::recover_from_config(state.clone());
 
+    // Spawn the saturation sampler. State is already populated by
+    // recover_from_config; the sampler skips the first tick so we get a
+    // full interval before any sample is taken, letting any in-flight
+    // recovery settle. Shutdown handle is dropped → sampler runs until
+    // runtime process exit.
+    let _saturation_shutdown =
+        gitim_runtime::saturation_sampler::SaturationSampler::new(state.clone()).spawn();
+
     // Idle watchdog: exit if no activity for 24 hours
     let idle_state = state.clone();
     tokio::spawn(async move {

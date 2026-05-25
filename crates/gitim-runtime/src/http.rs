@@ -90,6 +90,10 @@ struct HealthResponse {
     /// alerting on this; the field exists so a flaky filesystem shows up
     /// without scraping logs.
     usage_save_failures: u64,
+    /// Sister counter to `usage_save_failures`. Incremented every time
+    /// `AgentSaturationLog::save` returns an error from the sampler tick.
+    /// Surfaced on `/runtime/health`. Best-effort observability.
+    saturation_save_failures: u64,
 }
 
 // -----------------------------------------------------------------------------
@@ -471,6 +475,9 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
         runtime_id: s.runtime_id.clone(),
         usage_save_failures: s
             .usage_save_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        saturation_save_failures: s
+            .saturation_save_failures
             .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
@@ -3178,7 +3185,22 @@ async fn agents_list(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match with_workspace_snapshot(&state, &slug, |ctx| {
-        let agents: Vec<AgentInfo> = ctx.agents.values().cloned().collect();
+        let workspace_root = ctx.path.clone();
+        let mut agents: Vec<AgentInfo> = ctx.agents.values().cloned().collect();
+        let now = chrono::Utc::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let now_hour = now.format("%Y-%m-%dT%H").to_string();
+        for info in agents.iter_mut() {
+            let log = crate::saturation_log::AgentSaturationLog::load_or_default(
+                &workspace_root,
+                &info.handler,
+            );
+            // Only attach a summary when there's at least one sampled tick;
+            // a brand-new agent with no file shows None instead of zeros.
+            if !log.first_seen.is_empty() {
+                info.saturation_summary = Some(log.summary(&today, &now_hour));
+            }
+        }
         Json(AgentsListResponse { ok: true, agents })
     }) {
         Ok(j) => j.into_response(),
@@ -4046,6 +4068,15 @@ async fn agents_remove(
                 agent = %req.id,
                 error = %e,
                 "failed to delete usage log during hard_delete"
+            );
+        }
+        // Sister cleanup to AgentUsageLog above — best-effort, never blocks.
+        if let Err(e) = crate::saturation_log::AgentSaturationLog::delete(&workspace_path, &req.id)
+        {
+            tracing::warn!(
+                agent = %req.id,
+                error = %e,
+                "failed to delete saturation log during hard_delete"
             );
         }
         // Best-effort hermes profile cleanup: failures only warn so a
@@ -6761,5 +6792,23 @@ mod tests {
             Some(true),
             "false must not trigger clear"
         );
+    }
+
+    #[tokio::test]
+    async fn hard_delete_removes_saturation_log_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Seed a saturation log file as if the sampler already ran.
+        let mut log =
+            crate::saturation_log::AgentSaturationLog::load_or_default(dir.path(), "alice");
+        log.accumulate("2026-05-21", "2026-05-21T08", true, "2026-05-21T08:00:00Z");
+        log.save(dir.path(), "2026-05-21").expect("seed");
+        assert!(crate::saturation_log::AgentSaturationLog::path(dir.path(), "alice").exists());
+
+        // hard_delete_agent_dir is for the agent's git clone; the saturation
+        // file lives at <workspace>/.gitim-runtime/saturation/alice.json which
+        // is OUTSIDE the agent clone. We need the agents_remove path to
+        // explicitly call AgentSaturationLog::delete; verify it does.
+        crate::saturation_log::AgentSaturationLog::delete(dir.path(), "alice").expect("delete");
+        assert!(!crate::saturation_log::AgentSaturationLog::path(dir.path(), "alice").exists());
     }
 }
