@@ -1,9 +1,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::url_redact::redacted_url;
+
+/// Process-level timeout for all git subprocess invocations.
+/// Prevents `Command::output()` from blocking indefinitely when git hangs
+/// (e.g. disk full, credential prompt, NFS stall, lock contention).
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
     "-c",
@@ -29,6 +35,112 @@ pub enum GitError {
     /// cannot proceed until HEAD is reattached.
     #[error("HEAD is detached: not pointing to a branch")]
     DetachedHead,
+    /// Git subprocess did not finish within the process-level timeout.
+    /// The child process has been killed.
+    #[error("git command timed out after {0:?}")]
+    Timeout(Duration),
+    /// Disk-full condition detected in git output (ENOSPC / No space left on device).
+    #[error("disk full: {0}")]
+    DiskFull(String),
+}
+
+/// Run a git subprocess with a process-level timeout.
+///
+/// Spawns `git` as a child process and waits up to `GIT_COMMAND_TIMEOUT` for
+/// it to finish. If the deadline expires, the child is killed and
+/// `GitError::Timeout` is returned. On success, stderr is checked for
+/// ENOSPC patterns before returning the output.
+fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
+    let child = Command::new("git")
+        .args(args)
+        .current_dir(current_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // Wait with timeout using a thread + channel.
+    // We keep the Child's pid so we can kill it on timeout.
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
+        Ok(Ok(output)) => {
+            // Check for disk-full even on "success" — git sometimes exits 0
+            // with ENOSPC warnings in stderr, and some commands (e.g. fetch)
+            // may partially succeed.
+            let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+            if is_disk_full(&stderr_str) {
+                return Err(GitError::DiskFull(stderr_str));
+            }
+            Ok(output)
+        }
+        Ok(Err(e)) => Err(GitError::Io(e)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Child process is hung — try to kill it.
+            // SAFETY: pid belongs to our child process. On Unix, pids are
+            // recycled slowly, and the window between spawn and timeout
+            // (120s) makes a pid recycle race practically impossible.
+            #[cfg(unix)]
+            {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, try the portable kill. This is best-effort;
+                // the child will be reaped when it eventually exits.
+                let _ = Command::new("kill")
+                    .args([&pid.to_string()])
+                    .output();
+            }
+            Err(GitError::Timeout(GIT_COMMAND_TIMEOUT))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // Thread panicked before sending — treat as I/O error.
+            Err(GitError::CommandFailed(
+                "git subprocess thread panicked".to_string(),
+            ))
+        }
+    }
+}
+
+/// Run a git subprocess with timeout, returning `Result<Output, GitError>`
+/// where non-zero exit is converted to `CommandFailed` (with ENOSPC check).
+fn run_git(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
+    let output = run_git_command(args, current_dir)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if is_disk_full(&stderr) {
+            return Err(GitError::DiskFull(stderr));
+        }
+        return Err(GitError::CommandFailed(stderr));
+    }
+    Ok(output)
+}
+
+/// Run a git subprocess with timeout, for best-effort calls that discard
+/// the result. Returns the output if the command succeeded within the
+/// timeout, or `None` on any error (timeout, non-zero exit, I/O).
+fn run_git_best_effort(args: &[&str], current_dir: &Path) -> Option<Output> {
+    run_git_command(args, current_dir).ok().and_then(|o| {
+        if o.status.success() {
+            Some(o)
+        } else {
+            None
+        }
+    })
+}
+
+fn is_disk_full(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("no space left on device")
+        || lower.contains("enospc")
+        || lower.contains("cannot write: no space left on device")
+        || lower.contains("disk full")
 }
 
 #[derive(Clone)]
@@ -48,11 +160,12 @@ impl GitStorage {
     }
 
     pub fn pull_rebase(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
-            .args(GIT_HTTP_TIMEOUT_ARGS)
-            .args(["pull", "--rebase"])
-            .current_dir(&self.root)
-            .output()?;
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
+            "pull", "--rebase",
+        ];
+        let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
             return Err(classify_remote_error(&String::from_utf8_lossy(
                 &output.stderr,
@@ -76,15 +189,7 @@ impl GitStorage {
     ) -> Result<(), GitError> {
         let mut args = vec!["add"];
         args.extend(paths);
-        let output = Command::new("git")
-            .args(&args)
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&args, &self.root)?;
 
         let mut commit_args = vec!["commit", "-m", message];
         let author_str;
@@ -93,15 +198,7 @@ impl GitStorage {
             commit_args.push("--author");
             commit_args.push(&author_str);
         }
-        let output = Command::new("git")
-            .args(&commit_args)
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&commit_args, &self.root)?;
         Ok(())
     }
 
@@ -111,15 +208,7 @@ impl GitStorage {
         message: &str,
         author: Option<(&str, &str)>,
     ) -> Result<String, GitError> {
-        let output = Command::new("git")
-            .args(["add", "--", path])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&["add", "--", path], &self.root)?;
 
         let mut commit_args = vec!["commit", "--only", "-m", message];
         let author_str;
@@ -131,25 +220,18 @@ impl GitStorage {
         commit_args.push("--");
         commit_args.push(path);
 
-        let output = Command::new("git")
-            .args(&commit_args)
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&commit_args, &self.root)?;
 
         self.rev_parse("HEAD")
     }
 
     pub fn push(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
-            .args(GIT_HTTP_TIMEOUT_ARGS)
-            .args(["push", "-u", "origin", "HEAD"])
-            .current_dir(&self.root)
-            .output()?;
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
+            "push", "-u", "origin", "HEAD",
+        ];
+        let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
             return Err(classify_remote_error(&String::from_utf8_lossy(
                 &output.stderr,
@@ -159,20 +241,16 @@ impl GitStorage {
     }
 
     pub fn has_remote(&self) -> bool {
-        Command::new("git")
-            .args(["remote", "get-url", "origin"])
-            .current_dir(&self.root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        run_git_best_effort(&["remote", "get-url", "origin"], &self.root).is_some()
     }
 
     pub fn fetch(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
-            .args(GIT_HTTP_TIMEOUT_ARGS)
-            .args(["fetch", "origin"])
-            .current_dir(&self.root)
-            .output()?;
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0], GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2], GIT_HTTP_TIMEOUT_ARGS[3],
+            "fetch", "origin",
+        ];
+        let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
             return Err(classify_remote_error(&String::from_utf8_lossy(
                 &output.stderr,
@@ -190,15 +268,7 @@ impl GitStorage {
             return Err(GitError::DetachedHead);
         }
 
-        let output = Command::new("git")
-            .args(["rev-list", "--count", "@{upstream}..HEAD"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["rev-list", "--count", "@{upstream}..HEAD"], &self.root)?;
         let count: u64 = String::from_utf8_lossy(&output.stdout)
             .trim()
             .parse()
@@ -219,15 +289,7 @@ impl GitStorage {
         if !self.head_is_on_branch()? {
             return Err(GitError::DetachedHead);
         }
-        let output = Command::new("git")
-            .args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], &self.root)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut parts = stdout.split_whitespace();
         let behind: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -239,10 +301,7 @@ impl GitStorage {
     /// false on detached HEAD. Used as a precondition probe for any
     /// `@{upstream}`-dependent operation.
     pub fn head_is_on_branch(&self) -> Result<bool, GitError> {
-        let output = Command::new("git")
-            .args(["symbolic-ref", "--quiet", "HEAD"])
-            .current_dir(&self.root)
-            .output()?;
+        let output = run_git_command(&["symbolic-ref", "--quiet", "HEAD"], &self.root)?;
         // `--quiet` makes detached HEAD exit non-zero with no output and no
         // stderr. We treat that specifically as detached; any other
         // non-zero exit is a real error.
@@ -252,21 +311,15 @@ impl GitStorage {
         if output.stderr.is_empty() && output.stdout.is_empty() {
             return Ok(false);
         }
-        Err(GitError::CommandFailed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if is_disk_full(&stderr) {
+            return Err(GitError::DiskFull(stderr));
+        }
+        Err(GitError::CommandFailed(stderr))
     }
 
     pub fn rev_parse(&self, reference: &str) -> Result<String, GitError> {
-        let output = Command::new("git")
-            .args(["rev-parse", reference])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["rev-parse", reference], &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
@@ -278,15 +331,7 @@ impl GitStorage {
         // would silently skip. Forcing rename decomposition turns every
         // archival into a delete + add pair, and the new path's full
         // content lands in the returned map.
-        let output = Command::new("git")
-            .args(["diff", "--no-renames", &range])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--no-renames", &range], &self.root)?;
         Ok(Self::parse_diff_output(&String::from_utf8_lossy(
             &output.stdout,
         )))
@@ -294,15 +339,7 @@ impl GitStorage {
 
     pub fn changed_files_range(&self, from: &str, to: &str) -> Result<Vec<PathBuf>, GitError> {
         let range = format!("{}..{}", from, to);
-        let output = Command::new("git")
-            .args(["diff", "--name-only", "--no-renames", &range])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--name-only", "--no-renames", &range], &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| !line.is_empty())
@@ -311,15 +348,7 @@ impl GitStorage {
     }
 
     pub fn diff_unpushed(&self, pattern: &str) -> Result<HashMap<PathBuf, String>, GitError> {
-        let output = Command::new("git")
-            .args(["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--no-renames", "@{upstream}..HEAD", "--", pattern], &self.root)?;
         Ok(Self::parse_diff_output(&String::from_utf8_lossy(
             &output.stdout,
         )))
@@ -359,30 +388,14 @@ impl GitStorage {
     }
 
     pub fn rebase_onto_origin(&self) -> Result<(), GitError> {
-        let output = Command::new("git")
-            .args(["rebase", "@{upstream}"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&["rebase", "@{upstream}"], &self.root)?;
         Ok(())
     }
 
     /// List files changed between upstream and HEAD, matching a pattern.
     /// Returns relative paths (e.g. "channels/general.meta.yaml").
     pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
-        let output = Command::new("git")
-            .args(["diff", "--name-only", "@{upstream}..HEAD", "--", pattern])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--name-only", "@{upstream}..HEAD", "--", pattern], &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -396,15 +409,7 @@ impl GitStorage {
     /// `showboards/*/board.md`) so they aren't silently destroyed by a
     /// `git reset --hard @{upstream}`.
     pub fn changed_files_unpushed_all(&self) -> Result<Vec<PathBuf>, GitError> {
-        let output = Command::new("git")
-            .args(["diff", "--name-only", "@{upstream}..HEAD"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--name-only", "@{upstream}..HEAD"], &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -413,26 +418,10 @@ impl GitStorage {
     }
 
     pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
-        let output = Command::new("git")
-            .args(["merge-base", "@{upstream}", "HEAD"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-        let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let merge_base_output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
+        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout).trim().to_string();
         let range = format!("{}..HEAD", merge_base);
-        let output = Command::new("git")
-            .args(["diff", "--name-only", "--no-renames", &range, "--", pattern])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        let output = run_git(&["diff", "--name-only", "--no-renames", &range, "--", pattern], &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -441,15 +430,7 @@ impl GitStorage {
     }
 
     pub fn mv(&self, from: &str, to: &str) -> Result<(), GitError> {
-        let output = Command::new("git")
-            .args(["mv", from, to])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&["mv", from, to], &self.root)?;
         Ok(())
     }
 
@@ -457,21 +438,10 @@ impl GitStorage {
     /// Encapsulates rebase_abort + reset_hard_upstream.
     pub fn discard_unpushed(&self) -> Result<(), GitError> {
         // Best-effort abort any in-progress rebase
-        let _ = Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(&self.root)
-            .output();
+        let _ = run_git_best_effort(&["rebase", "--abort"], &self.root);
 
         // Reset to upstream state
-        let output = Command::new("git")
-            .args(["reset", "--hard", "@{upstream}"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+        run_git(&["reset", "--hard", "@{upstream}"], &self.root)?;
         Ok(())
     }
 
@@ -483,10 +453,7 @@ impl GitStorage {
     /// and `@{upstream}` is usable again", which is false while those
     /// directories remain.
     pub fn abort_rebase(&self) -> Result<(), GitError> {
-        let _ = Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(&self.root)
-            .output();
+        let _ = run_git_best_effort(&["rebase", "--abort"], &self.root);
 
         if self.has_stale_rebase_state() {
             return Err(GitError::CommandFailed(
@@ -530,15 +497,7 @@ impl GitStorage {
 
         if !self.head_is_on_branch()? {
             let branch = self.default_branch_from_origin_head()?;
-            let output = Command::new("git")
-                .args(["checkout", "-B", &branch, "HEAD"])
-                .current_dir(&self.root)
-                .output()?;
-            if !output.status.success() {
-                return Err(GitError::CommandFailed(
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                ));
-            }
+            run_git(&["checkout", "-B", &branch, "HEAD"], &self.root)?;
         }
 
         Ok(())
@@ -549,14 +508,15 @@ impl GitStorage {
     /// `CommandFailed` if origin/HEAD is unset (caller must decide whether
     /// to escalate or pick a fallback).
     fn default_branch_from_origin_head(&self) -> Result<String, GitError> {
-        let output = Command::new("git")
-            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-            .current_dir(&self.root)
-            .output()?;
+        let output = run_git_command(&["symbolic-ref", "refs/remotes/origin/HEAD"], &self.root)?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if is_disk_full(&stderr) {
+                return Err(GitError::DiskFull(stderr));
+            }
             return Err(GitError::CommandFailed(format!(
                 "origin/HEAD not set: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             )));
         }
         let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -596,6 +556,9 @@ fn is_auth_failed(stderr: &str) -> bool {
 /// that exits this function is safe to log.
 pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
     let stderr = redacted_url(raw_stderr);
+    if is_disk_full(&stderr) {
+        return GitError::DiskFull(stderr);
+    }
     if is_rate_limited(&stderr) {
         return GitError::RateLimited;
     }
@@ -738,6 +701,39 @@ mod tests {
                 "http.lowSpeedTime=10",
             ]
         );
+    }
+
+    #[test]
+    fn disk_full_detection_matches_known_patterns() {
+        assert!(is_disk_full(
+            "fatal: cannot write: No space left on device"
+        ));
+        assert!(is_disk_full(
+            "error: No space left on device (os error 28)"
+        ));
+        assert!(is_disk_full("ENOSPC: write failed"));
+        assert!(is_disk_full("disk full: cannot allocate"));
+    }
+
+    #[test]
+    fn disk_full_detection_no_false_positives() {
+        assert!(!is_disk_full(""));
+        assert!(!is_disk_full("fatal: authentication failed"));
+        assert!(!is_disk_full("error: failed to push some refs"));
+    }
+
+    #[test]
+    fn classify_remote_error_prioritizes_disk_full_over_rate_limit() {
+        let stderr = "No space left on device (rate limit also hit)";
+        assert!(matches!(
+            classify_remote_error(stderr),
+            GitError::DiskFull(_)
+        ));
+    }
+
+    #[test]
+    fn git_command_timeout_is_120_seconds() {
+        assert_eq!(GIT_COMMAND_TIMEOUT, Duration::from_secs(120));
     }
 
     #[test]

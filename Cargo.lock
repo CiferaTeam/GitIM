@@ -971,6 +971,7 @@ name = "gitim-sync"
 version = "0.8.6"
 dependencies = [
  "gitim-core",
+ "libc",
  "notify",
  "rand",
  "regex",
