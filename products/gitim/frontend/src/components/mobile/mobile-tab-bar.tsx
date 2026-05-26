@@ -12,7 +12,10 @@ export function MobileTabBar() {
   const tabs = getVisibleNavigationItems(mode, "mobile");
 
   return (
-    <div className="shrink-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] border-t border-border bg-card/80 backdrop-blur-md flex items-center justify-around md:hidden">
+    <nav
+      aria-label="Mobile navigation"
+      className="fixed inset-x-0 bottom-0 z-30 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] border-t border-border bg-card/80 backdrop-blur-md flex items-center justify-around md:hidden"
+    >
       {tabs.map((t) => {
         const active =
           t.to === "/chat"
@@ -33,6 +36,6 @@ export function MobileTabBar() {
           </button>
         );
       })}
-    </div>
+    </nav>
   );
 }

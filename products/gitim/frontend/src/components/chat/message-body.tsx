@@ -27,7 +27,7 @@ function InlineCode({ code }: { code: string }) {
     <code
       onClick={handleClick}
       title="Click to copy"
-      className={`px-1.5 py-0.5 rounded text-[13px] font-mono cursor-pointer transition-colors duration-150 ${
+      className={`break-all whitespace-pre-wrap px-1.5 py-0.5 rounded text-[13px] font-mono cursor-pointer transition-colors duration-150 ${
         copied
           ? "bg-primary/20 text-primary"
           : "bg-muted text-foreground/90 hover:bg-muted/80"
@@ -229,7 +229,7 @@ export function MessageBody({
     [body],
   );
   return (
-    <span className="whitespace-pre-wrap">
+    <span className="whitespace-pre-wrap break-words">
       {fragments.map((fragment, index) => (
         <FragmentRenderer
           key={index}

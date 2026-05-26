@@ -23,7 +23,7 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div
-      className="h-screen flex flex-col bg-background text-foreground"
+      className="h-screen flex flex-col overflow-hidden bg-background text-foreground"
       style={{ height: "100dvh" }}
     >
       {/* Top bar */}
@@ -86,9 +86,13 @@ export function AppShell({ children }: AppShellProps) {
       </header>
 
       {/* Content */}
-      <main className="flex-1 overflow-hidden">
+      <main className="min-h-0 flex-1 overflow-hidden">
         {children ?? <Outlet />}
       </main>
+      <div
+        aria-hidden="true"
+        className="shrink-0 h-[calc(4rem+env(safe-area-inset-bottom))] md:hidden"
+      />
       <MobileTabBar />
     </div>
   );

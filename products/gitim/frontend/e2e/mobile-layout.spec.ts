@@ -72,7 +72,26 @@ async function stubGitHubIdentity(page: Page) {
   });
 }
 
-async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>> = []) {
+function mobileMessages(count = 1) {
+  return Array.from({ length: count }, (_, index) => {
+    const line = index + 1;
+    return {
+      line_number: line,
+      point_to: 0,
+      author: index % 2 === 0 ? "lewis" : "alice",
+      timestamp: "20260317T120000Z",
+      body: line === count
+        ? "hello mobile"
+        : `mobile layout message ${line} with inline code \`CURSOR_COMPOSER25_MODEL_SWITCH_SMOKE_20260526_LONG_TOKEN\``,
+    };
+  });
+}
+
+async function stubRuntime(
+  page: Page,
+  sentBodies: Array<Record<string, unknown>> = [],
+  options: { messageCount?: number } = {},
+) {
   const boardHandlers = [
     "alpha01",
     "bravo02",
@@ -129,7 +148,7 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
           ok: true,
           data: {
             channels: [
-              { name: "general", kind: "channel", members: ["lewis"] },
+              { name: "general", kind: "channel", members: ["lewis", "alice"] },
               { name: "alice--lewis", kind: "dm", members: ["alice", "lewis"] },
               { name: "bob--carol", kind: "dm", members: ["bob", "carol"] },
             ],
@@ -217,15 +236,7 @@ async function stubRuntime(page: Page, sentBodies: Array<Record<string, unknown>
         json: {
           ok: true,
           data: {
-            entries: [
-              {
-                line_number: 1,
-                point_to: 0,
-                author: "lewis",
-                timestamp: "20260317T120000Z",
-                body: "hello mobile",
-              },
-            ],
+            entries: mobileMessages(options.messageCount ?? 1),
           },
         },
       });
@@ -538,7 +549,7 @@ test("mobile runtime mode defaults to chat", async ({ page }) => {
 
 test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await stubRuntime(page);
+  await stubRuntime(page, [], { messageCount: 36 });
   await page.goto("/chat");
 
   await expect(page.getByText("hello mobile")).toBeVisible();
@@ -546,6 +557,33 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cards", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
+
+  const tabBarMetrics = await page
+    .getByRole("button", { name: "Chat", exact: true })
+    .evaluate((button) => {
+      const tabBar = button.parentElement as HTMLElement;
+      const rect = tabBar.getBoundingClientRect();
+      return {
+        bottom: rect.bottom,
+        top: rect.top,
+        viewportHeight: window.innerHeight,
+        bodyScrollHeight: document.body.scrollHeight,
+        documentClientHeight: document.documentElement.clientHeight,
+      };
+    });
+  expect(tabBarMetrics.top).toBeGreaterThanOrEqual(0);
+  expect(tabBarMetrics.bottom).toBeLessThanOrEqual(tabBarMetrics.viewportHeight);
+  expect(tabBarMetrics.bodyScrollHeight).toBeLessThanOrEqual(
+    tabBarMetrics.documentClientHeight,
+  );
+
+  const messageScrollMetrics = await page.locator("[data-message-scroll]").evaluate((el) => ({
+    clientWidth: el.clientWidth,
+    scrollWidth: el.scrollWidth,
+  }));
+  expect(messageScrollMetrics.scrollWidth).toBeLessThanOrEqual(
+    messageScrollMetrics.clientWidth,
+  );
 
   const channelCardsButton = page.getByRole("button", { name: "Open cards for general" });
   await expect(channelCardsButton).toContainText("Cards");
@@ -569,18 +607,18 @@ test("mobile chat Enter inserts newline and send button sends", async ({ page })
   await page.goto("/chat");
 
   const input = page.getByPlaceholder("Type a message...");
-  await input.fill("hello");
+  await input.fill("<@alice> hello");
   await input.press("Enter");
   await input.type("world");
 
-  await expect(input).toHaveValue("hello\nworld");
+  await expect(input).toHaveValue("<@alice> hello\nworld");
   expect(sentBodies).toHaveLength(0);
 
   await page.getByRole("button", { name: "Send message" }).click();
   await expect.poll(() => sentBodies.length).toBe(1);
   expect(sentBodies[0]).toMatchObject({
     channel: "general",
-    body: "hello\nworld",
+    body: "<@alice> hello\nworld",
   });
   await expect(input).toHaveValue("");
 });
