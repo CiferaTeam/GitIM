@@ -174,19 +174,23 @@ export function MessageList({
         onPendingScrollClear();
       });
     } else if (decision.kind === "anchor") {
-      requestAnimationFrame(() => {
-        if (!scrollRef.current) return;
-        const target = scrollRef.current.querySelector(
-          `[data-line="${decision.line}"]`,
-        ) as HTMLElement | null;
-        if (target) {
-          suppressTopPagingUntilUserScrollRef.current = true;
-          target.scrollIntoView({ behavior: "auto", block: "start" });
-          scrollRef.current.scrollTop += decision.offsetPx;
-          suppressAutoBottomRef.current = true;
-          reportViewportAnchor(scrollRef.current);
-        }
-      });
+      // Synchronous in useLayoutEffect: by the time this effect runs, React
+      // has already committed the message list to the DOM in this same frame,
+      // so the target [data-line] node is queryable. Wrapping in
+      // requestAnimationFrame defers to a later frame where, under React
+      // Strict Mode's simulated unmount, scrollRef.current can be cleared and
+      // the callback bails before it can scroll — the symptom users see as
+      // "snapped back to the top after switching tabs."
+      const target = el.querySelector(
+        `[data-line="${decision.line}"]`,
+      ) as HTMLElement | null;
+      if (target) {
+        suppressTopPagingUntilUserScrollRef.current = true;
+        target.scrollIntoView({ behavior: "auto", block: "start" });
+        el.scrollTop += decision.offsetPx;
+        suppressAutoBottomRef.current = true;
+        reportViewportAnchor(el);
+      }
     } else if (decision.kind === "preserve-prepend-anchor") {
       el.scrollTop = el.scrollTop + decision.heightDelta;
       reportViewportAnchor(el);
