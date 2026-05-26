@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -42,13 +43,50 @@ function escapeLabel(s: string): string {
 const TOOLTIP_OFFSET = 8;
 const TOOLTIP_MAX_WIDTH = 448; // max-w-md
 const TOOLTIP_MAX_HEIGHT = 384; // max-h-96
+// Grace period before closing on mouseleave. Lets the cursor cross the
+// TOOLTIP_OFFSET gap between node and tooltip without dismissing.
+const TOOLTIP_CLOSE_DELAY_MS = 150;
 
 export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
   const ref = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const id = useId().replace(/:/g, "_");
   const [hoveredNode, setHoveredNode] = useState<FlowNodeSummary | null>(null);
   const [tooltipStyle, setTooltipStyle] = useState<React.CSSProperties>({});
   const cleanupRef = useRef<(() => void) | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setHoveredNode(null);
+      closeTimerRef.current = null;
+    }, TOOLTIP_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+
+  // Bind native mouseenter/leave to the tooltip so the cursor can park inside
+  // it (e.g. to scroll the prompt) without the close timer firing. Native
+  // listeners stay symmetric with the SVG node bindings and are easier to
+  // exercise from tests than React's mouseover-derived synthetic events.
+  useEffect(() => {
+    const el = tooltipRef.current;
+    if (!el) return;
+    const enter = () => cancelClose();
+    const leave = () => scheduleClose();
+    el.addEventListener("mouseenter", enter);
+    el.addEventListener("mouseleave", leave);
+    return () => {
+      el.removeEventListener("mouseenter", enter);
+      el.removeEventListener("mouseleave", leave);
+    };
+  }, [hoveredNode, cancelClose, scheduleClose]);
 
   useEffect(() => {
     if (nodes.length === 0) return;
@@ -81,6 +119,7 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
           el.setAttribute("aria-label", `Node ${node.id}`);
 
           const show = (target: Element) => {
+            cancelClose();
             const rect = target.getBoundingClientRect();
             const viewportW = window.innerWidth;
             const viewportH = window.innerHeight;
@@ -116,14 +155,19 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
             setHoveredNode(node);
           };
 
-          const hide = () => setHoveredNode(null);
+          // Immediate close for keyboard/explicit dismiss; mouse leave goes
+          // through scheduleClose so the cursor can reach the tooltip.
+          const hideImmediate = () => {
+            cancelClose();
+            setHoveredNode(null);
+          };
 
           const handleEnter = (e: Event) => show(e.currentTarget as Element);
-          const handleLeave = () => hide();
+          const handleLeave = () => scheduleClose();
           const handleFocus = (e: Event) => show(e.currentTarget as Element);
-          const handleBlur = () => hide();
+          const handleBlur = () => hideImmediate();
           const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") hide();
+            if (e.key === "Escape") hideImmediate();
           };
 
           el.addEventListener("mouseenter", handleEnter);
@@ -160,9 +204,10 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
       cancelled = true;
       cleanupRef.current?.();
       cleanupRef.current = null;
+      cancelClose();
       setHoveredNode(null);
     };
-  }, [id, nodes]);
+  }, [id, nodes, cancelClose, scheduleClose]);
 
   if (nodes.length === 0) {
     return (
@@ -176,6 +221,7 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
       {hoveredNode &&
         createPortal(
           <div
+            ref={tooltipRef}
             data-testid="flow-dag-tooltip"
             style={tooltipStyle}
             className="rounded-md border border-border bg-popover p-3 shadow-md outline-hidden"

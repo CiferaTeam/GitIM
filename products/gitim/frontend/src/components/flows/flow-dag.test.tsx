@@ -5,6 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { FlowDAG } from "./flow-dag";
 import type { FlowNodeSummary } from "@/lib/types";
 
+// Matches TOOLTIP_CLOSE_DELAY_MS in flow-dag.tsx. Kept loose so tests are
+// robust to small bumps in the constant.
+const CLOSE_DELAY_MS = 150;
+
 const mocks = vi.hoisted(() => ({
   mermaidRender: vi.fn(),
 }));
@@ -44,6 +48,9 @@ describe("FlowDAG node hover tooltip", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Only fake setTimeout/clearTimeout so microtasks (mermaid render promises)
+    // resolve normally while tests can drive the close-delay clock.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     mocks.mermaidRender.mockImplementation(() =>
       Promise.resolve({ svg: buildMockSvg(["scope-gate", "requirements"]) }),
     );
@@ -60,6 +67,7 @@ describe("FlowDAG node hover tooltip", () => {
     }
     root = null;
     document.body.innerHTML = "";
+    vi.useRealTimers();
   });
 
   const nodes: FlowNodeSummary[] = [
@@ -103,7 +111,44 @@ describe("FlowDAG node hover tooltip", () => {
     );
   });
 
-  it("hides tooltip on mouseleave", async () => {
+  it("hides tooltip after mouseleave grace period", async () => {
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    expect(target).not.toBeUndefined();
+
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+      await flushPromises();
+    });
+
+    // Still visible immediately after leave — grace period lets the cursor
+    // travel to the tooltip itself.
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip']"),
+    ).not.toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(CLOSE_DELAY_MS + 50);
+      await flushPromises();
+    });
+
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip']"),
+    ).toBeNull();
+  });
+
+  it("keeps tooltip visible when cursor enters tooltip during grace period", async () => {
     await act(async () => {
       root!.render(<FlowDAG nodes={nodes} />);
       await flushPromises();
@@ -127,7 +172,54 @@ describe("FlowDAG node hover tooltip", () => {
     const tooltip = document.body.querySelector(
       "[data-testid='flow-dag-tooltip']",
     );
-    expect(tooltip).toBeNull();
+    expect(tooltip).not.toBeNull();
+
+    // Cursor reaches the tooltip before the close timer fires — this cancels
+    // the close so the user can scroll the prompt.
+    await act(async () => {
+      tooltip!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      vi.advanceTimersByTime(CLOSE_DELAY_MS + 50);
+      await flushPromises();
+    });
+
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip']"),
+    ).not.toBeNull();
+  });
+
+  it("closes tooltip after grace period when cursor leaves the tooltip", async () => {
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    expect(target).not.toBeUndefined();
+
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    const tooltip = document.body.querySelector(
+      "[data-testid='flow-dag-tooltip']",
+    );
+    expect(tooltip).not.toBeNull();
+
+    // Cursor moves onto tooltip then leaves it entirely.
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+      tooltip!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      tooltip!.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+      vi.advanceTimersByTime(CLOSE_DELAY_MS + 50);
+      await flushPromises();
+    });
+
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip']"),
+    ).toBeNull();
   });
 
   it("shows tooltip on focus and hides on blur", async () => {
