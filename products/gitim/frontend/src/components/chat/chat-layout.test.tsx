@@ -297,6 +297,26 @@ describe("ChatLayout all mention send", () => {
     expect(preview?.textContent).toContain("no one else");
   });
 
+  it("hides the input area when the current channel is no longer in active channels", async () => {
+    // Reproduces remote-archive: the daemon (or another agent) archives the
+    // channel and the next channels poll drops it from `channels`. The user
+    // hasn't opened the Archived sidebar yet, so `archivedChannels` is still
+    // empty. Without this guard, InputArea kept rendering with a null
+    // recipientChannel and showed "Routes to no one else".
+    useChatStore.setState({
+      channels: [],
+      currentChannel: "general",
+      archivedChannels: [],
+    });
+
+    await act(async () => {
+      root!.render(<ChatLayout />);
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector("textarea")).toBeNull();
+  });
+
   it("prompts confirmation when the message has no effective recipients", async () => {
     await act(async () => {
       root!.render(<ChatLayout />);

@@ -765,7 +765,7 @@ export function ChatLayout() {
           onLoadOlder={handleLoadOlder}
           scrollRef={messageScrollRef}
         />
-        {currentChannel && !isArchivedView && (
+        {currentChannel && currentChannelData && !isArchivedView && (
           <div className="relative shrink-0">
             <ScrollToBottomButton
               visible={!messagesAtBottom}
