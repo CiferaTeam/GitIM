@@ -1,6 +1,6 @@
 use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
-use crate::state::{PendingMessage, PushResult, SharedState};
+use crate::state::{PendingMessage, SharedState};
 use crate::thread_io;
 use gitim_core::types::{validate_labels, CardMeta, CardStatus, ChannelName, Handler};
 use gitim_sync::git::GitError;
@@ -880,55 +880,49 @@ pub async fn handle_send_card_message(
         author, ch_name, card_id, next_line
     );
     let (author_name, author_email) = state.author_for(&author);
-    let commit_status = match state.git_storage.add_and_commit_as(
-        &[&thread_rel],
-        &commit_msg,
-        Some((&author_name, &author_email)),
-    ) {
-        Ok(()) => "committed",
-        Err(e) => {
-            warn!(
-                "git commit failed for L{:06} in {}/{}: {}",
-                next_line, ch_name, card_id, e
-            );
-            "written"
-        }
-    };
+    // Commit, then snapshot HEAD as commit_id while write_guard is still held —
+    // see crates/gitim-daemon/src/handlers/send.rs for the rationale.
+    let (commit_status, commit_id): (&str, Option<String>) =
+        match state.git_storage.add_and_commit_as(
+            &[&thread_rel],
+            &commit_msg,
+            Some((&author_name, &author_email)),
+        ) {
+            Ok(()) => match state.git_storage.rev_parse("HEAD") {
+                Ok(hash) => ("committed", Some(hash)),
+                Err(e) => {
+                    warn!(
+                        "rev_parse HEAD failed after commit for L{:06} in {}/{}: {}",
+                        next_line, ch_name, card_id, e
+                    );
+                    ("committed", None)
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "git commit failed for L{:06} in {}/{}: {}",
+                    next_line, ch_name, card_id, e
+                );
+                ("written", None)
+            }
+        };
 
-    // File committed (or at least written) — release before the push await
-    // so pending push completion doesn't block other writers.
+    // Local commit is the ack. Release before any non-essential work so
+    // the next writer / sync_loop rebase can proceed.
     drop(write_guard);
 
-    let should_await_push =
-        state.has_remote && state.sync_started.load(std::sync::atomic::Ordering::SeqCst);
-    let push_rx = if should_await_push {
-        let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
-        {
-            let mut pending = state
-                .pending_push
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.push(PendingMessage {
-                channel: channel_key.clone(),
-                line_number: next_line,
-                result_tx: Some(tx),
-            });
-        }
-        Some(rx)
-    } else {
-        {
-            let mut pending = state
-                .pending_push
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.push(PendingMessage {
-                channel: channel_key.clone(),
-                line_number: next_line,
-                result_tx: None,
-            });
-        }
-        None
-    };
+    // Track in pending_push so sync_loop can emit a push-confirmation event
+    // when the commit reaches the remote.
+    {
+        let mut pending = state
+            .pending_push
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        pending.push(PendingMessage {
+            channel: channel_key.clone(),
+            line_number: next_line,
+        });
+    }
 
     let _ = state.event_tx.send(Event::CardMessageAppended {
         channel: ch_name.to_string(),
@@ -941,46 +935,18 @@ pub async fn handle_send_card_message(
         ch_name, card_id, author, next_line
     );
 
-    use gitim_core::responses::SendCardMessageResponse;
-    let payload = if let Some(rx) = push_rx {
+    if state.has_remote && state.sync_started.load(std::sync::atomic::Ordering::SeqCst) {
         state.push_notify.notify_one();
-        match rx.await {
-            Ok(PushResult::Pushed { commit_id }) => SendCardMessageResponse {
-                line_number: next_line,
-                channel: ch_name.to_string(),
-                card_id,
-                status: "pushed".to_string(),
-                commit_id: Some(commit_id),
-                error: None,
-            },
-            Ok(PushResult::Failed { reason }) => SendCardMessageResponse {
-                line_number: next_line,
-                channel: ch_name.to_string(),
-                card_id,
-                status: "commit_only".to_string(),
-                commit_id: None,
-                error: Some(reason),
-            },
-            Err(_) => SendCardMessageResponse {
-                line_number: next_line,
-                channel: ch_name.to_string(),
-                card_id,
-                status: "commit_only".to_string(),
-                commit_id: None,
-                error: Some("push result channel closed".to_string()),
-            },
-        }
-    } else {
-        SendCardMessageResponse {
-            line_number: next_line,
-            channel: ch_name.to_string(),
-            card_id,
-            status: commit_status.to_string(),
-            commit_id: None,
-            error: None,
-        }
-    };
-    Response::json(payload)
+    }
+
+    use gitim_core::responses::SendCardMessageResponse;
+    Response::json(SendCardMessageResponse {
+        line_number: next_line,
+        channel: ch_name.to_string(),
+        card_id,
+        status: commit_status.to_string(),
+        commit_id,
+    })
 }
 
 pub async fn handle_update_card(

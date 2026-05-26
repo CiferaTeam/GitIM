@@ -1,6 +1,6 @@
 use crate::api::{Event, Response};
 use crate::handlers::{ensure_author_not_departed, resolve_thread_path};
-use crate::state::{PendingMessage, PushResult, SharedState};
+use crate::state::{PendingMessage, SharedState};
 
 use gitim_core::dm::dm_filename;
 use gitim_core::formatter::format_message;
@@ -166,69 +166,67 @@ pub async fn handle_send(
         Err(e) => return Response::error(format!("open failed: {}", e)),
     }
 
-    // Git add + commit (best effort — message was already written)
-    let commit_status = match thread_path.strip_prefix(&state.repo_root) {
-        Ok(rel) => {
-            let rel_str = rel.to_string_lossy().to_string();
-            let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
-            let (author_name, author_email) = state.author_for(&author);
-            match state.git_storage.add_and_commit_as(
-                &[&rel_str],
-                &commit_msg,
-                Some((&author_name, &author_email)),
-            ) {
-                Ok(()) => "committed",
-                Err(e) => {
-                    warn!(
-                        "git commit failed for L{:06} in {}: {}",
-                        next_line, thread_name, e
-                    );
-                    "written"
+    // Git add + commit, then snapshot HEAD as the response's commit_id.
+    // rev_parse runs while `write_guard` is still held, so no concurrent
+    // rebase / writer can change HEAD between commit and snapshot.
+    //
+    // If `git commit` fails the message is still on disk (status="written")
+    // and sync_loop will pick it up via the next rebase / commit; commit_id
+    // is None in that case.
+    let (commit_status, commit_id): (&str, Option<String>) =
+        match thread_path.strip_prefix(&state.repo_root) {
+            Ok(rel) => {
+                let rel_str = rel.to_string_lossy().to_string();
+                let commit_msg = format!("msg: @{} -> {} L{:06}", author, thread_name, next_line);
+                let (author_name, author_email) = state.author_for(&author);
+                match state.git_storage.add_and_commit_as(
+                    &[&rel_str],
+                    &commit_msg,
+                    Some((&author_name, &author_email)),
+                ) {
+                    Ok(()) => match state.git_storage.rev_parse("HEAD") {
+                        Ok(hash) => ("committed", Some(hash)),
+                        Err(e) => {
+                            warn!(
+                                "rev_parse HEAD failed after commit for L{:06} in {}: {}",
+                                next_line, thread_name, e
+                            );
+                            ("committed", None)
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "git commit failed for L{:06} in {}: {}",
+                            next_line, thread_name, e
+                        );
+                        ("written", None)
+                    }
                 }
             }
-        }
-        Err(e) => {
-            warn!("failed to compute relative path for git add: {}", e);
-            "written"
-        }
-    };
+            Err(e) => {
+                warn!("failed to compute relative path for git add: {}", e);
+                ("written", None)
+            }
+        };
 
-    // File is on disk and (if possible) committed — safe to let the next
-    // writer race past us. Push await below must not hold the lock.
+    // Local commit is the ack point. Drop the commit lock so the next
+    // writer can proceed; push is sync_loop's responsibility and runs
+    // out-of-band from this response.
     drop(write_guard);
 
-    // Record in pending_push and optionally set up push-result channel.
-    // Only wait for push if we have a remote AND the sync loop is actually running.
-    let should_await_push =
-        state.has_remote && state.sync_started.load(std::sync::atomic::Ordering::SeqCst);
-    let push_rx = if should_await_push {
-        let (tx, rx) = tokio::sync::oneshot::channel::<PushResult>();
-        {
-            let mut pending = state
-                .pending_push
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.push(PendingMessage {
-                channel: thread_name.clone(),
-                line_number: next_line,
-                result_tx: Some(tx),
-            });
-        }
-        Some(rx)
-    } else {
-        {
-            let mut pending = state
-                .pending_push
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.push(PendingMessage {
-                channel: thread_name.clone(),
-                line_number: next_line,
-                result_tx: None,
-            });
-        }
-        None
-    };
+    // Track the message in pending_push so sync_loop can emit a
+    // MessagesPushed event once it lands on the remote (consumed by
+    // SSE-driven UIs and by sync_loop's renumber bookkeeping).
+    {
+        let mut pending = state
+            .pending_push
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        pending.push(PendingMessage {
+            channel: thread_name.clone(),
+            line_number: next_line,
+        });
+    }
 
     // Invalidate cache
     state.thread_cache.write().await.remove(&thread_name);
@@ -249,41 +247,17 @@ pub async fn handle_send(
         thread_name, author, next_line
     );
 
-    // If has_remote, wake sync_loop and await push result
-    use gitim_core::responses::SendResponse;
-    let payload = if let Some(rx) = push_rx {
+    // Wake sync_loop so it picks up the new commit on its next cycle.
+    // No-op when there is no remote / sync_loop hasn't started.
+    if state.has_remote && state.sync_started.load(std::sync::atomic::Ordering::SeqCst) {
         state.push_notify.notify_one();
-        match rx.await {
-            Ok(PushResult::Pushed { commit_id }) => SendResponse {
-                line_number: next_line,
-                channel: thread_name,
-                status: "pushed".to_string(),
-                commit_id: Some(commit_id),
-                error: None,
-            },
-            Ok(PushResult::Failed { reason }) => SendResponse {
-                line_number: next_line,
-                channel: thread_name,
-                status: "commit_only".to_string(),
-                commit_id: None,
-                error: Some(reason),
-            },
-            Err(_) => SendResponse {
-                line_number: next_line,
-                channel: thread_name,
-                status: "commit_only".to_string(),
-                commit_id: None,
-                error: Some("push result channel closed".to_string()),
-            },
-        }
-    } else {
-        SendResponse {
-            line_number: next_line,
-            channel: thread_name,
-            status: commit_status.to_string(),
-            commit_id: None,
-            error: None,
-        }
-    };
-    Response::json(payload)
+    }
+
+    use gitim_core::responses::SendResponse;
+    Response::json(SendResponse {
+        line_number: next_line,
+        channel: thread_name,
+        status: commit_status.to_string(),
+        commit_id,
+    })
 }

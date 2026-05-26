@@ -22,11 +22,18 @@ pub struct StatusResponse {
 
 /// Response payload for `Request::Send`.
 ///
-/// Shape is the same flat struct in three cases:
-/// 1. **Pushed**: remote write succeeded — `commit_id` populated, `error` None.
-/// 2. **Commit-only with reason**: local commit ok, push failed — `error`
-///    populated, `commit_id` None.
-/// 3. **No remote**: local-only repo, no push attempted — both None.
+/// The local commit is the ack point. Send returns as soon as the
+/// message is on disk and committed to the local git tree; push to
+/// the remote happens asynchronously in `sync_loop` and is observable
+/// via `Event::MessagesPushed` (SSE) and `sync_loop` log.
+///
+/// `status` values:
+/// - `"committed"`: local commit succeeded; `commit_id` is the local
+///   HEAD hash at commit time. Note: a subsequent rebase in `sync_loop`
+///   may rewrite this commit, so the hash on the remote can differ.
+/// - `"written"`: message text was written to the thread file but
+///   `git commit` failed; `sync_loop` will sweep it up on its next
+///   cycle. `commit_id` is None.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SendResponse {
     /// Thread line number assigned to this message (`L%06d` on disk).
@@ -34,16 +41,14 @@ pub struct SendResponse {
     /// Resolved channel/thread name (matches request input — duplicated
     /// so async consumers don't have to track the request).
     pub channel: String,
-    /// Outcome string. Current values: `"pushed"`, `"commit_only"`,
-    /// or whatever local-only `commit_status` produces. Treated as a
-    /// hint, not a closed enum (sync layer can extend).
+    /// Outcome string. Current values: `"committed"`, `"written"`.
+    /// Treated as a hint, not a closed enum.
     pub status: String,
-    /// Remote commit hash on push success.
+    /// Local HEAD hash captured under `commit_lock` immediately after the
+    /// commit. None when the commit itself failed (status = `"written"`)
+    /// or when `rev_parse HEAD` errored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<String>,
-    /// Reason if push attempted but failed (auth, conflict, channel closed).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 /// Response payload for `Request::Read`.
@@ -247,7 +252,8 @@ pub struct ChannelEventResponse {
     pub author: String,
     pub targets: Vec<String>,
     pub line_number: u64,
-    /// Push outcome string, same conventions as `SendResponse::status`.
+    /// Commit outcome string, same conventions as `SendResponse::status`
+    /// (`"committed"` or `"written"`).
     pub status: String,
 }
 
@@ -399,8 +405,8 @@ pub struct ReadCardResponse {
     pub entries: Vec<Value>,
 }
 
-/// Response payload for `Request::SendCardMessage`. Same three runtime
-/// branches as `SendResponse`, plus the `card_id` it was sent into.
+/// Response payload for `Request::SendCardMessage`. Same shape and
+/// semantics as `SendResponse`, plus the `card_id` it was sent into.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SendCardMessageResponse {
     pub line_number: u64,
@@ -409,8 +415,6 @@ pub struct SendCardMessageResponse {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 /// Response payload for `Request::UpdateCard`.
@@ -627,20 +631,22 @@ mod tests {
     }
 
     #[test]
-    fn send_response_pushed_wire_shape() {
+    fn send_response_committed_wire_shape() {
         let r = SendResponse {
             line_number: 42,
             channel: "general".to_string(),
-            status: "pushed".to_string(),
+            status: "committed".to_string(),
             commit_id: Some("abc123".to_string()),
-            error: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 4, "pushed-case omits `error`");
+        assert_eq!(obj.len(), 4);
         assert_eq!(obj.get("line_number").and_then(|v| v.as_u64()), Some(42));
         assert_eq!(obj.get("channel").and_then(|v| v.as_str()), Some("general"));
-        assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("pushed"));
+        assert_eq!(
+            obj.get("status").and_then(|v| v.as_str()),
+            Some("committed")
+        );
         assert_eq!(
             obj.get("commit_id").and_then(|v| v.as_str()),
             Some("abc123")
@@ -648,40 +654,21 @@ mod tests {
     }
 
     #[test]
-    fn send_response_commit_only_with_error() {
-        let r = SendResponse {
-            line_number: 99,
-            channel: "general".to_string(),
-            status: "commit_only".to_string(),
-            commit_id: None,
-            error: Some("auth failed".to_string()),
-        };
-        let v = serde_json::to_value(&r).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 4, "commit_only with error omits `commit_id`");
-        assert_eq!(
-            obj.get("error").and_then(|v| v.as_str()),
-            Some("auth failed")
-        );
-        assert!(!obj.contains_key("commit_id"));
-    }
-
-    #[test]
-    fn send_response_no_remote() {
+    fn send_response_written_omits_commit_id() {
         let r = SendResponse {
             line_number: 1,
             channel: "x".to_string(),
-            status: "committed".to_string(),
+            status: "written".to_string(),
             commit_id: None,
-            error: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(
             obj.len(),
             3,
-            "no-remote path omits both commit_id and error"
+            "written status (commit failed) omits commit_id"
         );
+        assert!(!obj.contains_key("commit_id"));
     }
 
     #[test]
@@ -1088,19 +1075,22 @@ mod tests {
     }
 
     #[test]
-    fn send_card_message_response_pushed() {
+    fn send_card_message_response_committed() {
         let r = SendCardMessageResponse {
             line_number: 7,
             channel: "general".to_string(),
             card_id: "card-1".to_string(),
-            status: "pushed".to_string(),
+            status: "committed".to_string(),
             commit_id: Some("hash".to_string()),
-            error: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 5, "pushed-case omits `error`");
+        assert_eq!(obj.len(), 5);
         assert!(obj.contains_key("commit_id"));
+        assert_eq!(
+            obj.get("status").and_then(|v| v.as_str()),
+            Some("committed")
+        );
     }
 
     #[test]
