@@ -1971,6 +1971,36 @@ export async function validateFlow(
   );
 }
 
+export async function updateFlowNodePrompt(
+  slug: string,
+  flowSlug: string,
+  nodeId: string,
+  prompt: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}/nodes/${encodeURIComponent(nodeId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function startFlowRun(
   workspaceSlug: string,
   flowSlug: string,

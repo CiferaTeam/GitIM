@@ -2327,6 +2327,29 @@ async fn flows_validate(
     flow_raw_data_response(client.flow_validate(&flow_slug).await)
 }
 
+async fn flows_node_prompt_set(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug, node_id)): axum::extract::Path<(String, String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(prompt) = body.get("prompt").and_then(|v| v.as_str()) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new("missing 'prompt'")),
+        )
+            .into_response();
+    };
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client.flow_update_node(&flow_slug, &node_id, prompt).await {
+        Ok(resp) => flow_write_response(resp),
+        Err(e) => flow_client_error_to_response(e),
+    }
+}
+
 /// Like `flow_raw_data_response` but for write endpoints: returns the `data`
 /// field on success (or `{}` if absent), 404 for `not_found`, 422 for other
 /// errors. Used by run-start, node-set, and run-cancel.
@@ -5882,6 +5905,10 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         // axum matching the literal word as a flow slug.
         .route("/im/flows", get(flows_list).post(flows_create))
         .route("/im/flows/{flow_slug}/validate", get(flows_validate))
+        .route(
+            "/im/flows/{flow_slug}/nodes/{node_id}",
+            patch(flows_node_prompt_set),
+        )
         .route(
             "/im/flows/{flow_slug}",
             get(flows_show).delete(flows_remove),

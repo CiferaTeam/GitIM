@@ -205,6 +205,48 @@ pub async fn handle_flow_remove(state: SharedState, slug: String, author: String
     }))
 }
 
+pub async fn handle_flow_update_node(
+    state: SharedState,
+    slug: String,
+    node_id: String,
+    prompt: String,
+    author: String,
+) -> Response {
+    let slug = match FlowSlug::new(&slug) {
+        Ok(s) => s,
+        Err(e) => return Response::error(format!("invalid slug: {}", e)),
+    };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
+    let rel = flow_path(&slug);
+    let abs = state.repo_root.join(&rel);
+    let content = match std::fs::read_to_string(&abs) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
+        }
+        Err(e) => return Response::error(format!("failed to read flow: {}", e)),
+    };
+    let mut doc = match parse_flow_markdown(&content) {
+        Ok(d) => d,
+        Err(e) => return Response::error(format!("invalid flow: {}", e)),
+    };
+
+    let node = match doc.meta.nodes.iter_mut().find(|n| n.id == node_id) {
+        Some(n) => n,
+        None => {
+            return Response::error_with_code(format!("node not found: {}", node_id), "not_found");
+        }
+    };
+    node.prompt = prompt.trim_end().to_string();
+
+    match commit_flow_document_locked(&state, &slug, doc, "flow: update node", &author) {
+        Ok(c) => flow_write_success(&state, c),
+        Err(resp) => resp,
+    }
+}
+
 pub async fn handle_flow_validate(state: SharedState, slug: String) -> Response {
     let slug_str = slug.clone();
     let slug = match FlowSlug::new(&slug) {

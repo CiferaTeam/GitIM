@@ -294,3 +294,118 @@ async fn flow_remove_rejected_for_departed_user() {
         "flow should still exist after rejected remove"
     );
 }
+
+/// Seed a flow file by hand. `flow_create` only writes the stub frontmatter,
+/// so when we want to test `update_node` end-to-end we need a flow that
+/// actually has nodes.
+fn seed_two_node_flow(root: &Path) {
+    let dir = root.join("flows").join("rel");
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = "---\nschema_version: 1\nslug: rel\nname: Release\ncreated_by: lewis\ncreated_at: 2026-05-12T10:00:00Z\nnodes:\n  - id: changelog\n    type: agent_mention\n    owner: lewis\n    needs: []\n  - id: e2e\n    type: agent_mention\n    owner: lewis\n    needs: [changelog]\n---\n\n## changelog\n\noriginal changelog prompt\n\n## e2e\n\noriginal e2e prompt\n";
+    std::fs::write(dir.join("index.md"), md).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "seed flow"]);
+}
+
+#[tokio::test]
+async fn flow_update_node_replaces_prompt_and_commits() {
+    let (_tmp, state) = setup().await;
+    seed_two_node_flow(&state.repo_root);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_update_node(
+        state.clone(),
+        "rel".into(),
+        "changelog".into(),
+        "rewritten changelog prompt\nwith a second line".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "flow_update_node failed: {:?}", r.error);
+    assert_eq!(r.data.as_ref().unwrap()["slug"], "rel");
+    assert_eq!(r.data.as_ref().unwrap()["status"], "committed");
+
+    // The other node's prompt must be untouched.
+    let raw = std::fs::read_to_string(state.repo_root.join("flows/rel/index.md")).unwrap();
+    assert!(
+        raw.contains("rewritten changelog prompt"),
+        "updated prompt missing from rendered file:\n{raw}"
+    );
+    assert!(
+        raw.contains("with a second line"),
+        "second prompt line missing:\n{raw}"
+    );
+    assert!(
+        raw.contains("original e2e prompt"),
+        "untouched node prompt got clobbered:\n{raw}"
+    );
+
+    // updated_at must advance.
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "rel".into()).await;
+    assert!(r.ok);
+    assert!(
+        r.data.unwrap()["updated_at"].as_str().is_some(),
+        "updated_at should be populated after update_node",
+    );
+}
+
+#[tokio::test]
+async fn flow_update_node_unknown_node_returns_not_found() {
+    let (_tmp, state) = setup().await;
+    seed_two_node_flow(&state.repo_root);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_update_node(
+        state.clone(),
+        "rel".into(),
+        "does-not-exist".into(),
+        "whatever".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(!r.ok, "unknown node should be rejected");
+    assert_eq!(r.error_code.as_deref(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn flow_update_node_unknown_flow_returns_not_found() {
+    let (_tmp, state) = setup().await;
+
+    let r = gitim_daemon::flow_handlers::handle_flow_update_node(
+        state.clone(),
+        "no-such-flow".into(),
+        "any".into(),
+        "x".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(!r.ok, "unknown flow should be rejected");
+    assert_eq!(r.error_code.as_deref(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn flow_update_node_rejected_for_departed_user() {
+    let (_tmp, state) = setup().await;
+    seed_two_node_flow(&state.repo_root);
+    depart_user_fs(&state.repo_root, "lewis");
+
+    let r = gitim_daemon::flow_handlers::handle_flow_update_node(
+        state.clone(),
+        "rel".into(),
+        "changelog".into(),
+        "should not land".into(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(!r.ok, "departed user must not be able to edit node prompt");
+    assert!(
+        r.error.as_deref().unwrap_or("").contains("departed"),
+        "expected 'departed' in error, got: {:?}",
+        r.error,
+    );
+
+    // File must not have been modified.
+    let raw = std::fs::read_to_string(state.repo_root.join("flows/rel/index.md")).unwrap();
+    assert!(
+        raw.contains("original changelog prompt"),
+        "prompt should be untouched after rejection",
+    );
+}

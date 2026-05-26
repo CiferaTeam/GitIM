@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useFlowStore } from "@/hooks/use-flow-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
@@ -27,11 +26,6 @@ export function FlowsView() {
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
-
-  const [newSlug, setNewSlug] = useState("");
-  const [newName, setNewName] = useState("");
-  const [createSubmitting, setCreateSubmitting] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
 
   const activeSlugRef = useRef(activeSlug);
   const listRequestIdRef = useRef(0);
@@ -95,21 +89,6 @@ export function FlowsView() {
     },
     [activeSlug, setFlows, setSelectedFlow],
   );
-
-  const handleCreate = useCallback(async () => {
-    if (!activeSlug || !newSlug || !newName) return;
-    setCreateSubmitting(true);
-    setCreateError(null);
-    const res = await client.createFlow(activeSlug, newSlug, newName, "");
-    setCreateSubmitting(false);
-    if (!res.ok) {
-      setCreateError(res.error ?? "Failed to create flow");
-      return;
-    }
-    setNewSlug("");
-    setNewName("");
-    await refreshFlows();
-  }, [activeSlug, newSlug, newName, refreshFlows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,14 +167,6 @@ export function FlowsView() {
           loading={listState === "loading"}
           selectedSlug={selectedSlug}
           onSelect={setSelectedSlug}
-          newSlug={newSlug}
-          newName={newName}
-          onNewSlugChange={setNewSlug}
-          onNewNameChange={setNewName}
-          createSubmitting={createSubmitting}
-          createError={createError}
-          onClearCreateError={() => setCreateError(null)}
-          onCreate={() => void handleCreate()}
         />
         <FlowDetailPanel
           flows={flows}
@@ -213,76 +184,18 @@ function FlowSidebar({
   loading,
   selectedSlug,
   onSelect,
-  newSlug,
-  newName,
-  onNewSlugChange,
-  onNewNameChange,
-  createSubmitting,
-  createError,
-  onClearCreateError,
-  onCreate,
 }: {
   flows: FlowSummary[];
   loading: boolean;
   selectedSlug: string | null;
   onSelect: (slug: string) => void;
-  newSlug: string;
-  newName: string;
-  onNewSlugChange: (v: string) => void;
-  onNewNameChange: (v: string) => void;
-  createSubmitting: boolean;
-  createError: string | null;
-  onClearCreateError: () => void;
-  onCreate: () => void;
 }) {
-  const canCreate = newSlug.trim().length > 0 && newName.trim().length > 0;
-
   return (
     <aside className="flex flex-col border-b border-border md:border-b-0 md:border-r">
-      <div className="border-b border-border px-3 py-3">
-        <p className="mb-2 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-          New flow
-        </p>
-        <div className="space-y-1.5">
-          <Input
-            placeholder="slug (e.g. release)"
-            value={newSlug}
-            onChange={(e) => {
-              onClearCreateError();
-              onNewSlugChange(e.target.value);
-            }}
-            disabled={createSubmitting}
-            className="h-8 text-sm"
-          />
-          <Input
-            placeholder="name"
-            value={newName}
-            onChange={(e) => {
-              onClearCreateError();
-              onNewNameChange(e.target.value);
-            }}
-            disabled={createSubmitting}
-            className="h-8 text-sm"
-          />
-          {createError && (
-            <p className="text-xs text-destructive">{createError}</p>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            className="w-full"
-            disabled={!canCreate || createSubmitting}
-            onClick={onCreate}
-          >
-            {createSubmitting ? "Creating..." : "+ Create"}
-          </Button>
-        </div>
-      </div>
-
       <div className="flex flex-1 gap-2 overflow-x-auto px-3 py-3 md:h-full md:flex-col md:overflow-y-auto md:overflow-x-hidden">
         {flows.length === 0 && !loading && (
           <p className="text-xs text-muted-foreground">
-            No flows yet — create one above.
+            No flows yet — ask the coordinator agent to draft one.
           </p>
         )}
         {flows.map((flow) => {
@@ -338,7 +251,7 @@ function FlowDetailPanel({
         {loading
           ? "Loading flow..."
           : flows.length === 0
-            ? "Create your first flow using the form on the left"
+            ? "No flows yet — ask the coordinator agent to draft one"
             : "Select a flow to view its template"}
       </div>
     );

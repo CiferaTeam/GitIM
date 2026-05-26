@@ -437,6 +437,16 @@ pub enum Request {
     },
     #[serde(rename = "flow_validate")]
     FlowValidate { slug: String },
+    /// Replace a single node's prompt body. Frontmatter fields stay
+    /// immutable on this path — node add/remove and meta edits still
+    /// flow through `flow_create` / `flow_remove` / direct repo edits.
+    #[serde(rename = "flow_update_node")]
+    FlowUpdateNode {
+        slug: String,
+        node_id: String,
+        prompt: String,
+        author: Option<String>,
+    },
 
     #[serde(rename = "flow_run_start")]
     FlowRunStart {

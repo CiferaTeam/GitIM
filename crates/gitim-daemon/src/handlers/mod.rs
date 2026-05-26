@@ -169,6 +169,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::BoardSectionAppend { .. }
                 | Request::FlowCreate { .. }
                 | Request::FlowRemove { .. }
+                | Request::FlowUpdateNode { .. }
                 | Request::FlowRunStart { .. }
                 | Request::FlowNodeSet { .. }
                 | Request::FlowRunCancel { .. }
@@ -572,6 +573,25 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         }
         Request::FlowValidate { slug } => {
             crate::flow_handlers::handle_flow_validate(state, slug).await
+        }
+        Request::FlowUpdateNode {
+            slug,
+            node_id,
+            prompt,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_handlers::handle_flow_update_node(
+                state,
+                slug,
+                node_id,
+                prompt,
+                resolved_author,
+            )
+            .await
         }
         Request::FlowRunStart {
             slug,

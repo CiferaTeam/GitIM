@@ -744,6 +744,23 @@ impl GitimClient {
         self.request("flow_validate", json!({ "slug": slug })).await
     }
 
+    pub async fn flow_update_node(
+        &self,
+        slug: &str,
+        node_id: &str,
+        prompt: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "flow_update_node",
+            json!({
+                "slug": slug,
+                "node_id": node_id,
+                "prompt": prompt,
+            }),
+        )
+        .await
+    }
+
     pub async fn flow_run_start(
         &self,
         slug: &str,
