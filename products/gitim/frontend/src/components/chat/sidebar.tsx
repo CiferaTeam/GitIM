@@ -819,27 +819,33 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                   {foldedRegularChannels.length}
                 </span>
               </button>
-              {showFoldedExpanded &&
-                filteredFoldedChannels.map((ch) => (
-                  <ChannelItem
-                    key={ch.name}
-                    icon={<Hash className="size-3.5 text-text-muted" />}
-                    label={ch.name}
-                    unread={0}
-                    hasMention={false}
-                    active={currentChannel === ch.name}
-                    pinned={false}
-                    pinLabel={`Pin #${ch.name}`}
-                    unpinLabel={`Unpin #${ch.name}`}
-                    folded
-                    foldLabel={`Hide #${ch.name}`}
-                    unfoldLabel={`Show #${ch.name}`}
-                    testId="sidebar-folded-channel-item"
-                    onClick={() => onChannelSelect(ch.name)}
-                    onTogglePin={() => handleTogglePinnedConversation(ch)}
-                    onToggleFold={() => handleToggleFoldedChannel(ch)}
-                  />
-                ))}
+              {showFoldedExpanded && (
+                <div
+                  className="mt-0.5 pl-4 space-y-0.5"
+                  data-testid="sidebar-folded-channel-list"
+                >
+                  {filteredFoldedChannels.map((ch) => (
+                    <ChannelItem
+                      key={ch.name}
+                      icon={<Hash className="size-3.5 text-text-muted" />}
+                      label={ch.name}
+                      unread={0}
+                      hasMention={false}
+                      active={currentChannel === ch.name}
+                      pinned={false}
+                      pinLabel={`Pin #${ch.name}`}
+                      unpinLabel={`Unpin #${ch.name}`}
+                      folded
+                      foldLabel={`Hide #${ch.name}`}
+                      unfoldLabel={`Show #${ch.name}`}
+                      testId="sidebar-folded-channel-item"
+                      onClick={() => onChannelSelect(ch.name)}
+                      onTogglePin={() => handleTogglePinnedConversation(ch)}
+                      onToggleFold={() => handleToggleFoldedChannel(ch)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {filteredUnfoldedChannels.map((ch) => (

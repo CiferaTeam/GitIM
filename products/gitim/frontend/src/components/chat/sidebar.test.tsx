@@ -188,6 +188,36 @@ describe("Sidebar channel ordering", () => {
     ).toBeNull();
   });
 
+  it("indents channels rendered inside the Folded section", () => {
+    testEnv.localStorage.setItem(
+      "gitim-folded-channels:runtime:room",
+      JSON.stringify(["random"]),
+    );
+
+    act(() => {
+      root?.render(
+        <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />,
+      );
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="sidebar-folded-section-toggle"]',
+        )
+        ?.click();
+    });
+
+    const foldedList = container.querySelector(
+      '[data-testid="sidebar-folded-channel-list"]',
+    );
+
+    expect(foldedList).not.toBeNull();
+    expect(foldedList?.className).toContain("pl-4");
+    expect(
+      foldedList?.querySelector('[data-testid="sidebar-folded-channel-item"]'),
+    ).not.toBeNull();
+  });
+
   it("renders a channel under the pin segment when stale state lists it as both pinned and folded", () => {
     // Pin and fold are mutually exclusive in the UI, but a stale localStorage
     // pair could co-list a channel. Pin wins for rendering — pinned filter
