@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Pin, Plus, Search } from "lucide-react";
+import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
@@ -31,6 +31,7 @@ interface SidebarProps {
 
 const KNOWN_AGENT_STORAGE_PREFIX = "gitim-known-agents:";
 const PINNED_CONVERSATIONS_STORAGE_PREFIX = "gitim-pinned-conversations:";
+const FOLDED_CHANNELS_STORAGE_PREFIX = "gitim-folded-channels:";
 
 // Archived DMs are loaded one page at a time. 5 is a sidebar-friendly batch
 // — small enough that the section doesn't dwarf the active DM list, large
@@ -53,6 +54,10 @@ function knownAgentStorageKey(workspaceKey: string): string {
 
 function pinnedConversationsStorageKey(workspaceKey: string): string {
   return `${PINNED_CONVERSATIONS_STORAGE_PREFIX}${workspaceKey}`;
+}
+
+function foldedChannelsStorageKey(workspaceKey: string): string {
+  return `${FOLDED_CHANNELS_STORAGE_PREFIX}${workspaceKey}`;
 }
 
 function readKnownAgentIds(workspaceKey: string | null): Set<string> {
@@ -109,6 +114,24 @@ function clonePinnedConversations(pins: PinnedConversations): PinnedConversation
     channels: new Set(pins.channels),
     dms: new Set(pins.dms),
   };
+}
+
+function readFoldedChannels(workspaceKey: string | null): Set<string> {
+  if (!workspaceKey) return new Set();
+  try {
+    const raw = localStorage.getItem(foldedChannelsStorageKey(workspaceKey));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeFoldedChannels(workspaceKey: string, folded: Set<string>) {
+  localStorage.setItem(
+    foldedChannelsStorageKey(workspaceKey),
+    JSON.stringify([...folded].sort()),
+  );
 }
 
 function equalStringSets(a: Set<string>, b: Set<string>): boolean {
@@ -228,6 +251,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [pinnedConversations, setPinnedConversations] = useState<PinnedConversations>(
     () => readPinnedConversations(activeWorkspaceKey),
   );
+  const [foldedChannels, setFoldedChannels] = useState<Set<string>>(
+    () => readFoldedChannels(activeWorkspaceKey),
+  );
+  const [foldedOpen, setFoldedOpen] = useState(false);
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -268,6 +295,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   useEffect(() => {
     setPinnedConversations(readPinnedConversations(activeWorkspaceKey));
+    setFoldedChannels(readFoldedChannels(activeWorkspaceKey));
+    setFoldedOpen(false);
   }, [activeWorkspaceKey]);
 
   async function handleCreateChannel() {
@@ -320,8 +349,18 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
   }, [dmSearchOpen]);
 
-  const regularChannels = sortUnreadThenPinned(
-    channels.filter((c) => c.kind === "channel"),
+  const allRegularChannels = channels.filter((c) => c.kind === "channel");
+  const pinnedRegularChannels = sortUnreadThenPinned(
+    allRegularChannels.filter((c) => pinnedConversations.channels.has(c.name)),
+    pinnedConversations.channels,
+  );
+  const foldedRegularChannels = allRegularChannels.filter(
+    (c) => !pinnedConversations.channels.has(c.name) && foldedChannels.has(c.name),
+  );
+  const unfoldedUnpinnedChannels = sortUnreadThenPinned(
+    allRegularChannels.filter(
+      (c) => !pinnedConversations.channels.has(c.name) && !foldedChannels.has(c.name),
+    ),
     pinnedConversations.channels,
   );
   const liveAgentIds = useMemo(
@@ -345,11 +384,20 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const myDmChannels = dmChannels.filter((c) => isMyDm(c, currentUser));
   const otherDmChannels = dmChannels.filter((c) => !isMyDm(c, currentUser));
 
-  const filteredRegularChannels = channelQuery.trim()
-    ? regularChannels.filter((c) =>
-        c.name.toLowerCase().includes(channelQuery.toLowerCase())
-      )
-    : regularChannels;
+  const channelQueryNeedle = channelQuery.trim().toLowerCase();
+  const matchesChannelQuery = (c: Channel) =>
+    !channelQueryNeedle || c.name.toLowerCase().includes(channelQueryNeedle);
+  const filteredPinnedChannels = pinnedRegularChannels.filter(matchesChannelQuery);
+  const filteredFoldedChannels = foldedRegularChannels.filter(matchesChannelQuery);
+  const filteredUnfoldedChannels = unfoldedUnpinnedChannels.filter(matchesChannelQuery);
+  const hasAnyVisibleChannel =
+    filteredPinnedChannels.length +
+      filteredFoldedChannels.length +
+      filteredUnfoldedChannels.length >
+    0;
+  // Force the Folded section open when the user is searching, so matches
+  // inside it are reachable without an extra click.
+  const showFoldedExpanded = foldedOpen || channelQueryNeedle.length > 0;
 
   const filteredUsers = dmQuery.trim()
     ? users.filter(
@@ -389,17 +437,56 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   function handleTogglePinnedConversation(channel: Channel) {
     if (!activeWorkspaceKey) return;
+    let nowPinned = false;
     setPinnedConversations((prev) => {
       const next = clonePinnedConversations(prev);
       const ids = channel.kind === "dm" ? next.dms : next.channels;
       if (ids.has(channel.name)) {
         ids.delete(channel.name);
+        nowPinned = false;
       } else {
         ids.add(channel.name);
+        nowPinned = true;
       }
       writePinnedConversations(activeWorkspaceKey, next);
       return next;
     });
+    if (nowPinned && channel.kind === "channel") {
+      setFoldedChannels((prev) => {
+        if (!prev.has(channel.name)) return prev;
+        const next = new Set(prev);
+        next.delete(channel.name);
+        writeFoldedChannels(activeWorkspaceKey, next);
+        return next;
+      });
+    }
+  }
+
+  function handleToggleFoldedChannel(channel: Channel) {
+    if (!activeWorkspaceKey) return;
+    if (channel.kind !== "channel") return;
+    let nowFolded = false;
+    setFoldedChannels((prev) => {
+      const next = new Set(prev);
+      if (next.has(channel.name)) {
+        next.delete(channel.name);
+        nowFolded = false;
+      } else {
+        next.add(channel.name);
+        nowFolded = true;
+      }
+      writeFoldedChannels(activeWorkspaceKey, next);
+      return next;
+    });
+    if (nowFolded) {
+      setPinnedConversations((prev) => {
+        if (!prev.channels.has(channel.name)) return prev;
+        const next = clonePinnedConversations(prev);
+        next.channels.delete(channel.name);
+        writePinnedConversations(activeWorkspaceKey, next);
+        return next;
+      });
+    }
   }
 
   async function fetchArchivedChannelsPage(query: string, offset: number) {
@@ -692,7 +779,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
-          {filteredRegularChannels.map((ch) => (
+          {filteredPinnedChannels.map((ch) => (
             <ChannelItem
               key={ch.name}
               icon={<Hash className="size-3.5 text-text-muted" />}
@@ -700,15 +787,82 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               unread={ch.unreadCount}
               hasMention={ch.hasMention}
               active={currentChannel === ch.name}
-              pinned={pinnedConversations.channels.has(ch.name)}
+              pinned
               pinLabel={`Pin #${ch.name}`}
               unpinLabel={`Unpin #${ch.name}`}
+              folded={false}
+              foldLabel={`Hide #${ch.name}`}
+              unfoldLabel={`Show #${ch.name}`}
               testId="sidebar-channel-item"
               onClick={() => onChannelSelect(ch.name)}
               onTogglePin={() => handleTogglePinnedConversation(ch)}
+              onToggleFold={() => handleToggleFoldedChannel(ch)}
             />
           ))}
-          {filteredRegularChannels.length === 0 && channelQuery.trim() && (
+          {foldedRegularChannels.length > 0 && (
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => setFoldedOpen((open) => !open)}
+                className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] text-text-muted hover:text-text-secondary hover:bg-surface/40 transition-colors"
+                aria-expanded={showFoldedExpanded}
+                data-testid="sidebar-folded-section-toggle"
+              >
+                <ChevronRight
+                  className={[
+                    "size-3 transition-transform duration-150",
+                    showFoldedExpanded ? "rotate-90" : "",
+                  ].join(" ")}
+                />
+                <span className="uppercase font-semibold tracking-wider">Folded</span>
+                <span className="ml-1 text-text-faint font-mono">
+                  {foldedRegularChannels.length}
+                </span>
+              </button>
+              {showFoldedExpanded &&
+                filteredFoldedChannels.map((ch) => (
+                  <ChannelItem
+                    key={ch.name}
+                    icon={<Hash className="size-3.5 text-text-muted" />}
+                    label={ch.name}
+                    unread={0}
+                    hasMention={false}
+                    active={currentChannel === ch.name}
+                    pinned={false}
+                    pinLabel={`Pin #${ch.name}`}
+                    unpinLabel={`Unpin #${ch.name}`}
+                    folded
+                    foldLabel={`Hide #${ch.name}`}
+                    unfoldLabel={`Show #${ch.name}`}
+                    testId="sidebar-folded-channel-item"
+                    onClick={() => onChannelSelect(ch.name)}
+                    onTogglePin={() => handleTogglePinnedConversation(ch)}
+                    onToggleFold={() => handleToggleFoldedChannel(ch)}
+                  />
+                ))}
+            </div>
+          )}
+          {filteredUnfoldedChannels.map((ch) => (
+            <ChannelItem
+              key={ch.name}
+              icon={<Hash className="size-3.5 text-text-muted" />}
+              label={ch.name}
+              unread={ch.unreadCount}
+              hasMention={ch.hasMention}
+              active={currentChannel === ch.name}
+              pinned={false}
+              pinLabel={`Pin #${ch.name}`}
+              unpinLabel={`Unpin #${ch.name}`}
+              folded={false}
+              foldLabel={`Hide #${ch.name}`}
+              unfoldLabel={`Show #${ch.name}`}
+              testId="sidebar-channel-item"
+              onClick={() => onChannelSelect(ch.name)}
+              onTogglePin={() => handleTogglePinnedConversation(ch)}
+              onToggleFold={() => handleToggleFoldedChannel(ch)}
+            />
+          ))}
+          {!hasAnyVisibleChannel && channelQueryNeedle && (
             <p className="px-2 py-1 text-[11px] text-text-muted">No channels found</p>
           )}
         </div>
@@ -1220,6 +1374,13 @@ interface ChannelItemProps {
   testId: string;
   onClick: () => void;
   onTogglePin: () => void;
+  /** Optional fold action — shows an Eye/EyeOff icon button next to the pin
+   *  button on hover. Used by regular channels in this revision; DM and
+   *  archived rows omit it. */
+  folded?: boolean;
+  foldLabel?: string;
+  unfoldLabel?: string;
+  onToggleFold?: () => void;
   /** Optional archive action — shows an Archive icon button next to the
    *  pin button on hover. Used by DMs in this revision; channel archive
    *  has its own dedicated UI in the archived section. */
@@ -1239,10 +1400,15 @@ function ChannelItem({
   testId,
   onClick,
   onTogglePin,
+  folded = false,
+  foldLabel,
+  unfoldLabel,
+  onToggleFold,
   archiveLabel,
   onArchive,
 }: ChannelItemProps) {
   const pinButtonLabel = pinned ? unpinLabel : pinLabel;
+  const foldButtonLabel = folded ? unfoldLabel : foldLabel;
   return (
     <li
       data-testid={testId}
@@ -1291,6 +1457,26 @@ function ChannelItem({
       >
         <Pin className={["size-3", pinned ? "fill-current" : ""].join(" ")} />
       </Button>
+      {onToggleFold && foldButtonLabel && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={foldButtonLabel}
+          aria-pressed={folded}
+          title={foldButtonLabel}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFold();
+          }}
+          className={[
+            "mr-1 text-text-faint transition-opacity hover:text-foreground focus-visible:opacity-100",
+            folded ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          ].join(" ")}
+        >
+          {folded ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
+        </Button>
+      )}
       {onArchive && archiveLabel && (
         <Button
           type="button"

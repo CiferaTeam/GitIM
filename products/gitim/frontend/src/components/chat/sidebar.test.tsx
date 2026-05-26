@@ -144,7 +144,7 @@ describe("Sidebar channel ordering", () => {
     ]);
   });
 
-  it("keeps pins as the tie-breaker after unread status", () => {
+  it("pins float above unread non-pinned channels", () => {
     testEnv.localStorage.setItem(
       "gitim-pinned-conversations:runtime:room",
       JSON.stringify({ channels: ["random"], dms: [] }),
@@ -156,10 +156,60 @@ describe("Sidebar channel ordering", () => {
       );
     });
 
+    // random is pinned (no unread); infra has unread but no pin; general is
+    // neither. New behavior: pinned segment is rendered first, then the
+    // unfolded-unpinned segment (which still uses unread-first ordering).
     expect(visibleChannelNames(container)).toEqual([
-      "infra",
       "random",
+      "infra",
       "general",
     ]);
+  });
+
+  it("hides folded channels from the main list and groups them under a Folded toggle", () => {
+    testEnv.localStorage.setItem(
+      "gitim-folded-channels:runtime:room",
+      JSON.stringify(["random"]),
+    );
+
+    act(() => {
+      root?.render(
+        <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />,
+      );
+    });
+
+    expect(visibleChannelNames(container)).toEqual(["infra", "general"]);
+    expect(
+      container.querySelector('[data-testid="sidebar-folded-section-toggle"]'),
+    ).not.toBeNull();
+    // Folded section is collapsed by default, so the folded row isn't rendered.
+    expect(
+      container.querySelector('[data-testid="sidebar-folded-channel-item"]'),
+    ).toBeNull();
+  });
+
+  it("renders a channel under the pin segment when stale state lists it as both pinned and folded", () => {
+    // Pin and fold are mutually exclusive in the UI, but a stale localStorage
+    // pair could co-list a channel. Pin wins for rendering — pinned filter
+    // runs first, then the fold filter excludes anything already pinned.
+    testEnv.localStorage.setItem(
+      "gitim-pinned-conversations:runtime:room",
+      JSON.stringify({ channels: ["infra"], dms: [] }),
+    );
+    testEnv.localStorage.setItem(
+      "gitim-folded-channels:runtime:room",
+      JSON.stringify(["infra"]),
+    );
+
+    act(() => {
+      root?.render(
+        <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />,
+      );
+    });
+
+    expect(visibleChannelNames(container)).toEqual(["infra", "general", "random"]);
+    expect(
+      container.querySelector('[data-testid="sidebar-folded-section-toggle"]'),
+    ).toBeNull();
   });
 });
