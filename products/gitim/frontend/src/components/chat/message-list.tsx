@@ -164,28 +164,25 @@ export function MessageList({
       lastMessageIsOutbound: !!messages[messages.length - 1]?._pendingId,
     });
 
+    // Both `line` and `anchor` branches run synchronously inside
+    // useLayoutEffect — the target [data-line] node is in the DOM by the time
+    // this effect fires. Deferring to requestAnimationFrame leaves a window
+    // where, under React Strict Mode's simulated unmount, scrollRef.current
+    // can be cleared and the callback bails before it can scroll. The user
+    // sees that as "snapped back to the top after switching tabs / clicking
+    // a message link cross-route."
     if (decision.kind === "line") {
-      requestAnimationFrame(() => {
-        if (!scrollRef.current) return;
-        const target = scrollRef.current.querySelector(
-          `[data-line="${decision.line}"]`,
-        ) as HTMLElement | null;
-        if (target) {
-          suppressTopPagingUntilUserScrollRef.current = true;
-          target.scrollIntoView({ behavior: "auto", block: "center" });
-          reportViewportAnchor(scrollRef.current);
-          onHighlightLineChange(decision.line);
-        }
-        onPendingScrollClear();
-      });
+      const target = el.querySelector(
+        `[data-line="${decision.line}"]`,
+      ) as HTMLElement | null;
+      if (target) {
+        suppressTopPagingUntilUserScrollRef.current = true;
+        target.scrollIntoView({ behavior: "auto", block: "center" });
+        reportViewportAnchor(el);
+        onHighlightLineChange(decision.line);
+      }
+      onPendingScrollClear();
     } else if (decision.kind === "anchor") {
-      // Synchronous in useLayoutEffect: by the time this effect runs, React
-      // has already committed the message list to the DOM in this same frame,
-      // so the target [data-line] node is queryable. Wrapping in
-      // requestAnimationFrame defers to a later frame where, under React
-      // Strict Mode's simulated unmount, scrollRef.current can be cleared and
-      // the callback bails before it can scroll — the symptom users see as
-      // "snapped back to the top after switching tabs."
       const target = el.querySelector(
         `[data-line="${decision.line}"]`,
       ) as HTMLElement | null;

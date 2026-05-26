@@ -14,6 +14,13 @@ import {
 import { computeAnchoredReadSince } from "../components/chat/pagination";
 import { clearCursor, loadCursor, saveCursor } from "../lib/cursor";
 import { resolveRemoteSyncFromChanges } from "../lib/remote-sync-toast";
+import {
+  apiToDisplay,
+  isChatRoute,
+  isUnknownWorkspaceResponse,
+  parseCardRoute,
+  toApiChannel,
+} from "../lib/scope-name";
 import type {
   Agent,
   ApiResponse,
@@ -57,51 +64,6 @@ type AgentSnapshotResponses = {
   fleetStatusRes: ApiResponse<{ nodes: FleetNodeStatus[] }>;
 };
 
-/** "dm:alice,lewis" -> "alice--lewis"; passthrough for channels */
-function apiToDisplay(channel: string): string {
-  if (channel.startsWith("dm:")) {
-    return channel.slice(3).replace(",", "--");
-  }
-  return channel;
-}
-
-/** "alice--lewis" -> "dm:alice,lewis"; passthrough for channels */
-function toApiChannel(displayName: string): string {
-  if (displayName.includes("--")) {
-    return `dm:${displayName.split("--").join(",")}`;
-  }
-  return displayName;
-}
-
-function decodePathSegment(segment: string): string {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
-}
-
-function parseCardRoute(
-  pathname: string,
-): { channel: string; cardId: string } | null {
-  const match = /^\/cards\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
-  if (!match) return null;
-  return {
-    channel: decodePathSegment(match[1]),
-    cardId: decodePathSegment(match[2]),
-  };
-}
-
-function isUnknownWorkspaceResponse(res: {
-  ok: boolean;
-  error?: string | null;
-}): boolean {
-  return !res.ok && res.error === "unknown workspace";
-}
-
-function isChatRoute(pathname: string): boolean {
-  return pathname === "/chat" || pathname.startsWith("/chat/");
-}
 
 /**
  * Owns the workspace lifecycle: bootstrap (me/channels/users/agents/cards/boards),
