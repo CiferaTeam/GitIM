@@ -217,7 +217,16 @@ export default function App() {
   );
   const isMobile = useIsMobile();
   const location = useLocation();
+  // react-router v7's useNavigate returns a fresh function reference whenever
+  // the location changes. Capturing it directly in poll/effect deps causes
+  // every route switch (e.g. /chat ↔ /management) to re-fire the workspace
+  // init effect, which calls resetForWorkspaceSwitch and wipes
+  // currentChannel / messages mid-render. That race breaks
+  // scroll-anchor restoration in ChatLayout. Hold a ref instead so call
+  // sites see the latest navigate without polluting dep arrays.
   const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -713,7 +722,7 @@ export default function App() {
                 action: {
                   label: "Open card",
                   onClick: () => {
-                    navigate(
+                    navigateRef.current(
                       `/cards/${encodeURIComponent(parsed.channel)}/${encodeURIComponent(parsed.cardId)}`,
                     );
                   },
@@ -898,7 +907,6 @@ export default function App() {
     markTransportUnavailable,
     recordPollFailure,
     reloadActiveWorkspaceState,
-    navigate,
     mode,
   ]);
 
