@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { mapBackendUsageSummary } from "../lib/client";
+import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import type {
   Agent,
   AgentStatus,
@@ -80,6 +81,10 @@ export const useFleetStore = create<FleetState>((set) => ({
 
   resetForWorkspaceSwitch: () => set({ agents: [], statuses: [] }),
 }));
+
+onWorkspaceSwitch(() => {
+  useFleetStore.getState().resetForWorkspaceSwitch();
+});
 
 export function applyFleetEventEnvelope(envelope: FleetEventEnvelope) {
   if (envelope.kind === "node_status") {

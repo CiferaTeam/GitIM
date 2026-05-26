@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { BoardReadResponse, BoardSummary } from "@/lib/types";
+import { onWorkspaceSwitch } from "@/lib/workspace-lifecycle";
 
 interface BoardState {
   boards: BoardSummary[];
@@ -53,3 +54,7 @@ export const useBoardStore = create<BoardState>((set) => ({
       selectedBoard: null,
     }),
 }));
+
+onWorkspaceSwitch(() => {
+  useBoardStore.getState().resetForWorkspaceSwitch();
+});

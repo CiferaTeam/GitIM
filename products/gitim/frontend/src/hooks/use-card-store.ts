@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Card, CardFilter, Message } from "../lib/types";
+import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 /** Key used to index discussion messages per card: "<channel>/<card_id>". */
 export function cardPathKey(channel: string, cardId: string): string {
@@ -283,6 +284,10 @@ export const useCardStore = create<CardState>((set) => ({
       inFlightCardPaths: new Set<string>(),
     }),
 }));
+
+onWorkspaceSwitch(() => {
+  useCardStore.getState().resetForWorkspaceSwitch();
+});
 
 // ─── Derived selectors (call as regular functions with state) ───────────────
 

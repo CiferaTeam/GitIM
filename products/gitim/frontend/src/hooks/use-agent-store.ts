@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Agent } from "../lib/types";
+import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 interface AgentState {
   agents: Agent[];
@@ -40,3 +41,7 @@ export const useAgentStore = create<AgentState>((set) => ({
   resetForWorkspaceSwitch: () =>
     set({ agents: [], selectedAgentId: null }),
 }));
+
+onWorkspaceSwitch(() => {
+  useAgentStore.getState().resetForWorkspaceSwitch();
+});

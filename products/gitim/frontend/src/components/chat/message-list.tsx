@@ -71,7 +71,12 @@ function viewportAnchorFromElement(
     if (rect.bottom <= containerRect.top) continue;
     return {
       line: Math.floor(line),
-      offsetPx: Math.max(0, Math.floor(containerRect.top - rect.top)),
+      // Round-trip preservation: scrollIntoView often leaves a sub-pixel gap
+      // (e.g. rect.top = 0.4), and `floor` here turns 59.6 into 59 every
+      // cycle — over many route-switch round-trips the anchor drifts upward
+      // 1px at a time. `round` symmetrises the rounding error so successive
+      // restores stay at the same line.
+      offsetPx: Math.max(0, Math.round(containerRect.top - rect.top)),
     };
   }
   return null;

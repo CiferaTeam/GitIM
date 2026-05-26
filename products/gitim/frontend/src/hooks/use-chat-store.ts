@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ArchivedDmEntry } from "../lib/client";
 import type { ChatViewportAnchor } from "../lib/chat-ui-state";
 import type { Channel, Message } from "../lib/types";
+import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 interface NavEntry {
   channel: string;
@@ -613,3 +614,7 @@ export const useChatStore = create<ChatState>((set) => ({
       hasMoreHistory: true,
     }),
 }));
+
+onWorkspaceSwitch(() => {
+  useChatStore.getState().resetForWorkspaceSwitch();
+});

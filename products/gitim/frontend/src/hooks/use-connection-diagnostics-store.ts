@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 export type BrowserSyncStatus =
   | "unknown"
@@ -150,3 +151,7 @@ export const useConnectionDiagnosticsStore = create<ConnectionDiagnosticsState>(
       }),
   }),
 );
+
+onWorkspaceSwitch(() => {
+  useConnectionDiagnosticsStore.getState().reset();
+});

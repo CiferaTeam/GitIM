@@ -27,6 +27,7 @@ import type {
 } from "../lib/types";
 import { readUiState } from "../lib/ui-state";
 import { workspaceIdentity } from "../lib/workspace-key";
+import { emitWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import { useAgentStore } from "./use-agent-store";
 import { useBoardStore } from "./use-board-store";
 import { cardPathKey, parseCardScope, useCardStore } from "./use-card-store";
@@ -830,16 +831,11 @@ export function usePollLoop(): void {
     const workspaceKey = activeWorkspaceIdentity;
 
     // Reset per-workspace store slices on switch so stale data from the
-    // previous workspace doesn't leak into the new one. Each store owns the
-    // knowledge of which of its fields are workspace-scoped — in particular
-    // chat resets `currentChannel` + `messages` so poll-driven `addMessages`
-    // can't append ws-B entries onto ws-A's list.
-    useChatStore.getState().resetForWorkspaceSwitch();
-    useAgentStore.getState().resetForWorkspaceSwitch();
-    useFleetStore.getState().resetForWorkspaceSwitch();
-    useCardStore.getState().resetForWorkspaceSwitch();
-    useConnectionDiagnosticsStore.getState().reset();
-    useBoardStore.getState().resetForWorkspaceSwitch();
+    // previous workspace doesn't leak into the new one. Each store registers
+    // its own listener at module load (see lib/workspace-lifecycle.ts), so a
+    // new workspace-scoped store can't forget to wire its reset — the wiring
+    // lives next to the store. We just fire the event here.
+    emitWorkspaceSwitch();
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
     consecutiveTransportFailuresRef.current = 0;
