@@ -1,4 +1,4 @@
-import type { Agent, AgentActivityEvent, AgentStatus } from "./types";
+import type { Agent, AgentActivityEvent, AgentStatus, SaturationSummary } from "./types";
 
 export type AgentWorkState = "working" | "idle";
 export type AgentPresenceState = "online" | "stopped" | "error";
@@ -57,4 +57,44 @@ export function presenceMatchesFilter(
   if (filter === "online") return agentPresenceState(status) === "online";
   if (filter === "stopped") return agentPresenceState(status) === "stopped";
   return status === filter;
+}
+
+export interface FleetSaturationView {
+  today_ratio: number | null;
+  today_working: number;
+  today_total: number;
+  last_7_days_ratios: Array<{ date: string; ratio: number | null }>;
+}
+
+export function summarizeFleetSaturation(
+  summaries: Array<SaturationSummary | undefined>,
+): FleetSaturationView {
+  let today_working = 0;
+  let today_total = 0;
+  const by_date = new Map<string, { working: number; total: number }>();
+
+  for (const s of summaries) {
+    if (!s) continue;
+    today_working += s.today.working_samples;
+    today_total += s.today.total_samples;
+    for (const d of s.last_7_days) {
+      const cur = by_date.get(d.date) ?? { working: 0, total: 0 };
+      cur.working += d.bucket.working_samples;
+      cur.total += d.bucket.total_samples;
+      by_date.set(d.date, cur);
+    }
+  }
+
+  const today_ratio = today_total === 0 ? null : today_working / today_total;
+  const last_7_days_ratios: Array<{ date: string; ratio: number | null }> = [];
+  const dates = Array.from(by_date.keys()).sort();
+  for (const date of dates) {
+    const { working, total } = by_date.get(date)!;
+    last_7_days_ratios.push({
+      date,
+      ratio: total === 0 ? null : working / total,
+    });
+  }
+
+  return { today_ratio, today_working, today_total, last_7_days_ratios };
 }
