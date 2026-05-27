@@ -3,7 +3,7 @@
 > Brainstorming(/office-hours) 输出。仅 design / requirements，不含实现步骤。
 > 下一阶段 (writing-plans / plan-eng-review) 产 `01-plan.md`。
 
-Status: DRAFT
+Status: APPROVED
 Date: 2026-05-27
 Review trail:
 - 2026-05-27 brainstorming(claude opus-4-7): 8 轮迭代收敛
@@ -23,6 +23,14 @@ Review trail:
   - I5 修:label char set vs handler char set 关系加 footnote
   - I7 修:`onboard.rs::register_user` 加入影响面表(struct literal 需要补 `labels: vec![]`)
   - Open Questions 收敛:Q1/Q3/Q5 锁定到 requirements,只剩 Q2/Q4 留给 plan
+- 2026-05-27 eng-review(Software Architect subagent,fresh context): READY for plan generation,3 plan-stage caveats
+  - Issue #1 lock:`BoardMeta` 移除 `#[serde(deny_unknown_fields)]`,避免新 daemon 写 `labels:` → 老 daemon fetch 反序列化失败
+  - Issue #2 lock:`set_board_field` 的 `"tags" → labels` 是 daemon-side runtime match,plan 阶段 3 个 site 必改
+  - Issue #3 lock:`LabelsAdd/Remove` read-modify-write 必须在 `commit_lock` 内,匹配 `send_card_message` pattern
+  - 边界补:M1(sync_loop race)/ M2(cross-workspace scope)/ M4(poisoned yaml)/ M5(rollback pattern)/ M6(mid-rebase scan)/ M7(WebUI auth model)进 edge case
+  - 测试补:5 个高价值 scenario(roundtrip / 新 yaml + 老 daemon / 并发 cross-handler race / 排除 departed / set_board_field 双 arg)加进测试策略
+  - cap 调整:`UserMeta.labels` 30 → 20,跟 Board mirror 上限对齐
+  - Architect 同意 P6/no-SSE/empty-query/P10 不 reopen
 
 ---
 
@@ -187,10 +195,10 @@ Daemon 在 flow 启动 / 节点流转时**不计算 routing**,**不去自动 ass
 - 单对象 label 数量上限:
   - `CardMeta.labels`: 10(不动)
   - `BoardMeta.labels`: 20(不动)
-  - `UserMeta.labels`: 30(新设;给 agent 足够 claim 空间)
+  - `UserMeta.labels`: 20(新设;跟 Board 对齐 —— 因为 Board 是 user labels 的 mirror,两者上限对齐避免 mirror 段被截断)
   - `FlowNode.required_labels`: 10(新设;跟 card 对齐)
 
-理由:char set + max_len 是 protocol invariant(跨对象一致);max_count 反映对象的预期密度,不强求统一。
+理由:char set + max_len 是 protocol invariant(跨对象一致);max_count 反映对象的预期密度,不强求统一。Eng-review 建议把 user cap 从初版 30 下调到 20(20 label 已能 cover 任何 agent 实际 skill 集合,且跟 board mirror 对齐)。
 
 ### P10 — CLI 命名 lock,`gitim card label` 跟 `gitim labels` 长期共存
 
@@ -261,7 +269,7 @@ labels:
 ```rust
 // crates/gitim-core/src/types/board.rs
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+// 注意:相对现状 **去掉** `#[serde(deny_unknown_fields)]`,见下方"跨版本 compat"
 pub struct BoardMeta {
     pub version: u32,
     pub handler: String,
@@ -273,7 +281,15 @@ pub struct BoardMeta {
 }
 ```
 
-`#[serde(deny_unknown_fields)]` 跟 `alias` 配合:旧 yaml `tags: [...]` 仍可读(alias);新 yaml 输出 `labels: [...]`。旧 yaml 读完再写一遍 = 自然 migrate(无需独立 migration tool)。
+`alias = "tags"` 让旧 yaml `tags: [...]` 仍可读;新 yaml 输出 `labels: [...]`。旧 yaml 读完再写一遍 = passive migrate(无需独立 migration tool)。
+
+**跨版本 compat 决策(eng-review Issue #1)**:
+现役 `BoardMeta` 有 `#[serde(deny_unknown_fields)]`(`board.rs:62`)。本设计**移除**这个 attribute。
+- **场景**: 新 daemon 写出 `labels: [...]` push 到 remote → 还没升级的 peer daemon fetch → 老 daemon 的 BoardMeta 没 `labels` 字段且 `deny_unknown_fields` 会**拒绝**反序列化 → peer 端 board 操作全断
+- **决策**: 去掉 `deny_unknown_fields`,跟 CardMeta/UserMeta 的 permissive policy 对齐
+- **trade-off**: 老 daemon "看到" `labels` 字段会 silently drop(不再当错误),但功能上还能跑(`tags` 字段还能继续 read/write 它的旧版本)。这是可接受的过渡态
+- **alternative 拒绝**: ① 给 BoardMeta 配 grace period(v1 daemon 继续输出 `tags:`,v2 才 swap)—— 半截子,无法立刻享受字段统一价值。② 强制 coupled upgrade —— 不现实
+- 这条决策 plan 阶段不再 reopen,implementation 直接按这个走
 
 ### `FlowNode`
 
@@ -365,7 +381,7 @@ validate_labels(&node.required_labels, FLOW_NODE_MAX_LABELS)
 
 - 验证 caller handler == target(`error_code: "not_self"` 若不等)
 - 验证 labels 字符集 + 单 label 长度(per P9)
-- 验证 union 后总数 ≤ 30(UserMeta cap)
+- 验证 union 后总数 ≤ 20(UserMeta cap)
 - 读 `users/<target>.meta.yaml` → merge labels(去重) → 写回 → commit(`system@gitim` 不做,author = target handler;复用现有 daemon commit author 逻辑)
 - 拿 `commit_lock`,跟其他 writer 串行
 - response: `{ok: true, current_labels: [...]}`
@@ -430,14 +446,19 @@ gitim labels find <label1> <label2>    # all-of search
 | 同一 label 重复 add | 去重后写入,不报错 |
 | Remove 不存在的 label | 静默 no-op,不报错 |
 | 单 label 超 32 char / 含非法字符 | 拒绝,`error_code: "invalid_label"`,HTTP 422 |
-| Add 后总数超 30 | 拒绝,`error_code: "labels_full"`,HTTP 422 |
+| Add 后总数超 20 | 拒绝,`error_code: "labels_full"`,HTTP 422 |
 | `LabelsList` 查不存在的 handler 或 departed handler | `ensure_known_user` 失败 → 返回 `error_code: "unknown_user"`,HTTP 404(跟现有 daemon 模式一致) |
 | `LabelsList` active handler 但 labels 为空 | 返回 `{labels: []}` |
 | `AgentsWithLabels` empty query | 返回 empty `{handlers: []}`(避免歧义:不返回"所有 agent") |
 | `AgentsWithLabels` 扫到一个 user.meta.yaml 反序列化失败 | 跳过该文件,log warn,继续扫剩余;不让一个坏文件吞掉整个 query 结果 |
 | `FlowNode.required_labels` 含 invalid char / 超 10 个 | flow validator 拒绝,error 带 node id context,flow load 失败 |
 | `create_card` 期间 fs scan agent labels 报错 | 静默返回 `suggested_assignees: []`,log warn;不让 suggestion 失败影响 card 创建主路径 |
-| `LabelsAdd` 后 yaml write 成功但 git commit 失败 | rollback yaml file(写回旧版本),返回 error;避免 commit log 跟 working tree 分裂 |
+| `LabelsAdd` 后 yaml write 成功但 git commit 失败 | rollback yaml file(写回旧版本),返回 error;避免 commit log 跟 working tree 分裂。匹配 `card_handlers.rs::archive_card` 的 rollback pattern(内存保留旧 bytes,commit fail 时 atomic restore) |
+| 并发 `LabelsAdd` × 2(同一 daemon 两个 client) | 必须 read-modify-write 都在 `commit_lock` 内,跟 `card_handlers.rs:868 send_card_message` 的 pattern 一致;否则 race 会丢 label |
+| 并发 `LabelsAdd` + `sync_loop` rebase | 同 daemon 内 `commit_lock` 串行;由于 P4 自 claim only,跨 daemon 不会同时写同一 user.meta.yaml,sync_loop rebase 不会撞到 labels-only conflict |
+| `AgentsWithLabels` / `compute_suggested_assignees` 扫到 sync_loop mid-rebase 时被部分 mv 的 yaml(`ENOENT` / 部分文件) | log warn skip,best-effort suggestion;`compute_suggested_assignees` 已是 advisory,P5 显式说允许 race |
+| 跨 workspace 同 handler | labels 是 per-workspace,不跨 workspace 共享身份 —— labels 跟 `UserMeta.role` 同 scope,这是设计意图 |
+| WebUI `POST /labels/<self>` 的 `<self>` 验证 | runtime HTTP 只服务 human clone,`<self>` = `<workspace>/.gitim-runtime/human/.gitim/me.json` 的 handler;runtime 信任自己 me.json,不接受任意路径参数。Agent labels 走 agent 自己 daemon 的 IPC,不经 runtime HTTP |
 | `create_card` 没 labels | suggested_assignees = `[]` |
 | `create_card` labels 有,但没 agent 全 match | suggested_assignees = `[]` |
 | 旧 board.md `tags:` 字段读 | serde alias 兜住,自动 deserialize 成 labels |
@@ -452,29 +473,41 @@ gitim labels find <label1> <label2>    # all-of search
 
 ### `gitim-core::types::labels` 单测(纯函数)
 
-- `validate_labels(&labels, max_count)` — 各 max_count 边界
+- `validate_labels(&labels, max_count)` — 各 max_count 边界(10 / 20 / 20 / 10 对应 card / board / user / flow)
 - 单 label 字符集 / 长度
 - 去重
 - Board.tags alias 兼容:旧 yaml `tags: [...]` 反序列化成 `labels: vec![...]`
 - 旧 board.md 写回后 yaml 输出是 `labels:` 不是 `tags:`
+- 老 daemon hypothetical-style:模拟无 `labels` 字段 + 不带 `serde(deny_unknown_fields)` 的 BoardMeta 反序列化新格式 yaml,不报错(eng-review test #2)
 
 ### `gitim-core::types::user_meta` 单测
 
 - 旧 yaml(无 labels)反序列化成 `labels: vec![]`
 - 新 yaml roundtrip
+- 加 labels 后 yaml 输出包含 labels,其他字段(display_name / role / introduction)保留
+
+### `gitim-core::types::board` 单测(`set_board_field` 路由)
+
+- `set_board_field(doc, "tags", "ci,release")` → `meta.labels == ["ci", "release"]`(eng-review test #5)
+- `set_board_field(doc, "labels", "ci,release")` → `meta.labels == ["ci", "release"]`
+- 两个调用结果相同 → catch alias 路由不一致 regression
 
 ### `gitim-daemon::handlers::labels` 集成测
 
 - `LabelsAdd` self → ok
 - `LabelsAdd` non-self → 403 `not_self`
-- `LabelsAdd` 超 30 个 → 422 `labels_full`
+- `LabelsAdd` 超 20 个 → 422 `labels_full`
 - `LabelsAdd` invalid char → 422 `invalid_label`
 - `LabelsAdd` 重复 → 去重
 - `LabelsRemove` not-exist label → no-op
-- `LabelsList` 自己 + 别人
-- `AgentsWithLabels` empty → empty
+- `LabelsList` 自己 + active 别人 → ok
+- `LabelsList` departed handler(在 `archive/users/`) → 404 `unknown_user`(eng-review test #4)
+- `AgentsWithLabels` empty query → empty handlers
 - `AgentsWithLabels` all-of match → 正确返回
-- 并发两个 add → commit_lock 串行,最终状态正确
+- `AgentsWithLabels` 排除 departed users(只有 alice 在 `users/`,bob 在 `archive/users/`,query rust → 仅 alice)(eng-review test #4)
+- 并发两个 add → commit_lock 串行,**两 label 都在最终 yaml 里**(catch race 的明确断言)(eng-review test #3)
+- `LabelsAdd ["rust"]` + 并发另一 client `create_card labels=["rust"]` → 任一顺序都不 panic、不丢 write(eng-review test #3)
+- 旧 yaml(无 labels)+ 新 daemon roundtrip:手写无 labels 字段的 `user.meta.yaml` → 启动 daemon → `LabelsList` 返回 `{labels: []}` → `LabelsAdd ["rust"]` → 再 `LabelsList` 含 rust 且其他字段不丢(eng-review test #1)
 
 ### `gitim-daemon::handlers::card::create_card` 集成测
 
@@ -491,7 +524,7 @@ gitim labels find <label1> <label2>    # all-of search
 
 ### 性能 / 非测试项
 
-- `AgentsWithLabels` O(N agents × M labels per agent) 线性扫,workspace 内 typical N<20、M<30,microsec 级,不做 benchmark
+- `AgentsWithLabels` O(N agents × M labels per agent) 线性扫,workspace 内 typical N<20、M<20,microsec 级,不做 benchmark
 - 不写部署顺序文档:daemon 升级跟 runtime 一起 via `update-and-restart`;旧 yaml 通过 serde alias 兼容
 
 ---
@@ -569,9 +602,21 @@ gitim labels find <label1> <label2>    # all-of search
 
 ## 已 lock 的 review-decided 项
 
+### 来自 brainstorming spot-check 后 lock
+
 - **Q1 → P10**: `gitim card label` 跟 `gitim labels` 长期共存,动词前 noun 区分目标对象(`labels` = self user,`card label` = 具体 card),不收敛
 - **Q3 → 影响面**: WebUI 走专用 endpoint `GET /labels/<handler>` + `POST/DELETE /labels/<self>` + `GET /agents-with-labels`;不塞进 `GET /agents/:handler`,避免该 endpoint 过度耦合
 - **Q5 → P5/P6**: labels add/remove **不**emit SSE event;v1 frontend 不监听 labels 变化,靠 next page load 刷新。WebUI read-only 视图本来就低频访问,polling 都不需要
+
+### 来自 eng-review (Software Architect subagent) 后 lock
+
+- **Issue #1**: `BoardMeta` 移除 `#[serde(deny_unknown_fields)]`(跟 CardMeta/UserMeta 对齐),解决新 daemon 写 `labels:` → 老 daemon fetch 拒收的硬伤。详见 BoardMeta schema 段
+- **Issue #2**: `set_board_field` 的 `"tags" → labels` routing 是 **daemon-side runtime match**(`board.rs:171`),不只是 serde alias。Plan 阶段三个 site 必改:`board.rs::set_board_field` 的 match arm、`board_handlers.rs:134` 透传、`prompts.rs:501` 文档
+- **Issue #3**: `LabelsAdd / LabelsRemove` 必须 read-modify-write 都在 `commit_lock` 内,匹配 `card_handlers.rs:868 send_card_message` 的 pattern。否则两个 client 并发 add 会丢 label
+- **`UserMeta.labels` cap 30 → 20**:跟 BoardMeta 对齐,因为 Board 是 user labels 的 mirror,两者不对齐时 mirror 段会被截断。20 已足够覆盖任何 agent 的 skill 集合
+- **Eng-review verdict**: READY for plan generation,无需重新 brainstorm requirements,以上 caveats 在 plan 落地
+- **Architect 同意的 decision**(不再 reopen):P6 hint-only routing、no-SSE for labels、empty query → empty result、P10 命名分裂
+- **Architect 轻微反对但被 docstring 兜住**: `compute_suggested_assignees` 是 best-effort,response struct doccomment 必须明确"suggestion failure → empty list",plan 阶段写到 `CreateCardResponse.suggested_assignees` 字段注释里
 
 ---
 
