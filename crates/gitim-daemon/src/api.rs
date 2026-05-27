@@ -544,6 +544,27 @@ pub enum Request {
         #[serde(default)]
         author: Option<String>,
     },
+
+    // ===== Unified labels space (docs/plans/unified-labels/) =====
+    /// Add labels to a user's `users/<target>.meta.yaml`. Self-claim only —
+    /// daemon rejects if target != daemon's bound handler.
+    #[serde(rename = "labels_add")]
+    LabelsAdd { target: String, labels: Vec<String> },
+
+    /// Remove labels from a user's `users/<target>.meta.yaml`. Self-claim only.
+    #[serde(rename = "labels_remove")]
+    LabelsRemove { target: String, labels: Vec<String> },
+
+    /// List labels for any active user. Returns 404 for unknown or departed
+    /// handlers (excludes `archive/users/`).
+    #[serde(rename = "labels_list")]
+    LabelsList { target: String },
+
+    /// Find active agents whose `users/<h>.meta.yaml.labels` is a superset
+    /// of the query labels (all-of subset match). Empty query → empty result.
+    /// Excludes departed handlers.
+    #[serde(rename = "agents_with_labels")]
+    AgentsWithLabels { labels: Vec<String> },
 }
 
 fn default_limit() -> usize {

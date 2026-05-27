@@ -244,10 +244,17 @@ pub async fn handle_create_card(
         card_id, channel, author
     );
 
+    // Best-effort: scan active users for labels superset match, populate
+    // CreateCardResponse.suggested_assignees. Failure → empty list (logged
+    // inside scan helper). See docs/plans/unified-labels/ (P5).
+    let suggested_assignees =
+        crate::handlers::compute_suggested_assignees(&state, meta.labels.clone()).await;
+
     let payload = gitim_core::responses::CreateCardResponse {
         channel: ch_name.to_string(),
         card_id,
         title,
+        suggested_assignees,
     };
     Response::json(payload)
 }
