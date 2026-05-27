@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use super::channel::ChannelName;
 use super::handler::Handler;
+use super::labels::{validate_labels, LabelError, CARD_MAX_LABELS};
 
 #[derive(Error, Debug)]
 pub enum CardError {
@@ -20,12 +21,8 @@ pub enum CardError {
     InvalidHandler(String),
     #[error("invalid timestamp '{0}'")]
     InvalidTimestamp(String),
-    #[error("label length out of range (1..={1}), got {0}")]
-    LabelLengthOutOfRange(usize, usize),
-    #[error("invalid char '{0}' in label (allowed: a-z 0-9 - _)")]
-    InvalidLabelChar(char),
-    #[error("too many labels (max {1}), got {0}")]
-    TooManyLabels(usize, usize),
+    #[error(transparent)]
+    Label(#[from] LabelError),
 }
 
 #[derive(Error, Debug)]
@@ -86,8 +83,6 @@ pub struct CardMeta {
     pub archived_via: Option<ArchivedVia>,
 }
 
-pub(crate) const MAX_LABELS: usize = 10;
-pub(crate) const MAX_LABEL_LEN: usize = 32;
 pub(crate) const MAX_CARD_ID_LEN: usize = 20;
 
 pub fn validate_card_id(card_id: &str) -> Result<(), CardError> {
@@ -101,28 +96,6 @@ pub fn validate_card_id(card_id: &str) -> Result<(), CardError> {
         if !matches!(ch, '0'..='9' | 'a'..='f' | '-') {
             return Err(CardError::InvalidCardIdChar(ch));
         }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_label(label: &str) -> Result<(), CardError> {
-    if label.is_empty() || label.len() > MAX_LABEL_LEN {
-        return Err(CardError::LabelLengthOutOfRange(label.len(), MAX_LABEL_LEN));
-    }
-    for ch in label.chars() {
-        if !matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_') {
-            return Err(CardError::InvalidLabelChar(ch));
-        }
-    }
-    Ok(())
-}
-
-pub fn validate_labels(labels: &[String]) -> Result<(), CardError> {
-    if labels.len() > MAX_LABELS {
-        return Err(CardError::TooManyLabels(labels.len(), MAX_LABELS));
-    }
-    for l in labels {
-        validate_label(l)?;
     }
     Ok(())
 }
@@ -150,7 +123,7 @@ pub fn validate_card_meta(meta: &CardMeta) -> Result<(), CardError> {
     if let Some(assignee) = &meta.assignee {
         Handler::new(assignee).map_err(|e| CardError::InvalidHandler(e.to_string()))?;
     }
-    validate_labels(&meta.labels)?;
+    validate_labels(&meta.labels, CARD_MAX_LABELS)?;
     validate_timestamp(&meta.created_at)?;
     validate_timestamp(&meta.updated_at)?;
     Ok(())
@@ -274,27 +247,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_label_ok() {
-        assert!(validate_label("v2").is_ok());
-        assert!(validate_label("agent-task").is_ok());
-        assert!(validate_label("sprint_2").is_ok());
-    }
-
-    #[test]
-    fn validate_label_rejects_uppercase() {
-        assert!(validate_label("V2").is_err());
-    }
-
-    #[test]
-    fn validate_label_rejects_too_long() {
-        let too_long = "a".repeat(33);
-        assert!(validate_label(&too_long).is_err());
-    }
-
-    #[test]
-    fn validate_labels_rejects_too_many() {
-        let many: Vec<String> = (0..11).map(|i| format!("l{}", i)).collect();
-        assert!(validate_labels(&many).is_err());
+    fn validate_card_meta_rejects_too_many_labels() {
+        // Use validate_card_meta to confirm CARD_MAX_LABELS is wired through
+        let meta = CardMeta {
+            title: "t".into(),
+            channel: "c".into(),
+            status: CardStatus::Todo,
+            labels: (0..11).map(|i| format!("l{}", i)).collect(),
+            assignee: None,
+            created_by: "u".into(),
+            created_at: "20260101T000000Z".into(),
+            updated_at: "20260101T000000Z".into(),
+            archived_via: None,
+        };
+        assert!(matches!(
+            validate_card_meta(&meta),
+            Err(CardError::Label(_))
+        ));
     }
 
     #[test]

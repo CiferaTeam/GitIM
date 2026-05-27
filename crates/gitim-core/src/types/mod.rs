@@ -4,6 +4,7 @@ pub mod channel;
 pub mod config;
 pub mod cron;
 pub mod handler;
+pub mod labels;
 pub mod link;
 pub mod message;
 pub mod meta;
@@ -16,12 +17,16 @@ pub use board::{
 };
 pub use card::{
     parse_card_meta_yaml, stringify_card_meta_yaml, validate_card_id, validate_card_meta,
-    validate_labels, CardError, CardMeta, CardMetaYamlError, CardStatus,
+    CardError, CardMeta, CardMetaYamlError, CardStatus,
 };
 pub use channel::ChannelName;
 pub use config::Config;
 pub use cron::{validate_cron_name, CronNameError, CronSpec, CronSpecError};
 pub use handler::Handler;
+pub use labels::{
+    validate_label, validate_labels, LabelError, BOARD_MAX_LABELS, CARD_MAX_LABELS,
+    FLOW_NODE_MAX_LABELS, MAX_LABEL_LEN, USER_MAX_LABELS,
+};
 pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
-pub use meta::{ChannelMeta, UserMeta, MAX_INTRODUCTION_LEN};
+pub use meta::{validate_user_meta, ChannelMeta, UserMeta, UserMetaError, MAX_INTRODUCTION_LEN};

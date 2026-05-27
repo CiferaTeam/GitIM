@@ -396,6 +396,7 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
         display_name: display_name.to_string(),
         role: "member".to_string(),
         introduction: "GitIM user".to_string(),
+        labels: Vec::new(),
     };
     let meta_str = Response::yaml_string(&meta, "user meta")?;
     std::fs::write(&meta_path, &meta_str)

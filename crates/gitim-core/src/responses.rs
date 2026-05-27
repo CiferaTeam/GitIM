@@ -434,7 +434,10 @@ pub struct BoardMetaSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    pub tags: Vec<String>,
+    /// 跟 BoardMeta.labels 同源。serde alias "tags" 让旧 wire JSON (`{tags: [...]}`)
+    /// 反序列化时仍能填充 `labels` 字段(v1 兼容窗口期)。
+    #[serde(default, alias = "tags")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -444,7 +447,8 @@ pub struct BoardSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    pub tags: Vec<String>,
+    #[serde(default, alias = "tags")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1136,7 +1140,7 @@ mod tests {
                 updated_at: "20260509T120000Z".to_string(),
                 status: "working".to_string(),
                 summary: "checking release".to_string(),
-                tags: vec!["release".to_string()],
+                labels: vec!["release".to_string()],
             }],
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -1151,7 +1155,7 @@ mod tests {
         );
         assert_eq!(
             first
-                .get("tags")
+                .get("labels")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len()),
             Some(1),
@@ -1169,7 +1173,7 @@ mod tests {
                 updated_at: "20260509T120000Z".to_string(),
                 status: "working".to_string(),
                 summary: "checking release".to_string(),
-                tags: vec!["release".to_string()],
+                labels: vec!["release".to_string()],
             },
             body: "## 当前状态\n\nworking\n".to_string(),
         };

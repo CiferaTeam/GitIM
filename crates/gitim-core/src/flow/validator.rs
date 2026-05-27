@@ -1,4 +1,5 @@
 use crate::flow::types::{FlowDocument, FlowError, FlowNode, FlowSlug, FlowWarning, NodeType};
+use crate::types::labels::{validate_labels, FLOW_NODE_MAX_LABELS};
 
 const MAX_FILE_SIZE: usize = 256 * 1024;
 const MAX_NODE_COUNT: usize = 50;
@@ -94,6 +95,15 @@ pub fn validate_flow_document(doc: &FlowDocument, slug_in_path: &str) -> Result<
                     ));
                 }
             }
+        }
+
+        // required_labels 不是 node_type-required,但若存在必须合法
+        if let Err(inner) = validate_labels(&n.required_labels, FLOW_NODE_MAX_LABELS) {
+            return Err(FlowError::InvalidNodeField {
+                node: n.id.clone(),
+                field: "required_labels",
+                inner: inner.to_string(),
+            });
         }
     }
 
@@ -198,6 +208,7 @@ mod tests {
             signal: None,
             needs: needs.iter().map(|s| s.to_string()).collect(),
             exits: vec![],
+            required_labels: vec![],
             prompt: String::new(),
         }
     }
@@ -328,5 +339,43 @@ mod tests {
             matches!(&err, FlowError::InvalidNodeId { .. }),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_required_labels_invalid_char_rejected() {
+        let mut n = node("n1", &[]);
+        n.required_labels = vec!["Rust!".into()];
+        let d = doc_with_nodes(vec![n]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        match err {
+            FlowError::InvalidNodeField { node, field, .. } => {
+                assert_eq!(node, "n1");
+                assert_eq!(field, "required_labels");
+            }
+            e => panic!("unexpected error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_required_labels_too_many_rejected() {
+        let mut n = node("n1", &[]);
+        n.required_labels = (0..11).map(|i| format!("l{i}")).collect();
+        let d = doc_with_nodes(vec![n]);
+        let err = validate_flow_document(&d, "test").unwrap_err();
+        assert!(matches!(
+            err,
+            FlowError::InvalidNodeField {
+                field: "required_labels",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_required_labels_valid_accepted() {
+        let mut n = node("n1", &[]);
+        n.required_labels = vec!["rust".into(), "backend".into()];
+        let d = doc_with_nodes(vec![n]);
+        assert!(validate_flow_document(&d, "test").is_ok());
     }
 }

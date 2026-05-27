@@ -2,7 +2,9 @@ use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::{PendingMessage, SharedState};
 use crate::thread_io;
-use gitim_core::types::{validate_labels, CardMeta, CardStatus, ChannelName, Handler};
+use gitim_core::types::{
+    validate_labels, CardMeta, CardStatus, ChannelName, Handler, CARD_MAX_LABELS,
+};
 use gitim_sync::git::GitError;
 use tracing::{error, info, warn};
 
@@ -164,7 +166,7 @@ pub async fn handle_create_card(
     }
 
     let labels_vec = labels.unwrap_or_default();
-    if let Err(e) = validate_labels(&labels_vec) {
+    if let Err(e) = validate_labels(&labels_vec, CARD_MAX_LABELS) {
         return Response::error(format!("invalid labels: {}", e));
     }
 
@@ -1014,7 +1016,7 @@ pub async fn handle_update_card(
         }
     }
     if let Some(ref new_labels) = labels {
-        if let Err(e) = validate_labels(new_labels) {
+        if let Err(e) = validate_labels(new_labels, CARD_MAX_LABELS) {
             return Response::error(format!("invalid labels: {}", e));
         }
         meta.labels = new_labels.clone();
