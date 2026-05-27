@@ -3470,12 +3470,19 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
 
         let poll_interval = agent_loop.poll_interval;
         let mut consecutive_errors: u32 = 0;
+        let mut consecutive_daemon_restarts: u32 = 0;
         const MAX_BACKOFF_SECS: u64 = 60;
+        // Minimum settle time after a daemon restart before polling again.
+        // Prevents tight-loop log storms when the daemon starts but is not yet
+        // ready (socket exists but accept loop hasn't started) or crashes
+        // immediately after spawn.
+        const DAEMON_RESTART_SETTLE_SECS: u64 = 2;
 
         loop {
             match agent_loop.run_once().await {
                 Ok(true) => {
                     consecutive_errors = 0;
+                    consecutive_daemon_restarts = 0;
                     if let Ok(mut s) = state_clone.try_lock() {
                         if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                             if let Some(info) = ctx.agents.get_mut(&owned_id) {
@@ -3488,6 +3495,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
+                    consecutive_daemon_restarts = 0;
                 }
                 Err(crate::error::RuntimeError::SelfDeparted) => {
                     // Archive-protocol B.4: this agent's own user.meta.yaml
@@ -3554,11 +3562,27 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                         match agent_loop.ensure_daemon_running().await {
                             Ok(()) => {
                                 consecutive_errors = 0;
+                                consecutive_daemon_restarts =
+                                    consecutive_daemon_restarts.saturating_add(1);
+                                // Exponential backoff after restart success: give the
+                                // daemon time to fully start before polling again.
+                                // Without this, a daemon that crashes after creating
+                                // its socket causes a tight loop at CPU speed.
+                                let settle = std::time::Duration::from_secs(
+                                    (DAEMON_RESTART_SETTLE_SECS
+                                        * 2u64.saturating_pow(
+                                            consecutive_daemon_restarts.saturating_sub(1),
+                                        ))
+                                    .min(MAX_BACKOFF_SECS),
+                                );
                                 tracing::info!(
                                     agent = %owned_id,
                                     slug = %owned_slug,
-                                    "agent daemon restarted after poll failure"
+                                    settle_secs = settle.as_secs(),
+                                    attempt = consecutive_daemon_restarts,
+                                    "agent daemon restarted after poll failure; settling"
                                 );
+                                tokio::time::sleep(settle).await;
                                 continue;
                             }
                             Err(restart_err) => {

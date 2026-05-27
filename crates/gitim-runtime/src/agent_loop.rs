@@ -1192,16 +1192,24 @@ impl AgentLoop {
         }
 
         let mut consecutive_errors: u32 = 0;
+        let mut consecutive_daemon_restarts: u32 = 0;
         const MAX_BACKOFF_SECS: u64 = 60;
+        // Minimum settle time after a daemon restart before polling again.
+        // Prevents tight-loop log storms when the daemon starts but is not yet
+        // ready (socket exists but accept loop hasn't started) or crashes
+        // immediately after spawn.
+        const DAEMON_RESTART_SETTLE_SECS: u64 = 2;
 
         loop {
             match self.run_once().await {
                 Ok(true) => {
                     consecutive_errors = 0;
+                    consecutive_daemon_restarts = 0;
                     // provider finished/failed logs are already emitted in run_once
                 }
                 Ok(false) => {
                     consecutive_errors = 0;
+                    consecutive_daemon_restarts = 0;
                     tracing::trace!("idle");
                 }
                 Err(RuntimeError::SelfDeparted) => {
@@ -1220,10 +1228,22 @@ impl AgentLoop {
                         match self.ensure_daemon_running().await {
                             Ok(()) => {
                                 consecutive_errors = 0;
+                                consecutive_daemon_restarts =
+                                    consecutive_daemon_restarts.saturating_add(1);
+                                let settle = Duration::from_secs(
+                                    (DAEMON_RESTART_SETTLE_SECS
+                                        * 2u64.saturating_pow(
+                                            consecutive_daemon_restarts.saturating_sub(1),
+                                        ))
+                                    .min(MAX_BACKOFF_SECS),
+                                );
                                 tracing::info!(
                                     handler = %self.handler,
-                                    "agent daemon restarted after poll failure"
+                                    settle_secs = settle.as_secs(),
+                                    attempt = consecutive_daemon_restarts,
+                                    "agent daemon restarted after poll failure; settling"
                                 );
+                                tokio::time::sleep(settle).await;
                                 continue;
                             }
                             Err(restart_err) => {
