@@ -130,6 +130,9 @@ vi.mock("gitim-wasm", () => ({
   })),
   stringifyBoardMarkdown: vi.fn((doc: Record<string, unknown>) => {
     const meta = doc.meta as Record<string, unknown>;
+    // v1 transition: BoardMeta wire/yaml field name stays as `tags` (serde
+    // rename) for cross-version compat. Object key here matches the Rust
+    // wasm export which still uses `tags`.
     const tags = Array.isArray(meta.tags) ? meta.tags : [];
     return [
       "---",

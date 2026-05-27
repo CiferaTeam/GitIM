@@ -361,6 +361,14 @@ pub struct CreateCardResponse {
     pub channel: String,
     pub card_id: String,
     pub title: String,
+    /// Best-effort assignee recommendations: handlers whose
+    /// `users/<h>.meta.yaml.labels` is a superset of `card.labels`.
+    /// Empty when card has no labels, when no agent matches, or when
+    /// the post-commit scan fails (best-effort — never fails the create).
+    /// Sorted by handler. Client can ignore.
+    /// See `docs/plans/unified-labels/00-requirements.md` (P5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_assignees: Vec<String>,
 }
 
 /// Response payload for `Request::ArchiveCard`.
@@ -434,7 +442,11 @@ pub struct BoardMetaSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    pub tags: Vec<String>,
+    /// Wire shape matches yaml: serialized as `tags:` for v1 cross-version
+    /// compat, accepts `labels:` alias on input. See BoardMeta doccomment.
+    /// v2 will swap output to `labels`.
+    #[serde(default, rename = "tags", alias = "labels")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -444,7 +456,8 @@ pub struct BoardSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    pub tags: Vec<String>,
+    #[serde(default, rename = "tags", alias = "labels")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -605,6 +618,38 @@ pub struct ToggleCronResponse {
 pub struct DeleteCronResponse {
     pub name: String,
     pub deleted_by: String,
+}
+
+// =============================================================================
+// Unified labels space — see docs/plans/unified-labels/00-requirements.md
+// =============================================================================
+
+/// Response payload for `Request::LabelsAdd`.
+/// Returns the canonical sorted set of labels after the add (post-dedupe).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelsAddResponse {
+    pub current_labels: Vec<String>,
+}
+
+/// Response payload for `Request::LabelsRemove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelsRemoveResponse {
+    pub current_labels: Vec<String>,
+}
+
+/// Response payload for `Request::LabelsList`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelsListResponse {
+    pub handler: String,
+    pub labels: Vec<String>,
+}
+
+/// Response payload for `Request::AgentsWithLabels`. Returned set is
+/// `agent.labels ⊇ query.labels` (all-of subset match), excluding archived
+/// (departed) handlers. Sorted by handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentsWithLabelsResponse {
+    pub handlers: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1043,10 +1088,32 @@ mod tests {
             channel: "general".to_string(),
             card_id: "card-1".to_string(),
             title: "Fix bug".to_string(),
+            suggested_assignees: vec![],
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
+        // 3 mandatory fields; suggested_assignees omitted when empty
+        // (skip_serializing_if = "Vec::is_empty")
         assert_eq!(obj.len(), 3);
+        assert!(obj.get("suggested_assignees").is_none());
+    }
+
+    #[test]
+    fn create_card_response_wire_shape_with_assignees() {
+        let r = CreateCardResponse {
+            channel: "general".to_string(),
+            card_id: "card-1".to_string(),
+            title: "Fix bug".to_string(),
+            suggested_assignees: vec!["alice".into(), "bob".into()],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        let arr = obj
+            .get("suggested_assignees")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(arr.len(), 2);
     }
 
     #[test]
@@ -1136,7 +1203,7 @@ mod tests {
                 updated_at: "20260509T120000Z".to_string(),
                 status: "working".to_string(),
                 summary: "checking release".to_string(),
-                tags: vec!["release".to_string()],
+                labels: vec!["release".to_string()],
             }],
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -1149,6 +1216,7 @@ mod tests {
             first.get("path").and_then(|v| v.as_str()),
             Some("showboards/alice/board.md")
         );
+        // v1 wire output: `tags:` (rename), labels is the internal Rust name.
         assert_eq!(
             first
                 .get("tags")
@@ -1156,6 +1224,8 @@ mod tests {
                 .map(|a| a.len()),
             Some(1),
         );
+        // Confirm: `labels` is NOT a separate key on the wire (just an alias for input)
+        assert!(first.get("labels").is_none());
     }
 
     #[test]
@@ -1169,7 +1239,7 @@ mod tests {
                 updated_at: "20260509T120000Z".to_string(),
                 status: "working".to_string(),
                 summary: "checking release".to_string(),
-                tags: vec!["release".to_string()],
+                labels: vec!["release".to_string()],
             },
             body: "## 当前状态\n\nworking\n".to_string(),
         };

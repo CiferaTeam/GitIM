@@ -614,6 +614,87 @@ impl GitimClient {
         decode_unit(resp)
     }
 
+    // ===== Unified labels space (docs/plans/unified-labels/) =====
+
+    /// Raw ApiResponse variant — used by HTTP layer (gitim-runtime) which
+    /// passes through to the wire shape.
+    pub async fn labels_add_raw(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "labels_add",
+            json!({
+                "target": target,
+                "labels": labels,
+            }),
+        )
+        .await
+    }
+
+    pub async fn labels_remove_raw(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "labels_remove",
+            json!({
+                "target": target,
+                "labels": labels,
+            }),
+        )
+        .await
+    }
+
+    pub async fn labels_list_raw(&self, target: &str) -> Result<ApiResponse, ClientError> {
+        self.request("labels_list", json!({ "target": target }))
+            .await
+    }
+
+    pub async fn agents_with_labels_raw(
+        &self,
+        labels: &[String],
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("agents_with_labels", json!({ "labels": labels }))
+            .await
+    }
+
+    pub async fn labels_add(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::LabelsAddResponse, ClientError> {
+        let resp = self.labels_add_raw(target, labels).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn labels_remove(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::LabelsRemoveResponse, ClientError> {
+        let resp = self.labels_remove_raw(target, labels).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn labels_list(
+        &self,
+        target: &str,
+    ) -> Result<gitim_core::responses::LabelsListResponse, ClientError> {
+        let resp = self.labels_list_raw(target).await?;
+        decode_typed(resp)
+    }
+
+    pub async fn agents_with_labels(
+        &self,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::AgentsWithLabelsResponse, ClientError> {
+        let resp = self.agents_with_labels_raw(labels).await?;
+        decode_typed(resp)
+    }
+
     /// Convenience wrapper: re-runs `show_cron` and pulls the computed
     /// `next_fire`. The daemon stores `next_fire` as ISO 8601 UTC; this
     /// parses it into a `DateTime<Utc>` for callers that need to

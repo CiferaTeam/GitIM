@@ -4,13 +4,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::handler::Handler;
+use super::labels::{validate_labels, LabelError, BOARD_MAX_LABELS};
 
 pub const BOARD_VERSION: u32 = 1;
 pub const BOARD_MAX_BYTES: usize = 64 * 1024;
 pub const BOARD_MAX_STATUS_LEN: usize = 80;
 pub const BOARD_MAX_SUMMARY_LEN: usize = 280;
-pub const BOARD_MAX_TAGS: usize = 20;
-pub const BOARD_MAX_TAG_LEN: usize = 32;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BoardError {
@@ -28,12 +27,8 @@ pub enum BoardError {
     StatusTooLong(usize, usize),
     #[error("summary exceeds {1} bytes, got {0}")]
     SummaryTooLong(usize, usize),
-    #[error("too many tags (max {1}), got {0}")]
-    TooManyTags(usize, usize),
-    #[error("tag length out of range (1..={1}), got {0}")]
-    TagLengthOutOfRange(usize, usize),
-    #[error("invalid char '{0}' in tag (allowed: a-z 0-9 - _)")]
-    InvalidTagChar(char),
+    #[error(transparent)]
+    Label(#[from] LabelError),
     #[error("YAML serialization error: {0}")]
     YamlSerialize(String),
     #[error("unknown board field '{0}'")]
@@ -58,16 +53,30 @@ pub enum BoardMarkdownError {
     Board(#[from] BoardError),
 }
 
+/// Board metadata frontmatter.
+///
+/// Two compatibility provisions for the unified-labels rollout:
+///
+/// 1. **`#[serde(deny_unknown_fields)]` removed** (eng-review Issue #1) so a
+///    new daemon doesn't reject yaml/JSON with future-unknown fields. This
+///    matches `CardMeta` / `UserMeta` policy.
+///
+/// 2. **Field is serialized as `tags:`** during the v1 transition window
+///    (PR #35 review P1): the internal Rust name is `labels` for code clarity,
+///    but `#[serde(rename = "tags", alias = "labels")]` means yaml/JSON
+///    output continues to use `tags:` (compatible with old daemons that still
+///    have `deny_unknown_fields`), while accepting either name on input. v2
+///    will switch the output side to `labels:` after enough release cycles
+///    that no peer is left running pre-v1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BoardMeta {
     pub version: u32,
     pub handler: String,
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
+    #[serde(default, rename = "tags", alias = "labels")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,7 +101,7 @@ pub fn default_board(handler: &str, timestamp: &str) -> Result<BoardDocument, Bo
             updated_at: timestamp.to_string(),
             status: "idle".to_string(),
             summary: String::new(),
-            tags: Vec::new(),
+            labels: Vec::new(),
         },
         body: default_board_body(),
     };
@@ -178,10 +187,12 @@ pub fn set_board_field(
             validate_summary(&summary)?;
             doc.meta.summary = summary;
         }
-        "tags" => {
-            let tags = parse_tags(value)?;
-            validate_tags(&tags)?;
-            doc.meta.tags = tags;
+        // "labels" is canonical; "tags" is a backward-compat alias accepted as a
+        // field name so existing agent prompts (`gitim board set tags <csv>`)
+        // keep working through the v1 rollout.
+        "labels" | "tags" => {
+            let labels = parse_labels_csv(value)?;
+            doc.meta.labels = labels;
         }
         other => return Err(BoardError::UnknownField(other.to_string())),
     }
@@ -262,7 +273,7 @@ fn validate_board_meta(meta: &BoardMeta) -> Result<(), BoardError> {
     validate_timestamp(&meta.updated_at)?;
     validate_status(&meta.status)?;
     validate_summary(&meta.summary)?;
-    validate_tags(&meta.tags)?;
+    validate_labels(&meta.labels, BOARD_MAX_LABELS)?;
     Ok(())
 }
 
@@ -330,35 +341,15 @@ fn validate_summary(summary: &str) -> Result<(), BoardError> {
     Ok(())
 }
 
-fn parse_tags(value: &str) -> Result<Vec<String>, BoardError> {
-    let tags = value
+fn parse_labels_csv(value: &str) -> Result<Vec<String>, BoardError> {
+    let labels = value
         .split(',')
         .map(str::trim)
         .filter(|tag| !tag.is_empty())
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    validate_tags(&tags)?;
-    Ok(tags)
-}
-
-fn validate_tags(tags: &[String]) -> Result<(), BoardError> {
-    if tags.len() > BOARD_MAX_TAGS {
-        return Err(BoardError::TooManyTags(tags.len(), BOARD_MAX_TAGS));
-    }
-    for tag in tags {
-        if tag.is_empty() || tag.len() > BOARD_MAX_TAG_LEN {
-            return Err(BoardError::TagLengthOutOfRange(
-                tag.len(),
-                BOARD_MAX_TAG_LEN,
-            ));
-        }
-        for ch in tag.chars() {
-            if !matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_') {
-                return Err(BoardError::InvalidTagChar(ch));
-            }
-        }
-    }
-    Ok(())
+    validate_labels(&labels, BOARD_MAX_LABELS)?;
+    Ok(labels)
 }
 
 fn validate_section_name(section: &str) -> Result<&str, BoardError> {
@@ -455,11 +446,16 @@ mod tests {
     use super::*;
 
     fn sample_board() -> &'static str {
-        "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: 正在梳理发布风险\ntags:\n  - release\n---\n## 当前状态\n\n在看 sync 失败。\n\n## 已知事实\n\n- origin/main 可达\n"
+        "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: 正在梳理发布风险\nlabels:\n  - release\n---\n## 当前状态\n\n在看 sync 失败。\n\n## 已知事实\n\n- origin/main 可达\n"
     }
 
-    fn board_without_tags() -> &'static str {
+    fn board_without_labels() -> &'static str {
         "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: 正在梳理发布风险\n---\n## 当前状态\n"
+    }
+
+    fn legacy_board_with_tags() -> &'static str {
+        // 旧 yaml 用 tags: alias 应能 read
+        "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\ntags:\n  - release\n---\nbody\n"
     }
 
     #[test]
@@ -467,7 +463,7 @@ mod tests {
         let parsed = parse_board_markdown(sample_board()).unwrap();
         assert_eq!(parsed.meta.handler, "alice");
         assert_eq!(parsed.meta.status, "working");
-        assert_eq!(parsed.meta.tags, vec!["release"]);
+        assert_eq!(parsed.meta.labels, vec!["release"]);
         assert!(parsed.body.contains("## 当前状态"));
 
         let rendered = stringify_board_markdown(&parsed).unwrap();
@@ -486,24 +482,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_board_without_tags_defaults_to_empty_vec() {
-        let parsed = parse_board_markdown(board_without_tags()).unwrap();
+    fn parse_board_without_labels_defaults_to_empty_vec() {
+        let parsed = parse_board_markdown(board_without_labels()).unwrap();
 
-        assert!(parsed.meta.tags.is_empty());
+        assert!(parsed.meta.labels.is_empty());
     }
 
     #[test]
-    fn invalid_tag_characters_are_rejected() {
-        let invalid = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\ntags:\n  - release!\n---\nbody\n";
+    fn legacy_tags_yaml_field_is_read_via_alias() {
+        // 兼容旧 yaml: `tags:` 字段经 serde alias 路由到 BoardMeta.labels
+        let parsed = parse_board_markdown(legacy_board_with_tags()).unwrap();
+        assert_eq!(parsed.meta.labels, vec!["release"]);
+    }
+
+    #[test]
+    fn rendered_yaml_keeps_tags_field_name_for_v1() {
+        // v1 transition window (PR #35 review P1): wire/yaml output stays as
+        // `tags:` so old daemons with `deny_unknown_fields` keep working.
+        // Internal Rust field is `labels` (serde rename) — only the on-wire
+        // name is `tags`. v2 will swap after fleet upgrades.
+        let parsed = parse_board_markdown(legacy_board_with_tags()).unwrap();
+        let rendered = stringify_board_markdown(&parsed).unwrap();
+        assert!(rendered.contains("tags:"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("labels:"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn new_yaml_with_labels_alias_parses_and_round_trips_to_tags() {
+        // Caller wrote yaml with `labels:` directly (e.g. hand-edit or future
+        // migration tool). v1 daemon reads it via alias, then writes back with
+        // canonical `tags:` on next save. This is the passive migration path
+        // in reverse — we tolerate `labels:` input but normalize output.
+        let yaml = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\nlabels:\n  - release\n---\nbody\n";
+        let parsed = parse_board_markdown(yaml).unwrap();
+        assert_eq!(parsed.meta.labels, vec!["release"]);
+        let rendered = stringify_board_markdown(&parsed).unwrap();
+        assert!(rendered.contains("tags:"));
+    }
+
+    #[test]
+    fn invalid_label_characters_are_rejected() {
+        let invalid = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\nlabels:\n  - release!\n---\nbody\n";
 
         assert!(parse_board_markdown(invalid).is_err());
     }
 
     #[test]
-    fn unknown_frontmatter_fields_are_rejected() {
-        let invalid = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\ntags: []\nextra: dropped\n---\nbody\n";
+    fn unknown_frontmatter_fields_are_silently_dropped() {
+        // eng-review Issue #1:`deny_unknown_fields` 移除后,unknown 字段
+        // 不再 reject(避免新 daemon 写 `labels:` 时老 daemon fetch 拒收)。
+        let with_extra = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\nlabels: []\nfuture_field: dropped\n---\nbody\n";
 
-        assert!(parse_board_markdown(invalid).is_err());
+        let parsed = parse_board_markdown(with_extra).expect("should accept unknown field");
+        assert_eq!(parsed.meta.handler, "alice");
+        // future_field 不存在于 BoardMeta,被静默 drop
     }
 
     #[test]
@@ -556,10 +588,19 @@ mod tests {
     fn set_field_updates_thin_frontmatter() {
         let mut parsed = parse_board_markdown(sample_board()).unwrap();
         set_board_field(&mut parsed, "summary", "等待 CI 结果").unwrap();
-        set_board_field(&mut parsed, "tags", "ci,release").unwrap();
+        set_board_field(&mut parsed, "labels", "ci,release").unwrap();
 
         assert_eq!(parsed.meta.summary, "等待 CI 结果");
-        assert_eq!(parsed.meta.tags, vec!["ci", "release"]);
+        assert_eq!(parsed.meta.labels, vec!["ci", "release"]);
+    }
+
+    #[test]
+    fn set_field_with_tags_alias_routes_to_labels() {
+        // eng-review Issue #2 + P2:`set_board_field` arg name 同时接受
+        // 'tags' 和 'labels',两者路由到同一个 meta.labels 字段
+        let mut parsed = parse_board_markdown(sample_board()).unwrap();
+        set_board_field(&mut parsed, "tags", "ci,release").unwrap();
+        assert_eq!(parsed.meta.labels, vec!["ci", "release"]);
     }
 
     #[test]

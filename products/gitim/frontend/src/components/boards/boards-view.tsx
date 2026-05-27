@@ -270,7 +270,9 @@ function BoardDetail({
   }
 
   const meta = board.meta;
-  const tags = meta.tags.length > 0 ? meta.tags : summary?.tags ?? [];
+  // v1 transition: wire field is `tags`. Internal Rust field is `labels`
+  // (serde rename for cross-version compat). v2 may switch wire to `labels`.
+  const tags = meta.tags.length > 0 ? meta.tags : (summary?.tags ?? []);
   return (
     <section className="min-h-0 overflow-y-auto px-4 py-4 md:px-6">
       <div className="mx-auto flex max-w-4xl flex-col gap-5">

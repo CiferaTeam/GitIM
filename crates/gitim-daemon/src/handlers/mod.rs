@@ -2,6 +2,7 @@ mod channel;
 pub mod cron;
 mod depart;
 mod dm;
+mod labels;
 mod poll;
 mod read;
 mod search;
@@ -13,6 +14,7 @@ pub use channel::*;
 pub use cron::*;
 pub use depart::*;
 pub use dm::*;
+pub use labels::*;
 pub use poll::*;
 pub use read::*;
 pub use search::*;
@@ -177,6 +179,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::EnableCron { .. }
                 | Request::DisableCron { .. }
                 | Request::DeleteCron { .. }
+                | Request::LabelsAdd { .. }
+                | Request::LabelsRemove { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -683,5 +687,13 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             };
             handle_delete_cron(state, name, resolved_author).await
         }
+
+        // Unified labels space — see docs/plans/unified-labels/
+        Request::LabelsAdd { target, labels } => handle_labels_add(state, target, labels).await,
+        Request::LabelsRemove { target, labels } => {
+            handle_labels_remove(state, target, labels).await
+        }
+        Request::LabelsList { target } => handle_labels_list(state, target).await,
+        Request::AgentsWithLabels { labels } => handle_agents_with_labels(state, labels).await,
     }
 }

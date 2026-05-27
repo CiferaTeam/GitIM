@@ -169,7 +169,8 @@ pub fn validate_card_id(card_id: &str) -> Result<(), JsError> {
 pub fn validate_card_labels(labels: JsValue) -> Result<(), JsError> {
     let labels: Vec<String> =
         serde_wasm_bindgen::from_value(labels).map_err(|e| JsError::new(&e.to_string()))?;
-    gitim_core::types::validate_labels(&labels).map_err(|e| JsError::new(&e.to_string()))
+    gitim_core::types::validate_labels(&labels, gitim_core::types::CARD_MAX_LABELS)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "parseBoardMarkdown")]

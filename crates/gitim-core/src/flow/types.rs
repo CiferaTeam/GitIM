@@ -93,6 +93,13 @@ pub struct FlowNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exits: Vec<String>,
 
+    /// 节点能力需求(unified labels space)。仅信息位 —— daemon 不强制 routing,
+    /// 不计算"谁满足"也不阻塞 flow 推进。Coordinator agent 自行用
+    /// `agents_with_labels` IPC 查候选,决定拉谁。详见
+    /// `docs/plans/unified-labels/00-requirements.md` (P6)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_labels: Vec<String>,
+
     /// 节点 prompt body(由 body section parser 注入,frontmatter 里不读)。
     #[serde(skip)]
     pub prompt: String,
@@ -139,6 +146,12 @@ pub enum FlowError {
     Cycle,
     #[error("node {0} type {1:?} missing required field: {2}")]
     MissingRequiredField(String, NodeType, &'static str),
+    #[error("node {node} field {field}: {inner}")]
+    InvalidNodeField {
+        node: String,
+        field: &'static str,
+        inner: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +248,7 @@ mod tests {
             signal: None,
             needs: vec![],
             exits: vec![],
+            required_labels: vec![],
             prompt: String::new(),
         };
         let yaml = serde_yaml::to_string(&node).unwrap();
@@ -243,5 +257,33 @@ mod tests {
         assert!(!yaml.contains("participants"), "yaml={yaml}");
         assert!(!yaml.contains("signal"), "yaml={yaml}");
         assert!(!yaml.contains("exits"), "yaml={yaml}");
+        assert!(!yaml.contains("required_labels"), "yaml={yaml}");
+    }
+
+    #[test]
+    fn old_flow_yaml_without_required_labels_defaults_to_empty() {
+        let yaml = "id: n1\ntype: agent_mention\nowner: alice\n";
+        let node: FlowNode = serde_yaml::from_str(yaml).unwrap();
+        assert!(node.required_labels.is_empty());
+    }
+
+    #[test]
+    fn flow_node_required_labels_roundtrip() {
+        let node = FlowNode {
+            id: "n1".into(),
+            node_type: NodeType::AgentMention,
+            owner: Some("alice".into()),
+            participants: vec![],
+            signal: None,
+            needs: vec![],
+            exits: vec![],
+            required_labels: vec!["rust".into(), "backend".into()],
+            prompt: String::new(),
+        };
+        let yaml = serde_yaml::to_string(&node).unwrap();
+        assert!(yaml.contains("required_labels:"));
+        assert!(yaml.contains("- rust"));
+        let parsed: FlowNode = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.required_labels, vec!["rust", "backend"]);
     }
 }

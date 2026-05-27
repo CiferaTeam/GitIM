@@ -325,6 +325,10 @@ export interface BoardMetaSummary {
   updated_at: string;
   status: string;
   summary: string;
+  // v1 transition: wire field is still `tags` (Rust BoardMeta uses
+  // serde rename = "tags" for cross-version yaml/JSON compat). The
+  // internal Rust field name `labels` doesn't surface on wire.
+  // v2 will switch wire to `labels`; until then, frontend reads `tags`.
   tags: string[];
 }
 

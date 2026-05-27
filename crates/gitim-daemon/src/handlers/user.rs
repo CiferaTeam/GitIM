@@ -57,6 +57,7 @@ pub async fn handle_register_user(
         display_name,
         role,
         introduction,
+        labels: Vec::new(),
     };
     let meta_str = match Response::yaml_string(&meta, "user meta") {
         Ok(meta_str) => meta_str,

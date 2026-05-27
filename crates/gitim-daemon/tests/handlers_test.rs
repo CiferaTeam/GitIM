@@ -63,6 +63,7 @@ async fn register_test_user(state: &SharedState, handler: &str) {
         display_name: handler.to_string(),
         role: "member".to_string(),
         introduction: "test user".to_string(),
+        labels: Vec::new(),
     };
     std::fs::write(
         users_dir.join(format!("{}.meta.yaml", handler)),

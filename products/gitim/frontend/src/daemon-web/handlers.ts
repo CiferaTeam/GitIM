@@ -65,6 +65,9 @@ interface BoardMeta {
   updated_at: string;
   status: string;
   summary: string;
+  // v1 transition: wasm BoardMeta serializes via serde rename = "tags",
+  // so this object's key is `tags` even though the internal Rust field
+  // is `labels`. v2 will switch the wire side; until then, TS reads `tags`.
   tags: string[];
 }
 

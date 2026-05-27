@@ -86,7 +86,7 @@ pub async fn handle_board_list(state: SharedState) -> Response {
                 updated_at: doc.meta.updated_at,
                 status: doc.meta.status,
                 summary: doc.meta.summary,
-                tags: doc.meta.tags,
+                labels: doc.meta.labels,
             });
         }
     }
@@ -310,7 +310,7 @@ fn board_meta_summary(meta: &BoardMeta) -> BoardMetaSummary {
         updated_at: meta.updated_at.clone(),
         status: meta.status.clone(),
         summary: meta.summary.clone(),
-        tags: meta.tags.clone(),
+        labels: meta.labels.clone(),
     }
 }
 

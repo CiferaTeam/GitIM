@@ -2,7 +2,9 @@ use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::{PendingMessage, SharedState};
 use crate::thread_io;
-use gitim_core::types::{validate_labels, CardMeta, CardStatus, ChannelName, Handler};
+use gitim_core::types::{
+    validate_labels, CardMeta, CardStatus, ChannelName, Handler, CARD_MAX_LABELS,
+};
 use gitim_sync::git::GitError;
 use tracing::{error, info, warn};
 
@@ -105,7 +107,7 @@ async fn ensure_known_user(state: &SharedState, handler: &str) -> Result<(), Str
 /// retry the push on its next tick. Callers should surface the error to the client
 /// as a transient push failure rather than implying the operation did not happen
 /// locally.
-async fn push_with_retry(state: &SharedState, op: &str) -> Result<(), String> {
+pub(crate) async fn push_with_retry(state: &SharedState, op: &str) -> Result<(), String> {
     if !state.git_storage.has_remote() {
         return Ok(());
     }
@@ -164,7 +166,7 @@ pub async fn handle_create_card(
     }
 
     let labels_vec = labels.unwrap_or_default();
-    if let Err(e) = validate_labels(&labels_vec) {
+    if let Err(e) = validate_labels(&labels_vec, CARD_MAX_LABELS) {
         return Response::error(format!("invalid labels: {}", e));
     }
 
@@ -242,10 +244,17 @@ pub async fn handle_create_card(
         card_id, channel, author
     );
 
+    // Best-effort: scan active users for labels superset match, populate
+    // CreateCardResponse.suggested_assignees. Failure → empty list (logged
+    // inside scan helper). See docs/plans/unified-labels/ (P5).
+    let suggested_assignees =
+        crate::handlers::compute_suggested_assignees(&state, meta.labels.clone()).await;
+
     let payload = gitim_core::responses::CreateCardResponse {
         channel: ch_name.to_string(),
         card_id,
         title,
+        suggested_assignees,
     };
     Response::json(payload)
 }
@@ -1014,7 +1023,7 @@ pub async fn handle_update_card(
         }
     }
     if let Some(ref new_labels) = labels {
-        if let Err(e) = validate_labels(new_labels) {
+        if let Err(e) = validate_labels(new_labels, CARD_MAX_LABELS) {
             return Response::error(format!("invalid labels: {}", e));
         }
         meta.labels = new_labels.clone();
