@@ -84,6 +84,32 @@ export interface Agent {
    *  GET /agents on first load. Absent when the agent has never produced a
    *  usage entry (lazy init from the runtime side). */
   usageSummary?: UsageSummary;
+  saturation_summary?: SaturationSummary;
+}
+
+export interface SaturationBucket {
+  working_samples: number;
+  total_samples: number;
+}
+
+export interface DaySaturation {
+  date: string;
+  bucket: SaturationBucket;
+}
+
+export interface HourSaturation {
+  hour: string;
+  bucket: SaturationBucket;
+}
+
+export interface SaturationSummary {
+  first_seen: string;
+  last_updated: string;
+  totals: SaturationBucket;
+  today: SaturationBucket;
+  last_7_days: DaySaturation[];
+  last_24_hours: HourSaturation[];
+  by_day_30: DaySaturation[];
 }
 
 /** Hard ceiling for the introduction blurb. Must stay in sync with

@@ -19,6 +19,7 @@ import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import type { Agent, UsageBucket } from "@/lib/types";
 import type { AgentWorkloadSummary } from "@/lib/agent-runtime-state";
+import { summarizeFleetSaturation } from "@/lib/agent-runtime-state";
 
 interface WorkspaceUsageHeaderProps {
   agents?: Agent[];
@@ -52,6 +53,14 @@ export function WorkspaceUsageHeader({
     [agents],
   );
   const usage = propUsage ?? storeUsage;
+
+  const fleetSaturation = useMemo(
+    () =>
+      summarizeFleetSaturation(
+        agents ? agents.map((a) => a.saturation_summary) : [],
+      ),
+    [agents],
+  );
 
   const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -237,6 +246,44 @@ export function WorkspaceUsageHeader({
               strokeLinejoin="round"
             />
           </svg>
+          {fleetSaturation.today_ratio !== null && (
+            <div className="mt-2 flex flex-col items-start gap-0.5">
+              <span className="text-xs font-medium text-text-muted">
+                Today saturation
+              </span>
+              <span className="text-xl font-mono text-foreground">
+                {(fleetSaturation.today_ratio * 100).toFixed(1)}%
+              </span>
+              <span className="text-xs font-mono text-text-muted">
+                {fleetSaturation.today_working} /{" "}
+                {fleetSaturation.today_total} samples
+              </span>
+              {fleetSaturation.last_7_days_ratios.length > 0 && (
+                <svg
+                  width={120}
+                  height={24}
+                  viewBox="0 0 120 24"
+                  aria-label="近 7 天 saturation sparkline"
+                  className="mt-1 overflow-visible text-primary"
+                >
+                  <path
+                    d={sparklinePath(
+                      fleetSaturation.last_7_days_ratios.map(
+                        (d) => d.ratio ?? 0,
+                      ),
+                      120,
+                      24,
+                    )}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </div>
+          )}
         </div>
       )}
     </section>
