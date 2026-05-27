@@ -550,9 +550,9 @@ dependencies = [
 
 [[package]]
 name = "displaydoc"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+checksum = "1ac70aa55017e108007fbaf5aa0f54b021c98f92ff8af59d42eda9da96e3dd4f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-agent-provider"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-cli"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-client"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "async-stream",
  "axum",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-runtime"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "gitim-core",
  "libc",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-updater"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "flate2",
  "hex",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-wasm"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "gitim-core",
  "gitim-sync",
@@ -1078,9 +1078,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "8be7462df143984c4598a256ef469b251d7d7f9e271135073e78fc535414f3d0"
 dependencies = [
  "bytes",
  "itoa",
@@ -1503,9 +1503,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "memchr"
-version = "2.8.0"
+version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "mime"
