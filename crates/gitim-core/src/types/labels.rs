@@ -30,6 +30,8 @@ pub enum LabelError {
     InvalidChar(char),
     #[error("too many labels (max {1}), got {0}")]
     TooMany(usize, usize),
+    #[error("duplicate label: {0}")]
+    Duplicate(String),
 }
 
 /// Validate a single label against the char set and length bounds.
@@ -46,13 +48,20 @@ pub fn validate_label(label: &str) -> Result<(), LabelError> {
     Ok(())
 }
 
-/// Validate a label list: each label valid + total count within `max_count`.
+/// Validate a label list: each label valid, no duplicates, total count within
+/// `max_count`. Creation/edit paths (card create, board set_field, flow node
+/// construction) call this to guarantee the same invariants that incremental
+/// `LabelsAdd` / `LabelsRemove` get for free via BTreeSet dedup.
 pub fn validate_labels(labels: &[String], max_count: usize) -> Result<(), LabelError> {
     if labels.len() > max_count {
         return Err(LabelError::TooMany(labels.len(), max_count));
     }
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for l in labels {
         validate_label(l)?;
+        if !seen.insert(l.as_str()) {
+            return Err(LabelError::Duplicate(l.clone()));
+        }
     }
     Ok(())
 }
@@ -136,5 +145,25 @@ mod tests {
         let labels = vec!["ok".to_string(), "BAD".to_string(), "ok2".to_string()];
         let err = validate_labels(&labels, 10).unwrap_err();
         assert!(matches!(err, LabelError::InvalidChar('B')));
+    }
+
+    #[test]
+    fn validate_labels_rejects_duplicates() {
+        // PR #35 P1 #2: creation paths (card create, board set_field, flow node
+        // construction) must reject duplicate labels. Incremental add/remove
+        // paths get dedup for free via BTreeSet — this catches the same shape
+        // for one-shot construction.
+        let labels = vec!["rust".to_string(), "rust".to_string()];
+        let err = validate_labels(&labels, 10).unwrap_err();
+        assert!(matches!(err, LabelError::Duplicate(ref s) if s == "rust"));
+    }
+
+    #[test]
+    fn validate_labels_dedupe_check_runs_after_per_label_validation() {
+        // Per-label validity wins over duplicate detection — bad char surfaces
+        // first so caller sees the actual broken label.
+        let labels = vec!["Rust".to_string(), "Rust".to_string()];
+        let err = validate_labels(&labels, 10).unwrap_err();
+        assert!(matches!(err, LabelError::InvalidChar('R')));
     }
 }

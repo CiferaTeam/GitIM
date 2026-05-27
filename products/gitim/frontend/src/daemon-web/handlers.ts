@@ -65,10 +65,10 @@ interface BoardMeta {
   updated_at: string;
   status: string;
   summary: string;
-  // Unified labels space — was `tags` before v1, renamed to `labels`.
-  // Old yaml `tags:` still parses via serde alias on the Rust side; on the
-  // TS side new wire is `labels`. Local-mode wasm parser also returns `labels`.
-  labels: string[];
+  // v1 transition: wasm BoardMeta serializes via serde rename = "tags",
+  // so this object's key is `tags` even though the internal Rust field
+  // is `labels`. v2 will switch the wire side; until then, TS reads `tags`.
+  tags: string[];
 }
 
 interface BoardDocument {
@@ -1165,7 +1165,7 @@ export async function listBoards(): Promise<ApiResponse> {
           updated_at: board.meta.updated_at,
           status: board.meta.status,
           summary: board.meta.summary,
-          labels: board.meta.labels,
+          tags: board.meta.tags,
         });
       } catch {
         continue;
@@ -1683,7 +1683,7 @@ function boardMetaSummary(meta: BoardMeta): BoardMeta {
     updated_at: meta.updated_at,
     status: meta.status,
     summary: meta.summary,
-    labels: meta.labels,
+    tags: meta.tags,
   };
 }
 

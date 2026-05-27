@@ -55,16 +55,19 @@ pub enum BoardMarkdownError {
 
 /// Board metadata frontmatter.
 ///
-/// Note: `#[serde(deny_unknown_fields)]` was **removed** in the unified-labels
-/// rollout (eng-review Issue #1) to keep cross-version compatibility — when a
-/// new daemon writes `labels:` and an older peer daemon fetches the board,
-/// the older `BoardMeta` would otherwise reject the unknown field. With
-/// `deny_unknown_fields` gone, unknown fields are silently dropped, which is
-/// consistent with `CardMeta` / `UserMeta` policy.
+/// Two compatibility provisions for the unified-labels rollout:
 ///
-/// The `labels` field uses `#[serde(alias = "tags")]` so old `tags: [...]`
-/// yaml is read transparently and rewritten as `labels: [...]` on next save
-/// (passive migration; no separate migration tool needed).
+/// 1. **`#[serde(deny_unknown_fields)]` removed** (eng-review Issue #1) so a
+///    new daemon doesn't reject yaml/JSON with future-unknown fields. This
+///    matches `CardMeta` / `UserMeta` policy.
+///
+/// 2. **Field is serialized as `tags:`** during the v1 transition window
+///    (PR #35 review P1): the internal Rust name is `labels` for code clarity,
+///    but `#[serde(rename = "tags", alias = "labels")]` means yaml/JSON
+///    output continues to use `tags:` (compatible with old daemons that still
+///    have `deny_unknown_fields`), while accepting either name on input. v2
+///    will switch the output side to `labels:` after enough release cycles
+///    that no peer is left running pre-v1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardMeta {
     pub version: u32,
@@ -72,7 +75,7 @@ pub struct BoardMeta {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    #[serde(default, alias = "tags")]
+    #[serde(default, rename = "tags", alias = "labels")]
     pub labels: Vec<String>,
 }
 
@@ -493,12 +496,28 @@ mod tests {
     }
 
     #[test]
-    fn rendered_yaml_uses_labels_not_tags() {
-        // Passive migration:旧 tags-yaml 重写后落地 labels:
+    fn rendered_yaml_keeps_tags_field_name_for_v1() {
+        // v1 transition window (PR #35 review P1): wire/yaml output stays as
+        // `tags:` so old daemons with `deny_unknown_fields` keep working.
+        // Internal Rust field is `labels` (serde rename) — only the on-wire
+        // name is `tags`. v2 will swap after fleet upgrades.
         let parsed = parse_board_markdown(legacy_board_with_tags()).unwrap();
         let rendered = stringify_board_markdown(&parsed).unwrap();
-        assert!(rendered.contains("labels:"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("tags:"), "rendered:\n{rendered}");
+        assert!(rendered.contains("tags:"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("labels:"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn new_yaml_with_labels_alias_parses_and_round_trips_to_tags() {
+        // Caller wrote yaml with `labels:` directly (e.g. hand-edit or future
+        // migration tool). v1 daemon reads it via alias, then writes back with
+        // canonical `tags:` on next save. This is the passive migration path
+        // in reverse — we tolerate `labels:` input but normalize output.
+        let yaml = "---\nversion: 1\nhandler: alice\nupdated_at: 20260509T120000Z\nstatus: working\nsummary: s\nlabels:\n  - release\n---\nbody\n";
+        let parsed = parse_board_markdown(yaml).unwrap();
+        assert_eq!(parsed.meta.labels, vec!["release"]);
+        let rendered = stringify_board_markdown(&parsed).unwrap();
+        assert!(rendered.contains("tags:"));
     }
 
     #[test]

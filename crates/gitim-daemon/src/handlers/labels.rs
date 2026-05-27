@@ -9,13 +9,37 @@
 //!
 //! Spec: docs/plans/unified-labels/00-requirements.md (P4, P5, P5b)
 //! Plan: docs/plans/unified-labels/01-plan.md (Phase C)
+//!
+//! ## Concurrency trade-offs (v1)
+//!
+//! **`std::sync::Mutex` blocks Tokio workers during commit_lock RMW.**
+//! `state.commit_lock` is `std::sync::Mutex<()>` — `lock()` blocks the
+//! current worker thread for the entire read-yaml → modify → write-yaml →
+//! git-commit window. This mirrors the established pattern in `send.rs`,
+//! `card_handlers.rs`, `board_handlers.rs`, and `flow_run_handlers.rs`. If
+//! labels become a hot path, migrating the project's `commit_lock` to
+//! `tokio::sync::Mutex` is a project-wide change (not a labels-only one),
+//! so this file matches existing conventions instead. See PR #35 P2 #5.
+//!
+//! **`handle_labels_list` reads yaml without holding `commit_lock`.**
+//! A concurrent `handle_labels_add` may write yaml then succeed/fail commit
+//! while `labels_list` reads in between. Effect: `labels_list` can briefly
+//! return labels that aren't yet committed (and might rollback on commit
+//! fail). Acceptable for v1 because labels are advisory metadata, the
+//! window is microseconds, and the only state that matters for downstream
+//! routing (`agents_with_labels` / `compute_suggested_assignees`) is the
+//! eventually-pushed-to-origin set. Strong read-your-writes would require
+//! `labels_list` to acquire `commit_lock` (read-side) — extra contention
+//! for very little gain. See PR #35 P2 #6.
 
 use std::collections::BTreeSet;
 
 use gitim_core::responses::{
     AgentsWithLabelsResponse, LabelsAddResponse, LabelsListResponse, LabelsRemoveResponse,
 };
-use gitim_core::types::{validate_labels, validate_user_meta, Handler, UserMeta, USER_MAX_LABELS};
+use gitim_core::types::{
+    validate_labels, validate_user_meta, Handler, UserMeta, UserMetaError, USER_MAX_LABELS,
+};
 use tracing::warn;
 
 use crate::api::Response;
@@ -43,6 +67,16 @@ pub async fn handle_labels_add(
     if let Err(resp) = ensure_self_and_handler(&state, &target).await {
         return resp;
     }
+
+    // Dedupe input before validation — spec says re-adding existing labels
+    // is a no-op success ("同一 label 重复 add | 去重后写入,不报错"),
+    // including duplicates within a single add call. validate_labels is
+    // strict on duplicates (for create_card/set_board_field invariants), so
+    // we collect into BTreeSet → Vec first to flatten input dupes.
+    let labels: Vec<String> = {
+        let dedup: BTreeSet<String> = labels.into_iter().collect();
+        dedup.into_iter().collect()
+    };
 
     if let Err(e) = validate_labels(&labels, USER_MAX_LABELS) {
         return Response::error_with_code(format!("invalid labels: {e}"), "invalid_label");
@@ -100,11 +134,10 @@ pub async fn handle_labels_add(
 
     // Defense-in-depth: re-validate full UserMeta before serializing.
     // Catches corrupt-on-disk labels that bypassed daemon write paths.
+    // Map per-variant so `error_code` matches the actual failure.
     if let Err(e) = validate_user_meta(&meta) {
-        return Response::error_with_code(
-            format!("post-merge meta validation failed: {e}"),
-            "invalid_label",
-        );
+        let code = user_meta_error_code(&e);
+        return Response::error_with_code(format!("post-merge meta validation failed: {e}"), code);
     }
 
     let new_yaml = match Response::yaml_string(&meta, "user meta") {
@@ -199,10 +232,8 @@ pub async fn handle_labels_remove(
     // Defense-in-depth: validate the remaining set (should always pass since
     // we're only shrinking, but cheap and catches corrupt-on-disk yaml).
     if let Err(e) = validate_user_meta(&meta) {
-        return Response::error_with_code(
-            format!("post-remove meta validation failed: {e}"),
-            "invalid_label",
-        );
+        let code = user_meta_error_code(&e);
+        return Response::error_with_code(format!("post-remove meta validation failed: {e}"), code);
     }
 
     let new_yaml = match Response::yaml_string(&meta, "user meta") {
@@ -346,6 +377,17 @@ fn scan_active_for_labels(
         }
     }
     matched.into_iter().collect()
+}
+
+/// Map `UserMetaError` variant → wire `error_code` string. Per-variant so
+/// callers can distinguish "label-related rejection" from "introduction
+/// rejection" — defense-in-depth `validate_user_meta` from labels handlers
+/// can trip either branch when reading corrupt-on-disk yaml (PR #35 P3 #7).
+fn user_meta_error_code(e: &UserMetaError) -> &'static str {
+    match e {
+        UserMetaError::Label(_) => "invalid_label",
+        UserMetaError::IntroductionTooLong(_, _) => "invalid_introduction",
+    }
 }
 
 /// Validate `target` as a handler + check caller == target.

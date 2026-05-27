@@ -369,7 +369,7 @@ mod tests {
         let board_dir = state.repo_root.join(format!("showboards/{}", handler));
         std::fs::create_dir_all(&board_dir).unwrap();
         let content = format!(
-            "---\nversion: 1\nhandler: {}\nupdated_at: 20260525T000000Z\nstatus: active\nsummary: test\nlabels: []\n---\n",
+            "---\nversion: 1\nhandler: {}\nupdated_at: 20260525T000000Z\nstatus: active\nsummary: test\ntags: []\n---\n",
             handler
         );
         std::fs::write(board_dir.join("board.md"), &content).unwrap();

@@ -299,9 +299,11 @@ export interface BoardMetaSummary {
   updated_at: string;
   status: string;
   summary: string;
-  // Unified labels space — renamed from `tags` in v1. Rust wire emits
-  // `labels` now; old yaml `tags:` is read via serde alias on the Rust side.
-  labels: string[];
+  // v1 transition: wire field is still `tags` (Rust BoardMeta uses
+  // serde rename = "tags" for cross-version yaml/JSON compat). The
+  // internal Rust field name `labels` doesn't surface on wire.
+  // v2 will switch wire to `labels`; until then, frontend reads `tags`.
+  tags: string[];
 }
 
 export interface BoardSummary {
@@ -310,7 +312,7 @@ export interface BoardSummary {
   updated_at: string;
   status: string;
   summary: string;
-  labels: string[];
+  tags: string[];
 }
 
 export interface BoardReadResponse {

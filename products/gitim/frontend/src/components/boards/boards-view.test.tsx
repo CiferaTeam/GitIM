@@ -62,7 +62,7 @@ function boardSummary(handler: string, summary = `${handler} board`): BoardSumma
     updated_at: "20260509T120000Z",
     status: "working",
     summary,
-    labels: ["mobile", "board"],
+    tags: ["mobile", "board"],
   };
 }
 
@@ -76,7 +76,7 @@ function boardRead(handler: string, summary = `${handler} board`): BoardReadResp
       updated_at: "20260509T120000Z",
       status: "working",
       summary,
-      labels: ["mobile", "board"],
+      tags: ["mobile", "board"],
     },
     body: `## 当前状态\n\n${summary}`,
   };
@@ -137,7 +137,7 @@ describe("BoardsView", () => {
           updated_at: "20260509T120000Z",
           status: "working",
           summary: "Shipping board UI",
-          labels: ["mobile", "board"],
+          tags: ["mobile", "board"],
         }],
       },
     });
@@ -152,7 +152,7 @@ describe("BoardsView", () => {
           updated_at: "20260509T120000Z",
           status: "working",
           summary: "Shipping board UI",
-          labels: ["mobile", "board"],
+          tags: ["mobile", "board"],
         },
         body: "## 当前状态\n\n正在接入移动端。\n\n## 待确认\n\n- poll 刷新",
       },

@@ -442,9 +442,10 @@ pub struct BoardMetaSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    /// 跟 BoardMeta.labels 同源。serde alias "tags" 让旧 wire JSON (`{tags: [...]}`)
-    /// 反序列化时仍能填充 `labels` 字段(v1 兼容窗口期)。
-    #[serde(default, alias = "tags")]
+    /// Wire shape matches yaml: serialized as `tags:` for v1 cross-version
+    /// compat, accepts `labels:` alias on input. See BoardMeta doccomment.
+    /// v2 will swap output to `labels`.
+    #[serde(default, rename = "tags", alias = "labels")]
     pub labels: Vec<String>,
 }
 
@@ -455,9 +456,7 @@ pub struct BoardSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
-    /// 跟 BoardMeta.labels 同源。serde alias "tags" 让旧 wire JSON (`{tags: [...]}`)
-    /// 反序列化时仍能填充 `labels` 字段(v1 兼容窗口期)。
-    #[serde(default, alias = "tags")]
+    #[serde(default, rename = "tags", alias = "labels")]
     pub labels: Vec<String>,
 }
 
@@ -1217,13 +1216,16 @@ mod tests {
             first.get("path").and_then(|v| v.as_str()),
             Some("showboards/alice/board.md")
         );
+        // v1 wire output: `tags:` (rename), labels is the internal Rust name.
         assert_eq!(
             first
-                .get("labels")
+                .get("tags")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len()),
             Some(1),
         );
+        // Confirm: `labels` is NOT a separate key on the wire (just an alias for input)
+        assert!(first.get("labels").is_none());
     }
 
     #[test]
