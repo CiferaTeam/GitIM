@@ -16,6 +16,9 @@ pub enum SyncOutcome {
     RateLimited,
     /// Auth circuit is tripped; loop should idle without making git calls.
     AuthCircuitOpen,
+    /// Rebase failed (e.g. dirty working tree). Caller should apply backoff
+    /// and throttle its own warning so the log doesn't flood at 5s/line.
+    RebaseFailed,
 }
 
 /// Consecutive auth failures at which the circuit trips.
@@ -158,6 +161,18 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     // Initial delay before first cycle (skip immediate fire)
     let mut next_delay = Duration::from_millis(base_ms);
     let mut last_auth_idle_warn = std::time::Instant::now();
+    // Track consecutive rebase failures to throttle warnings and back off.
+    // Reset to 0 when a cycle completes without a rebase failure.
+    let mut consecutive_rebase_failures: u32 = 0;
+    // Throttle: after the first failure, suppress subsequent warns unless
+    // this many seconds have passed since the last emitted warn.
+    const REBASE_WARN_INTERVAL_SECS: u64 = 300; // 5 minutes
+    let mut last_rebase_warn = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(REBASE_WARN_INTERVAL_SECS))
+        .unwrap_or_else(std::time::Instant::now);
+    // After this many consecutive failures, apply additional backoff.
+    const REBASE_BACKOFF_THRESHOLD: u32 = 3;
+    const REBASE_MAX_BACKOFF_SECS: u64 = 120;
 
     loop {
         if circuit.is_tripped() {
@@ -230,6 +245,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
         next_delay = match outcome {
             SyncOutcome::Normal => {
                 consecutive_rate_limits = 0;
+                consecutive_rebase_failures = 0;
                 let jitter = if jitter_range > 0 {
                     rand::rng().random_range(0..jitter_range)
                 } else {
@@ -255,6 +271,37 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
                 // Idle on the regular cadence. Flag stays latched until the
                 // daemon clears it (v1: restart). No git calls get made.
                 Duration::from_millis(base_ms)
+            }
+            SyncOutcome::RebaseFailed => {
+                // run_sync_cycle already emitted one warn for the first
+                // failure. Throttle subsequent warnings to avoid the
+                // "720 lines/hour" flood when the working tree stays dirty.
+                consecutive_rebase_failures = consecutive_rebase_failures.saturating_add(1);
+                if consecutive_rebase_failures > 1
+                    && last_rebase_warn.elapsed() < Duration::from_secs(REBASE_WARN_INTERVAL_SECS)
+                {
+                    // Suppress: too recent. Fall through to backoff silently.
+                } else {
+                    warn!(
+                        "sync: rebase still failing (consecutive: {}); \
+                         check for unstaged changes in the working tree",
+                        consecutive_rebase_failures
+                    );
+                    last_rebase_warn = std::time::Instant::now();
+                }
+                // Apply backoff after the threshold so a transient dirty
+                // tree doesn't hold up normal cadence, but a persistent
+                // one backs off to avoid hammering git every 5 seconds.
+                if consecutive_rebase_failures >= REBASE_BACKOFF_THRESHOLD {
+                    let backoff_secs = (base_ms / 1000
+                        * 2u64.saturating_pow(
+                            consecutive_rebase_failures.saturating_sub(REBASE_BACKOFF_THRESHOLD),
+                        ))
+                    .min(REBASE_MAX_BACKOFF_SECS);
+                    Duration::from_secs(backoff_secs)
+                } else {
+                    Duration::from_millis(base_ms)
+                }
             }
         };
     }
@@ -873,8 +920,14 @@ fn sync_pull_only(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Err(e) = repo.rebase_onto_origin() {
+        // Emit the error to daemon log so the first failure is always
+        // visible, then return RebaseFailed so the loop can throttle
+        // subsequent warnings and apply backoff instead of retrying at
+        // full 5-second cadence (which produces 720 warn lines/hour
+        // when the working tree stays dirty for extended periods).
         warn!("sync: rebase failed after fetch: {}", e);
         let _ = repo.abort_rebase();
+        return SyncOutcome::RebaseFailed;
     }
 
     SyncOutcome::Normal

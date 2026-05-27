@@ -180,17 +180,34 @@ fn spawn_daemon(repo_root: &Path, stdio: DaemonStdio) -> Result<(), ClientError>
 }
 
 fn wait_for_socket(sock_path: &Path) -> Result<(), ClientError> {
-    if sock_path.exists() {
-        return Ok(());
-    }
+    // Poll until the daemon is actually accepting connections, not just until
+    // the socket file appears. A daemon that creates its socket during startup
+    // but crashes before its accept loop is ready will leave the file on disk
+    // while `connect` returns `ConnectionRefused` — checking only file
+    // existence would cause `ensure_daemon_running` to claim success and
+    // trigger an immediate tight-loop in the caller.
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
-    while Instant::now() < deadline {
-        thread::sleep(POLL_INTERVAL);
-        if sock_path.exists() {
-            return Ok(());
+    loop {
+        match std::os::unix::net::UnixStream::connect(sock_path) {
+            Ok(_) => return Ok(()),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::ConnectionRefused =>
+            {
+                // Not ready yet — file missing or daemon backlog not open.
+            }
+            Err(e) => {
+                // Any other error (permission denied, etc.) is fatal.
+                return Err(ClientError::ConnectionFailed(format!(
+                    "socket readiness check failed: {e}"
+                )));
+            }
         }
+        if Instant::now() >= deadline {
+            return Err(ClientError::Timeout);
+        }
+        thread::sleep(POLL_INTERVAL);
     }
-    Err(ClientError::Timeout)
 }
 
 fn clean_stale_files(repo_root: &Path) {
