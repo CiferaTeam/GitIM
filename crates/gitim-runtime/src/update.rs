@@ -766,6 +766,9 @@ mod tests {
         ctx.human_repo = Some(ws.join(".gitim-runtime/human"));
 
         let stale = crate::user_config::UserConfig {
+            runtime_id: String::new(),
+            listen_port: None,
+            fleet_nodes: Vec::new(),
             workspaces: vec![crate::user_config::WorkspaceEntry {
                 slug: "ws".to_string(),
                 workspace_name: "ws".to_string(),
