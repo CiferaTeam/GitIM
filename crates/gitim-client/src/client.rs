@@ -614,6 +614,62 @@ impl GitimClient {
         decode_unit(resp)
     }
 
+    // ===== Unified labels space (docs/plans/unified-labels/) =====
+
+    pub async fn labels_add(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::LabelsAddResponse, ClientError> {
+        let resp = self
+            .request(
+                "labels_add",
+                json!({
+                    "target": target,
+                    "labels": labels,
+                }),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn labels_remove(
+        &self,
+        target: &str,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::LabelsRemoveResponse, ClientError> {
+        let resp = self
+            .request(
+                "labels_remove",
+                json!({
+                    "target": target,
+                    "labels": labels,
+                }),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn labels_list(
+        &self,
+        target: &str,
+    ) -> Result<gitim_core::responses::LabelsListResponse, ClientError> {
+        let resp = self
+            .request("labels_list", json!({ "target": target }))
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn agents_with_labels(
+        &self,
+        labels: &[String],
+    ) -> Result<gitim_core::responses::AgentsWithLabelsResponse, ClientError> {
+        let resp = self
+            .request("agents_with_labels", json!({ "labels": labels }))
+            .await?;
+        decode_typed(resp)
+    }
+
     /// Convenience wrapper: re-runs `show_cron` and pulls the computed
     /// `next_fire`. The daemon stores `next_fire` as ISO 8601 UTC; this
     /// parses it into a `DateTime<Utc>` for callers that need to

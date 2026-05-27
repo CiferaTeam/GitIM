@@ -257,6 +257,12 @@ enum Commands {
         #[command(subcommand)]
         command: FlowCommands,
     },
+
+    /// Manage your user labels (capabilities / skills)
+    Labels {
+        #[command(subcommand)]
+        cmd: commands::labels::LabelsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1074,6 +1080,7 @@ async fn main() {
                 commands::flow::cmd_flow_run_cancel(&client, &mode, &run_id).await
             }
         },
+        Commands::Labels { cmd } => commands::labels::run(&client, cmd, mode).await,
     }
 }
 
