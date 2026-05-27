@@ -8,9 +8,13 @@ import {
   Suspense,
 } from "react";
 import { createPortal } from "react-dom";
+import { Button } from "@/components/ui/button";
 import type { FlowNodeSummary } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
+
+export type SavePromptResult = { ok: boolean; error?: string };
 
 /** Characters allowed in a node ID: a-z, 0-9, hyphen, underscore. */
 const SAFE_NODE_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -47,14 +51,35 @@ const TOOLTIP_MAX_HEIGHT = 384; // max-h-96
 // TOOLTIP_OFFSET gap between node and tooltip without dismissing.
 const TOOLTIP_CLOSE_DELAY_MS = 150;
 
-export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
+export function FlowDAG({
+  nodes,
+  onSavePrompt,
+}: {
+  nodes: FlowNodeSummary[];
+  onSavePrompt?: (
+    nodeId: string,
+    prompt: string,
+  ) => Promise<SavePromptResult>;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const id = useId().replace(/:/g, "_");
   const [hoveredNode, setHoveredNode] = useState<FlowNodeSummary | null>(null);
   const [tooltipStyle, setTooltipStyle] = useState<React.CSSProperties>({});
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const editingRef = useRef(false);
   const cleanupRef = useRef<(() => void) | null>(null);
   const closeTimerRef = useRef<number | null>(null);
+
+  // Mirror `editing` into a ref so handlers bound to native SVG events
+  // (which capture state at attach time) can read the current value without
+  // tearing down + re-binding on every edit toggle.
+  useEffect(() => {
+    editingRef.current = editing;
+  }, [editing]);
 
   const cancelClose = useCallback(() => {
     if (closeTimerRef.current !== null) {
@@ -64,12 +89,20 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
   }, []);
 
   const scheduleClose = useCallback(() => {
+    if (editingRef.current) return;
     cancelClose();
     closeTimerRef.current = window.setTimeout(() => {
       setHoveredNode(null);
       closeTimerRef.current = null;
     }, TOOLTIP_CLOSE_DELAY_MS);
   }, [cancelClose]);
+
+  const exitEdit = useCallback(() => {
+    setEditing(false);
+    setDraft("");
+    setSaving(false);
+    setSaveError(null);
+  }, []);
 
   // Bind native mouseenter/leave to the tooltip so the cursor can park inside
   // it (e.g. to scroll the prompt) without the close timer firing. Native
@@ -119,6 +152,10 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
           el.setAttribute("aria-label", `Node ${node.id}`);
 
           const show = (target: Element) => {
+            // While the user is editing a prompt, the tooltip is locked to
+            // the editing node — ignore hover/focus on other nodes so a
+            // stray mouseover doesn't blow away the unsaved draft.
+            if (editingRef.current) return;
             cancelClose();
             const rect = target.getBoundingClientRect();
             const viewportW = window.innerWidth;
@@ -157,7 +194,10 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
 
           // Immediate close for keyboard/explicit dismiss; mouse leave goes
           // through scheduleClose so the cursor can reach the tooltip.
+          // Locked while editing — Escape/blur on the SVG node must not yank
+          // the textarea out from under the user.
           const hideImmediate = () => {
+            if (editingRef.current) return;
             cancelClose();
             setHoveredNode(null);
           };
@@ -205,7 +245,9 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
       cleanupRef.current?.();
       cleanupRef.current = null;
       cancelClose();
-      setHoveredNode(null);
+      // Keep the tooltip pinned when nodes re-render mid-edit (e.g. parent
+      // refresh from a sibling save) so the user's draft survives.
+      if (!editingRef.current) setHoveredNode(null);
     };
   }, [id, nodes, cancelClose, scheduleClose]);
 
@@ -213,6 +255,34 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
     return (
       <div className="italic text-muted-foreground text-sm">(no nodes)</div>
     );
+  }
+
+  async function handleSave() {
+    if (!hoveredNode || !onSavePrompt) return;
+    if (draft === (hoveredNode.prompt ?? "")) {
+      exitEdit();
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    const res = await onSavePrompt(hoveredNode.id, draft);
+    if (!res.ok) {
+      setSaving(false);
+      setSaveError(res.error ?? "Failed to save prompt");
+      return;
+    }
+    // Optimistically swap the displayed prompt to the saved draft so the
+    // tooltip stays open in read mode without waiting for the parent's
+    // async reload to land.
+    setHoveredNode({ ...hoveredNode, prompt: draft });
+    exitEdit();
+  }
+
+  function startEdit() {
+    if (!hoveredNode) return;
+    setDraft(hoveredNode.prompt ?? "");
+    setSaveError(null);
+    setEditing(true);
   }
 
   return (
@@ -226,27 +296,94 @@ export function FlowDAG({ nodes }: { nodes: FlowNodeSummary[] }) {
             style={tooltipStyle}
             className="rounded-md border border-border bg-popover p-3 shadow-md outline-hidden"
           >
-            <div className="mb-1 font-mono text-xs font-medium text-popover-foreground">
-              {hoveredNode.id}
-            </div>
-            <div
-              className="prose prose-sm max-w-none overflow-y-auto dark:prose-invert"
-              style={{ maxWidth: TOOLTIP_MAX_WIDTH, maxHeight: TOOLTIP_MAX_HEIGHT }}
-            >
-              {hoveredNode.prompt ? (
-                <Suspense
-                  fallback={
-                    <span className="text-xs text-muted-foreground">Loading…</span>
-                  }
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="font-mono text-xs font-medium text-popover-foreground">
+                {hoveredNode.id}
+              </span>
+              {onSavePrompt && !editing && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={startEdit}
+                  data-testid="flow-dag-tooltip-edit"
                 >
-                  <ReactMarkdown>{hoveredNode.prompt}</ReactMarkdown>
-                </Suspense>
-              ) : (
-                <span className="text-xs italic text-muted-foreground">
-                  (no prompt body)
-                </span>
+                  Edit
+                </Button>
               )}
             </div>
+            {editing ? (
+              <div
+                className="space-y-2"
+                style={{ width: TOOLTIP_MAX_WIDTH }}
+              >
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      exitEdit();
+                    }
+                  }}
+                  disabled={saving}
+                  spellCheck={false}
+                  data-testid="flow-dag-tooltip-textarea"
+                  className={cn(
+                    "w-full min-h-[10rem] resize-y rounded-md border border-input bg-background",
+                    "px-2 py-1.5 font-mono text-xs leading-relaxed",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    saving && "opacity-50",
+                  )}
+                />
+                {saveError && (
+                  <p className="text-xs text-destructive">{saveError}</p>
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={exitEdit}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => void handleSave()}
+                    disabled={saving || draft === (hoveredNode.prompt ?? "")}
+                    data-testid="flow-dag-tooltip-save"
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="prose prose-sm max-w-none overflow-y-auto dark:prose-invert"
+                style={{ maxWidth: TOOLTIP_MAX_WIDTH, maxHeight: TOOLTIP_MAX_HEIGHT }}
+              >
+                {hoveredNode.prompt ? (
+                  <Suspense
+                    fallback={
+                      <span className="text-xs text-muted-foreground">Loading…</span>
+                    }
+                  >
+                    <ReactMarkdown>{hoveredNode.prompt}</ReactMarkdown>
+                  </Suspense>
+                ) : (
+                  <span className="text-xs italic text-muted-foreground">
+                    (no prompt body)
+                  </span>
+                )}
+              </div>
+            )}
           </div>,
           document.body,
         )}

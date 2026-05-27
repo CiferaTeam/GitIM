@@ -42,6 +42,18 @@ async function flushPromises(times = 4) {
   }
 }
 
+// React tracks the controlled input value through its own setter — writing
+// directly to `.value` is invisible to React. Use the native prototype
+// setter so the input event fires through React's onChange.
+function setTextareaValue(el: HTMLTextAreaElement, next: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  setter?.call(el, next);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("FlowDAG node hover tooltip", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
@@ -276,6 +288,185 @@ describe("FlowDAG node hover tooltip", () => {
     expect(tooltip).not.toBeNull();
     expect(tooltip!.textContent).toContain("requirements");
     expect(tooltip!.textContent).toContain("(no prompt body)");
+  });
+
+  it("does not render Edit button when onSavePrompt is omitted", async () => {
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip-edit']"),
+    ).toBeNull();
+  });
+
+  it("clicking Edit enters edit mode and locks the tooltip", async () => {
+    const onSavePrompt = vi.fn();
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} onSavePrompt={onSavePrompt} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    const editBtn = document.body.querySelector<HTMLButtonElement>(
+      "[data-testid='flow-dag-tooltip-edit']",
+    );
+    expect(editBtn).not.toBeNull();
+
+    await act(async () => {
+      editBtn!.click();
+      await flushPromises();
+    });
+
+    // Textarea is mounted with the existing prompt as initial value.
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      "[data-testid='flow-dag-tooltip-textarea']",
+    );
+    expect(textarea).not.toBeNull();
+    expect(textarea!.value).toBe(
+      "Validate scope before starting implementation.",
+    );
+
+    // Hovering away no longer closes the tooltip while editing.
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+      vi.advanceTimersByTime(CLOSE_DELAY_MS + 50);
+      await flushPromises();
+    });
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip']"),
+    ).not.toBeNull();
+  });
+
+  it("Save calls onSavePrompt with edited prompt and closes tooltip", async () => {
+    const onSavePrompt = vi.fn().mockResolvedValue({ ok: true });
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} onSavePrompt={onSavePrompt} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          "[data-testid='flow-dag-tooltip-edit']",
+        )!
+        .click();
+      await flushPromises();
+    });
+
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      "[data-testid='flow-dag-tooltip-textarea']",
+    )!;
+    await act(async () => {
+      setTextareaValue(textarea, "Revised scope prompt.");
+      await flushPromises();
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          "[data-testid='flow-dag-tooltip-save']",
+        )!
+        .click();
+      await flushPromises();
+    });
+
+    expect(onSavePrompt).toHaveBeenCalledWith(
+      "scope-gate",
+      "Revised scope prompt.",
+    );
+    // Successful save keeps the tooltip open in read mode showing the new
+    // prompt — the user gets immediate visual confirmation.
+    const tooltip = document.body.querySelector(
+      "[data-testid='flow-dag-tooltip']",
+    );
+    expect(tooltip).not.toBeNull();
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip-textarea']"),
+    ).toBeNull();
+    expect(tooltip!.textContent).toContain("Revised scope prompt.");
+    // Edit button comes back since we're back in read mode.
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip-edit']"),
+    ).not.toBeNull();
+  });
+
+  it("Save surfaces error and keeps edit mode when onSavePrompt fails", async () => {
+    const onSavePrompt = vi
+      .fn()
+      .mockResolvedValue({ ok: false, error: "patch failed" });
+    await act(async () => {
+      root!.render(<FlowDAG nodes={nodes} onSavePrompt={onSavePrompt} />);
+      await flushPromises();
+    });
+
+    const target = Array.from(document.querySelectorAll(".node")).find(
+      (n) => n.querySelector(".nodeLabel")?.textContent === "scope-gate",
+    );
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await flushPromises();
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          "[data-testid='flow-dag-tooltip-edit']",
+        )!
+        .click();
+      await flushPromises();
+    });
+
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      "[data-testid='flow-dag-tooltip-textarea']",
+    )!;
+    await act(async () => {
+      setTextareaValue(textarea, "x");
+      await flushPromises();
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          "[data-testid='flow-dag-tooltip-save']",
+        )!
+        .click();
+      await flushPromises();
+    });
+
+    const tooltip = document.body.querySelector(
+      "[data-testid='flow-dag-tooltip']",
+    );
+    expect(tooltip).not.toBeNull();
+    expect(tooltip!.textContent).toContain("patch failed");
+    // Still in edit mode — textarea remains.
+    expect(
+      document.body.querySelector("[data-testid='flow-dag-tooltip-textarea']"),
+    ).not.toBeNull();
   });
 
   it("hides tooltip on Escape keydown", async () => {

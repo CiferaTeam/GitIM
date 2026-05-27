@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Link } from "react-router";
 
@@ -159,6 +160,9 @@ export function FlowDetail({
             <span>·</span>
             <span>{doc.nodes.length} nodes</span>
           </div>
+          {recentRuns.length > 0 && (
+            <RecentRunsDisclosure runs={recentRuns} />
+          )}
         </header>
 
         {/* DAG */}
@@ -172,7 +176,22 @@ export function FlowDetail({
                 </div>
               }
             >
-              <FlowDAG nodes={doc.nodes} />
+              <FlowDAG
+                nodes={doc.nodes}
+                onSavePrompt={async (nodeId, prompt) => {
+                  if (!activeSlug) {
+                    return { ok: false, error: "No active workspace" };
+                  }
+                  const res = await client.updateFlowNodePrompt(
+                    activeSlug,
+                    doc.slug,
+                    nodeId,
+                    prompt,
+                  );
+                  if (res.ok) await reloadFlow();
+                  return { ok: res.ok, error: res.error };
+                }}
+              />
             </Suspense>
           </div>
         </section>
@@ -193,30 +212,49 @@ export function FlowDetail({
             </div>
           </section>
         )}
-
-        {/* Recent runs */}
-        {recentRuns.length > 0 && (
-          <section>
-            <h3 className="mb-2 text-sm font-semibold">Recent runs</h3>
-            <div className="space-y-1">
-              {recentRuns.map((r) => (
-                <Link
-                  key={r.run_id}
-                  to={`/runs/${r.run_id}`}
-                  className="block px-3 py-1.5 rounded hover:bg-muted text-sm font-mono"
-                >
-                  <span>{r.run_id}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    [{r.status}] · {r.nodes_done}/{r.node_count} nodes · #
-                    {r.channel}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          </section>
-        )}
       </div>
     </section>
+  );
+}
+
+function RecentRunsDisclosure({ runs }: { runs: FlowRunSummary[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-3 rounded-md border border-border bg-card text-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/50"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+          aria-hidden="true"
+        />
+        <span className="font-medium">Recent runs</span>
+        <span className="text-xs text-muted-foreground">({runs.length})</span>
+      </button>
+      {open && (
+        <div className="space-y-1 border-t border-border px-2 py-2">
+          {runs.map((r) => (
+            <Link
+              key={r.run_id}
+              to={`/runs/${r.run_id}`}
+              className="block px-2 py-1 rounded hover:bg-muted text-sm font-mono"
+            >
+              <span>{r.run_id}</span>
+              <span className="ml-2 text-xs text-muted-foreground">
+                [{r.status}] · {r.nodes_done}/{r.node_count} nodes · #
+                {r.channel}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
