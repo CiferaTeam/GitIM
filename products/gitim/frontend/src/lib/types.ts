@@ -299,7 +299,9 @@ export interface BoardMetaSummary {
   updated_at: string;
   status: string;
   summary: string;
-  tags: string[];
+  // Unified labels space — renamed from `tags` in v1. Rust wire emits
+  // `labels` now; old yaml `tags:` is read via serde alias on the Rust side.
+  labels: string[];
 }
 
 export interface BoardSummary {
@@ -308,7 +310,7 @@ export interface BoardSummary {
   updated_at: string;
   status: string;
   summary: string;
-  tags: string[];
+  labels: string[];
 }
 
 export interface BoardReadResponse {

@@ -54,7 +54,7 @@ vi.mock("gitim-wasm", () => ({
       updated_at: timestamp,
       status: "idle",
       summary: "",
-      tags: [],
+      labels: [],
     },
     body: "## 当前状态\n\n## 关注事项\n",
   })),
@@ -130,7 +130,7 @@ vi.mock("gitim-wasm", () => ({
   })),
   stringifyBoardMarkdown: vi.fn((doc: Record<string, unknown>) => {
     const meta = doc.meta as Record<string, unknown>;
-    const tags = Array.isArray(meta.tags) ? meta.tags : [];
+    const labels = Array.isArray(meta.labels) ? meta.labels : [];
     return [
       "---",
       `version: ${meta.version}`,
@@ -138,8 +138,8 @@ vi.mock("gitim-wasm", () => ({
       `updated_at: ${meta.updated_at}`,
       `status: ${meta.status}`,
       `summary: ${meta.summary}`,
-      "tags:",
-      ...tags.map((tag) => `  - ${tag}`),
+      "labels:",
+      ...labels.map((l) => `  - ${l}`),
       "---",
       doc.body as string,
     ].join("\n");
@@ -369,7 +369,7 @@ function boardMarkdown(handler: string, body = "## 当前状态\n\n在线\n"): s
     "updated_at: 20260509T120000Z",
     "status: working",
     "summary: Browser board",
-    "tags:",
+    "labels:",
     "  - mobile",
     "---",
     body,

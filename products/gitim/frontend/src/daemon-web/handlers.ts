@@ -65,7 +65,10 @@ interface BoardMeta {
   updated_at: string;
   status: string;
   summary: string;
-  tags: string[];
+  // Unified labels space — was `tags` before v1, renamed to `labels`.
+  // Old yaml `tags:` still parses via serde alias on the Rust side; on the
+  // TS side new wire is `labels`. Local-mode wasm parser also returns `labels`.
+  labels: string[];
 }
 
 interface BoardDocument {
@@ -1162,7 +1165,7 @@ export async function listBoards(): Promise<ApiResponse> {
           updated_at: board.meta.updated_at,
           status: board.meta.status,
           summary: board.meta.summary,
-          tags: board.meta.tags,
+          labels: board.meta.labels,
         });
       } catch {
         continue;
@@ -1680,7 +1683,7 @@ function boardMetaSummary(meta: BoardMeta): BoardMeta {
     updated_at: meta.updated_at,
     status: meta.status,
     summary: meta.summary,
-    tags: meta.tags,
+    labels: meta.labels,
   };
 }
 

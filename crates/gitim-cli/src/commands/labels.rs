@@ -39,40 +39,50 @@ pub enum LabelsCommand {
 }
 
 pub async fn run(client: &GitimClient, cmd: LabelsCommand, mode: OutputMode) {
-    let repo_root = get_repo_root();
-    let me = read_my_handler(&repo_root);
-
+    // Self-handler is only needed for write commands (Add/Remove) and for
+    // `List` without an explicit --handler. In guest workspaces me.json has
+    // no handler set, so we MUST NOT read it for read-only commands that
+    // pass an explicit target (Match, List --handler <h>) — those work
+    // against the daemon's guest read paths.
     match cmd {
-        LabelsCommand::Add { labels } => match client.labels_add(&me, &labels).await {
-            Ok(resp) => {
-                if matches!(mode, OutputMode::Json) {
-                    let j = serde_json::to_string(&resp).unwrap_or_default();
-                    println!("{j}");
-                } else {
-                    println!("labels: [{}]", resp.current_labels.join(", "));
+        LabelsCommand::Add { labels } => {
+            let me = read_my_handler(&get_repo_root());
+            match client.labels_add(&me, &labels).await {
+                Ok(resp) => {
+                    if matches!(mode, OutputMode::Json) {
+                        let j = serde_json::to_string(&resp).unwrap_or_default();
+                        println!("{j}");
+                    } else {
+                        println!("labels: [{}]", resp.current_labels.join(", "));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            }
-        },
-        LabelsCommand::Remove { labels } => match client.labels_remove(&me, &labels).await {
-            Ok(resp) => {
-                if matches!(mode, OutputMode::Json) {
-                    let j = serde_json::to_string(&resp).unwrap_or_default();
-                    println!("{j}");
-                } else {
-                    println!("labels: [{}]", resp.current_labels.join(", "));
+        }
+        LabelsCommand::Remove { labels } => {
+            let me = read_my_handler(&get_repo_root());
+            match client.labels_remove(&me, &labels).await {
+                Ok(resp) => {
+                    if matches!(mode, OutputMode::Json) {
+                        let j = serde_json::to_string(&resp).unwrap_or_default();
+                        println!("{j}");
+                    } else {
+                        println!("labels: [{}]", resp.current_labels.join(", "));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            }
-        },
+        }
         LabelsCommand::List { handler } => {
-            let target = handler.unwrap_or(me);
+            // Read me.json only when --handler is absent (caller wants self).
+            // With explicit --handler, this works in guest mode.
+            let target = handler.unwrap_or_else(|| read_my_handler(&get_repo_root()));
             match client.labels_list(&target).await {
                 Ok(resp) => {
                     if matches!(mode, OutputMode::Json) {

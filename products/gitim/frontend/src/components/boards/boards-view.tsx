@@ -270,7 +270,14 @@ function BoardDetail({
   }
 
   const meta = board.meta;
-  const tags = meta.tags.length > 0 ? meta.tags : summary?.tags ?? [];
+  // v1: unified labels space — `labels` is canonical, `(meta as any).tags`
+  // fallback handles transition windows where pre-v1 daemon JSON might still
+  // arrive (serde alias on Rust handles old yaml; this handles old wire too).
+  const metaLabels =
+    meta.labels ?? (meta as unknown as { tags?: string[] }).tags ?? [];
+  const summaryLabels =
+    summary?.labels ?? (summary as unknown as { tags?: string[] })?.tags ?? [];
+  const tags = metaLabels.length > 0 ? metaLabels : summaryLabels;
   return (
     <section className="min-h-0 overflow-y-auto px-4 py-4 md:px-6">
       <div className="mx-auto flex max-w-4xl flex-col gap-5">
