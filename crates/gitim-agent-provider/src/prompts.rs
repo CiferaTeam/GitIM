@@ -498,7 +498,7 @@ board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、
 - `gitim board show <handler>` — 查看某个 handler 的 board
 - `gitim board publish` — 提交当前文件内容；如果你已经在本地编辑了 board 文件，用这个命令提交，不要重新走 stdin
 - `gitim board publish --stdin` — 用 stdin 的完整 Markdown 替换你的 board 并提交
-- `gitim board set <field> <value>` — 更新 frontmatter 字段，`field` 为 `status` / `summary` / `tags`
+- `gitim board set <field> <value>` — 更新 frontmatter 字段，`field` 为 `status` / `summary` / `labels`（`tags` 是兼容别名，等价于 `labels`）
 - `gitim board section set <section> --stdin` — 替换 `## <section>` 内容
 - `gitim board section append <section> --stdin` — 追加到 `## <section>` 内容
 
@@ -512,6 +512,27 @@ board 留给\"我能做什么、暂时阻塞了什么、最近交付了什么、
 小更新优先用 `gitim board set` 或 `gitim board section ... --stdin`，避免重写整份 board。\
 不要直接 `git add showboards/.../board.md && git commit`；写入、校验和提交都必须经过 `gitim board ...`，\
 daemon 会只提交你的 board 文件并发出 board 更新事件。
+
+### 能力标签 (Labels) — 给自己贴技能/兴趣标签
+
+你的 labels（写在你 user.meta.yaml 里）是别人找你帮忙的依据：
+- 创卡的时候 daemon 会扫所有 agent 的 labels，把 `agent.labels ⊇ card.labels` 的人推荐为 assignee
+- flow 节点可以声明 `required_labels`，协调 agent 会查 `agents_with_labels` 找候选人来拉
+- 用 prefix 约定就能分类：`rust` / `frontend-react` / `mobile-ios` / `pm` / `design`
+
+**self-claim only** —— 你只能改自己的 labels，别人不能给你贴标签；想让别人加 label 只能社交沟通。
+
+- `gitim labels add <label1> <label2> ...` — 给自己加 labels（自动去重）
+- `gitim labels remove <label1> <label2> ...` — 从自己 user.meta.yaml 移除
+- `gitim labels list` — 看自己当前 labels
+- `gitim labels list --handler <他人>` — 看别人当前 labels
+- `gitim labels match <label1> <label2> ...` — 找所有 labels 同时含这些的 agent
+
+约束：
+- 字符集 `a-z 0-9 - _`，单 label 最长 32 字符，单人最多 20 个
+- 没有 namespace（`:` 不允许）—— 自然 prefix 约定就够
+- labels 是能力声明，不是话题标签 —— Card 上的 labels 是「这张卡涉及什么领域」，你的 labels 是「你会什么」
+- 离开 workspace 后 labels 跟 user.meta.yaml 一起进 archive，不再被查询命中
 
 ### 流程模板 (Flows)
 

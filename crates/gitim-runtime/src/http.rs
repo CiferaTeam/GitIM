@@ -1413,6 +1413,100 @@ async fn im_board_init(
     api_response_to_json(client.board_init().await)
 }
 
+// =============================================================================
+// Unified labels space (docs/plans/unified-labels/)
+// =============================================================================
+//
+// HTTP layer for `/im/labels` endpoints. POST/DELETE always operate on the
+// workspace owner's handler (read from human me.json) — see P4 self-claim
+// and edge case M7. GET routes accept any handler.
+
+async fn im_labels_list(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, handler)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.labels_list_raw(&handler).await)
+}
+
+#[derive(Deserialize)]
+struct LabelsModRequest {
+    labels: Vec<String>,
+}
+
+async fn im_labels_add(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<LabelsModRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    // Self = workspace owner — read handler from human me.json. The daemon
+    // will validate (target == state.current_user) and reject if mismatch.
+    // Reusing `human_handler` instead of a bespoke helper — same pattern as
+    // im_card_archive et al.
+    let me = match human_handler(&state, &slug) {
+        Ok(h) => h,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.labels_add_raw(&me, &req.labels).await)
+}
+
+async fn im_labels_remove(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(req): Json<LabelsModRequest>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let me = match human_handler(&state, &slug) {
+        Ok(h) => h,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.labels_remove_raw(&me, &req.labels).await)
+}
+
+#[derive(Deserialize)]
+struct AgentsWithLabelsQuery {
+    /// Comma-separated label list (URL-friendly). Empty string → empty result.
+    #[serde(default)]
+    labels: String,
+}
+
+async fn im_agents_with_labels(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(q): axum::extract::Query<AgentsWithLabelsQuery>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let labels: Vec<String> = q
+        .labels
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    api_response_to_json(client.agents_with_labels_raw(&labels).await)
+}
+
 #[derive(Deserialize)]
 struct BoardPublishRequest {
     #[serde(default)]
@@ -5857,6 +5951,17 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/thread", post(im_thread))
         .route("/im/boards", get(im_list_boards))
         .route("/im/boards/{handler}", get(im_show_board))
+        // Unified labels space — read endpoints
+        .route("/im/labels/{handler}", get(im_labels_list))
+        .route("/im/agents-with-labels", get(im_agents_with_labels))
+        // Self-claim writes: POST adds, DELETE removes; `<self>` derived
+        // from runtime's me.json (we ignore the path param's handler and
+        // always operate on the workspace owner — see docs/plans/
+        // unified-labels/00-requirements.md M7).
+        .route(
+            "/im/labels",
+            axum::routing::post(im_labels_add).delete(im_labels_remove),
+        )
         .route("/im/board/init", post(im_board_init))
         .route("/im/board/publish", post(im_board_publish))
         .route("/im/board/field", post(im_board_field))
