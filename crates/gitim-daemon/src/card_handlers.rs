@@ -107,7 +107,7 @@ async fn ensure_known_user(state: &SharedState, handler: &str) -> Result<(), Str
 /// retry the push on its next tick. Callers should surface the error to the client
 /// as a transient push failure rather than implying the operation did not happen
 /// locally.
-async fn push_with_retry(state: &SharedState, op: &str) -> Result<(), String> {
+pub(crate) async fn push_with_retry(state: &SharedState, op: &str) -> Result<(), String> {
     if !state.git_storage.has_remote() {
         return Ok(());
     }

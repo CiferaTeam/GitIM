@@ -455,6 +455,8 @@ pub struct BoardSummary {
     pub updated_at: String,
     pub status: String,
     pub summary: String,
+    /// 跟 BoardMeta.labels 同源。serde alias "tags" 让旧 wire JSON (`{tags: [...]}`)
+    /// 反序列化时仍能填充 `labels` 字段(v1 兼容窗口期)。
     #[serde(default, alias = "tags")]
     pub labels: Vec<String>,
 }

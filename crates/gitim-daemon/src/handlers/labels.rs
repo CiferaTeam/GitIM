@@ -15,29 +15,32 @@ use std::collections::BTreeSet;
 use gitim_core::responses::{
     AgentsWithLabelsResponse, LabelsAddResponse, LabelsListResponse, LabelsRemoveResponse,
 };
-use gitim_core::types::{validate_labels, UserMeta, USER_MAX_LABELS};
+use gitim_core::types::{validate_labels, validate_user_meta, Handler, UserMeta, USER_MAX_LABELS};
 use tracing::warn;
 
 use crate::api::Response;
+use crate::card_handlers::push_with_retry;
 use crate::state::SharedState;
 
 /// `LabelsAdd` IPC handler. Self-claim only.
 ///
 /// Flow:
 /// 1. Verify caller (daemon's bound handler in `state.current_user`) == target
-/// 2. Validate proposed labels (char set + per-label length)
+/// 2. Validate target as handler shape + proposed labels (char set + len)
 /// 3. Acquire `commit_lock` (held across read-modify-write to avoid TOCTOU
 ///    between concurrent adds — eng-review Issue #3)
 /// 4. Read existing `users/<target>.meta.yaml` from disk, parse, union labels
-/// 5. Validate post-union cap (≤ USER_MAX_LABELS)
-/// 6. Write yaml back, commit. On commit failure restore old bytes.
-/// 7. Drop lock, push best-effort (sync_loop will retry).
+/// 5. Validate post-union cap (≤ USER_MAX_LABELS) and re-validate full meta
+/// 6. If labels actually changed → write yaml back + commit. If unchanged →
+///    skip commit (idempotent: re-adding existing labels is a no-op success).
+/// 7. On commit failure restore old bytes.
+/// 8. Drop lock, push with retry (matches `send_card_message` pattern).
 pub async fn handle_labels_add(
     state: SharedState,
     target: String,
     labels: Vec<String>,
 ) -> Response {
-    if let Err(resp) = ensure_self(&state, &target).await {
+    if let Err(resp) = ensure_self_and_handler(&state, &target).await {
         return resp;
     }
 
@@ -67,7 +70,8 @@ pub async fn handle_labels_add(
     };
 
     // Union with existing (BTreeSet handles dedup + sort).
-    let mut union: BTreeSet<String> = meta.labels.into_iter().collect();
+    let existing_set: BTreeSet<String> = meta.labels.iter().cloned().collect();
+    let mut union = existing_set.clone();
     for l in &labels {
         union.insert(l.clone());
     }
@@ -81,7 +85,27 @@ pub async fn handle_labels_add(
             "labels_full",
         );
     }
+
+    // Idempotent fast-path: if the union equals existing labels (incl. order
+    // — both are sorted BTreeSet collections), nothing changed. Skip commit
+    // entirely. Re-adding labels you already have is a no-op success per
+    // spec edge-case "同一 label 重复 add | 去重后写入,不报错".
+    if union == existing_set {
+        return Response::json(LabelsAddResponse {
+            current_labels: meta.labels,
+        });
+    }
+
     meta.labels = union.into_iter().collect();
+
+    // Defense-in-depth: re-validate full UserMeta before serializing.
+    // Catches corrupt-on-disk labels that bypassed daemon write paths.
+    if let Err(e) = validate_user_meta(&meta) {
+        return Response::error_with_code(
+            format!("post-merge meta validation failed: {e}"),
+            "invalid_label",
+        );
+    }
 
     let new_yaml = match Response::yaml_string(&meta, "user meta") {
         Ok(s) => s,
@@ -112,24 +136,25 @@ pub async fn handle_labels_add(
     let current_labels = meta.labels;
     drop(guard);
 
-    // Push best-effort outside the lock; sync_loop retries on failure.
-    if state.git_storage.has_remote() {
-        if let Err(e) = state.git_storage.push() {
-            warn!("labels_add: push failed (commit durable, sync_loop will retry): {e}");
-        }
+    // Push with retry (rebase on conflict) — same pattern as send_card_message
+    // (card_handlers.rs:868). If still failing after retries, commit is
+    // already durable locally; sync_loop will push on next tick.
+    if let Err(e) = push_with_retry(&state, "labels_add").await {
+        return Response::error(e);
     }
 
     Response::json(LabelsAddResponse { current_labels })
 }
 
 /// `LabelsRemove` IPC handler. Self-claim only. Same shape as `labels_add`
-/// but set-subtraction instead of set-union.
+/// but set-subtraction instead of set-union. Idempotent: removing
+/// non-existent labels is a no-op success.
 pub async fn handle_labels_remove(
     state: SharedState,
     target: String,
     labels: Vec<String>,
 ) -> Response {
-    if let Err(resp) = ensure_self(&state, &target).await {
+    if let Err(resp) = ensure_self_and_handler(&state, &target).await {
         return resp;
     }
 
@@ -154,11 +179,31 @@ pub async fn handle_labels_remove(
     };
 
     let to_remove: BTreeSet<String> = labels.into_iter().collect();
-    let mut remaining: BTreeSet<String> = meta.labels.into_iter().collect();
+    let existing_set: BTreeSet<String> = meta.labels.iter().cloned().collect();
+    let mut remaining = existing_set.clone();
     for l in &to_remove {
         remaining.remove(l);
     }
+
+    // Idempotent fast-path: removing labels that aren't present produces an
+    // unchanged set. Skip commit per spec "Remove 不存在的 label | 静默
+    // no-op,不报错".
+    if remaining == existing_set {
+        return Response::json(LabelsRemoveResponse {
+            current_labels: meta.labels,
+        });
+    }
+
     meta.labels = remaining.into_iter().collect();
+
+    // Defense-in-depth: validate the remaining set (should always pass since
+    // we're only shrinking, but cheap and catches corrupt-on-disk yaml).
+    if let Err(e) = validate_user_meta(&meta) {
+        return Response::error_with_code(
+            format!("post-remove meta validation failed: {e}"),
+            "invalid_label",
+        );
+    }
 
     let new_yaml = match Response::yaml_string(&meta, "user meta") {
         Ok(s) => s,
@@ -188,10 +233,8 @@ pub async fn handle_labels_remove(
     let current_labels = meta.labels;
     drop(guard);
 
-    if state.git_storage.has_remote() {
-        if let Err(e) = state.git_storage.push() {
-            warn!("labels_remove: push failed (commit durable, sync_loop will retry): {e}");
-        }
+    if let Err(e) = push_with_retry(&state, "labels_remove").await {
+        return Response::error(e);
     }
 
     Response::json(LabelsRemoveResponse { current_labels })
@@ -202,6 +245,9 @@ pub async fn handle_labels_remove(
 /// 404 with `error_code: "unknown_user"` if target is not in
 /// `state.users` (covers both "never registered" and "in `archive/users/`").
 pub async fn handle_labels_list(state: SharedState, target: String) -> Response {
+    if let Err(e) = Handler::new(&target) {
+        return Response::error_with_code(format!("invalid handler: {e}"), "invalid_handler");
+    }
     {
         let users = state.users.read().await;
         if !users.contains(&target) {
@@ -253,6 +299,10 @@ pub async fn handle_agents_with_labels(state: SharedState, labels: Vec<String>) 
 /// Best-effort scan used by `handle_create_card` to populate
 /// `CreateCardResponse.suggested_assignees`. Returns empty if `card_labels`
 /// is empty or if no agent matches; never panics on bad yaml (logs warn).
+///
+/// **Race tolerance:** `state.users` is snapshotted at the start of the call,
+/// so a handler that gets archived or registered between snapshot and the
+/// fs scan is silently included/excluded — acceptable for advisory output.
 pub async fn compute_suggested_assignees(
     state: &SharedState,
     card_labels: Vec<String>,
@@ -298,15 +348,34 @@ fn scan_active_for_labels(
     matched.into_iter().collect()
 }
 
-/// `caller_handler == target` check. The caller's identity is the daemon's
-/// own bound handler (per-clone daemon model — every IPC into this daemon
-/// is implicitly authored by `state.current_user`). See requirements P4
-/// "Enforcement 机制".
-async fn ensure_self(state: &SharedState, target: &str) -> Result<(), Response> {
-    let me = state.current_user.read().await.clone().unwrap_or_default();
+/// Validate `target` as a handler + check caller == target.
+///
+/// The caller's identity is the daemon's own bound handler (per-clone daemon
+/// model — every IPC into this daemon is implicitly authored by
+/// `state.current_user`). See requirements P4 "Enforcement 机制".
+///
+/// Fails fast with `error_code: "invalid_handler"` if target isn't a valid
+/// handler shape, `"no_identity"` if the daemon hasn't bound a current_user
+/// yet, `"not_self"` if target != current_user.
+async fn ensure_self_and_handler(state: &SharedState, target: &str) -> Result<(), Response> {
+    if let Err(e) = Handler::new(target) {
+        return Err(Response::error_with_code(
+            format!("invalid target handler: {e}"),
+            "invalid_handler",
+        ));
+    }
+    let me = match state.current_user.read().await.clone() {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            return Err(Response::error_with_code(
+                "daemon has no bound identity (current_user is empty)",
+                "no_identity",
+            ))
+        }
+    };
     if me != target {
         return Err(Response::error_with_code(
-            format!("only self ({}) can modify own labels", me),
+            format!("only self (@{}) can modify own labels", me),
             "not_self",
         ));
     }
