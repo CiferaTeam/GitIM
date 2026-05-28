@@ -18,6 +18,20 @@ pub struct StatusResponse {
     /// Whether the daemon is in guest mode (read-only, no committed
     /// identity in `me.json`).
     pub guest: bool,
+    /// Locally-committed messages not yet pushed to the remote. Read from the
+    /// daemon's `pending_push` queue, which drains on a successful push and
+    /// piles up while pushes fail. Staying above zero across successive status
+    /// calls means the remote isn't receiving messages — local commit succeeds
+    /// but push is stuck (slow/flaky remote, tripped auth circuit, etc.).
+    /// `#[serde(default)]` keeps a new CLI compatible with an old daemon that
+    /// omits the field.
+    #[serde(default)]
+    pub pending_push_count: u64,
+    /// True when the sync loop's auth circuit is tripped (3+ consecutive auth
+    /// failures) and the daemon has paused git ops. Surfaces "PAT expired /
+    /// auth blocked" to the CLI without grepping daemon logs.
+    #[serde(default)]
+    pub auth_circuit_open: bool,
 }
 
 /// Response payload for `Request::Send`.
@@ -666,13 +680,57 @@ mod tests {
             version: "0.1.0".to_string(),
             status: "running".to_string(),
             guest: false,
+            pending_push_count: 0,
+            auth_circuit_open: false,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.len(), 5);
         assert_eq!(obj.get("version").and_then(|v| v.as_str()), Some("0.1.0"));
         assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("running"));
         assert_eq!(obj.get("guest").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            obj.get("pending_push_count").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            obj.get("auth_circuit_open").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    /// Push-backlog visibility fields round-trip and reflect a stuck daemon:
+    /// unpushed commits piled up + auth circuit tripped.
+    #[test]
+    fn status_response_carries_push_backlog() {
+        let r = StatusResponse {
+            version: "0.1.0".to_string(),
+            status: "running".to_string(),
+            guest: false,
+            pending_push_count: 7,
+            auth_circuit_open: true,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("pending_push_count").and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        assert_eq!(
+            obj.get("auth_circuit_open").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    /// An old daemon's status JSON (pre-backlog fields) must still deserialize:
+    /// the new fields default to 0 / false rather than erroring. This keeps a
+    /// new CLI compatible with an un-upgraded daemon.
+    #[test]
+    fn status_response_backward_compatible_without_backlog_fields() {
+        let legacy = r#"{"version":"0.1.0","status":"running","guest":false}"#;
+        let r: StatusResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.pending_push_count, 0);
+        assert!(!r.auth_circuit_open);
     }
 
     #[test]
@@ -1318,6 +1376,8 @@ mod tests {
             version: "9.9.9".to_string(),
             status: "running".to_string(),
             guest: true,
+            pending_push_count: 3,
+            auth_circuit_open: true,
         };
         let s = serde_json::to_string(&r).unwrap();
         let back: StatusResponse = serde_json::from_str(&s).unwrap();

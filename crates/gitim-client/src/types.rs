@@ -107,6 +107,8 @@ mod tests {
             version: "1.2.3".to_string(),
             status: "running".to_string(),
             guest: true,
+            pending_push_count: 0,
+            auth_circuit_open: false,
         };
         let envelope = json!({
             "ok": true,

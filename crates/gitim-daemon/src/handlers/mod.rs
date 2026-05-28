@@ -190,10 +190,23 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
     match req {
         Request::Status => {
             let is_guest = state.is_guest.load(std::sync::atomic::Ordering::SeqCst);
+            // Push-backlog visibility: pending_push drains on a successful push
+            // and accumulates while pushes fail, so its length is the count of
+            // locally-committed messages not yet on the remote. auth_failed is
+            // the sync-loop circuit breaker. Together they let `gitim status`
+            // distinguish "all synced" from "committing locally but push stuck".
+            let pending_push_count = state
+                .pending_push
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len() as u64;
+            let auth_circuit_open = state.auth_failed.load(std::sync::atomic::Ordering::SeqCst);
             let payload = gitim_core::responses::StatusResponse {
                 version: "0.1.0".to_string(),
                 status: "running".to_string(),
                 guest: is_guest,
+                pending_push_count,
+                auth_circuit_open,
             };
             // Wire-additive: attach the parsed gitim.epoch.yaml snapshot as
             // an `epoch` sibling on the StatusResponse data object so clients
