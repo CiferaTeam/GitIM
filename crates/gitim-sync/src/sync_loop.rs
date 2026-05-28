@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
@@ -26,19 +26,33 @@ pub enum SyncOutcome {
 /// confident the PAT is revoked rather than transiently noisy.
 pub const AUTH_FAILURE_TRIP_THRESHOLD: u32 = 3;
 
-/// Tracks consecutive auth failures and latches the `tripped` flag shared with daemon state.
-/// A successful remote op resets the counter; once tripped, the flag stays set
-/// until the daemon clears it (v1: restart = fresh state).
+/// Once tripped, the circuit goes half-open after this interval: a single sync
+/// cycle is allowed to retry git. A successful retry clears the latch and sync
+/// resumes; a failed retry re-arms the latch for another interval. This lets a
+/// transient auth blip (a slow / flaky remote producing the occasional 401/403)
+/// self-heal without a daemon restart, while still capping retry pressure on a
+/// genuinely-revoked PAT to one probe per interval.
+pub const AUTH_PROBE_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Auth circuit breaker. Tracks consecutive auth failures and latches the
+/// `tripped` flag shared with daemon state once the threshold is crossed.
+///
+/// The latch is NOT permanent: after [`AUTH_PROBE_INTERVAL`] the circuit goes
+/// half-open and [`AuthCircuit::should_attempt_probe`] returns true for one
+/// cycle. A successful remote op (observed via [`AuthCircuit::record`]) clears
+/// the latch and sync resumes; a failed probe re-arms it for another interval.
+/// A daemon restart still produces a fresh circuit.
 ///
 /// Clone is shallow: the latched `tripped` flag is `Arc<AtomicBool>` (shared),
-/// `consecutive_failures` is `u32` (copied). `start_sync_loop` clones the
-/// circuit into each `spawn_blocking` cycle, then copies the inner state back
-/// out — the counter survives across cycles via the return path, the latch
-/// survives via the shared Arc.
+/// `consecutive_failures` (u32) and `tripped_at` (Option<Instant>) are Copy and
+/// survive across cycles via `start_sync_loop`'s clone-then-copy-back path.
 #[derive(Clone)]
 pub struct AuthCircuit {
     pub tripped: Arc<AtomicBool>,
     consecutive_failures: u32,
+    /// When the latch was last (re-)armed; `None` when closed. Drives the
+    /// half-open probe schedule — see [`AuthCircuit::should_attempt_probe`].
+    tripped_at: Option<Instant>,
 }
 
 impl AuthCircuit {
@@ -46,6 +60,7 @@ impl AuthCircuit {
         Self {
             tripped,
             consecutive_failures: 0,
+            tripped_at: None,
         }
     }
 
@@ -53,12 +68,20 @@ impl AuthCircuit {
         self.tripped.load(Ordering::SeqCst)
     }
 
-    /// Feed the circuit a push/fetch result. Returns true iff this call transitioned
-    /// the circuit from closed to tripped (caller logs once on that edge).
+    /// Feed the circuit a push/fetch result. Returns true iff this call
+    /// transitioned the circuit from closed to tripped (caller logs once on
+    /// that edge).
+    ///
+    /// A successful op always clears the latch — including a half-open probe
+    /// that just succeeded, which is how the circuit self-heals.
     pub fn record(&mut self, result: &Result<(), GitError>) -> bool {
         match result {
             Ok(()) => {
                 self.consecutive_failures = 0;
+                // Clear the latch on any success: a half-open probe that
+                // reached the remote and authenticated means we're back.
+                self.tripped.store(false, Ordering::SeqCst);
+                self.tripped_at = None;
                 false
             }
             Err(GitError::AuthFailed(_)) => {
@@ -66,6 +89,7 @@ impl AuthCircuit {
                 if self.consecutive_failures >= AUTH_FAILURE_TRIP_THRESHOLD
                     && !self.tripped.swap(true, Ordering::SeqCst)
                 {
+                    self.tripped_at = Some(Instant::now());
                     return true;
                 }
                 false
@@ -75,6 +99,31 @@ impl AuthCircuit {
             // and a non-auth failure shouldn't count toward the auth budget.
             Err(_) => false,
         }
+    }
+
+    /// True iff the circuit is tripped AND enough time has elapsed since the
+    /// latch was last armed to justify a half-open probe. `now` is injected so
+    /// the schedule is testable without a real clock.
+    ///
+    /// A tripped circuit with no recorded `tripped_at` (e.g. the flag was set
+    /// externally, or restored from a prior state) is treated as probe-eligible
+    /// immediately — better to attempt recovery than idle forever on an
+    /// unexplained latch.
+    pub fn should_attempt_probe(&self, now: Instant) -> bool {
+        if !self.is_tripped() {
+            return false;
+        }
+        match self.tripped_at {
+            Some(at) => now.duration_since(at) >= AUTH_PROBE_INTERVAL,
+            None => true,
+        }
+    }
+
+    /// Record that a half-open probe is being attempted at `now`, resetting the
+    /// interval timer. Call this before the probe's git op so that a failed
+    /// probe backs off another full interval instead of re-probing every cycle.
+    pub fn mark_probe(&mut self, now: Instant) {
+        self.tripped_at = Some(now);
     }
 
     #[cfg(test)]
@@ -178,7 +227,10 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
         if circuit.is_tripped() {
             let elapsed = last_auth_idle_warn.elapsed();
             if elapsed >= Duration::from_secs(AUTH_CIRCUIT_HEARTBEAT_SECS) {
-                warn!("sync: auth circuit open — idling (no git operations) until daemon restart");
+                warn!(
+                    "sync: auth circuit open — idling (no git operations) until next half-open probe (every {}s)",
+                    AUTH_PROBE_INTERVAL.as_secs()
+                );
                 last_auth_idle_warn = std::time::Instant::now();
             }
         }
@@ -327,8 +379,17 @@ pub fn run_sync_cycle(
     rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome {
     if circuit.is_tripped() {
-        on_cycle_done();
-        return SyncOutcome::AuthCircuitOpen;
+        // Half-open: after AUTH_PROBE_INTERVAL, let one cycle retry git. A
+        // successful push/fetch below clears the latch via observe_auth ->
+        // record(Ok); a failed one re-arms it. Until the interval elapses, idle.
+        if !circuit.should_attempt_probe(Instant::now()) {
+            on_cycle_done();
+            return SyncOutcome::AuthCircuitOpen;
+        }
+        // Reset the timer up front so a failed probe backs off another full
+        // interval rather than re-probing every cycle.
+        circuit.mark_probe(Instant::now());
+        info!("sync: auth circuit half-open — attempting recovery probe");
     }
 
     // Top-of-cycle self-heal. A prior cycle (or an external git op) may
@@ -465,12 +526,16 @@ fn enforce_divergence_threshold(
 /// so the auth circuit observes every push/fetch. Callers check the returned flag
 /// once and trip-log if it transitioned.
 fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
+    let was_tripped = circuit.is_tripped();
     if circuit.record(result) {
         error!(
             "sync: auth circuit tripped after {} consecutive auth failures — \
-             sync loop will idle until daemon restart",
-            AUTH_FAILURE_TRIP_THRESHOLD
+             pausing git, will half-open and retry every {}s",
+            AUTH_FAILURE_TRIP_THRESHOLD,
+            AUTH_PROBE_INTERVAL.as_secs()
         );
+    } else if was_tripped && !circuit.is_tripped() {
+        info!("sync: auth circuit recovered — remote auth succeeded, resuming normal sync");
     }
 }
 
