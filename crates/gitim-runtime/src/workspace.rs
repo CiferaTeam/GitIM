@@ -113,6 +113,7 @@ async fn kill_pid_at(repo: &Path) {
     let _ = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
         .output();
+    remove_run_files(repo);
 }
 
 fn kill_pid_at_blocking(repo: &Path) {
@@ -130,6 +131,18 @@ fn kill_pid_at_blocking(repo: &Path) {
     let _ = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
         .output();
+    remove_run_files(repo);
+}
+
+/// Remove a daemon's pid + socket files after killing it. Without this, a fresh
+/// runtime's `ensure_daemon` can read the stale pid, treat a not-yet-reaped
+/// zombie as "alive" via `kill(pid, 0)`, skip the spawn, and then block in
+/// `wait_for_socket` on the dead socket until timeout. Best-effort — a missing
+/// file is fine.
+fn remove_run_files(repo: &Path) {
+    let run_dir = repo.join(".gitim/run");
+    let _ = std::fs::remove_file(run_dir.join("gitim.pid"));
+    let _ = std::fs::remove_file(run_dir.join("gitim.sock"));
 }
 
 #[cfg(test)]
@@ -191,5 +204,32 @@ mod tests {
             timestamp: "2026".to_string(),
         });
         assert!(rx_a.try_recv().is_err());
+    }
+
+    #[test]
+    fn kill_pid_at_blocking_removes_stale_run_files() {
+        // After killing a daemon we must delete its pid + sock files. Otherwise
+        // a fresh runtime's `ensure_daemon` reads the stale pid, finds it
+        // "alive" (kill(pid,0) on a not-yet-reaped zombie), skips the spawn, and
+        // then blocks 15s in wait_for_socket on the dead socket. Cleaning the
+        // files forces a clean re-spawn.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".gitim/run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // A pid that cannot be alive: above macOS pid_max (99998) and the common
+        // Linux default (32768). kill(2) on it is a harmless ESRCH.
+        std::fs::write(run_dir.join("gitim.pid"), "999999").unwrap();
+        std::fs::write(run_dir.join("gitim.sock"), b"").unwrap();
+
+        kill_pid_at_blocking(tmp.path());
+
+        assert!(
+            !run_dir.join("gitim.pid").exists(),
+            "stale pid file must be removed so ensure_daemon re-spawns"
+        );
+        assert!(
+            !run_dir.join("gitim.sock").exists(),
+            "stale socket must be removed so wait_for_socket doesn't hang on it"
+        );
     }
 }
