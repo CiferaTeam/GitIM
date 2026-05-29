@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-agent-provider"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-cli"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-client"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-core"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-daemon"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "async-stream",
  "axum",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-index"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "chrono",
  "gitim-core",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-runtime"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "async-trait",
  "axum",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-sync"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "gitim-core",
  "libc",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-updater"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "flate2",
  "hex",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "gitim-wasm"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "gitim-core",
  "gitim-sync",
@@ -1129,9 +1129,9 @@ checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hyper"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6299f016b246a94207e63da54dbe807655bf9e00044f73ded42c3ac5305fbcca"
+checksum = "eb92f162bf56536459fc83c79b974bb12837acfed43d6bc370a7916d0ae15ecc"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1444,9 +1444,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.16"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
+checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
 dependencies = [
  "libc",
 ]
@@ -1535,9 +1535,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+checksum = "02bd0af71c67b473010cbbc60715ee815645a4dc942899111f494b4b737d6fda"
 dependencies = [
  "libc",
  "log",
@@ -2308,9 +2308,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3374,18 +3374,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.48"
+version = "0.8.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9"
+checksum = "bce33a6288fa3f072a8c2c7d0f2fdbb90e28298f0135c1f99b96c3db2efcc60b"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.48"
+version = "0.8.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
+checksum = "8fd425244944f4ab65ccff928e7323354c5a018c75838362fdce749dfad2ee1e"
 dependencies = [
  "proc-macro2",
  "quote",
