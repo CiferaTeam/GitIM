@@ -99,6 +99,17 @@ mod default_max_tests {
     }
 
     #[test]
+    fn claude_opus_4_8_is_200k() {
+        // Opus 4.8 ships a 1M window upstream, but GitIM keeps the conservative
+        // 200k denominator (see `claude_max_tokens`) until an explicit
+        // long-context mode exists. Pin that decision for the new generation.
+        assert_eq!(
+            default_max_tokens("claude", "claude-opus-4-8"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
     fn claude_opus_older_generations_stay_at_200k() {
         // Opus 3 / 4 (pre-4.7) never got the 1M upgrade; they still need the
         // conservative denominator so the threshold preamble fires in time.
