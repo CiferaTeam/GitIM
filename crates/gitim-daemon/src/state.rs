@@ -72,9 +72,11 @@ pub struct AppState {
     pub epoch_status: std::sync::RwLock<Option<gitim_core::epoch::EpochFile>>,
     /// Epoch seconds of last client connection. Used by idle watchdog.
     pub last_client_activity: AtomicU64,
-    /// Latched by sync_loop when 3 consecutive auth failures trip the circuit.
-    /// Readers can check this to surface "PAT expired" to the UI; the flag stays
-    /// set until daemon restart (v1).
+    /// Tripped by sync_loop after 3 consecutive auth failures. Readers can
+    /// check this to surface "PAT expired" to the UI (e.g. `Status` exposes it
+    /// as `auth_circuit_open`). Self-heals: once tripped, the circuit half-opens
+    /// and retries one probe per interval, clearing the flag on the first
+    /// successful remote op — no daemon restart required.
     pub auth_failed: Arc<AtomicBool>,
     /// **Commit-tree invariant**: any in-process operation that mutates the
     /// local commit tree MUST hold this lock for the duration of that
