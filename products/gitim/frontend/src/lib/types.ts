@@ -64,6 +64,12 @@ export interface Agent {
   systemPrompt: string;
   model?: string;
   /**
+   * Claude-only effort level ("low" | "medium" | "high" | "xhigh" | "max").
+   * Sent to `claude --effort`. Undefined = provider default. Round-tripped
+   * from the runtime so the edit form can show the current value.
+   */
+  effort?: string;
+  /**
    * Human-facing blurb stored in `users/<handler>.meta.yaml::introduction`.
    * Display-only — never fed to the LLM. Capped at 256 bytes server-side
    * (see MAX_INTRODUCTION_LEN in gitim-core).

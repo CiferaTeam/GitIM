@@ -46,6 +46,7 @@ fn has_active_agents_with_running() {
                 repo_path: "/tmp/test".to_string(),
                 provider: None,
                 model: None,
+                effort: None,
                 system_prompt: None,
                 introduction: None,
                 env: std::collections::HashMap::new(),

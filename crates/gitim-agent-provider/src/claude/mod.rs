@@ -66,6 +66,7 @@ impl Drop for PersistentClaude {
 struct SpawnSig {
     cwd: Option<PathBuf>,
     model: Option<String>,
+    effort: Option<String>,
 }
 
 pub struct ClaudeProvider {
@@ -240,7 +241,7 @@ fn can_reuse(p: &mut PersistentClaude, opts: &ExecOptions) -> bool {
     if !p.is_alive() {
         return false;
     }
-    if p.sig.cwd != opts.cwd || p.sig.model != opts.model {
+    if p.sig.cwd != opts.cwd || p.sig.model != opts.model || p.sig.effort != opts.effort {
         return false;
     }
     // Cold-start request (agent_loop passes no resume_token when starting
@@ -269,6 +270,9 @@ async fn spawn_persistent(
     ];
     if let Some(model) = &opts.model {
         args.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = &opts.effort {
+        args.extend(["--effort".to_string(), effort.clone()]);
     }
     if let Some(max_turns) = opts.max_turns {
         args.extend(["--max-turns".to_string(), max_turns.to_string()]);
@@ -315,6 +319,7 @@ async fn spawn_persistent(
         sig: SpawnSig {
             cwd: opts.cwd.clone(),
             model: opts.model.clone(),
+            effort: opts.effort.clone(),
         },
         stderr_tail,
         stderr_handle,

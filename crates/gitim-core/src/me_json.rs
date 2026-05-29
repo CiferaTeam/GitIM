@@ -54,6 +54,12 @@ pub struct MeJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Effort level for the `claude` provider (`low` / `medium` / `high` /
+    /// `xhigh` / `max`). Passed to the CLI as `--effort`. `None` for other
+    /// providers or when unset. Preserved across re-onboard via merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
     /// Custom system prompt for the agent loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -112,6 +118,9 @@ impl MeJson {
         }
         if patch.model.is_some() {
             self.model = patch.model;
+        }
+        if patch.effort.is_some() {
+            self.effort = patch.effort;
         }
         if patch.system_prompt.is_some() {
             self.system_prompt = patch.system_prompt;
@@ -457,6 +466,53 @@ mod tests {
         assert_eq!(
             obj.get("llm_provider").and_then(|v| v.as_str()),
             Some("minimax-cn")
+        );
+    }
+
+    // --- effort field tests ---
+
+    /// effort survives serialize → deserialize and is omitted when None.
+    #[test]
+    fn serde_effort_roundtrip_and_skip_when_none() {
+        let with = MeJson {
+            handler: Some("alice".into()),
+            provider: Some("claude".into()),
+            effort: Some("xhigh".into()),
+            ..Default::default()
+        };
+        let decoded: MeJson = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(decoded.effort.as_deref(), Some("xhigh"));
+
+        let without = MeJson {
+            handler: Some("alice".into()),
+            provider: Some("claude".into()),
+            ..Default::default()
+        };
+        let obj = serde_json::to_value(&without).unwrap();
+        assert!(!obj.as_object().unwrap().contains_key("effort"));
+    }
+
+    /// Merge mirrors model: Some overrides, None preserves (re-onboard safety).
+    #[test]
+    fn merged_with_effort_some_overrides_none_preserves() {
+        let base = MeJson {
+            handler: Some("alice".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone()
+                .merged_with(MeJson {
+                    effort: Some("max".into()),
+                    ..Default::default()
+                })
+                .effort
+                .as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            base.merged_with(MeJson::default()).effort.as_deref(),
+            Some("high")
         );
     }
 }

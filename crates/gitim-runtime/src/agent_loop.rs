@@ -92,6 +92,9 @@ pub struct AgentLoopConfig {
     pub provider_type: String,
     pub handler: String,
     pub model: Option<String>,
+    /// Effort level for the `claude` provider (`low`..`max`). None for other
+    /// providers or when unset.
+    pub effort: Option<String>,
     pub system_prompt: Option<String>,
     pub env: HashMap<String, String>,
 }
@@ -117,6 +120,7 @@ pub struct AgentLoop {
     repo_root: PathBuf,
     provider_type: String,
     model: Option<String>,
+    effort: Option<String>,
     custom_system_prompt: Option<String>,
     handler: String,
     activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
@@ -178,6 +182,7 @@ impl AgentLoop {
             repo_root: repo_root.to_path_buf(),
             provider_type: provider_type.to_string(),
             model: None,
+            effort: None,
             custom_system_prompt: None,
             handler: handler.to_string(),
             activity_tx: None,
@@ -217,6 +222,7 @@ impl AgentLoop {
             repo_root: repo_root.to_path_buf(),
             provider_type: config.provider_type.clone(),
             model: config.model.clone(),
+            effort: config.effort.clone(),
             custom_system_prompt: config.system_prompt.clone(),
             handler: config.handler.clone(),
             activity_tx: None,
@@ -322,6 +328,7 @@ impl AgentLoop {
         ExecOptions {
             cwd: Some(self.repo_root.clone()),
             model: self.model.clone(),
+            effort: self.effort.clone(),
             system_prompt,
             max_turns: Some(32),
             resume_token: self.session_token.clone(),
@@ -2086,6 +2093,7 @@ mod tests {
                 repo_path: tmp.path().display().to_string(),
                 provider: Some("mock".to_string()),
                 model: None,
+                effort: None,
                 system_prompt: None,
                 introduction: None,
                 env: Default::default(),

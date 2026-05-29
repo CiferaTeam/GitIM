@@ -41,6 +41,8 @@ export function AddAgentDialog() {
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
+  // Claude-only effort level. "" = provider default (no --effort flag).
+  const [effort, setEffort] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [introduction, setIntroduction] = useState("");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
@@ -174,6 +176,7 @@ export function AddAgentDialog() {
     setName("");
     setProvider("");
     setModel("");
+    setEffort("");
     setSystemPrompt("");
     setIntroduction("");
     setEnvVars([]);
@@ -256,6 +259,7 @@ export function AddAgentDialog() {
         joinGeneral,
         provider === "hermes" ? hermesLlmOverride?.llmProvider : undefined,
         provider === "hermes" ? hermesLlmOverride?.llmModel : undefined,
+        provider === "claude" ? effort || undefined : undefined,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -305,6 +309,7 @@ export function AddAgentDialog() {
                   onChange={(e) => {
                     setProvider(e.target.value as ProviderId | "");
                     setModel("");
+                    setEffort("");
                     setProviderCustomModelInput("");
                     setProviderModelCatalog(null);
                     setProviderModelsLoading(false);
@@ -454,6 +459,32 @@ export function AddAgentDialog() {
                   )}
                 </div>
               ) : null}
+
+              {provider === "claude" && (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor="agent-effort">
+                    Effort
+                  </label>
+                  <select
+                    id="agent-effort"
+                    value={effort}
+                    onChange={(e) => setEffort(e.target.value)}
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="">Use CLI default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">XHigh</option>
+                    <option value="max">Max</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    How hard the model thinks. Higher effort means deeper
+                    reasoning at more latency and cost. Not all levels are valid
+                    for every model.
+                  </p>
+                </div>
+              )}
 
               {provider === "hermes" && (
                 <div className="space-y-3 rounded-md border border-input p-3">

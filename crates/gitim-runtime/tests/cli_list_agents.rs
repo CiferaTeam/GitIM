@@ -84,6 +84,7 @@ fn make_agent_with_env(
         repo_path: repo_path.to_string(),
         provider: Some("claude".to_string()),
         model: None,
+        effort: None,
         system_prompt: Some(system_prompt.to_string()),
         introduction: None,
         env,

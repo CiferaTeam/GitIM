@@ -85,6 +85,7 @@ fn insert_agent(
             repo_path: repo_path.display().to_string(),
             provider: Some(provider.to_string()),
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: std::collections::HashMap::new(),

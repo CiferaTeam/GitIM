@@ -111,6 +111,10 @@ fn seed_agent_in_workspace(
             .get("model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        effort: me_json
+            .get("effort")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         system_prompt: me_json
             .get("system_prompt")
             .and_then(|v| v.as_str())
@@ -660,4 +664,99 @@ async fn patch_model_rejects_running_agent() {
         .as_str()
         .unwrap_or("")
         .contains("stop the agent before changing model"));
+}
+
+// -- 14. PATCH effort writes me.json but PRESERVES session ---------------------
+// Unlike model, an effort change must not wipe the conversation: it only
+// changes how hard the model thinks. The Claude provider's SpawnSig picks up
+// the new --effort on the next (resumed) turn.
+
+#[tokio::test]
+async fn patch_effort_writes_me_json_without_clearing_session() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws14");
+    let dir = seed_agent_in_workspace(
+        &state,
+        "ws14",
+        "alice",
+        json!({ "provider": "claude", "model": "claude-opus-4-8" }),
+    );
+
+    let state_path = dir.path().join(".gitim/agent-state.json");
+    std::fs::write(
+        &state_path,
+        r#"{
+          "cursor": "000123",
+          "session_token": "keep-me",
+          "estimated_tokens": 5000
+        }"#,
+    )
+    .unwrap();
+
+    let (status, body) = send_patch(&router, "ws14", "alice", json!({ "effort": "xhigh" })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["agent"]["effort"], json!("xhigh"));
+
+    let me_path = dir.path().join(".gitim/me.json");
+    let me: Value = serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert_eq!(me["effort"], json!("xhigh"));
+
+    // Session state is untouched — effort does not cold-start the agent.
+    let agent_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(agent_state["session_token"], json!("keep-me"));
+    assert_eq!(agent_state["estimated_tokens"], json!(5000));
+}
+
+#[tokio::test]
+async fn patch_effort_empty_clears_me_json_field() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws15");
+    let dir = seed_agent_in_workspace(
+        &state,
+        "ws15",
+        "alice",
+        json!({ "provider": "claude", "model": "claude-opus-4-8", "effort": "max" }),
+    );
+
+    let (status, body) = send_patch(&router, "ws15", "alice", json!({ "effort": "" })).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["agent"].get("effort").is_none() || body["agent"]["effort"].is_null());
+
+    let me_path = dir.path().join(".gitim/me.json");
+    let me: Value = serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
+    assert!(me.get("effort").is_none());
+}
+
+#[tokio::test]
+async fn patch_effort_rejects_running_agent() {
+    let (router, state) = create_router();
+    inject_workspace(&state, "ws16");
+    let _dir = seed_agent_in_workspace(
+        &state,
+        "ws16",
+        "alice",
+        json!({ "provider": "claude", "model": "claude-opus-4-8" }),
+    );
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get_mut("ws16")
+        .unwrap()
+        .agents
+        .get_mut("alice")
+        .unwrap()
+        .status = "running".to_string();
+
+    let (status, body) = send_patch(&router, "ws16", "alice", json!({ "effort": "high" })).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["ok"], json!(false));
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("stop the agent before changing effort"));
 }

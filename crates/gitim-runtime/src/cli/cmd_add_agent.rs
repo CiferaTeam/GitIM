@@ -43,6 +43,8 @@ pub struct Args {
     pub display_name: String,
     pub provider: String,
     pub model: Option<String>,
+    /// Effort level (Claude only): low / medium / high / xhigh / max.
+    pub effort: Option<String>,
     pub system_prompt: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
     /// Raw `KEY=VALUE` entries from `--env`. Validated and split inside `run`
@@ -84,6 +86,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
         display_name: &args.display_name,
         provider: &args.provider,
         model: args.model.as_deref(),
+        effort: args.effort.as_deref(),
         system_prompt: system_prompt.as_deref(),
         introduction: args.introduction.as_deref(),
         env: &env_map,
@@ -201,6 +204,7 @@ struct BuildArgs<'a> {
     display_name: &'a str,
     provider: &'a str,
     model: Option<&'a str>,
+    effort: Option<&'a str>,
     system_prompt: Option<&'a str>,
     introduction: Option<&'a str>,
     env: &'a HashMap<String, String>,
@@ -233,6 +237,9 @@ fn build_add_agent_body(args: BuildArgs<'_>) -> Result<serde_json::Value, CliErr
 
     if let Some(model) = args.model {
         obj.insert("model".to_string(), json!(model));
+    }
+    if let Some(effort) = args.effort {
+        obj.insert("effort".to_string(), json!(effort));
     }
     if let Some(prompt) = args.system_prompt {
         obj.insert("system_prompt".to_string(), json!(prompt));
@@ -270,6 +277,7 @@ mod tests {
             display_name: "Alice",
             provider: "claude",
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: &env,
@@ -286,6 +294,7 @@ mod tests {
         // serde defaults can take over.
         for omitted in [
             "model",
+            "effort",
             "system_prompt",
             "introduction",
             "env",
@@ -300,6 +309,29 @@ mod tests {
         }
     }
 
+    /// Effort is forwarded verbatim when present (Claude only at the UI layer,
+    /// but the wire builder is provider-agnostic — the runtime owns the gate).
+    #[test]
+    fn build_body_effort_forwarded() {
+        let env = HashMap::new();
+        let body = build_add_agent_body(BuildArgs {
+            handler: "alice",
+            display_name: "Alice",
+            provider: "claude",
+            model: Some("claude-opus-4-8"),
+            effort: Some("xhigh"),
+            system_prompt: None,
+            introduction: None,
+            env: &env,
+            no_join_general: false,
+            llm_provider: None,
+            llm_model: None,
+        })
+        .unwrap();
+        assert_eq!(body["effort"], "xhigh");
+        assert_eq!(body["model"], "claude-opus-4-8");
+    }
+
     /// Hermes happy path: both LLM flags get forwarded as siblings under
     /// `provider: "hermes"`. The runtime's hermes branch reads these fields
     /// to configure the cloned profile.
@@ -311,6 +343,7 @@ mod tests {
             display_name: "Bot",
             provider: "hermes",
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: &env,
@@ -336,6 +369,7 @@ mod tests {
             display_name: "Bot",
             provider: "claude",
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: &env,
@@ -358,6 +392,7 @@ mod tests {
             display_name: "Bot",
             provider: "claude",
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: &env,
@@ -382,6 +417,7 @@ mod tests {
             display_name: "Bot",
             provider: "claude",
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: &env,

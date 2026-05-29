@@ -165,6 +165,7 @@ mod tests {
             repo_path: String::new(),
             provider: None,
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: HashMap::new(),

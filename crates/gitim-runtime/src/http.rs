@@ -294,6 +294,10 @@ pub struct AgentInfo {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Claude-only effort level (`low`..`max`). Round-trips to the WebUI so the
+    /// edit form can show the current value. None for other providers / unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     /// Free-form blurb the WebUI shows on the agent card and detail page.
@@ -2590,6 +2594,10 @@ struct AgentAddRequest {
     provider: String,
     #[serde(default)]
     model: Option<String>,
+    /// Claude-only effort level (`low` / `medium` / `high` / `xhigh` / `max`).
+    /// Omitted / empty leaves the CLI default. Ignored for other providers.
+    #[serde(default)]
+    effort: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
     /// Optional human blurb (≤ MAX_INTRODUCTION_LEN). Surfaced on the agent
@@ -2957,6 +2965,7 @@ async fn agents_add(
                     let patch = MeJson {
                         provider: Some(req.provider.clone()),
                         model: req.model.clone(),
+                        effort: req.effort.clone(),
                         system_prompt: req.system_prompt.clone(),
                         env: env_patch,
                         // Hermes-only: persist llm_provider/llm_model chosen at
@@ -3163,6 +3172,7 @@ async fn agents_add(
                 // get Some(req.provider).
                 provider: Some(req.provider.clone()),
                 model: req.model.clone(),
+                effort: req.effort.clone(),
                 system_prompt: req.system_prompt.clone(),
                 introduction,
                 env: req.env.clone(),
@@ -3341,7 +3351,17 @@ struct AgentRemoveRequest {
 
 /// Start the agent loop for a given agent ID. Shared by add, start, and recover.
 fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
-    let (repo_root, handler, provider, model, system_prompt, env, activity_tx, workspace_root) = {
+    let (
+        repo_root,
+        handler,
+        provider,
+        model,
+        effort,
+        system_prompt,
+        env,
+        activity_tx,
+        workspace_root,
+    ) = {
         let s = crate::preconditions::arc_mutex_lock(state);
         let ctx = s
             .workspaces
@@ -3358,6 +3378,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 info.handler.clone(),
                 info.provider.clone(),
                 info.model.clone(),
+                info.effort.clone(),
                 info.system_prompt.clone(),
                 info.env.clone(),
                 ctx.activity_tx.clone(),
@@ -3370,6 +3391,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
         provider_type: provider.unwrap_or_else(|| "claude".to_string()),
         handler,
         model,
+        effort,
         system_prompt,
         env,
     };
@@ -3713,6 +3735,10 @@ struct AgentUpdateRequest {
     system_prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "deser_triple_option")]
     model: Option<Option<String>>,
+    /// Claude-only effort. Three-state like `model`: absent → no-op,
+    /// null / "" → clear (CLI default), "level" → set.
+    #[serde(default, deserialize_with = "deser_triple_option")]
+    effort: Option<Option<String>>,
     /// Three-state: absent → no-op, null → clear (empty introduction),
     /// "s" → set to s. Goes to daemon via `update_user`, which writes
     /// `users/<handler>.meta.yaml` and commits.
@@ -3769,6 +3795,13 @@ async fn agents_patch(
                     return (
                         StatusCode::CONFLICT,
                         Json(ErrorBody::new("stop the agent before changing model")),
+                    )
+                        .into_response();
+                }
+                if req.effort.is_some() && info.status == "running" {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ErrorBody::new("stop the agent before changing effort")),
                     )
                         .into_response();
                 }
@@ -3834,6 +3867,19 @@ async fn agents_patch(
         };
         model_changed = old_model != new_model;
         me.model = new_model;
+    }
+
+    // Effort: same three-state semantics as model. Effort is editable only
+    // while the agent is offline (frontend gate), so it takes effect on the
+    // next Start. Unlike model it does NOT clear the session — effort changes
+    // how hard the model thinks, not the conversation, so resuming with a new
+    // --effort is correct. The Claude provider's SpawnSig also carries effort,
+    // so any in-process change forces a respawn that picks up the new flag.
+    if let Some(effort_opt) = &req.effort {
+        me.effort = match effort_opt {
+            Some(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
     }
 
     // Env validation + whole-map replacement.
@@ -4111,6 +4157,12 @@ async fn agents_patch(
                     if model_changed {
                         info.session_usage = None;
                     }
+                }
+                if let Some(effort_opt) = &req.effort {
+                    info.effort = match effort_opt {
+                        Some(s) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    };
                 }
                 if let Some(env_map) = &req.env {
                     info.env = env_map.clone();
@@ -4965,6 +5017,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
         let display_name = me["display_name"].as_str().unwrap_or(&handler).to_string();
 
         let model = me["model"].as_str().map(|s| s.to_string());
+        let effort = me["effort"].as_str().map(|s| s.to_string());
         let custom_system_prompt = me["system_prompt"].as_str().map(|s| s.to_string());
         let env: HashMap<String, String> = me
             .get("env")
@@ -5033,6 +5086,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             repo_path: dir.display().to_string(),
                             provider: provider_raw.map(|s| s.to_string()),
                             model,
+                            effort,
                             system_prompt: custom_system_prompt,
                             introduction: read_user_introduction(&dir, &handler),
                             env,
@@ -5102,6 +5156,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             repo_path: dir.display().to_string(),
                             provider: provider_raw.map(|s| s.to_string()),
                             model,
+                            effort,
                             system_prompt: custom_system_prompt,
                             introduction: read_user_introduction(&dir, &handler),
                             env,

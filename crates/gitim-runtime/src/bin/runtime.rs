@@ -101,6 +101,9 @@ enum Command {
         /// semantics; passed through verbatim.
         #[arg(long)]
         model: Option<String>,
+        /// Optional effort level (Claude only): low / medium / high / xhigh / max.
+        #[arg(long)]
+        effort: Option<String>,
         /// Inline system prompt. Mutually exclusive with --system-prompt-file.
         #[arg(long = "system-prompt", conflicts_with = "system_prompt_file")]
         system_prompt: Option<String>,
@@ -175,6 +178,10 @@ enum Command {
         /// — the runtime rejects model changes on running agents.
         #[arg(long)]
         model: Option<String>,
+        /// Replacement effort level (Claude only): low / medium / high / xhigh /
+        /// max. Pass an empty string to clear. Stop the agent first.
+        #[arg(long)]
+        effort: Option<String>,
         /// Replacement introduction blurb.
         #[arg(long)]
         introduction: Option<String>,
@@ -410,6 +417,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             display_name,
             provider,
             model,
+            effort,
             system_prompt,
             system_prompt_file,
             env,
@@ -424,6 +432,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 display_name,
                 provider,
                 model,
+                effort,
                 system_prompt,
                 system_prompt_file,
                 env,
@@ -458,6 +467,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             system_prompt,
             system_prompt_file,
             model,
+            effort,
             introduction,
             env,
             dotenv_file,
@@ -469,6 +479,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 system_prompt,
                 system_prompt_file,
                 model,
+                effort,
                 introduction,
                 env,
                 dotenv_file,
@@ -1240,6 +1251,7 @@ mod argv_subcommand_tests {
                 display_name,
                 provider,
                 model,
+                effort,
                 system_prompt,
                 system_prompt_file,
                 env,
@@ -1254,6 +1266,7 @@ mod argv_subcommand_tests {
                 assert_eq!(display_name, "Tester");
                 assert_eq!(provider, "claude");
                 assert!(model.is_none());
+                assert!(effort.is_none());
                 assert!(system_prompt.is_none());
                 assert!(system_prompt_file.is_none());
                 assert!(env.is_empty());
@@ -1281,6 +1294,8 @@ mod argv_subcommand_tests {
             "hermes",
             "--model",
             "gpt-5",
+            "--effort",
+            "xhigh",
             "--system-prompt",
             "be careful",
             "--env",
@@ -1304,6 +1319,7 @@ mod argv_subcommand_tests {
                 display_name,
                 provider,
                 model,
+                effort,
                 system_prompt,
                 system_prompt_file,
                 env,
@@ -1318,6 +1334,7 @@ mod argv_subcommand_tests {
                 assert_eq!(display_name, "Alice");
                 assert_eq!(provider, "hermes");
                 assert_eq!(model.as_deref(), Some("gpt-5"));
+                assert_eq!(effort.as_deref(), Some("xhigh"));
                 assert_eq!(system_prompt.as_deref(), Some("be careful"));
                 assert!(system_prompt_file.is_none());
                 assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
@@ -1572,6 +1589,7 @@ mod argv_subcommand_tests {
                 system_prompt,
                 system_prompt_file,
                 model,
+                effort,
                 introduction,
                 env,
                 dotenv_file,
@@ -1582,6 +1600,7 @@ mod argv_subcommand_tests {
                 assert!(system_prompt.is_none());
                 assert!(system_prompt_file.is_none());
                 assert!(model.is_none());
+                assert!(effort.is_none());
                 assert!(introduction.is_none());
                 assert!(env.is_empty());
                 assert!(dotenv_file.is_none());

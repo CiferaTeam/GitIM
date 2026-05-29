@@ -731,6 +731,7 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             repo_path: ws_path.join("a").to_string_lossy().into_owned(),
             provider: Some("claude".into()),
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: Default::default(),

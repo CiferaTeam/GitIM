@@ -81,6 +81,7 @@ fn insert_agent(state: &SharedRuntimeState, slug: &str, id: &str, repo_path: &Pa
             repo_path: repo_path.display().to_string(),
             provider: Some("mock".to_string()),
             model: None,
+            effort: None,
             system_prompt: None,
             introduction: None,
             env: std::collections::HashMap::new(),

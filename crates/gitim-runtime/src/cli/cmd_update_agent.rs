@@ -47,6 +47,8 @@ pub struct Args {
     pub system_prompt: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
     pub model: Option<String>,
+    /// Replacement effort level (Claude only). Empty string clears it.
+    pub effort: Option<String>,
     pub introduction: Option<String>,
     /// Raw `KEY=VALUE` entries from repeated `--env`. Validated and split
     /// inside `run` so the error message is `CliError::InvalidConfig`
@@ -86,6 +88,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     // never what the user intended. Fail loud at the CLI boundary.
     if system_prompt.is_none()
         && args.model.is_none()
+        && args.effort.is_none()
         && args.introduction.is_none()
         && env_map.is_none()
         && dotenv.is_none()
@@ -93,7 +96,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     {
         return Err(CliError::InvalidConfig(
             "no update fields specified; pass at least one of \
-             --system-prompt, --model, --introduction, --env, --dotenv-file, --clear-session"
+             --system-prompt, --model, --effort, --introduction, --env, --dotenv-file, --clear-session"
                 .to_string(),
         ));
     }
@@ -104,6 +107,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     let body = build_update_body(BuildArgs {
         system_prompt: system_prompt.as_deref(),
         model: args.model.as_deref(),
+        effort: args.effort.as_deref(),
         introduction: args.introduction.as_deref(),
         env: env_map.as_ref(),
         dotenv: dotenv.as_deref(),
@@ -201,6 +205,7 @@ fn parse_env_entries(entries: &[String]) -> Result<Option<HashMap<String, String
 struct BuildArgs<'a> {
     system_prompt: Option<&'a str>,
     model: Option<&'a str>,
+    effort: Option<&'a str>,
     introduction: Option<&'a str>,
     env: Option<&'a HashMap<String, String>>,
     dotenv: Option<&'a str>,
@@ -222,6 +227,12 @@ fn build_update_body(args: BuildArgs<'_>) -> serde_json::Value {
     }
     if let Some(m) = args.model {
         body.insert("model".to_string(), json!(m));
+    }
+    // Effort is forwarded verbatim, including an explicit empty string — the
+    // runtime maps `""` to "clear" (its triple-option handler treats empty as
+    // None). This is the only field where we intentionally emit `""`.
+    if let Some(e) = args.effort {
+        body.insert("effort".to_string(), json!(e));
     }
     if let Some(i) = args.introduction {
         body.insert("introduction".to_string(), json!(i));
@@ -250,6 +261,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: Some("new prompt"),
             model: None,
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,
@@ -266,6 +278,33 @@ mod tests {
         assert_eq!(obj.len(), 1, "exactly one key");
     }
 
+    /// Effort set forwards the level; an explicit empty string forwards `""`
+    /// so the runtime's triple-option handler clears the field.
+    #[test]
+    fn build_body_effort_set_and_clear() {
+        let set = build_update_body(BuildArgs {
+            system_prompt: None,
+            model: None,
+            effort: Some("max"),
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: false,
+        });
+        assert_eq!(set["effort"], "max");
+
+        let clear = build_update_body(BuildArgs {
+            system_prompt: None,
+            model: None,
+            effort: Some(""),
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: false,
+        });
+        assert_eq!(clear["effort"], "");
+    }
+
     /// All five fields set in one call — the e2e shape the CLI must
     /// support for "patch everything at once".
     #[test]
@@ -275,6 +314,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: Some("X"),
             model: Some("Y"),
+            effort: Some("low"),
             introduction: Some("Z"),
             env: Some(&env),
             dotenv: Some("FOO=bar\n"),
@@ -283,11 +323,12 @@ mod tests {
         let obj = body.as_object().expect("body is object");
         assert_eq!(obj["system_prompt"], "X");
         assert_eq!(obj["model"], "Y");
+        assert_eq!(obj["effort"], "low");
         assert_eq!(obj["introduction"], "Z");
         let env_obj = obj["env"].as_object().expect("env is object");
         assert_eq!(env_obj["KEY"], "VAL");
         assert_eq!(obj["dotenv"], "FOO=bar\n");
-        assert_eq!(obj.len(), 5);
+        assert_eq!(obj.len(), 6);
     }
 
     /// An empty BuildArgs produces `{}` — the body builder doesn't enforce
@@ -298,6 +339,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: None,
             model: None,
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,
@@ -318,6 +360,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: None,
             model: None,
+            effort: None,
             introduction: None,
             env: Some(&env),
             dotenv: None,
@@ -333,6 +376,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: Some("X"),
             model: None,
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,
@@ -352,6 +396,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: None,
             model: None,
+            effort: None,
             introduction: None,
             env: Some(&env),
             dotenv: None,
@@ -466,6 +511,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: None,
             model: None,
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,
@@ -484,6 +530,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: Some("X"),
             model: None,
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,
@@ -503,6 +550,7 @@ mod tests {
         let body = build_update_body(BuildArgs {
             system_prompt: None,
             model: Some("claude-opus-4-7"),
+            effort: None,
             introduction: None,
             env: None,
             dotenv: None,

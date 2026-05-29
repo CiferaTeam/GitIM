@@ -70,6 +70,8 @@ export function AgentDetail() {
   const [draftModel, setDraftModel] = useState("");
   const [draftModelIsCustom, setDraftModelIsCustom] = useState(false);
   const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
+  // Claude-only effort draft. "" = provider default.
+  const [draftEffort, setDraftEffort] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
   const [draftIntroduction, setDraftIntroduction] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
@@ -145,6 +147,7 @@ export function AgentDetail() {
     applyDraftModelSelection(currentModel);
     setDraftPrompt(agent.systemPrompt ?? "");
     setDraftIntroduction(agent.introduction ?? "");
+    setDraftEffort(agent.effort ?? "");
     setDraftEnv(
       Object.entries(agent.env ?? {}).map(([key, value]) => ({ key, value })),
     );
@@ -160,6 +163,8 @@ export function AgentDetail() {
     agent !== undefined &&
     (() => {
       if (selectedDraftModel !== (agent.model ?? "")) return true;
+      // Effort
+      if (draftEffort !== (agent.effort ?? "")) return true;
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
       // Introduction
@@ -204,6 +209,7 @@ export function AgentDetail() {
     const patch: {
       system_prompt?: string | null;
       model?: string | null;
+      effort?: string | null;
       introduction?: string | null;
       env?: Record<string, string>;
     } = {};
@@ -216,6 +222,17 @@ export function AgentDetail() {
     const modelChanged = modelEditable && newModel !== oldModel;
     if (modelChanged) {
       patch.model = newModel === "" ? null : newModel;
+    }
+
+    // Effort is Claude-only and editable only while offline (like model). It
+    // does not cold-start the session — the runtime resumes with the new flag.
+    const effortEditable =
+      agent.status === "offline" && agent.provider === "claude";
+    const newEffort = draftEffort;
+    const oldEffort = agent.effort ?? "";
+    const effortChanged = effortEditable && newEffort !== oldEffort;
+    if (effortChanged) {
+      patch.effort = newEffort === "" ? null : newEffort;
     }
 
     const newPrompt = draftPrompt.trim();
@@ -273,6 +290,9 @@ export function AgentDetail() {
       }
       if (modelChanged) {
         lines.push("Model → starts a fresh provider session on next start");
+      }
+      if (effortChanged) {
+        lines.push("Effort → applies on next start (session preserved)");
       }
       if (promptChanged) {
         lines.push(
@@ -464,6 +484,41 @@ export function AgentDetail() {
             <span className="text-text-muted">—</span>
           )}
         </Field>
+
+        {agent.provider === "claude" && (
+          <Field label="Effort">
+            {mode !== "view" ? (
+              <div className="space-y-1.5">
+                <select
+                  value={draftEffort}
+                  onChange={(e) => setDraftEffort(e.target.value)}
+                  disabled={isRunning || mode === "saving"}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">Use CLI default</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
+                </select>
+                {isRunning && (
+                  <p className="text-xs text-text-muted">
+                    Stop the agent before changing effort.
+                  </p>
+                )}
+              </div>
+            ) : agent.effort ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
+                {agent.effort}
+              </span>
+            ) : (
+              <span className="text-text-muted italic text-sm">
+                Default (system decides)
+              </span>
+            )}
+          </Field>
+        )}
 
         <Field label="Messages Processed">
           <span className="text-lg font-semibold">{agent.messagesProcessed}</span>
