@@ -16,10 +16,11 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gitim_sync::git::{GitError, GitStorage};
 use gitim_sync::sync_loop::{
-    run_sync_cycle, AuthCircuit, SyncOutcome, AUTH_FAILURE_TRIP_THRESHOLD,
+    run_sync_cycle, AuthCircuit, SyncOutcome, AUTH_FAILURE_TRIP_THRESHOLD, AUTH_PROBE_INTERVAL,
 };
 use tempfile::TempDir;
 
@@ -135,6 +136,90 @@ fn circuit_flag_shared_across_clones() {
     assert!(flag_b.load(Ordering::SeqCst), "daemon-side clone sees trip");
 }
 
+// ── AuthCircuit half-open recovery ───────────────────────────────
+
+#[test]
+fn circuit_does_not_probe_immediately_after_trip() {
+    // A freshly-tripped circuit must NOT probe right away — probing instantly
+    // would hammer a remote that just rejected us. The half-open window only
+    // opens after AUTH_PROBE_INTERVAL.
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(flag.clone());
+    for _ in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+        circuit.record(&Err(auth_err()));
+    }
+    assert!(circuit.is_tripped());
+    assert!(
+        !circuit.should_attempt_probe(Instant::now()),
+        "must not probe in the same instant it tripped"
+    );
+}
+
+#[test]
+fn circuit_allows_probe_after_interval() {
+    // Once AUTH_PROBE_INTERVAL has elapsed since the trip, the circuit goes
+    // half-open: one cycle is allowed to attempt git again.
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(flag.clone());
+    for _ in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+        circuit.record(&Err(auth_err()));
+    }
+    let after = Instant::now() + AUTH_PROBE_INTERVAL + Duration::from_secs(1);
+    assert!(
+        circuit.should_attempt_probe(after),
+        "should allow a probe once the interval elapsed"
+    );
+}
+
+#[test]
+fn circuit_recovers_latch_on_successful_probe() {
+    // The whole point of half-open: a successful op (the probe) clears the
+    // latch so sync resumes WITHOUT a daemon restart. This is the behaviour
+    // the old pure-latch design lacked.
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(flag.clone());
+    for _ in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+        circuit.record(&Err(auth_err()));
+    }
+    assert!(flag.load(Ordering::SeqCst), "precondition: tripped");
+
+    circuit.record(&Ok(()));
+
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "a successful probe must clear the shared latch"
+    );
+    assert!(!circuit.is_tripped());
+}
+
+#[test]
+fn circuit_failed_probe_keeps_latch_and_backs_off() {
+    // A failed probe must re-arm the latch and reset the timer so the next
+    // probe is another full interval away — not every cycle.
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut circuit = AuthCircuit::new(flag.clone());
+    for _ in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+        circuit.record(&Err(auth_err()));
+    }
+
+    let t1 = Instant::now() + AUTH_PROBE_INTERVAL + Duration::from_secs(1);
+    assert!(circuit.should_attempt_probe(t1));
+
+    // Probe fires at t1 but fails.
+    circuit.mark_probe(t1);
+    circuit.record(&Err(auth_err()));
+
+    assert!(circuit.is_tripped(), "failed probe keeps the latch set");
+    assert!(
+        !circuit.should_attempt_probe(t1),
+        "must not re-probe immediately after a failed probe"
+    );
+    assert!(
+        circuit.should_attempt_probe(t1 + AUTH_PROBE_INTERVAL + Duration::from_secs(1)),
+        "next probe only after another full interval"
+    );
+}
+
 // ── run_sync_cycle integration ───────────────────────────────────
 
 /// Create a clone whose remote points at a non-existent local path.
@@ -209,9 +294,13 @@ fn run_sync_cycle_does_not_trip_circuit_on_non_auth_errors() {
 }
 
 #[test]
-fn run_sync_cycle_short_circuits_when_circuit_open() {
-    // Once the flag is set externally (e.g. from a previous trip), the cycle
-    // returns AuthCircuitOpen immediately without trying git.
+fn run_sync_cycle_probes_when_tripped_flag_lacks_trip_time() {
+    // A tripped flag with no recorded trip time (set externally, or restored
+    // from a prior state) is probe-eligible immediately — the half-open circuit
+    // attempts git rather than idling forever on an unexplained latch. Here the
+    // dead remote makes the probe fail with a NON-auth error, so the cycle does
+    // not short-circuit. ("Just tripped → short-circuit" is covered by
+    // end_to_end_trip_then_skip_git, where tripped_at is recent.)
     let (_bare, _clone, repo) = setup_clone_with_dead_remote();
     let flag = Arc::new(AtomicBool::new(true));
     let mut circuit = AuthCircuit::new(flag);
@@ -228,7 +317,10 @@ fn run_sync_cycle_short_circuits_when_circuit_open() {
         None,
     );
 
-    assert!(matches!(outcome, SyncOutcome::AuthCircuitOpen));
+    assert!(
+        !matches!(outcome, SyncOutcome::AuthCircuitOpen),
+        "an unexplained latch should go half-open and attempt a probe, not idle"
+    );
 }
 
 #[test]
