@@ -2448,6 +2448,49 @@ async fn flows_node_prompt_set(
     }
 }
 
+#[derive(Deserialize)]
+struct FlowReplaceRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    nodes: Vec<gitim_core::flow::FlowNodeInput>,
+}
+
+/// Overwrite an entire flow's node set. Body carries the full node list;
+/// the daemon validates topology before persisting (illegal DAG → 422).
+async fn flows_replace(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, flow_slug)): axum::extract::Path<(String, String)>,
+    Json(req): Json<FlowReplaceRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    match client
+        .flow_replace(
+            &flow_slug,
+            req.name.as_deref(),
+            req.description.as_deref(),
+            req.nodes,
+        )
+        .await
+    {
+        Ok(resp) => flow_write_response(resp),
+        Err(e) => flow_client_error_to_response(e),
+    }
+}
+
 /// Like `flow_raw_data_response` but for write endpoints: returns the `data`
 /// field on success (or `{}` if absent), 404 for `not_found`, 422 for other
 /// errors. Used by run-start, node-set, and run-cancel.
@@ -6095,7 +6138,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         )
         .route(
             "/im/flows/{flow_slug}",
-            get(flows_show).delete(flows_remove),
+            get(flows_show).delete(flows_remove).put(flows_replace),
         )
         .route("/im/flows/{flow_slug}/runs", post(flows_run_start))
         .route("/im/runs", get(flows_run_list))
