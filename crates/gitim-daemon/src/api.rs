@@ -447,6 +447,21 @@ pub enum Request {
         prompt: String,
         author: Option<String>,
     },
+    /// Overwrite an entire flow's node set in one shot (add / remove / re-wire
+    /// / edit node fields). `created_by` / `created_at` are preserved by the
+    /// handler; `name` / `description` keep old values when omitted. Topology
+    /// is validated before write — an illegal DAG is rejected without persisting.
+    #[serde(rename = "flow_replace")]
+    FlowReplace {
+        slug: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        nodes: Vec<gitim_core::flow::FlowNodeInput>,
+        author: Option<String>,
+    },
 
     #[serde(rename = "flow_run_start")]
     FlowRunStart {

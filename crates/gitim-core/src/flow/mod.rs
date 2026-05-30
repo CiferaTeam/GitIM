@@ -1,8 +1,8 @@
 pub mod types;
 
 pub use types::{
-    flow_path, FlowDocument, FlowError, FlowMeta, FlowNode, FlowSlug, FlowSlugError, FlowWarning,
-    NodeType,
+    flow_path, FlowDocument, FlowError, FlowMeta, FlowNode, FlowNodeInput, FlowSlug, FlowSlugError,
+    FlowWarning, NodeType,
 };
 
 pub mod parser;

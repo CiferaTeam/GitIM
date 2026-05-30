@@ -5,8 +5,8 @@ use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::flow::{
     flow_path, parse_flow_markdown, parse_flow_markdown_with_warnings, stringify_flow_markdown,
-    validate_flow_document, validate_flow_for_storage, FlowDocument, FlowMeta, FlowSlug,
-    FlowWarning,
+    validate_flow_document, validate_flow_for_storage, FlowDocument, FlowMeta, FlowNodeInput,
+    FlowSlug, FlowWarning,
 };
 use gitim_core::responses::{
     FlowNodeSummary, FlowSummary, FlowValidationItem, ListFlowsResponse, ShowFlowResponse,
@@ -242,6 +242,63 @@ pub async fn handle_flow_update_node(
     node.prompt = prompt.trim_end().to_string();
 
     match commit_flow_document_locked(&state, &slug, doc, "flow: update node", &author) {
+        Ok(c) => flow_write_success(&state, c),
+        Err(resp) => resp,
+    }
+}
+
+/// Overwrite an entire flow's node set in one shot (add / remove / re-wire /
+/// edit node fields). Reuses `commit_flow_document_locked`, so topology is
+/// validated before write — an illegal DAG is rejected without persisting.
+/// `created_by` / `created_at` are preserved from the existing doc; `name` /
+/// `description` keep their old values when the caller omits them.
+pub async fn handle_flow_replace(
+    state: SharedState,
+    slug: String,
+    name: Option<String>,
+    description: Option<String>,
+    nodes: Vec<FlowNodeInput>,
+    author: String,
+) -> Response {
+    let slug = match FlowSlug::new(&slug) {
+        Ok(s) => s,
+        Err(e) => return Response::error(format!("invalid slug: {}", e)),
+    };
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
+    let rel = flow_path(&slug);
+    let abs = state.repo_root.join(&rel);
+    let content = match std::fs::read_to_string(&abs) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Response::error_with_code(format!("flow not found: {}", slug), "not_found");
+        }
+        Err(e) => return Response::error(format!("failed to read flow: {}", e)),
+    };
+    let old = match parse_flow_markdown(&content) {
+        Ok(d) => d,
+        Err(e) => return Response::error(format!("invalid flow: {}", e)),
+    };
+
+    let doc = FlowDocument {
+        meta: FlowMeta {
+            schema_version: 1,
+            slug: slug.to_string(),
+            name: name.unwrap_or(old.meta.name),
+            description: description.unwrap_or(old.meta.description),
+            created_by: old.meta.created_by,
+            created_at: old.meta.created_at,
+            // commit_flow_document_locked stamps a fresh updated_at.
+            updated_at: old.meta.updated_at,
+            nodes: nodes
+                .into_iter()
+                .map(FlowNodeInput::into_flow_node)
+                .collect(),
+        },
+    };
+
+    match commit_flow_document_locked(&state, &slug, doc, "flow: replace", &author) {
         Ok(c) => flow_write_success(&state, c),
         Err(resp) => resp,
     }
