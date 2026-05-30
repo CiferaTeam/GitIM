@@ -301,9 +301,13 @@ enum FleetTunnelCommand {
         #[arg(long = "node-id")]
         node_id: String,
     },
-    /// Stop the local SSH tunnel for a node.
+    /// Force-restart the local SSH tunnel for a node.
+    ///
+    /// With the per-node watcher running, the tunnel is re-established within
+    /// ~10s, so this restarts rather than stops it. To stop for good, remove the
+    /// node with `fleet remove <node>`.
     Down {
-        /// Stable node/runtime UUID to stop.
+        /// Stable node/runtime UUID to restart.
         #[arg(long = "node-id")]
         node_id: String,
     },
