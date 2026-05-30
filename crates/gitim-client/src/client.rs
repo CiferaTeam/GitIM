@@ -842,6 +842,27 @@ impl GitimClient {
         .await
     }
 
+    /// Overwrite an entire flow's node set. `name` / `description` left as
+    /// `None` keep their existing values daemon-side.
+    pub async fn flow_replace(
+        &self,
+        slug: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        nodes: Vec<gitim_core::flow::FlowNodeInput>,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "flow_replace",
+            json!({
+                "slug": slug,
+                "name": name,
+                "description": description,
+                "nodes": nodes,
+            }),
+        )
+        .await
+    }
+
     pub async fn flow_run_start(
         &self,
         slug: &str,
