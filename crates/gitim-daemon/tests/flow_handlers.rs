@@ -232,6 +232,50 @@ async fn flow_replace_unknown_slug_is_not_found() {
 }
 
 #[tokio::test]
+async fn flow_replace_round_trips_signal_and_labels() {
+    // The editor seeds its draft from show's node projection, so signal +
+    // required_labels MUST survive replace → show or editing a wait_for_signal
+    // node (or labels) silently drops them.
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let nodes = vec![FlowNodeInput {
+        id: "gate".into(),
+        node_type: NodeType::WaitForSignal,
+        owner: None,
+        participants: vec![],
+        signal: Some("approved".into()),
+        needs: vec![],
+        exits: vec![],
+        required_labels: vec!["rust".into(), "backend".into()],
+        prompt: String::new(),
+    }];
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        nodes,
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "replace failed: {:?}", r.error);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    let node = &data["nodes"][0];
+    assert_eq!(
+        node["signal"].as_str(),
+        Some("approved"),
+        "signal must survive round-trip, node={node}"
+    );
+    assert_eq!(
+        node["required_labels"][0].as_str(),
+        Some("rust"),
+        "required_labels must survive round-trip, node={node}"
+    );
+}
+
+#[tokio::test]
 async fn flow_create_then_list_then_show_then_validate_then_remove() {
     let (_tmp, state) = setup().await;
 

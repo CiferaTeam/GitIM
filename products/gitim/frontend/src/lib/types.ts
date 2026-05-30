@@ -454,7 +454,9 @@ export interface FlowNodeSummary {
   type: NodeType;
   owner?: string;
   participants?: string[];
+  signal?: string;
   needs?: string[];
+  required_labels?: string[];
   prompt: string;
 }
 

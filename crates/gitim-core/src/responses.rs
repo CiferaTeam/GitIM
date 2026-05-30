@@ -1417,8 +1417,12 @@ pub struct FlowNodeSummary {
     pub owner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub participants: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_labels: Vec<String>,
     pub prompt: String,
 }
 
@@ -1446,7 +1450,9 @@ impl From<&FlowNode> for FlowNodeSummary {
             node_type: n.node_type.clone(),
             owner: n.owner.clone(),
             participants: n.participants.clone(),
+            signal: n.signal.clone(),
             needs: n.needs.clone(),
+            required_labels: n.required_labels.clone(),
             prompt: n.prompt.clone(),
         }
     }
