@@ -25,6 +25,7 @@ function summary(
 function agent(id: string, provider: string, s?: UsageSummary): Agent {
   return {
     id,
+    handler: id,
     name: id,
     status: "idle",
     provider: provider as Agent["provider"],

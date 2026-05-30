@@ -63,6 +63,7 @@ function summary(
 function agent(id: string, provider: string, usageSummary: UsageSummary): Agent {
   return {
     id,
+    handler: id,
     name: id,
     status: "running",
     provider: provider as Agent["provider"],
@@ -76,6 +77,7 @@ function agent(id: string, provider: string, usageSummary: UsageSummary): Agent 
 function bareAgent(id: string): Agent {
   return {
     id,
+    handler: id,
     name: id,
     status: "running",
     systemPrompt: "",

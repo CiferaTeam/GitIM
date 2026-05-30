@@ -212,6 +212,7 @@ function ensureInferredAgent(envelope: FleetAgentActivityEnvelope) {
     workspaceId: envelope.workspace_id,
     agent: {
       id: envelope.agent_id,
+      handler: envelope.agent_id,
       name: envelope.agent_id,
       status: statusForActivityEvent(envelope.event.event_type),
       systemPrompt: "",

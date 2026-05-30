@@ -62,6 +62,7 @@ function usageSummary(tokens = 100): UsageSummary {
 function agent(id: string, provider = "codex", usage?: UsageSummary): Agent {
   return {
     id,
+    handler: id,
     name: id,
     status: "running",
     provider: provider as Agent["provider"],

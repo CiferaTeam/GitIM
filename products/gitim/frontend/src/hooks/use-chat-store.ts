@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { ArchivedDmEntry } from "../lib/client";
 import type { ChatViewportAnchor } from "../lib/chat-ui-state";
-import type { Channel, Message } from "../lib/types";
+import type { Channel, Message, UserInfo } from "../lib/types";
 import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 interface NavEntry {
@@ -45,6 +45,11 @@ interface ChatState {
   currentUser: string;
   isGuest: boolean;
   users: string[];
+  /** Per-user display_name enrichment for the display-name directory. Sourced
+   *  from `list_users`' additive `user_infos`; absent entries fall back to bare
+   *  handler at render time. Kept alongside (not replacing) `users: string[]`
+   *  so existing handler-list consumers are untouched. */
+  userInfos: UserInfo[];
   channels: Channel[];
   /** Back-compat snapshot for callers that still need the current archived
    *  channel page. New UI should use `archivedChannelsView` so archive
@@ -74,6 +79,7 @@ interface ChatState {
   setCurrentUser: (u: string) => void;
   setIsGuest: (v: boolean) => void;
   setUsers: (u: string[]) => void;
+  setUserInfos: (u: UserInfo[]) => void;
   setChannels: (c: Channel[]) => void;
   setArchivedChannels: (c: Channel[]) => void;
   resetArchivedChannelsView: (query: string) => void;
@@ -201,6 +207,7 @@ export const useChatStore = create<ChatState>((set) => ({
   currentUser: "",
   isGuest: false,
   users: [],
+  userInfos: [],
   channels: [],
   archivedChannels: [],
   archivedChannelsView: null,
@@ -219,6 +226,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setCurrentUser: (u) => set({ currentUser: u }),
   setIsGuest: (v) => set({ isGuest: v }),
   setUsers: (u) => set({ users: u }),
+  setUserInfos: (u) => set({ userInfos: u }),
   setChannels: (newChannels) =>
     set((state) => {
       const prevMap = new Map(
@@ -599,6 +607,7 @@ export const useChatStore = create<ChatState>((set) => ({
       currentUser: "",
       isGuest: false,
       users: [],
+      userInfos: [],
       channels: [],
       archivedChannels: [],
       archivedChannelsView: null,

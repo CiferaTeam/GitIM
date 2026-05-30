@@ -640,7 +640,14 @@ export async function users(): Promise<ApiResponse> {
   const s = getState();
   await refreshUsersCache();
   const userList = Array.from(s.users.keys());
-  return ok({ users: userList });
+  // Mirror the Rust daemon's wire shape: `users` stays the bare handler list
+  // for backward compat; `user_infos` is the additive enrichment the frontend
+  // directory consumes. In-memory `s.users` already holds full UserMeta.
+  const userInfos = Array.from(s.users.entries()).map(([handler, meta]) => ({
+    handler,
+    display_name: meta.display_name,
+  }));
+  return ok({ users: userList, user_infos: userInfos });
 }
 
 export async function joinChannel(channel: string): Promise<ApiResponse> {

@@ -11,6 +11,7 @@ export const mockUsers: string[] = [
 export const mockAgents: Agent[] = [
   {
     id: "code-reviewer",
+    handler: "code-reviewer",
     name: "Code Reviewer",
     status: "running",
     systemPrompt: "You review code for correctness, style, and maintainability. Provide concise, actionable feedback.",
@@ -20,6 +21,7 @@ export const mockAgents: Agent[] = [
   },
   {
     id: "task-planner",
+    handler: "task-planner",
     name: "Task Planner",
     status: "idle",
     systemPrompt: "You plan and break down tasks into actionable sub-tasks. Prioritize based on dependencies.",
@@ -29,6 +31,7 @@ export const mockAgents: Agent[] = [
   },
   {
     id: "bug-fixer",
+    handler: "bug-fixer",
     name: "Bug Fixer",
     status: "error",
     systemPrompt: "You investigate and fix bugs. Always reproduce the issue first, then write a targeted fix.",

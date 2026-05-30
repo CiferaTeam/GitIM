@@ -1352,6 +1352,7 @@ export function mapBackendAgent(raw: Record<string, unknown>): Agent {
 
   return {
     id: (raw.id ?? raw.handler) as string,
+    handler: (raw.handler ?? raw.id) as string,
     name: (raw.display_name ?? raw.handler) as string,
     status: ((raw.status as string) === "idle" ? "offline" : raw.status) as Agent["status"],
     provider: (raw.provider as ProviderId) ?? undefined,
@@ -1707,6 +1708,7 @@ export async function addAgent(
     // Fallback: construct locally if fetch fails
     const agent: Agent = {
       id: data.id ?? handler,
+      handler: data.id ?? handler,
       name,
       status: "offline",
       provider,

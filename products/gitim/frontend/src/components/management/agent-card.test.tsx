@@ -11,6 +11,7 @@ import { agentModelLabel } from "./agent-model-label";
 function agent(provider: Agent["provider"], model?: string): Agent {
   return {
     id: `${provider}-agent`,
+    handler: `${provider}-agent`,
     name: `${provider}-agent`,
     status: "running",
     provider,

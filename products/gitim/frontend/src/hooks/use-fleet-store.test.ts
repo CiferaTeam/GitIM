@@ -11,6 +11,7 @@ import type { Agent, FleetAgentSnapshot } from "../lib/types";
 function agent(id: string): Agent {
   return {
     id,
+    handler: id,
     name: id,
     status: "running",
     systemPrompt: "",

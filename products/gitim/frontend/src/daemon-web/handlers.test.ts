@@ -277,6 +277,7 @@ import {
   listArchivedDms,
   unarchiveCard,
   reconcileOrphanCards,
+  users,
 } from "./handlers";
 import { getState, initState, setState } from "./state";
 import { getActiveFsName } from "./storage";
@@ -401,6 +402,28 @@ describe("daemon-web handlers", () => {
       sync_enabled: false,
       needs_token: true,
     }));
+  });
+
+  it("users() returns bare handler list plus additive user_infos with display_name", async () => {
+    const res = await users();
+
+    expect(res.ok).toBe(true);
+    // Bare handler list stays for backward compat.
+    expect(res.data?.users).toEqual(
+      expect.arrayContaining(["alice", "lewis"]),
+    );
+    // Additive enrichment mirrors the Rust daemon wire shape — one
+    // {handler, display_name} row per active user, sourced from UserMeta.
+    const infos = res.data?.user_infos as Array<{
+      handler: string;
+      display_name: string;
+    }>;
+    expect(infos).toEqual(
+      expect.arrayContaining([
+        { handler: "alice", display_name: "Alice" },
+        { handler: "lewis", display_name: "Lewis" },
+      ]),
+    );
   });
 
   it("preserves the remote sync baseline when cached local commits are ahead", async () => {

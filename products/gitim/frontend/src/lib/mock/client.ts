@@ -238,6 +238,7 @@ export async function addAgent(
   const id = name.toLowerCase().replace(/\s+/g, "-");
   const agent: Agent = {
     id,
+    handler: id,
     name,
     status: "offline",
     provider,

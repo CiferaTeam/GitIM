@@ -31,6 +31,7 @@ import type {
   FleetNodeStatus,
   Message,
   PollChange,
+  UserInfo,
 } from "../lib/types";
 import { readUiState } from "../lib/ui-state";
 import { workspaceIdentity } from "../lib/workspace-key";
@@ -417,6 +418,9 @@ export function usePollLoop(): void {
     if (channelsRes.ok && channelsRes.data) chatStore.setChannels(nextChannels);
     if (usersRes.ok && usersRes.data) {
       chatStore.setUsers(usersRes.data.users as string[]);
+      chatStore.setUserInfos(
+        (usersRes.data.user_infos as UserInfo[] | undefined) ?? [],
+      );
     }
     applyAgentSnapshots(agentSnapshot);
     if (cardsRes.ok && cardsRes.data) {
@@ -765,6 +769,12 @@ export function usePollLoop(): void {
           next.length !== current.length ||
           next.some((u, i) => u !== current[i]);
         if (changed) useChatStore.getState().setUsers(next);
+        // Refresh the directory enrichment too. Cheap to set unconditionally;
+        // the directory hook's content-signature guard keeps render identity
+        // stable when the mapping is unchanged.
+        useChatStore.getState().setUserInfos(
+          (usersRes.data.user_infos as UserInfo[] | undefined) ?? [],
+        );
       }
     } catch (err) {
       // AbortError is our own timeout — not a real transport failure.

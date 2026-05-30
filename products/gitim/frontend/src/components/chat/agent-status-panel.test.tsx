@@ -48,6 +48,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 function agentWithUsage(usedPercent: number): Agent {
   return {
     id: "cfo",
+    handler: "cfo",
     name: "cfo",
     status: "running",
     systemPrompt: "",
@@ -154,6 +155,7 @@ describe("AgentStatusPanel", () => {
         workspaceIdentity: "github.com/flame4/room",
         agent: {
           id: "glm51op",
+          handler: "glm51op",
           name: "glm51op",
           status: "idle",
           systemPrompt: "",

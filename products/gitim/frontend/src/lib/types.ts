@@ -58,6 +58,14 @@ export interface UsageSummary {
 
 export interface Agent {
   id: string;
+  /**
+   * Protocol handler, kept distinct from `id`/`name` so the display-name
+   * directory can key on the real handler and agent cards can show it. Today
+   * `id` and `handler` usually coincide, but `name` is `display_name ?? handler`
+   * — baking display_name into `name` is why two same-named agents were
+   * indistinguishable before this field existed.
+   */
+  handler: string;
   name: string;
   status: AgentStatus;
   provider?: ProviderId;

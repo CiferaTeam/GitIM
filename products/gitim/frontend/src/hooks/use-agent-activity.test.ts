@@ -7,6 +7,7 @@ import type { Agent } from "../lib/types";
 function agentWithUsage(): Agent {
   return {
     id: "pc_op1",
+    handler: "pc_op1",
     name: "pc_op1",
     status: "running",
     systemPrompt: "",
