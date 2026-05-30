@@ -769,12 +769,20 @@ export function usePollLoop(): void {
           next.length !== current.length ||
           next.some((u, i) => u !== current[i]);
         if (changed) useChatStore.getState().setUsers(next);
-        // Refresh the directory enrichment too. Cheap to set unconditionally;
-        // the directory hook's content-signature guard keeps render identity
-        // stable when the mapping is unchanged.
-        useChatStore.getState().setUserInfos(
-          (usersRes.data.user_infos as UserInfo[] | undefined) ?? [],
-        );
+        // Refresh the directory enrichment too, but only on a real change —
+        // setting it unconditionally would hand the directory a fresh identity
+        // every poll and re-render every <HandlerName> needlessly.
+        const nextInfos =
+          (usersRes.data.user_infos as UserInfo[] | undefined) ?? [];
+        const currentInfos = useChatStore.getState().userInfos;
+        const infosChanged =
+          nextInfos.length !== currentInfos.length ||
+          nextInfos.some(
+            (u, i) =>
+              u.handler !== currentInfos[i]?.handler ||
+              u.display_name !== currentInfos[i]?.display_name,
+          );
+        if (infosChanged) useChatStore.getState().setUserInfos(nextInfos);
       }
     } catch (err) {
       // AbortError is our own timeout — not a real transport failure.

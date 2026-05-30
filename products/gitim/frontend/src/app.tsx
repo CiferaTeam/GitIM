@@ -12,6 +12,7 @@ import { AgentDetail } from "./components/management/agent-detail";
 import { AgentList } from "./components/management/agent-list";
 import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
+import { DisplayNameDirectoryProvider } from "./hooks/display-name-directory-provider";
 import { useConnectionStore } from "./hooks/use-connection-store";
 import { useFleetSSE } from "./hooks/use-fleet-store";
 import { useIsMobile } from "./hooks/use-media-query";
@@ -111,8 +112,9 @@ export default function App() {
       gated = <WorkspaceIncomplete slug={active.slug} />;
     } else {
       gated = (
-        <Routes>
-          <Route element={<AppShell />}>
+        <DisplayNameDirectoryProvider>
+          <Routes>
+            <Route element={<AppShell />}>
             <Route
               index
               element={
@@ -155,8 +157,9 @@ export default function App() {
             {mode === "local" && (
               <Route path="*" element={<Navigate to="/chat" replace />} />
             )}
-          </Route>
-        </Routes>
+            </Route>
+          </Routes>
+        </DisplayNameDirectoryProvider>
       );
     }
   }
