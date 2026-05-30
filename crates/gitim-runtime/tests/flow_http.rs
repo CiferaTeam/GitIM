@@ -251,6 +251,31 @@ async fn replace_flow_cycle_returns_422() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+#[tokio::test]
+async fn replace_flow_missing_nodes_is_rejected() {
+    let env = setup();
+    // Scripted daemon WOULD accept the call — proving the rejection happens at
+    // deserialize time (before the daemon), not because the daemon errored.
+    // A body without `nodes` defaulting to [] would wipe the flow.
+    set(
+        &env.table,
+        "flow_replace",
+        json!({ "ok": true, "data": { "slug": "release", "status": "committed" } }),
+    )
+    .await;
+    let (status, _body) = send_json(
+        env.router,
+        "PUT",
+        "/workspaces/test-ws/im/flows/release",
+        json!({ "name": "Renamed" }),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "missing nodes must be rejected (would otherwise wipe the flow), got {status}"
+    );
+}
+
 // -- flows/show --
 
 #[tokio::test]

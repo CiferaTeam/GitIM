@@ -197,4 +197,73 @@ describe("FlowStructureEditor", () => {
     });
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
+
+  it("renaming a new node id cascades into dependents' needs", async () => {
+    const onSave = vi.fn().mockResolvedValue({ ok: true });
+    await render({ onSave });
+    // Add a node and give it id "x".
+    await act(async () => {
+      q<HTMLButtonElement>("[data-testid='fse-add']")!.click();
+      await flushPromises();
+    });
+    const idInput = () =>
+      rows()[2].querySelector<HTMLInputElement>("[data-testid='fse-node-id']")!;
+    await act(async () => {
+      setNativeValue(idInput(), "x", "input");
+      await flushPromises();
+    });
+    // changelog (row 0) now lists "x" as a selectable dependency — check it.
+    const xCheckbox = Array.from(
+      rows()[0].querySelectorAll<HTMLInputElement>("input[type=checkbox]"),
+    ).find((cb) => cb.parentElement?.textContent?.includes("x"))!;
+    expect(xCheckbox).toBeTruthy();
+    await act(async () => {
+      xCheckbox.click();
+      await flushPromises();
+    });
+    // Rename "x" -> "y". The dependent's needs must follow.
+    await act(async () => {
+      setNativeValue(idInput(), "y", "input");
+      await flushPromises();
+    });
+    await act(async () => {
+      q<HTMLButtonElement>("[data-testid='fse-save']")!.click();
+      await flushPromises();
+    });
+    const payload = onSave.mock.calls[0][0] as FlowNodeSummary[];
+    const changelog = payload.find((n) => n.id === "changelog")!;
+    expect(changelog.needs ?? []).toContain("y");
+    expect(changelog.needs ?? []).not.toContain("x");
+  });
+
+  it("preserves exits through save without editing them", async () => {
+    const onSave = vi.fn().mockResolvedValue({ ok: true });
+    await act(async () => {
+      root!.render(
+        <FlowStructureEditor
+          doc={{
+            ...makeDoc(),
+            nodes: [
+              {
+                id: "gate",
+                type: "agent_mention",
+                owner: "alice",
+                exits: ["approved"],
+                prompt: "",
+              },
+            ],
+          }}
+          onSave={onSave}
+          onCancel={vi.fn()}
+        />,
+      );
+      await flushPromises();
+    });
+    await act(async () => {
+      q<HTMLButtonElement>("[data-testid='fse-save']")!.click();
+      await flushPromises();
+    });
+    const payload = onSave.mock.calls[0][0] as FlowNodeSummary[];
+    expect(payload[0].exits).toEqual(["approved"]);
+  });
 });

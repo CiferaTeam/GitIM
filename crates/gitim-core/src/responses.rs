@@ -1422,6 +1422,8 @@ pub struct FlowNodeSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_labels: Vec<String>,
     pub prompt: String,
 }
@@ -1452,6 +1454,7 @@ impl From<&FlowNode> for FlowNodeSummary {
             participants: n.participants.clone(),
             signal: n.signal.clone(),
             needs: n.needs.clone(),
+            exits: n.exits.clone(),
             required_labels: n.required_labels.clone(),
             prompt: n.prompt.clone(),
         }

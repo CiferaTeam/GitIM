@@ -2454,7 +2454,10 @@ struct FlowReplaceRequest {
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
+    // No `#[serde(default)]`: a body that omits `nodes` is rejected at
+    // deserialize time. Defaulting to [] would let a name-only PUT (or a
+    // malformed client) overwrite the flow with zero nodes. An explicit
+    // `nodes: []` is still accepted — that's a deliberate "clear all nodes".
     nodes: Vec<gitim_core::flow::FlowNodeInput>,
 }
 

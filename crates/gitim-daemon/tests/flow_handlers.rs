@@ -276,6 +276,44 @@ async fn flow_replace_round_trips_signal_and_labels() {
 }
 
 #[tokio::test]
+async fn flow_replace_round_trips_exits() {
+    // exits is v2 conditional metadata the UI doesn't edit, but a structure
+    // save must not silently delete it from the user's on-disk frontmatter.
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let nodes = vec![FlowNodeInput {
+        id: "gate".into(),
+        node_type: NodeType::AgentMention,
+        owner: Some("lewis".into()),
+        participants: vec![],
+        signal: None,
+        needs: vec![],
+        exits: vec!["approved".into(), "rejected".into()],
+        required_labels: vec![],
+        prompt: String::new(),
+    }];
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        nodes,
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "replace failed: {:?}", r.error);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    let node = &data["nodes"][0];
+    assert_eq!(
+        node["exits"][0].as_str(),
+        Some("approved"),
+        "exits must survive round-trip, node={node}"
+    );
+}
+
+#[tokio::test]
 async fn flow_create_then_list_then_show_then_validate_then_remove() {
     let (_tmp, state) = setup().await;
 

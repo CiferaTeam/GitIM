@@ -456,6 +456,9 @@ export interface FlowNodeSummary {
   participants?: string[];
   signal?: string;
   needs?: string[];
+  // v2 conditional metadata — not edited in the UI, but carried through
+  // edit→save so a structure change never silently drops it.
+  exits?: string[];
   required_labels?: string[];
   prompt: string;
 }

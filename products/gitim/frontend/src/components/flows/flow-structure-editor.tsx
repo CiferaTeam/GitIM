@@ -69,6 +69,24 @@ export function FlowStructureEditor({
     setDraft((cur) => cur.map((n) => (n._key === key ? { ...n, ...patch } : n)));
   }
 
+  // Renaming a (new) node's id must follow into every dependent's needs, or the
+  // checkbox list hides a now-stale reference and Save ships an unknown need.
+  function handleIdChange(key: string, newId: string) {
+    setDraft((cur) => {
+      const oldId = cur.find((n) => n._key === key)?.id;
+      return cur.map((n) => {
+        if (n._key === key) return { ...n, id: newId };
+        if (oldId && newId && (n.needs ?? []).includes(oldId)) {
+          return {
+            ...n,
+            needs: (n.needs ?? []).map((d) => (d === oldId ? newId : d)),
+          };
+        }
+        return n;
+      });
+    });
+  }
+
   function addNode() {
     setDraft((cur) => [
       ...cur,
@@ -142,6 +160,8 @@ export function FlowStructureEditor({
       participants: n.participants?.length ? n.participants : undefined,
       signal: n.signal?.trim() || undefined,
       needs: n.needs?.length ? n.needs : undefined,
+      // Carry exits through untouched — UI doesn't edit them but must not drop them.
+      exits: n.exits?.length ? n.exits : undefined,
       required_labels: n.required_labels?.length
         ? n.required_labels
         : undefined,
@@ -178,7 +198,7 @@ export function FlowStructureEditor({
                   value={node.id}
                   disabled={!node._isNew}
                   placeholder="node-id"
-                  onChange={(e) => patchNode(node._key, { id: e.target.value })}
+                  onChange={(e) => handleIdChange(node._key, e.target.value)}
                   className={cn(
                     inputCls,
                     "flex-1 font-mono",

@@ -458,7 +458,9 @@ pub enum Request {
         name: Option<String>,
         #[serde(default)]
         description: Option<String>,
-        #[serde(default)]
+        // No default — a flow_replace IPC without `nodes` is a malformed
+        // request, not a request to wipe every node. The runtime client always
+        // sends `nodes`; this rejects direct IPC callers that forget it.
         nodes: Vec<gitim_core::flow::FlowNodeInput>,
         author: Option<String>,
     },
