@@ -158,6 +158,124 @@ async fn set(table: &Arc<Mutex<ResponseTable>>, method: &str, value: Value) {
     table.lock().await.insert(method.to_string(), value);
 }
 
+// -- flows/replace (PUT) --
+
+#[tokio::test]
+async fn replace_flow_returns_200_with_data() {
+    let env = setup();
+    set(
+        &env.table,
+        "flow_replace",
+        json!({
+            "ok": true,
+            "data": {
+                "slug": "release",
+                "path": "flows/release/index.md",
+                "status": "committed",
+                "commit_id": "abc123"
+            }
+        }),
+    )
+    .await;
+
+    let (status, body) = send_json(
+        env.router,
+        "PUT",
+        "/workspaces/test-ws/im/flows/release",
+        json!({
+            "nodes": [
+                {"id": "changelog", "type": "agent_mention", "owner": "alice", "prompt": "gen changelog"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.get("slug").and_then(|v| v.as_str()), Some("release"));
+}
+
+#[tokio::test]
+async fn replace_flow_missing_returns_404() {
+    let env = setup();
+    set(
+        &env.table,
+        "flow_replace",
+        json!({
+            "ok": false,
+            "error": "flow not found: ghost",
+            "error_code": "not_found"
+        }),
+    )
+    .await;
+
+    let (status, body) = send_json(
+        env.router,
+        "PUT",
+        "/workspaces/test-ws/im/flows/ghost",
+        json!({ "nodes": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body.get("error_code").and_then(|v| v.as_str()),
+        Some("not_found")
+    );
+}
+
+#[tokio::test]
+async fn replace_flow_cycle_returns_422() {
+    let env = setup();
+    // Daemon validate failure (cycle) returns ok=false with NO error_code
+    // (Response::error), which flow_write_response maps to 422.
+    set(
+        &env.table,
+        "flow_replace",
+        json!({
+            "ok": false,
+            "error": "cycle detected in flow DAG"
+        }),
+    )
+    .await;
+
+    let (status, _body) = send_json(
+        env.router,
+        "PUT",
+        "/workspaces/test-ws/im/flows/release",
+        json!({
+            "nodes": [
+                {"id": "a", "type": "agent_mention", "owner": "x", "needs": ["b"]},
+                {"id": "b", "type": "agent_mention", "owner": "x", "needs": ["a"]}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn replace_flow_missing_nodes_is_rejected() {
+    let env = setup();
+    // Scripted daemon WOULD accept the call — proving the rejection happens at
+    // deserialize time (before the daemon), not because the daemon errored.
+    // A body without `nodes` defaulting to [] would wipe the flow.
+    set(
+        &env.table,
+        "flow_replace",
+        json!({ "ok": true, "data": { "slug": "release", "status": "committed" } }),
+    )
+    .await;
+    let (status, _body) = send_json(
+        env.router,
+        "PUT",
+        "/workspaces/test-ws/im/flows/release",
+        json!({ "name": "Renamed" }),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "missing nodes must be rejected (would otherwise wipe the flow), got {status}"
+    );
+}
+
 // -- flows/show --
 
 #[tokio::test]

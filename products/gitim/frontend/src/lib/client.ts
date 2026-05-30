@@ -24,6 +24,7 @@ import type {
   FleetAgentSnapshot,
   FleetNodeStatus,
   FlowDocument,
+  FlowNodeSummary,
   FlowRunDetail,
   FlowRunSummary,
   FlowSummary,
@@ -1993,6 +1994,39 @@ export async function updateFlowNodePrompt(
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`,
+        error_code: (data as Record<string, unknown>).error_code as string | undefined,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Overwrite an entire flow's node set (add / remove / re-wire / edit fields).
+ * `name` / `description` omitted keep their existing values daemon-side.
+ */
+export async function replaceFlow(
+  slug: string,
+  flowSlug: string,
+  payload: { name?: string; description?: string; nodes: FlowNodeSummary[] },
+): Promise<ApiResponse> {
+  if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
+  try {
+    const res = await fetch(
+      `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       },
     );
     const data = await res.json().catch(() => ({}));

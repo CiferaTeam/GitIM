@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use gitim_core::flow::{FlowNodeInput, NodeType};
 use gitim_core::types::Config;
 use gitim_daemon::api::Event;
 use gitim_daemon::state::AppState;
@@ -65,6 +66,251 @@ async fn setup() -> (TempDir, Arc<AppState>) {
     }
 
     (tmp, state)
+}
+
+fn agent_node(id: &str, needs: Vec<String>, prompt: &str) -> FlowNodeInput {
+    FlowNodeInput {
+        id: id.into(),
+        node_type: NodeType::AgentMention,
+        owner: Some("lewis".into()),
+        participants: vec![],
+        signal: None,
+        needs,
+        exits: vec![],
+        required_labels: vec![],
+        prompt: prompt.into(),
+    }
+}
+
+fn sample_nodes() -> Vec<FlowNodeInput> {
+    vec![
+        agent_node("changelog", vec![], "生成 changelog"),
+        agent_node("e2e", vec!["changelog".into()], "跑 cargo test"),
+    ]
+}
+
+async fn create_stub(state: &Arc<AppState>) {
+    let r = gitim_daemon::flow_handlers::handle_flow_create(
+        state.clone(),
+        "release".into(),
+        "Release".into(),
+        String::new(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "stub create failed: {:?}", r.error);
+}
+
+#[tokio::test]
+async fn flow_replace_adds_nodes_to_stub() {
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        sample_nodes(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "flow_replace failed: {:?}", r.error);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    assert_eq!(data["nodes"].as_array().unwrap().len(), 2);
+    let raw = data["raw_markdown"].as_str().unwrap();
+    assert!(raw.contains("## changelog"), "raw={raw}");
+    assert!(raw.contains("生成 changelog"), "raw={raw}");
+    assert!(
+        raw.contains("needs:"),
+        "e2e should declare needs, raw={raw}"
+    );
+}
+
+#[tokio::test]
+async fn flow_replace_rejects_cycle_without_writing() {
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        sample_nodes(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "valid replace failed: {:?}", r.error);
+
+    // a → b → a 成环
+    let cyclic = vec![
+        agent_node("a", vec!["b".into()], ""),
+        agent_node("b", vec!["a".into()], ""),
+    ];
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        cyclic,
+        "lewis".into(),
+    )
+    .await;
+    assert!(!r.ok, "cycle must be rejected");
+
+    // 没落盘:reload 仍是 changelog/e2e,不是 a/b
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    let ids: Vec<String> = data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        ids.contains(&"changelog".to_string()),
+        "pre-cycle nodes must be retained (cyclic version not persisted), got {:?}",
+        ids
+    );
+}
+
+#[tokio::test]
+async fn flow_replace_preserves_created_at() {
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let before =
+        gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let created_at = before.data.unwrap()["created_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        sample_nodes(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "replace failed: {:?}", r.error);
+
+    let after =
+        gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = after.data.unwrap();
+    assert_eq!(
+        data["created_at"].as_str().unwrap(),
+        created_at,
+        "created_at must be preserved across replace"
+    );
+    assert!(
+        data["updated_at"].as_str().is_some(),
+        "updated_at should be set after replace"
+    );
+}
+
+#[tokio::test]
+async fn flow_replace_unknown_slug_is_not_found() {
+    let (_tmp, state) = setup().await;
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "ghost".into(),
+        None,
+        None,
+        sample_nodes(),
+        "lewis".into(),
+    )
+    .await;
+    assert!(!r.ok, "replacing non-existent flow should fail");
+    assert!(
+        r.error.unwrap().contains("not found"),
+        "expected not-found error"
+    );
+}
+
+#[tokio::test]
+async fn flow_replace_round_trips_signal_and_labels() {
+    // The editor seeds its draft from show's node projection, so signal +
+    // required_labels MUST survive replace → show or editing a wait_for_signal
+    // node (or labels) silently drops them.
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let nodes = vec![FlowNodeInput {
+        id: "gate".into(),
+        node_type: NodeType::WaitForSignal,
+        owner: None,
+        participants: vec![],
+        signal: Some("approved".into()),
+        needs: vec![],
+        exits: vec![],
+        required_labels: vec!["rust".into(), "backend".into()],
+        prompt: String::new(),
+    }];
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        nodes,
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "replace failed: {:?}", r.error);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    let node = &data["nodes"][0];
+    assert_eq!(
+        node["signal"].as_str(),
+        Some("approved"),
+        "signal must survive round-trip, node={node}"
+    );
+    assert_eq!(
+        node["required_labels"][0].as_str(),
+        Some("rust"),
+        "required_labels must survive round-trip, node={node}"
+    );
+}
+
+#[tokio::test]
+async fn flow_replace_round_trips_exits() {
+    // exits is v2 conditional metadata the UI doesn't edit, but a structure
+    // save must not silently delete it from the user's on-disk frontmatter.
+    let (_tmp, state) = setup().await;
+    create_stub(&state).await;
+    let nodes = vec![FlowNodeInput {
+        id: "gate".into(),
+        node_type: NodeType::AgentMention,
+        owner: Some("lewis".into()),
+        participants: vec![],
+        signal: None,
+        needs: vec![],
+        exits: vec!["approved".into(), "rejected".into()],
+        required_labels: vec![],
+        prompt: String::new(),
+    }];
+    let r = gitim_daemon::flow_handlers::handle_flow_replace(
+        state.clone(),
+        "release".into(),
+        None,
+        None,
+        nodes,
+        "lewis".into(),
+    )
+    .await;
+    assert!(r.ok, "replace failed: {:?}", r.error);
+
+    let r = gitim_daemon::flow_handlers::handle_flow_show(state.clone(), "release".into()).await;
+    let data = r.data.unwrap();
+    let node = &data["nodes"][0];
+    assert_eq!(
+        node["exits"][0].as_str(),
+        Some("approved"),
+        "exits must survive round-trip, node={node}"
+    );
 }
 
 #[tokio::test]

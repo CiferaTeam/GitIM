@@ -172,6 +172,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::FlowCreate { .. }
                 | Request::FlowRemove { .. }
                 | Request::FlowUpdateNode { .. }
+                | Request::FlowReplace { .. }
                 | Request::FlowRunStart { .. }
                 | Request::FlowNodeSet { .. }
                 | Request::FlowRunCancel { .. }
@@ -606,6 +607,27 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 slug,
                 node_id,
                 prompt,
+                resolved_author,
+            )
+            .await
+        }
+        Request::FlowReplace {
+            slug,
+            name,
+            description,
+            nodes,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::flow_handlers::handle_flow_replace(
+                state,
+                slug,
+                name,
+                description,
+                nodes,
                 resolved_author,
             )
             .await

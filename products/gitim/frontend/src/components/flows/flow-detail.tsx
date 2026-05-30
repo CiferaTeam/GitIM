@@ -15,6 +15,11 @@ const ReactMarkdown = lazy(() => import("react-markdown"));
 const FlowDAG = lazy(() =>
   import("./flow-dag").then((m) => ({ default: m.FlowDAG })),
 );
+const FlowStructureEditor = lazy(() =>
+  import("./flow-structure-editor").then((m) => ({
+    default: m.FlowStructureEditor,
+  })),
+);
 
 const NODE_TYPE_LABEL: Record<NodeType, string> = {
   agent_mention: "agent",
@@ -71,11 +76,22 @@ export function FlowDetail({
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [recentRuns, setRecentRuns] = useState<FlowRunSummary[]>([]);
+  const [editingStructure, setEditingStructure] = useState(false);
 
   async function reloadFlow() {
     if (!activeSlug) return;
     const res = await client.getFlow(activeSlug, doc.slug);
     if (res.ok && res.data) setSelectedFlow(res.data);
+  }
+
+  async function handleSaveStructure(nodes: FlowNodeSummary[]) {
+    if (!activeSlug) return { ok: false, error: "No active workspace" };
+    const res = await client.replaceFlow(activeSlug, doc.slug, { nodes });
+    if (res.ok) {
+      await reloadFlow();
+      setEditingStructure(false);
+    }
+    return { ok: res.ok, error: res.error };
   }
 
   useEffect(() => {
@@ -121,21 +137,31 @@ export function FlowDetail({
         <header className="border-b border-border pb-4">
           <div className="flex items-start justify-between gap-3">
             <h2 className="break-all text-xl font-semibold">{doc.name}</h2>
-            <div className="flex shrink-0 gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className={cn(
-                  "text-destructive hover:text-destructive hover:bg-destructive/10",
-                  removing && "opacity-50 pointer-events-none",
-                )}
-                onClick={() => void handleRemove()}
-                disabled={removing}
-              >
-                {removing ? "Removing…" : "Remove"}
-              </Button>
-            </div>
+            {!editingStructure && (
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditingStructure(true)}
+                >
+                  Edit structure
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    "text-destructive hover:text-destructive hover:bg-destructive/10",
+                    removing && "opacity-50 pointer-events-none",
+                  )}
+                  onClick={() => void handleRemove()}
+                  disabled={removing}
+                >
+                  {removing ? "Removing…" : "Remove"}
+                </Button>
+              </div>
+            )}
           </div>
           {removeError && (
             <p className="mt-2 text-xs text-destructive">{removeError}</p>
@@ -165,52 +191,70 @@ export function FlowDetail({
           )}
         </header>
 
-        {/* DAG */}
-        <section>
-          <h3 className="mb-2 text-sm font-semibold">DAG</h3>
-          <div className="rounded-md border border-border bg-card p-4 overflow-x-auto">
-            <Suspense
-              fallback={
-                <div className="text-xs text-muted-foreground">
-                  Loading diagram...
-                </div>
-              }
-            >
-              <FlowDAG
-                nodes={doc.nodes}
-                onSavePrompt={async (nodeId, prompt) => {
-                  if (!activeSlug) {
-                    return { ok: false, error: "No active workspace" };
+        {editingStructure ? (
+          <Suspense
+            fallback={
+              <div className="text-xs text-muted-foreground">
+                Loading editor…
+              </div>
+            }
+          >
+            <FlowStructureEditor
+              doc={doc}
+              onSave={handleSaveStructure}
+              onCancel={() => setEditingStructure(false)}
+            />
+          </Suspense>
+        ) : (
+          <>
+            {/* DAG */}
+            <section>
+              <h3 className="mb-2 text-sm font-semibold">DAG</h3>
+              <div className="rounded-md border border-border bg-card p-4 overflow-x-auto">
+                <Suspense
+                  fallback={
+                    <div className="text-xs text-muted-foreground">
+                      Loading diagram...
+                    </div>
                   }
-                  const res = await client.updateFlowNodePrompt(
-                    activeSlug,
-                    doc.slug,
-                    nodeId,
-                    prompt,
-                  );
-                  if (res.ok) await reloadFlow();
-                  return { ok: res.ok, error: res.error };
-                }}
-              />
-            </Suspense>
-          </div>
-        </section>
+                >
+                  <FlowDAG
+                    nodes={doc.nodes}
+                    onSavePrompt={async (nodeId, prompt) => {
+                      if (!activeSlug) {
+                        return { ok: false, error: "No active workspace" };
+                      }
+                      const res = await client.updateFlowNodePrompt(
+                        activeSlug,
+                        doc.slug,
+                        nodeId,
+                        prompt,
+                      );
+                      if (res.ok) await reloadFlow();
+                      return { ok: res.ok, error: res.error };
+                    }}
+                  />
+                </Suspense>
+              </div>
+            </section>
 
-        {/* Nodes */}
-        {doc.nodes.length > 0 && (
-          <section>
-            <h3 className="mb-2 text-sm font-semibold">Nodes</h3>
-            <div className="space-y-3">
-              {doc.nodes.map((n) => (
-                <FlowNodeCard
-                  key={n.id}
-                  node={n}
-                  flowSlug={doc.slug}
-                  onSaved={() => void reloadFlow()}
-                />
-              ))}
-            </div>
-          </section>
+            {/* Nodes */}
+            {doc.nodes.length > 0 && (
+              <section>
+                <h3 className="mb-2 text-sm font-semibold">Nodes</h3>
+                <div className="space-y-3">
+                  {doc.nodes.map((n) => (
+                    <FlowNodeCard
+                      key={n.id}
+                      node={n}
+                      flowSlug={doc.slug}
+                      onSaved={() => void reloadFlow()}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
         )}
       </div>
     </section>

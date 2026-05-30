@@ -105,6 +105,49 @@ pub struct FlowNode {
     pub prompt: String,
 }
 
+/// 覆盖写 flow 的 IPC 入参,承载单个节点的完整定义。
+///
+/// 镜像 `FlowNode`,但 `prompt` 是普通字段(非 `#[serde(skip)]`)—— IPC 层必须
+/// 能传节点 prompt,而 `FlowNode.prompt` 由 body section parser 注入、不走
+/// frontmatter,故单独建此入参类型。`exits` 一并透传(v1 不读、UI 不编辑),
+/// 让覆盖写保持字段维度完整,未来支持 conditional 时不必改契约。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowNodeInput {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: NodeType,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub participants: Vec<String>,
+    #[serde(default)]
+    pub signal: Option<String>,
+    #[serde(default)]
+    pub needs: Vec<String>,
+    #[serde(default)]
+    pub exits: Vec<String>,
+    #[serde(default)]
+    pub required_labels: Vec<String>,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+impl FlowNodeInput {
+    pub fn into_flow_node(self) -> FlowNode {
+        FlowNode {
+            id: self.id,
+            node_type: self.node_type,
+            owner: self.owner,
+            participants: self.participants,
+            signal: self.signal,
+            needs: self.needs,
+            exits: self.exits,
+            required_labels: self.required_labels,
+            prompt: self.prompt,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowMeta {
     pub schema_version: u32,
@@ -285,5 +328,67 @@ mod tests {
         assert!(yaml.contains("- rust"));
         let parsed: FlowNode = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.required_labels, vec!["rust", "backend"]);
+    }
+
+    #[test]
+    fn flow_node_input_into_flow_node_carries_prompt() {
+        // FlowNodeInput exists precisely because FlowNode.prompt is #[serde(skip)] —
+        // the IPC payload must carry prompt and into_flow_node must transfer it.
+        let json = r#"{"id":"changelog","type":"agent_mention","owner":"alice","prompt":"生成 changelog"}"#;
+        let input: FlowNodeInput = serde_json::from_str(json).unwrap();
+        let node = input.into_flow_node();
+        assert_eq!(node.id, "changelog");
+        assert_eq!(node.node_type, NodeType::AgentMention);
+        assert_eq!(node.owner.as_deref(), Some("alice"));
+        assert_eq!(node.prompt, "生成 changelog");
+        assert!(node.needs.is_empty());
+    }
+
+    #[test]
+    fn flow_node_inputs_round_trip_through_markdown() {
+        let inputs = vec![
+            FlowNodeInput {
+                id: "changelog".into(),
+                node_type: NodeType::AgentMention,
+                owner: Some("alice".into()),
+                participants: vec![],
+                signal: None,
+                needs: vec![],
+                exits: vec![],
+                required_labels: vec![],
+                prompt: "生成 changelog".into(),
+            },
+            FlowNodeInput {
+                id: "e2e".into(),
+                node_type: NodeType::AgentMention,
+                owner: Some("bob".into()),
+                participants: vec![],
+                signal: None,
+                needs: vec!["changelog".into()],
+                exits: vec![],
+                required_labels: vec![],
+                prompt: "跑 cargo test".into(),
+            },
+        ];
+        let meta = FlowMeta {
+            schema_version: 1,
+            slug: "release".into(),
+            name: "Release".into(),
+            description: String::new(),
+            created_by: "lewis".into(),
+            created_at: "2026-05-30T00:00:00Z".into(),
+            updated_at: None,
+            nodes: inputs
+                .into_iter()
+                .map(FlowNodeInput::into_flow_node)
+                .collect(),
+        };
+        let doc = FlowDocument { meta };
+        let rendered = crate::flow::parser::stringify_flow_markdown(&doc).unwrap();
+        let parsed = crate::flow::parser::parse_flow_markdown(&rendered).unwrap();
+        assert_eq!(parsed.meta.nodes.len(), 2);
+        assert_eq!(parsed.meta.nodes[0].prompt, "生成 changelog");
+        assert_eq!(parsed.meta.nodes[1].needs, vec!["changelog"]);
+        assert_eq!(parsed.meta.nodes[1].node_type, NodeType::AgentMention);
     }
 }
