@@ -3,6 +3,7 @@ import { computeDraftRecipients } from "../../lib/recipient-preview";
 import type { ApiResponse, Channel, Message } from "../../lib/types";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
+import { HandlerName } from "./handler-name";
 import { CornerDownLeft, SendHorizontal, UserCheck, X } from "lucide-react";
 import {
   Dialog,
@@ -234,7 +235,9 @@ export function InputArea({
           className="mb-2 flex items-center gap-2 rounded-lg border border-primary/45 bg-primary/15 px-3 py-1.5 text-xs text-foreground shadow-[0_0_0_1px_rgba(96,165,250,0.12)]"
         >
           <span className="flex-1 truncate">
-            <span className="font-semibold text-primary">Reply to @{replyTo.author}: </span>
+            <span className="font-semibold text-primary">
+              Reply to <HandlerName handler={replyTo.author} />:{" "}
+            </span>
             <span className="text-foreground/85">
               {replyTo.body.length > 40
                 ? replyTo.body.slice(0, 40) + "..."
@@ -311,9 +314,9 @@ export function InputArea({
               <span
                 key={`${recipient}-${replyTo?.line_number ?? 0}-${draftRecipients.join("|")}`}
                 data-recipient-chip
-                className="route-recipient-nudge inline-flex h-6 items-center rounded-md border border-primary/45 bg-primary/15 px-2 font-mono text-[10px] font-semibold text-primary shadow-[0_0_0_1px_rgba(96,165,250,0.10)]"
+                className="route-recipient-nudge inline-flex h-6 items-center rounded-md border border-primary/45 bg-primary/15 px-2 text-[10px] font-semibold text-primary shadow-[0_0_0_1px_rgba(96,165,250,0.10)]"
               >
-                @{recipient}
+                <HandlerName handler={recipient} />
               </span>
             ))
           ) : (

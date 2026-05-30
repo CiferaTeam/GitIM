@@ -5,6 +5,7 @@ import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "./message-body";
+import { HandlerName } from "./handler-name";
 
 interface MessageItemProps {
   message: Message;
@@ -216,7 +217,10 @@ export function MessageItem({
         <div className="flex-1 min-w-0">
           {/* Message header */}
           <div className="flex items-baseline gap-2 mb-0.5">
-            <span className="font-semibold text-sm text-foreground">@{message.author}</span>
+            <HandlerName
+              handler={message.author}
+              className="font-semibold text-sm text-foreground"
+            />
             <span className="text-[11px] text-text-muted font-mono">
               {formatTimestamp(message.timestamp, timezone)}
             </span>
@@ -239,7 +243,9 @@ export function MessageItem({
               className="mb-1.5 flex items-start gap-1.5 text-left w-full group/reply"
             >
               <div className="border-l-2 border-text-muted/40 pl-2.5 py-0.5 text-xs text-text-muted group-hover/reply:text-foreground transition-colors rounded-r-md bg-surface/30 group-hover/reply:bg-surface/60">
-                <span className="font-medium">@{replyTarget.author}: </span>
+                <span className="font-medium">
+                  <HandlerName handler={replyTarget.author} />:{" "}
+                </span>
                 <span>
                   {replyTarget.body.length > 60
                     ? replyTarget.body.slice(0, 60) + "..."
@@ -285,9 +291,9 @@ export function MessageItem({
               {recipients.map((recipient) => (
                 <span
                   key={recipient}
-                  className="inline-flex h-6 items-center rounded-md border border-border/80 bg-surface/40 px-2 font-mono text-[10px] text-text-muted"
+                  className="inline-flex h-6 items-center rounded-md border border-border/80 bg-surface/40 px-2 text-[10px] text-text-muted"
                 >
-                  @{recipient}
+                  <HandlerName handler={recipient} />
                 </span>
               ))}
             </div>

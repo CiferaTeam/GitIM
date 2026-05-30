@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../../lib/utils";
+import { useDirectory } from "../../hooks/use-display-name-directory";
+import { resolveDisplayName } from "../../lib/format-handler-display";
+import { HandlerName } from "./handler-name";
 
 interface MentionPopupProps {
   users: string[];
@@ -9,9 +12,15 @@ interface MentionPopupProps {
 }
 
 export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupProps) {
-  const filtered = users.filter((u) =>
-    u.toLowerCase().includes(filter.toLowerCase())
-  );
+  const directory = useDirectory();
+  const f = filter.toLowerCase();
+  // Match on either segment: typing the handle OR the display name finds the
+  // user. Selection still inserts the bare handle (handled by onSelect).
+  const filtered = users.filter((u) => {
+    if (u.toLowerCase().includes(f)) return true;
+    const name = resolveDisplayName(u, directory);
+    return name ? name.toLowerCase().includes(f) : false;
+  });
 
   const [activeIndex, setActiveIndex] = useState(0);
   const selectedIndex =
@@ -84,7 +93,7 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
               onSelect(user);
             }}
           >
-            @{user}
+            <HandlerName handler={user} />
           </button>
         ))}
       </div>

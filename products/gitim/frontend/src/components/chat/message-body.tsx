@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback } from "react";
 import { Copy, Check } from "lucide-react";
 import { parseMessageBody, type Fragment } from "../../lib/message-parser";
+import { HandlerName } from "./handler-name";
 
 export interface MessageBodyProps {
   body: string;
@@ -114,7 +115,7 @@ function FragmentRenderer({
             onMentionClick?.(fragment.handler, e);
           }}
         >
-          @{fragment.handler}
+          <HandlerName handler={fragment.handler} />
         </span>
       );
 
@@ -156,7 +157,7 @@ function FragmentRenderer({
             onUserProfileClick?.(fragment.handler, e);
           }}
         >
-          ~{fragment.handler}
+          <HandlerName handler={fragment.handler} />
         </span>
       );
 

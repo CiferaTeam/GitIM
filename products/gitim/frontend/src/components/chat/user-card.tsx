@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { MessageSquare } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
+import { HandlerName } from "./handler-name";
 
 interface UserCardProps {
   handler: string;
@@ -12,7 +13,7 @@ interface UserCardProps {
 export function UserCard({ handler, position, onClose, onStartDm }: UserCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const agents = useAgentStore((s) => s.agents);
-  const isAgent = agents.some((a) => a.name === handler || a.id === handler);
+  const isAgent = agents.some((a) => a.handler === handler);
 
   // Close on click outside or Escape
   useEffect(() => {
@@ -55,7 +56,7 @@ export function UserCard({ handler, position, onClose, onStartDm }: UserCardProp
         </div>
         <div className="min-w-0">
           <div className="text-sm font-medium text-foreground truncate">
-            @{handler}
+            <HandlerName handler={handler} />
           </div>
           <div className="text-[11px] text-muted-foreground">
             {isAgent ? "Agent" : "User"}
