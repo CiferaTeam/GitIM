@@ -15,13 +15,14 @@ import {
   type ProviderModelCatalog,
 } from "@/lib/providers";
 import { MAX_INTRODUCTION_LEN, type Agent } from "@/lib/types";
-import { ArrowLeft, Play, Pause, Flame, Loader2, Pencil } from "lucide-react";
+import { ArrowLeft, Play, Pause, Flame, Loader2, Lock, Pencil } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { relativeTime, statusBadge } from "./agent-status";
 import { ProviderBadge } from "./provider-badge";
 import { BurnAgentDialog } from "./burn-agent-dialog";
 import { AgentUsageCard } from "./agent-usage-card";
 import { EnvVarsEditor, type EnvVar } from "./env-vars-editor";
+import { runningLockNotice } from "./agent-field-lock";
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 
@@ -325,6 +326,10 @@ export function AgentDetail() {
   const showModelEditor =
     mode !== "view" &&
     canEditModel;
+  const lockNotice =
+    mode !== "view" && isRunning
+      ? runningLockNotice(agent.provider, canEditModel)
+      : null;
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -393,6 +398,13 @@ export function AgentDetail() {
         )}
       </div>
 
+      {lockNotice && (
+        <div className="mb-5 flex items-start gap-2 p-3 rounded-lg border border-warning/30 bg-warning/10 text-sm text-warning">
+          <Lock className="size-4 mt-0.5 shrink-0" />
+          <span>{lockNotice}</span>
+        </div>
+      )}
+
       {/* Info grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8 p-5 rounded-xl border border-border bg-card/50">
         <Field label="Repo Path">
@@ -458,11 +470,6 @@ export function AgentDetail() {
                   disabled={isRunning || mode === "saving"}
                 />
               )}
-              {isRunning && (
-                <p className="text-xs text-text-muted">
-                  Stop the agent before changing model.
-                </p>
-              )}
             </div>
           ) : agent.model ? (
             <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
@@ -502,11 +509,6 @@ export function AgentDetail() {
                   <option value="xhigh">XHigh</option>
                   <option value="max">Max</option>
                 </select>
-                {isRunning && (
-                  <p className="text-xs text-text-muted">
-                    Stop the agent before changing effort.
-                  </p>
-                )}
               </div>
             ) : agent.effort ? (
               <span className="inline-flex items-center px-2 py-0.5 rounded bg-background/60 border border-border text-sm font-mono">
