@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemberPicker } from "./member-picker";
+import { DisplayNameDirectoryProvider } from "../../hooks/display-name-directory-provider";
+import { useAgentStore } from "../../hooks/use-agent-store";
+import { useChatStore } from "../../hooks/use-chat-store";
+import type { UserInfo } from "../../lib/types";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -35,7 +39,11 @@ function renderPicker(options: {
   value?: string[];
   excludeHandlers?: string[];
   onChange?: (selected: string[]) => void;
+  userInfos?: UserInfo[];
 } = {}) {
+  useAgentStore.setState({ agents: [] });
+  useChatStore.setState({ userInfos: options.userInfos ?? [] });
+
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -44,16 +52,18 @@ function renderPicker(options: {
   function Harness() {
     const [value, setValue] = useState(options.value ?? []);
     return (
-      <MemberPicker
-        allUsers={["alice", "bob", "carol", "dave"]}
-        excludeHandlers={options.excludeHandlers ?? []}
-        value={value}
-        onChange={(next) => {
-          onChange(next);
-          setValue(next);
-        }}
-        emptyMessage="Nobody found"
-      />
+      <DisplayNameDirectoryProvider>
+        <MemberPicker
+          allUsers={["alice", "bob", "carol", "dave"]}
+          excludeHandlers={options.excludeHandlers ?? []}
+          value={value}
+          onChange={(next) => {
+            onChange(next);
+            setValue(next);
+          }}
+          emptyMessage="Nobody found"
+        />
+      </DisplayNameDirectoryProvider>
     );
   }
 
@@ -75,6 +85,8 @@ describe("MemberPicker", () => {
     }
     roots = [];
     document.body.innerHTML = "";
+    useAgentStore.setState({ agents: [] });
+    useChatStore.setState({ userInfos: [] });
   });
 
   it("filters out excluded handlers before rendering candidates", () => {
@@ -96,6 +108,24 @@ describe("MemberPicker", () => {
     });
 
     expect(candidateLabels(rendered.container)).toEqual(["@alice"]);
+  });
+
+  it("filters candidates on display_name, not just the handle", async () => {
+    const rendered = renderPicker({
+      userInfos: [{ handler: "alice", display_name: "Alice Chen" }],
+    });
+    roots.push(rendered.root);
+    const search = rendered.container.querySelector<HTMLInputElement>(
+      "input[data-slot='input']",
+    );
+
+    await act(async () => {
+      // "chen" appears only in the display name, not in any handle.
+      setInputValue(search!, "chen");
+      await Promise.resolve();
+    });
+
+    expect(candidateLabels(rendered.container)).toEqual(["Alice Chen@alice"]);
   });
 
   it("toggles and removes selected handlers", () => {

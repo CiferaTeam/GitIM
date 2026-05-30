@@ -6,6 +6,8 @@ import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "./message-body";
 import { HandlerName } from "./handler-name";
+import { useDirectory } from "../../hooks/use-display-name-directory";
+import { formatHandlerLabel } from "../../lib/format-handler-display";
 
 interface MessageItemProps {
   message: Message;
@@ -74,6 +76,7 @@ export function MessageItem({
   onUserProfileClick,
   onActionSheet,
 }: MessageItemProps) {
+  const directory = useDirectory();
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -282,7 +285,9 @@ export function MessageItem({
             <div
               data-message-receipt
               className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-text-muted"
-              aria-label={`🫡 ${recipients.map((r) => `@${r}`).join(", ")}`}
+              aria-label={`🫡 ${recipients
+                .map((r) => formatHandlerLabel(r, directory))
+                .join(", ")}`}
             >
               <span className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-surface/60 px-2 font-medium text-foreground/80">
                 <CheckCheck className="h-3 w-3 text-success" />

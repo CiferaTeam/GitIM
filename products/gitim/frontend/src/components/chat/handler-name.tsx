@@ -33,7 +33,10 @@ export function HandlerName({
   const name = resolveDisplayName(handler, directory);
 
   if (!name) {
-    return <span className={className}>@{handler}</span>;
+    // Bare handle: it's a technical value, so render it monospace per
+    // DESIGN.md (callers no longer need font-mono on the wrapper). In the
+    // common case a display_name exists and this branch isn't taken.
+    return <span className={cn("font-mono", className)}>@{handler}</span>;
   }
 
   return (

@@ -58,7 +58,11 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
       >
         <AtSign className="size-4 shrink-0" />
         <span className="truncate flex-1 text-sm">
-          {peer ? <HandlerName handler={peer} /> : label}
+          {peer && peer !== currentUser ? (
+            <HandlerName handler={peer} />
+          ) : (
+            label
+          )}
         </span>
         {ch.unreadCount > 0 && (
           <span className="text-[11px] px-2 py-0.5 rounded-full font-mono shrink-0 bg-surface-hover text-foreground border border-border">

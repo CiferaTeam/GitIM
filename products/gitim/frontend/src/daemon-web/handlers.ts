@@ -639,13 +639,17 @@ export async function thread(
 export async function users(): Promise<ApiResponse> {
   const s = getState();
   await refreshUsersCache();
-  const userList = Array.from(s.users.keys());
-  // Mirror the Rust daemon's wire shape: `users` stays the bare handler list
-  // for backward compat; `user_infos` is the additive enrichment the frontend
-  // directory consumes. In-memory `s.users` already holds full UserMeta.
-  const userInfos = Array.from(s.users.entries()).map(([handler, meta]) => ({
+  // Sort to match the Rust daemon (read.rs sorts before building both lists).
+  // Same order on both backends keeps `users[i] === user_infos[i].handler` and
+  // makes the poll loop's index-based change detection reliable when a session
+  // switches between the Rust daemon and this browser daemon.
+  const userList = Array.from(s.users.keys()).sort();
+  // `users` stays the bare handler list for backward compat; `user_infos` is
+  // the additive enrichment the frontend directory consumes. In-memory
+  // `s.users` already holds full UserMeta.
+  const userInfos = userList.map((handler) => ({
     handler,
-    display_name: meta.display_name,
+    display_name: s.users.get(handler)?.display_name,
   }));
   return ok({ users: userList, user_infos: userInfos });
 }

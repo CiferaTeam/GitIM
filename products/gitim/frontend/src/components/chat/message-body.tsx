@@ -2,6 +2,8 @@ import { useMemo, useState, useCallback } from "react";
 import { Copy, Check } from "lucide-react";
 import { parseMessageBody, type Fragment } from "../../lib/message-parser";
 import { HandlerName } from "./handler-name";
+import { useDirectory } from "../../hooks/use-display-name-directory";
+import { resolveDisplayName } from "../../lib/format-handler-display";
 
 export interface MessageBodyProps {
   body: string;
@@ -101,6 +103,7 @@ function FragmentRenderer({
   onMessageLinkClick,
   onUserProfileClick,
 }: FragmentRendererProps) {
+  const directory = useDirectory();
   switch (fragment.type) {
     case "text":
       return <span key={index}>{fragment.content}</span>;
@@ -157,7 +160,10 @@ function FragmentRenderer({
             onUserProfileClick?.(fragment.handler, e);
           }}
         >
-          <HandlerName handler={fragment.handler} />
+          {/* Keep the `~` profile-link sigil (distinct from an `@` mention) and
+              enrich with display_name when known. Falls back to the bare
+              handle. */}
+          ~{resolveDisplayName(fragment.handler, directory) ?? fragment.handler}
         </span>
       );
 

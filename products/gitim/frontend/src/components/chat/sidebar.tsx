@@ -1153,7 +1153,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 key={ch.name}
                 icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
-                labelNode={peer ? <HandlerName handler={peer} /> : undefined}
+                labelNode={
+                  peer && peer !== currentUser ? (
+                    <HandlerName handler={peer} />
+                  ) : undefined
+                }
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
@@ -1198,7 +1202,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 key={ch.name}
                 icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
-                labelNode={peer ? <HandlerName handler={peer} /> : undefined}
+                labelNode={
+                  peer && peer !== currentUser ? (
+                    <HandlerName handler={peer} />
+                  ) : undefined
+                }
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}

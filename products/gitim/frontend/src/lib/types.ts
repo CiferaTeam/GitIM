@@ -163,7 +163,11 @@ export interface Channel {
 
 export interface UserInfo {
   handler: string;
-  display_name: string;
+  /** Best-effort on the wire: the Rust daemon omits it (serde
+   *  `skip_serializing_if`) when `users/<handler>.meta.yaml` is missing or
+   *  unparseable, so it arrives as `undefined`. Renderers fall back to the
+   *  bare handler. */
+  display_name?: string;
 }
 
 export interface AgentActivityEvent {

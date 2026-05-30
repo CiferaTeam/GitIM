@@ -10,6 +10,7 @@ import {
 import type { Message } from "../../lib/types";
 import type { ChatViewportAnchor } from "../../lib/chat-ui-state";
 import { MessageItem } from "./message-item";
+import { HandlerName } from "./handler-name";
 import { MessageSquare, Hash } from "lucide-react";
 import {
   SCROLL_BOTTOM_THRESHOLD_PX,
@@ -316,24 +317,45 @@ export function MessageList({
 
         if (msg.type === "event") {
           const targets = msg.meta?.targets ?? [];
-          let eventText: string;
+          // Render people in event lines through <HandlerName> too, so "Alice
+          // joined" matches how authors read in the message body. The targets
+          // join with commas while keeping each name a directory lookup.
+          const targetList = targets.map((t, i) => (
+            <span key={t}>
+              {i > 0 ? ", " : ""}
+              <HandlerName handler={t} />
+            </span>
+          ));
+          let eventContent: React.ReactNode;
           if (msg.event_type === "join") {
-            eventText =
-              targets.length > 0
-                ? `@${msg.author} added ${targets.map((t) => `@${t}`).join(", ")}`
-                : `@${msg.author} joined the channel`;
+            eventContent =
+              targets.length > 0 ? (
+                <>
+                  <HandlerName handler={msg.author} /> added {targetList}
+                </>
+              ) : (
+                <>
+                  <HandlerName handler={msg.author} /> joined the channel
+                </>
+              );
           } else if (msg.event_type === "leave") {
-            eventText =
-              targets.length > 0
-                ? `@${msg.author} removed ${targets.map((t) => `@${t}`).join(", ")}`
-                : `@${msg.author} left the channel`;
+            eventContent =
+              targets.length > 0 ? (
+                <>
+                  <HandlerName handler={msg.author} /> removed {targetList}
+                </>
+              ) : (
+                <>
+                  <HandlerName handler={msg.author} /> left the channel
+                </>
+              );
           } else {
-            eventText = msg.body ?? `${msg.author}: ${msg.event_type}`;
+            eventContent = msg.body ?? `${msg.author}: ${msg.event_type}`;
           }
           return (
             <div key={key} className="flex justify-center py-2">
               <span className="text-[11px] text-text-muted/70 italic bg-surface/40 px-2 py-0.5 rounded-full">
-                {eventText}
+                {eventContent}
               </span>
             </div>
           );

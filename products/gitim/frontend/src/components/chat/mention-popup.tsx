@@ -81,7 +81,7 @@ export function MentionPopup({ users, filter, onSelect, onClose }: MentionPopupP
           <button
             key={user}
             className={cn(
-              "w-full text-left px-3 py-1.5 text-sm transition-colors",
+              "w-full truncate text-left px-3 py-1.5 text-sm transition-colors",
               i === selectedIndex
                 ? "bg-accent text-accent-foreground"
                 : "hover:bg-muted"

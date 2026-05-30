@@ -116,7 +116,11 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
             <Hash className="size-4 text-primary shrink-0" />
           )}
           <span className="font-semibold text-sm tracking-tight truncate">
-            {dmPeer ? <HandlerName handler={dmPeer} /> : displayName}
+            {dmPeer && dmPeer !== currentUser ? (
+              <HandlerName handler={dmPeer} />
+            ) : (
+              displayName
+            )}
           </span>
         </div>
       </div>
