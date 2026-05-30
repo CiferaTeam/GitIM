@@ -11,6 +11,61 @@ use crate::user_config::{FleetNodeEntry, FleetWorkspaceMapping};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
+/// How often the tunnel watcher probes a healthy tunnel.
+const TUNNEL_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// Initial retry delay after a tunnel watcher failure.
+const TUNNEL_BACKOFF_INITIAL: Duration = Duration::from_secs(5);
+/// Upper bound on the fleet tunnel watcher's retry backoff.
+const TUNNEL_BACKOFF_MAX: Duration = Duration::from_secs(120);
+
+/// Double the current backoff, capped at [`TUNNEL_BACKOFF_MAX`].
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(TUNNEL_BACKOFF_MAX)
+}
+
+/// Build a tunnel [`LaunchConfig`](crate::cli::tunnel::LaunchConfig) for a node's
+/// watcher, or `None` when the node has no `ssh_tunnel` or no fixed `local_port`
+/// to maintain (an auto-selected ephemeral port can't be re-bound across restarts).
+fn tunnel_launch_config(entry: &FleetNodeEntry) -> Option<crate::cli::tunnel::LaunchConfig> {
+    let tunnel = entry.ssh_tunnel.as_ref()?;
+    let local_port = tunnel.local_port?;
+    Some(crate::cli::tunnel::LaunchConfig {
+        node_id: entry.node_id.clone(),
+        ssh_target: tunnel.ssh_target.clone(),
+        remote_host: tunnel.remote_host.clone(),
+        remote_port: tunnel.remote_port,
+        local_port,
+    })
+}
+
+/// Keep a node's SSH tunnel alive for the lifetime of its [`FleetNodeRuntime`].
+///
+/// Periodically calls the idempotent [`ensure_running`](crate::cli::tunnel::ensure_running)
+/// — healthy tunnel is a no-op, dead/unhealthy one is rebuilt. Polls every
+/// [`TUNNEL_POLL_INTERVAL`] when healthy; exponential backoff on failure. No auth
+/// circuit-breaker: ssh retries cost no remote rate limit, and unbounded retry is
+/// exactly the keep-alive we want (remote can come back hours later).
+async fn tunnel_watcher_loop(launch: crate::cli::tunnel::LaunchConfig) {
+    let mut backoff = TUNNEL_BACKOFF_INITIAL;
+    loop {
+        match crate::cli::tunnel::ensure_running(&launch).await {
+            Ok(_) => {
+                backoff = TUNNEL_BACKOFF_INITIAL;
+                tokio::time::sleep(TUNNEL_POLL_INTERVAL).await;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    node_id = %launch.node_id,
+                    error = %err,
+                    "fleet tunnel watcher: ensure_running failed, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = next_backoff(backoff);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FleetEventEnvelope {
@@ -94,6 +149,13 @@ impl FleetNodeRuntime {
             let handle = tokio::spawn(async move {
                 subscribe_workspace_loop(state, entry, subscription).await;
             });
+            handles.push(handle.abort_handle());
+        }
+        // Per-node tunnel watcher: keep the SSH tunnel the observers depend on
+        // alive across restarts and transient drops. One per node, outside the
+        // subscription loop. Shares the AbortHandle lifecycle (Drop aborts it).
+        if let Some(launch) = tunnel_launch_config(&entry) {
+            let handle = tokio::spawn(tunnel_watcher_loop(launch));
             handles.push(handle.abort_handle());
         }
         Self { entry, handles }
@@ -752,5 +814,71 @@ mod tests {
             validate_node(&normalize_node(entry)).unwrap_err(),
             "ssh_tunnel.ssh_target is required"
         );
+    }
+
+    #[test]
+    fn next_backoff_doubles_and_caps() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(5)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(10)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(80)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(120)),
+            Duration::from_secs(120)
+        );
+    }
+
+    fn entry_with_tunnel(local_port: Option<u16>) -> FleetNodeEntry {
+        FleetNodeEntry {
+            node_id: "mac-mini".to_string(),
+            base_url: "http://127.0.0.1:18068".to_string(),
+            node_ip: None,
+            node_name: None,
+            workspaces: vec!["room".to_string()],
+            workspace_mappings: Vec::new(),
+            ssh_tunnel: Some(crate::user_config::FleetSshTunnelConfig {
+                ssh_target: "lewis@host".to_string(),
+                remote_host: "127.0.0.1".to_string(),
+                remote_port: 16868,
+                local_port,
+            }),
+        }
+    }
+
+    #[test]
+    fn tunnel_launch_config_maps_fields_when_complete() {
+        let launch = tunnel_launch_config(&entry_with_tunnel(Some(18068)));
+        assert_eq!(
+            launch.as_ref().map(|l| l.node_id.as_str()),
+            Some("mac-mini")
+        );
+        assert_eq!(
+            launch.as_ref().map(|l| l.ssh_target.as_str()),
+            Some("lewis@host")
+        );
+        assert_eq!(
+            launch.as_ref().map(|l| l.remote_host.as_str()),
+            Some("127.0.0.1")
+        );
+        assert_eq!(launch.as_ref().map(|l| l.remote_port), Some(16868));
+        assert_eq!(launch.as_ref().map(|l| l.local_port), Some(18068));
+    }
+
+    #[test]
+    fn tunnel_launch_config_none_without_tunnel_or_port() {
+        let mut no_tunnel = entry_with_tunnel(Some(18068));
+        no_tunnel.ssh_tunnel = None;
+        assert!(tunnel_launch_config(&no_tunnel).is_none());
+
+        // ssh_tunnel present but no fixed local_port → not watchable
+        assert!(tunnel_launch_config(&entry_with_tunnel(None)).is_none());
     }
 }
