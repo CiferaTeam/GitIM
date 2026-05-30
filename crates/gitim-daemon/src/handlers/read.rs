@@ -234,6 +234,27 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
     let mut sorted: Vec<String> = users.clone();
     sorted.sort();
 
+    // Best-effort per-user display_name, mirroring `handle_list_archived_users`
+    // below. A read or parse failure means the entry simply has no display_name
+    // on the wire — never an error for the list call. `users` (above) stays the
+    // bare handler list for backward compat; `user_infos` is the additive
+    // enrichment the frontend directory consumes.
+    let users_dir = state.repo_root.join("users");
+    let user_infos: Vec<gitim_core::responses::ActiveUserEntry> = sorted
+        .iter()
+        .map(|handler| {
+            let display_name =
+                std::fs::read_to_string(users_dir.join(format!("{handler}.meta.yaml")))
+                    .ok()
+                    .and_then(|c| serde_yaml::from_str::<UserMeta>(&c).ok())
+                    .map(|m| m.display_name);
+            gitim_core::responses::ActiveUserEntry {
+                handler: handler.clone(),
+                display_name,
+            }
+        })
+        .collect();
+
     let archived_users = if include_archived {
         let arch_users_dir = state.repo_root.join("archive").join("users");
         let mut handlers: Vec<String> = Vec::new();
@@ -256,6 +277,7 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
     let payload = gitim_core::responses::ListUsersResponse {
         users: sorted,
         archived_users,
+        user_infos: Some(user_infos),
     };
     Response::json(payload)
 }

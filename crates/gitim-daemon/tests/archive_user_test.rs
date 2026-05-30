@@ -819,6 +819,62 @@ async fn test_list_users_default_excludes_archived() {
 }
 
 #[tokio::test]
+async fn test_list_users_carries_display_name() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    let resp = list_users(state.clone()).await;
+    assert!(resp.ok);
+    let data = resp.data.unwrap();
+
+    // Additive enrichment: `user_infos` carries best-effort display_name per
+    // active user, parsed from `users/<handler>.meta.yaml`. `users` stays the
+    // bare string list (asserted elsewhere) for backward compat.
+    let infos: Vec<gitim_core::responses::ActiveUserEntry> =
+        serde_json::from_value(data["user_infos"].clone()).unwrap();
+    assert_eq!(
+        infos,
+        vec![
+            gitim_core::responses::ActiveUserEntry {
+                handler: "alice".to_string(),
+                display_name: Some("Alice".to_string()),
+            },
+            gitim_core::responses::ActiveUserEntry {
+                handler: "bob".to_string(),
+                display_name: Some("Bob".to_string()),
+            },
+        ],
+        "user_infos must mirror sorted handlers with their display_name"
+    );
+}
+
+#[tokio::test]
+async fn test_list_users_display_name_best_effort_when_meta_missing() {
+    let (_tmp, state) = setup_test_repo().await;
+
+    // Register a handler in memory whose meta.yaml does not exist on disk.
+    {
+        let mut users = state.users.write().await;
+        users.push("ghost".to_string());
+    }
+
+    let resp = list_users(state.clone()).await;
+    assert!(resp.ok);
+    let data = resp.data.unwrap();
+    let infos: Vec<gitim_core::responses::ActiveUserEntry> =
+        serde_json::from_value(data["user_infos"].clone()).unwrap();
+
+    let ghost = infos.iter().find(|e| e.handler == "ghost").unwrap();
+    assert_eq!(
+        ghost.display_name, None,
+        "missing meta.yaml → display_name omitted (best-effort), not an error"
+    );
+    // The bare handler list still includes ghost — enrichment failure never
+    // drops a user.
+    let users: Vec<String> = serde_json::from_value(data["users"].clone()).unwrap();
+    assert!(users.contains(&"ghost".to_string()));
+}
+
+#[tokio::test]
 async fn test_list_users_include_archived_returns_both() {
     let (_tmp, state) = setup_test_repo().await;
 

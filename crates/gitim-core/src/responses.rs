@@ -131,6 +131,29 @@ pub struct ListUsersResponse {
     /// Wire-additive — old clients see no field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_users: Option<Vec<String>>,
+    /// Wire-additive enrichment: per-active-user `display_name`, one row per
+    /// handler in `users`. New daemons always emit it (best-effort); old
+    /// daemons omit it. The frontend builds its `handler → display_name`
+    /// directory from this and falls back to the bare handler when absent.
+    ///
+    /// `users` stays `Vec<String>` (unchanged) so old clients reading a new
+    /// daemon don't break — they ignore this field. Yes, the handler then
+    /// appears in both `users` and `user_infos`; the duplication is the price
+    /// of true backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_infos: Option<Vec<ActiveUserEntry>>,
+}
+
+/// One row in `ListUsersResponse.user_infos`. Mirrors [`ArchivedUserEntry`]:
+/// `handler` is structurally guaranteed; `display_name` is best-effort —
+/// the daemon parses `users/<handler>.meta.yaml` on each list call and omits
+/// the field when the file is absent or unparseable. Frontends render the
+/// bare handler when `display_name` is `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActiveUserEntry {
+    pub handler: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// Response payload for `Request::GetThread`. `entries` keep the same
@@ -822,11 +845,13 @@ mod tests {
         let r = ListUsersResponse {
             users: vec!["alice".to_string(), "bob".to_string()],
             archived_users: None,
+            user_infos: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        // Default call: only `users`. `archived_users` is skipped when None
-        // so older clients that don't know the field still parse cleanly.
+        // Default call: only `users`. `archived_users` and `user_infos` are
+        // skipped when None so older clients that don't know the fields still
+        // parse cleanly.
         assert_eq!(obj.len(), 1);
         let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
@@ -842,6 +867,7 @@ mod tests {
         let r = ListUsersResponse {
             users: vec!["alice".to_string()],
             archived_users: Some(vec!["bob".to_string(), "carol".to_string()]),
+            user_infos: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
@@ -856,6 +882,43 @@ mod tests {
         // Disambiguation guard: no bare `archived` key — that's reserved for
         // `ReadResponse.archived: bool` semantics.
         assert!(!obj.contains_key("archived"));
+    }
+
+    #[test]
+    fn list_users_response_user_infos_wire_shape() {
+        let r = ListUsersResponse {
+            users: vec!["alice".to_string(), "bob".to_string()],
+            archived_users: None,
+            user_infos: Some(vec![
+                ActiveUserEntry {
+                    handler: "alice".to_string(),
+                    display_name: Some("Alice Chen".to_string()),
+                },
+                // display_name omitted on the wire when None (meta missing /
+                // unparseable) — the frontend falls back to the bare handler.
+                ActiveUserEntry {
+                    handler: "bob".to_string(),
+                    display_name: None,
+                },
+            ]),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        // `users` (strings) stays put for backward compat; `user_infos` is the
+        // additive enrichment.
+        assert_eq!(obj.get("users").unwrap().as_array().unwrap().len(), 2);
+        let infos = obj.get("user_infos").unwrap().as_array().unwrap();
+        assert_eq!(infos[0].get("handler").unwrap().as_str(), Some("alice"));
+        assert_eq!(
+            infos[0].get("display_name").unwrap().as_str(),
+            Some("Alice Chen")
+        );
+        // None display_name is skipped, not serialized as null.
+        assert_eq!(infos[1].get("handler").unwrap().as_str(), Some("bob"));
+        assert!(!infos[1].as_object().unwrap().contains_key("display_name"));
+        // Round-trips losslessly.
+        let back: ListUsersResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
     }
 
     #[test]
