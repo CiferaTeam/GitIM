@@ -4,6 +4,7 @@ import { HelpCircle } from "lucide-react";
 import { TwitterXIcon } from "../icons/twitter-x";
 import { ThemeToggle } from "../theme/theme-toggle";
 import { useChatStore } from "../../hooks/use-chat-store";
+import { HandlerName } from "../chat/handler-name";
 import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
@@ -76,10 +77,10 @@ export function AppShell({ children }: AppShellProps) {
           </button>
           {currentUser ? (
             <span
-              className="max-w-[22vw] truncate text-xs text-text-secondary font-mono bg-surface px-2 py-1 rounded-md border border-border md:max-w-none"
+              className="max-w-[22vw] truncate text-xs text-text-secondary bg-surface px-2 py-1 rounded-md border border-border md:max-w-none"
               title={`Human handler: @${currentUser}`}
             >
-              @{currentUser}
+              <HandlerName handler={currentUser} />
             </span>
           ) : null}
         </div>

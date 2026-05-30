@@ -1,7 +1,8 @@
 import { X, Hash, AtSign, MessageSquare } from "lucide-react";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { cn } from "../../lib/utils";
-import { formatDmDisplayName } from "../../lib/dm-display-name";
+import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
+import { HandlerName } from "../chat/handler-name";
 import type { Channel } from "../../lib/types";
 
 function isMyDm(channel: Channel, currentUser: string): boolean {
@@ -42,6 +43,7 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
 
   function renderDmButton(ch: Channel) {
     const label = formatDmDisplayName(ch.name, currentUser);
+    const peer = dmPeerHandler(ch.name, currentUser);
     return (
       <button
         key={ch.name}
@@ -55,7 +57,9 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
         )}
       >
         <AtSign className="size-4 shrink-0" />
-        <span className="truncate flex-1 text-sm">{label}</span>
+        <span className="truncate flex-1 text-sm">
+          {peer ? <HandlerName handler={peer} /> : label}
+        </span>
         {ch.unreadCount > 0 && (
           <span className="text-[11px] px-2 py-0.5 rounded-full font-mono shrink-0 bg-surface-hover text-foreground border border-border">
             {ch.unreadCount}
@@ -150,8 +154,8 @@ export function MobileSidebarDrawer({ open, onClose, onChannelSelect }: MobileSi
         </div>
 
         <div className="px-4 py-3 border-t border-border/60 shrink-0">
-          <span className="text-xs text-text-muted font-mono bg-surface px-3 py-1.5 rounded-lg border border-border inline-block">
-            @{currentUser}
+          <span className="text-xs text-text-muted bg-surface px-3 py-1.5 rounded-lg border border-border inline-block">
+            <HandlerName handler={currentUser} />
           </span>
         </div>
       </div>

@@ -5,6 +5,7 @@ import type { Message } from "../../lib/types";
 import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "../chat/message-body";
+import { HandlerName } from "../chat/handler-name";
 
 function initials(name: string) {
   return name.slice(0, 2).toUpperCase();
@@ -80,7 +81,9 @@ export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }
 
               {msg.point_to > 0 && parent && (
                 <div className="mb-1.5 border-l-2 border-text-muted/40 pl-2.5 text-xs text-text-muted py-0.5 rounded-r-md bg-surface/30">
-                  <span className="font-medium">@{parent.author}: </span>
+                  <span className="font-medium">
+                    <HandlerName handler={parent.author} />:{" "}
+                  </span>
                   <span>{parent.body.length > 60 ? parent.body.slice(0, 60) + "…" : parent.body}</span>
                 </div>
               )}
@@ -93,7 +96,10 @@ export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }
                   {initials(msg.author)}
                 </div>
                 <div className="flex items-baseline gap-2 min-w-0">
-                  <span className="font-medium text-foreground truncate text-sm">@{msg.author}</span>
+                  <HandlerName
+                    handler={msg.author}
+                    className="font-medium text-foreground truncate text-sm"
+                  />
                   <span className="text-[11px] text-text-muted">{formatTimestamp(msg.timestamp, timezone)}</span>
                 </div>
               </div>

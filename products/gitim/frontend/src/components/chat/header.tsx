@@ -5,8 +5,9 @@ import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
-import { formatDmDisplayName } from "../../lib/dm-display-name";
+import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
 import type { Channel } from "../../lib/types";
+import { HandlerName } from "./handler-name";
 import { Button } from "../ui/button";
 import {
   DropdownMenu,
@@ -96,6 +97,7 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
   const displayName = isDm
     ? formatDmDisplayName(currentChannel, currentUser)
     : currentChannel;
+  const dmPeer = isDm ? dmPeerHandler(currentChannel, currentUser) : null;
 
   const members = channel?.members ?? [];
   const canInvite = !isDm && !!currentUser && members.includes(currentUser);
@@ -113,7 +115,9 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
           ) : (
             <Hash className="size-4 text-primary shrink-0" />
           )}
-          <span className="font-semibold text-sm tracking-tight truncate">{displayName}</span>
+          <span className="font-semibold text-sm tracking-tight truncate">
+            {dmPeer ? <HandlerName handler={dmPeer} /> : displayName}
+          </span>
         </div>
       </div>
 
@@ -166,7 +170,7 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
                   >
                     <span className="flex items-center gap-1.5 text-sm text-foreground">
                       <Crown className="size-3.5 text-warning" />
-                      @{creator}
+                      <HandlerName handler={creator} />
                     </span>
                     {creator !== currentUser && (
                       <Button
@@ -192,7 +196,9 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
                       className="justify-between cursor-default focus:bg-transparent"
                       onSelect={(e) => e.preventDefault()}
                     >
-                      <span className="text-sm">@{member}</span>
+                      <span className="text-sm">
+                        <HandlerName handler={member} />
+                      </span>
                       {member !== currentUser && (
                         <Button
                           variant="ghost"

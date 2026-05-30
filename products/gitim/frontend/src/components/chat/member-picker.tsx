@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { Input } from "../ui/input";
 import { cn } from "@/lib/utils";
+import { useDirectory } from "../../hooks/use-display-name-directory";
+import { resolveDisplayName } from "../../lib/format-handler-display";
+import { HandlerName } from "./handler-name";
 
 interface MemberPickerProps {
   allUsers: string[];
@@ -20,11 +23,15 @@ export function MemberPicker({
   emptyMessage = "No users match",
 }: MemberPickerProps) {
   const [query, setQuery] = useState("");
+  const directory = useDirectory();
 
   const candidates = allUsers.filter((u) => !excludeHandlers.includes(u));
-  const filtered = candidates.filter((u) =>
-    u.toLowerCase().includes(query.toLowerCase())
-  );
+  const filtered = candidates.filter((u) => {
+    const q = query.toLowerCase();
+    if (u.toLowerCase().includes(q)) return true;
+    const name = resolveDisplayName(u, directory);
+    return name ? name.toLowerCase().includes(q) : false;
+  });
 
   function toggle(handle: string) {
     if (value.includes(handle)) {
@@ -48,7 +55,7 @@ export function MemberPicker({
               key={handle}
               className="inline-flex items-center gap-1 rounded-full bg-accent/20 border border-border px-2 py-0.5 text-xs font-medium text-foreground"
             >
-              @{handle}
+              <HandlerName handler={handle} />
               <button
                 type="button"
                 aria-label={`Remove ${handle}`}
@@ -94,8 +101,8 @@ export function MemberPicker({
                       onChange={() => toggle(handle)}
                       className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-primary"
                     />
-                    <span className="font-mono text-xs text-foreground">
-                      @{handle}
+                    <span className="text-xs text-foreground">
+                      <HandlerName handler={handle} />
                     </span>
                   </label>
                 </li>

@@ -7,7 +7,10 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { chatScopeKeyForChannel, clearChatScopeUnread } from "../../lib/chat-ui-state";
 import * as client from "../../lib/client";
-import { formatDmDisplayName } from "../../lib/dm-display-name";
+import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
+import { useDirectory } from "../../hooks/use-display-name-directory";
+import { resolveDisplayName } from "../../lib/format-handler-display";
+import { HandlerName } from "./handler-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import { AgentStatusPanel } from "./agent-status-panel";
@@ -220,6 +223,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const setArchivedDmsError = useChatStore((s) => s.setArchivedDmsError);
   const currentChannel = useChatStore((s) => s.currentChannel);
   const users = useChatStore((s) => s.users);
+  const directory = useDirectory();
   const setChannels = useChatStore((s) => s.setChannels);
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
@@ -400,10 +404,13 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const showFoldedExpanded = foldedOpen || channelQueryNeedle.length > 0;
 
   const filteredUsers = dmQuery.trim()
-    ? users.filter(
-        (u) =>
-          u.toLowerCase().includes(dmQuery.toLowerCase()) && u !== currentUser
-      )
+    ? users.filter((u) => {
+        if (u === currentUser) return false;
+        const q = dmQuery.toLowerCase();
+        if (u.toLowerCase().includes(q)) return true;
+        const name = resolveDisplayName(u, directory);
+        return name ? name.toLowerCase().includes(q) : false;
+      })
     : users.filter((u) => u !== currentUser);
   const archivedChannelItems =
     archivedChannelsView?.items ?? archivedChannels;
@@ -575,11 +582,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }
 
   function peerFromDmName(name: string): string | null {
-    const parts = name.split("--");
-    if (parts.length !== 2) return null;
-    if (parts[0] === currentUser) return parts[1];
-    if (parts[1] === currentUser) return parts[0];
-    return null;
+    return dmPeerHandler(name, currentUser);
   }
 
   // Fetches a page of archived DMs and writes it into the store. Handles
@@ -1128,7 +1131,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                         className="px-2 py-1.5 text-sm rounded-md cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
                         onMouseDown={() => handleUserSelect(u)}
                       >
-                        @{u}
+                        <HandlerName handler={u} />
                       </li>
                     ))}
                   </ul>
@@ -1150,6 +1153,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 key={ch.name}
                 icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
+                labelNode={peer ? <HandlerName handler={peer} /> : undefined}
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
@@ -1194,6 +1198,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 key={ch.name}
                 icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
+                labelNode={peer ? <HandlerName handler={peer} /> : undefined}
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
@@ -1370,7 +1375,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
 interface ChannelItemProps {
   icon: React.ReactNode;
+  /** Plain-text label — also feeds the pin/unpin aria strings. */
   label: string;
+  /** Optional rich label for the visual row (e.g. a <HandlerName> for DM
+   *  peers). Falls back to `label` when absent; aria always uses `label`. */
+  labelNode?: React.ReactNode;
   unread: number;
   hasMention: boolean;
   active: boolean;
@@ -1397,6 +1406,7 @@ interface ChannelItemProps {
 function ChannelItem({
   icon,
   label,
+  labelNode,
   unread,
   hasMention,
   active,
@@ -1432,7 +1442,7 @@ function ChannelItem({
         className="min-w-0 flex-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left"
       >
         {icon}
-        <span className="truncate flex-1">{label}</span>
+        <span className="truncate flex-1">{labelNode ?? label}</span>
         {unread > 0 && (
           <Badge
             variant="default"

@@ -120,6 +120,14 @@ export function AgentCard({
               <span className="truncate text-base font-semibold" title={agent.name}>
                 {agent.name}
               </span>
+              {agent.name !== agent.handler && (
+                <span
+                  className="shrink-0 font-mono text-xs font-normal text-text-muted"
+                  title={`Handler: @${agent.handler}`}
+                >
+                  @{agent.handler}
+                </span>
+              )}
               <span className="flex shrink-0 items-center gap-1 md:hidden">
                 {workBadge(workState)}
                 {presenceBadge(agent.status)}

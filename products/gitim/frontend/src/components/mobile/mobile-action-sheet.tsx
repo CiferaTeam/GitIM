@@ -1,5 +1,6 @@
 import { MessageSquare, GitBranch, Copy } from "lucide-react";
 import type { Message } from "../../lib/types";
+import { HandlerName } from "../chat/handler-name";
 
 interface MobileActionSheetProps {
   message: Message | null;
@@ -36,7 +37,9 @@ export function MobileActionSheet({ message, onClose, onReply, onShowThread }: M
         </div>
 
         <div className="px-4 pb-3 border-b border-border/60">
-          <p className="text-xs text-text-muted mb-1">@{current.author}</p>
+          <p className="text-xs text-text-muted mb-1">
+            <HandlerName handler={current.author} />
+          </p>
           <p className="text-sm text-foreground line-clamp-2">{current.body}</p>
         </div>
 
