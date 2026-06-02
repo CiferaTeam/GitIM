@@ -401,6 +401,20 @@ export async function poll(since?: string): Promise<ApiResponse> {
         if (validateChannelName(channelName)) continue;
         changes.push({ channel: channelName, kind: "channel_meta" });
         metaChanged = true;
+      } else if (fp.startsWith("channels/") && fp.endsWith(".meta.yaml")) {
+        // An active channel's own meta changed — members edited (e.g. an
+        // agent departing drops itself from the list), labels, created_by,
+        // etc. Mirror the Rust daemon's poll: surface a channel_meta change
+        // so the client refetches channels() and the member list/sidebar
+        // update. Without this the catch-all below only warms the local
+        // cache, leaving every UI surface stale until a reload. Card metas
+        // (channels/<ch>/cards/...) are claimed by cardChangeFromPath above.
+        const name = fp.replace("channels/", "");
+        if (name.includes("/")) continue;
+        const channelName = name.replace(".meta.yaml", "");
+        if (validateChannelName(channelName)) continue;
+        changes.push({ channel: channelName, kind: "channel_meta" });
+        metaChanged = true;
       } else if (fp.includes("meta.yaml")) {
         metaChanged = true;
       }

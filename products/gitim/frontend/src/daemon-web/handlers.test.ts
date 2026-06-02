@@ -1345,6 +1345,25 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("reports channel_meta from poll when an active channel's members change", async () => {
+    // An agent departing the workspace rewrites channels/<ch>.meta.yaml to
+    // drop itself from `members`. The client only refetches channels() — and
+    // thus refreshes the top-right member list — when poll surfaces a
+    // channel_meta change. Without it the list stays stale until reload.
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      "channels/general.meta.yaml",
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.changes).toContainEqual({
+      channel: "general",
+      kind: "channel_meta",
+    });
+  });
+
   it("reports archived DM changes from poll without resurrecting the deleted active path", async () => {
     files.delete("/repo/dm/alice--lewis.thread");
     dirs.set("/repo/archive", ["dm"]);
