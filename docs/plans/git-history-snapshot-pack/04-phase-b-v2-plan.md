@@ -16,6 +16,19 @@
 
 ---
 
+## Review 修正记录（Task 1-3 quality review 后并入）
+
+- **C1**：`atomic_push_two_refs` / `push_tag` 必须走 `classify_remote_error`（凭据脱敏 +
+  错误分型），Task 4 据此把 `PushConflict` 映射 `Lost`，其他 remote 错误 cleanup 后上抛。
+- **I1**：`run_git_command` 统一 `LC_ALL=C`（stderr 匹配去 locale 化）。
+- **I2**：`count_commits_on_branch` / `run_git_capture_with_env` / `write_redirect_commit`
+  的 env-ful commit 全部路由到带 timeout 的执行层。
+- **I3**（design 已并入协议）：`try_fire_rotation` 开头加 `has_unpushed_commits` 守卫 →
+  `NotReady`；`cleanup_failed_fire` reset 前验证 ahead-of-origin 全部是自产 commit。
+- **I4**（design 已并入约束）：混版本 workspace 不支持，运维约束，无代码。
+- **M1**：`write_redirect_commit` 用 `commit --only -- <path>`（结构性保证 R 只含 yaml flip）。
+- **M5**：EpochFile 构造器测试加字段值断言。
+
 ## 竞态场景 → 测试映射（验收总表）
 
 | Design 矩阵场景 | 测试 | Task |
@@ -27,6 +40,8 @@
 | 6 多跳 follow | `follow_resolves_across_two_epochs` | 6 |
 | 7 半成品 fire boot 清理 | `boot_cleanup_resets_partial_fire_residue` | 6 |
 | 8 migrate 冲突走 renumber | `migrate_conflict_falls_back_to_renumber`（daemon 集成） | 8 |
+| I3 fire 守卫（零丢失） | `fire_with_unpushed_backlog_returns_not_ready` | 6 |
+| I3 清理自产验证 | `cleanup_refuses_when_foreign_commits_ahead` | 6 |
 
 ---
 
@@ -498,16 +513,44 @@ fn epoch_at_ref(
 /// Remove every local trace of a failed fire so the next cycle starts
 /// clean: reset old branch onto origin, drop the never-published orphan
 /// branch. Also the boot-time cleanup for crash residue (scenario 7).
+///
+/// Zero-loss guard (review I3): reset only when everything ahead of origin
+/// is rotation-self-produced. A foreign commit in that range means messages
+/// would die — leave the residue in place (the push fence keeps it
+/// unpublished; delayed, never lost) and let a human look.
 pub fn cleanup_failed_fire(
     storage: &GitStorage,
     old_branch: &str,
     orphan_branch: &str,
 ) -> Result<(), RotationError> {
+    let ahead = storage.subjects_ahead_of_origin(old_branch)?;
+    if ahead.iter().any(|s| !s.starts_with("seal: redirect")) {
+        tracing::warn!(
+            "cleanup_failed_fire: non-rotation commits ahead of origin/{old_branch} \
+             ({ahead:?}); refusing to reset — residue stays fenced until resolved"
+        );
+        return Ok(());
+    }
     storage.reset_branch_to_origin(old_branch)?;
     // Branch may not exist if we crashed before creating it — best-effort.
     let _ = storage.delete_local_branch(orphan_branch);
     Ok(())
 }
+```
+
+需要一个配套小原语（`git.rs`）：
+
+```rust
+    /// Subjects of commits in `origin/<branch>..<branch>` (oldest first).
+    /// Empty when the branch is in sync with origin.
+    pub fn subjects_ahead_of_origin(&self, branch: &str) -> Result<Vec<String>, GitError> {
+        let range = format!("origin/{branch}..{branch}");
+        let out = run_git(&["log", "--reverse", "--format=%s", &range], &self.root)?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
 
 /// Attempt to fire an epoch rotation. Caller must hold `commit_lock`.
 pub fn try_fire_rotation(
@@ -518,6 +561,14 @@ pub fn try_fire_rotation(
     author: (&str, &str),
     created_at: &str,
 ) -> Result<RotationOutcome, RotationError> {
+    // Zero-loss guard (review I3): the Lost path resets hard onto origin, so
+    // fire may only proceed from a clean local == origin state. Any backlog
+    // (messages committed between push-success and our lock acquisition)
+    // defers rotation to the next push.
+    if storage.has_unpushed_commits()? {
+        return Ok(RotationOutcome::NotReady);
+    }
+
     let n = storage.count_commits_on_branch(current_branch)?;
     if n < threshold {
         return Ok(RotationOutcome::NotReady);
@@ -605,11 +656,17 @@ pub fn try_fire_rotation(
                 orphan_commit_sha,
             })
         }
-        Err(_) => {
+        Err(GitError::PushConflict) => {
             // Lost the race (to another firer OR to a plain message push —
             // design scenarios 1 and 2; we don't need to know which).
             cleanup_failed_fire(storage, current_branch, &new_branch)?;
             Ok(RotationOutcome::Lost)
+        }
+        Err(e) => {
+            // Auth / rate-limit / network (review C1 follow-through): nobody
+            // won; restore the clean state and let a later push retry.
+            cleanup_failed_fire(storage, current_branch, &new_branch)?;
+            Err(RotationError::Git(e))
         }
     }
 }
@@ -941,6 +998,34 @@ fn normal_push_loses_to_fire_message_migrates() {
         .current_dir(clone_b.path()).output().unwrap();
     assert!(String::from_utf8_lossy(&tip_msg.stdout).starts_with("seal: redirect"),
         "sealed branch tip must remain the redirect commit");
+}
+
+#[test]
+fn fire_with_unpushed_backlog_returns_not_ready() {
+    // Review I3：push 成功到 fire 拿锁之间 handler 又写了消息 → fire 必须让路，
+    // 否则 Lost 清理的 reset --hard 会摧毁这条消息。
+    let (_bare, clone) = setup_bare_and_clone(5);
+    commit_file(&clone, "inflight.thread", "[L1][@x][t] committed but not pushed");
+
+    let storage = GitStorage::new(clone.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let o = try_fire_rotation(&storage, "main", 3, arch.path(),
+        ("d", "d@g"), "2026-06-10T00:00:00Z").unwrap();
+    assert!(matches!(o, RotationOutcome::NotReady), "got {o:?}");
+    assert!(clone.path().join("inflight.thread").exists(), "backlog must survive");
+    assert_eq!(head_branch(&clone), "main");
+}
+
+#[test]
+fn cleanup_refuses_when_foreign_commits_ahead() {
+    // Review I3：ahead-of-origin 区间含非自产 commit → cleanup 拒绝 reset。
+    let (_bare, clone) = setup_bare_and_clone(3);
+    commit_file(&clone, "user-msg.thread", "[L1][@x][t] precious");
+    let storage = GitStorage::new(clone.path());
+
+    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+    assert!(clone.path().join("user-msg.thread").exists(),
+        "foreign commit must not be reset away");
 }
 
 #[test]

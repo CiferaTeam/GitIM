@@ -155,6 +155,28 @@ Fence 有两个检查点，共享一段判定逻辑：
 6. runtime health + daemon-web 只读拦截
 7. CLAUDE.md orientation 更新
 
+## 零丢失的两条补充守卫（code review 发现，已并入协议）
+
+**Fire 前置守卫**：`try_fire_rotation` 拿到 `commit_lock` 后第一步检查
+`has_unpushed_commits()`，非空 → 直接 `NotReady`。否则 Lost 路径的
+`reset --hard origin` 会把 push 成功到 fire 拿锁之间 handler 写入的消息一并摧毁。
+fire 只在"本地 == origin"的干净态进行；backlog 由正常 sync 推完后下次 push 再 fire。
+
+**清理自产验证**：`cleanup_failed_fire`（Lost 路径与 boot 残留路径共用）reset 前验证
+`origin/<branch>..HEAD` 区间内的 commit 全部是 rotation 自产（subject 以
+`seal: redirect` 开头），发现任何非自产 commit → 不 reset，warn 并保留现场
+（fence 保证残留不会被 push，不丢只滞留，人工介入）。
+
+## 混版本 workspace 约束（v1 运维边界）
+
+老 daemon（≤ 0.8.9）只有 epoch observability，**没有 write gate 也没有 push fence**
+——rotation 发生后它们会照常把消息 rebase 到 R 之上并 push 成功（消息丢在 sealed
+branch）。这与 epoch.yaml 的 schema 兼容性无关，schema 包装救不了。
+
+**v1 约束**：启用 rotation 的 workspace 要求所有 daemon 升级到含 fence 的版本。
+fleet 版本协商 / 老版本拒写是 non-goal。现实风险极低：1M commit 阈值意味着到达
+rotation 的 workspace 必然长期活跃，升级窗口以月计。
+
 ## 非目标（沿用 02 + 新增）
 
 - Bundle 上传外部 store；auto-prune 老 epoch；WebUI 手动 rotate 入口
@@ -163,3 +185,4 @@ Fence 有两个检查点，共享一段判定逻辑：
   refspec）——rotation 不减新 clone 下载量的问题**留 v2**，设计时已知
 - `snapshot.commit` 字段精确化（02 版已注明 v1 填 sealed SHA，后续 patch）
 - 多 epoch 跨索引搜索（gitim-index 当前不跨 epoch）
+- fleet 版本协商 / 老 daemon 拒写（见"混版本 workspace 约束"）
