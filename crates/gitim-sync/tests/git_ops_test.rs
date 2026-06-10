@@ -747,6 +747,158 @@ fn atomic_push_two_refs_succeeds_when_unraced() {
 }
 
 #[test]
+fn rebase_onto_moves_unpushed_commits_to_new_base() {
+    // main: c0 pushed; local-only m1 on top. nb branches from origin/main,
+    // adds b1, gets pushed. rebase_onto("origin/nb", "origin/main") while on
+    // main transplants m1 onto nb's tip: both contents present afterwards.
+    let (_bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "m1.txt", "local msg");
+
+    run_git(clone.path(), &["branch", "nb", "origin/main"]);
+    run_git(clone.path(), &["checkout", "nb"]);
+    commit_file(clone.path(), "b1.txt", "on new base");
+    run_git(clone.path(), &["push", "origin", "nb"]);
+    run_git(clone.path(), &["checkout", "main"]);
+
+    let storage = GitStorage::new(clone.path());
+    storage
+        .rebase_onto("origin/nb", "origin/main")
+        .expect("rebase");
+
+    assert!(
+        clone.path().join("b1.txt").exists(),
+        "new base content present"
+    );
+    assert!(
+        clone.path().join("m1.txt").exists(),
+        "migrated commit content present"
+    );
+    // Chain shape: m1' sits directly on nb's tip.
+    assert_eq!(
+        storage.rev_parse("HEAD^").unwrap(),
+        storage.rev_parse("origin/nb").unwrap(),
+        "migrated commit must be parented on the new base"
+    );
+}
+
+#[test]
+fn reset_branch_and_delete_branch_cleanup() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "residue.txt", "local-only");
+    run_git(clone.path(), &["branch", "stale-orphan"]);
+
+    let storage = GitStorage::new(clone.path());
+    storage.reset_branch_to_origin("main").expect("reset");
+    assert!(!clone.path().join("residue.txt").exists());
+
+    storage.delete_local_branch("stale-orphan").expect("delete");
+    let out = Command::new("git")
+        .args(["branch", "-l", "stale-orphan"])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn tag_archive_bundle_roundtrip() {
+    let (bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "second.txt", "more history");
+    run_git(clone.path(), &["push", "origin", "main"]);
+
+    let storage = GitStorage::new(clone.path());
+    let sha = storage.rev_parse("HEAD").unwrap().trim().to_string();
+
+    storage
+        .tag_archive("archive/epoch-1/abc1234", &sha)
+        .expect("tag");
+    storage
+        .push_tag("archive/epoch-1/abc1234")
+        .expect("push tag");
+
+    // Tag must exist on the remote after push_tag.
+    let remote_tag = Command::new("git")
+        .args(["tag", "-l", "archive/epoch-1/abc1234"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(
+        !remote_tag.stdout.is_empty(),
+        "tag must exist on remote after push_tag"
+    );
+
+    // Bundle into a not-yet-existing subdirectory (parent dir is created).
+    let dir = TempDir::new().unwrap();
+    let bundle = dir.path().join("archives/epoch-1.bundle");
+    storage
+        .bundle_to_path(&bundle, "archive/epoch-1/abc1234")
+        .expect("bundle");
+    assert!(bundle.exists());
+    let verify = Command::new("git")
+        .args(["bundle", "verify", bundle.to_str().unwrap()])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(
+        verify.status.success(),
+        "bundle verify failed: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
+fn branch_repoint_helpers_align_local_refs_with_origin() {
+    // B publishes branch `nb`; A materializes it locally without checkout,
+    // re-stamps it at a detached HEAD (the shape a finished `rebase --onto`
+    // leaves behind), then realigns it to origin without touching A's
+    // checked-out working tree.
+    let (_bare, clone_a, clone_b) = setup_two_clones();
+
+    run_git(clone_b.path(), &["checkout", "-b", "nb"]);
+    commit_file(clone_b.path(), "nb.txt", "on nb");
+    run_git(clone_b.path(), &["push", "origin", "nb"]);
+
+    let storage = GitStorage::new(clone_a.path());
+    storage.fetch().expect("fetch");
+
+    // create_or_repoint_branch: local nb appears at origin/nb, no checkout.
+    storage.create_or_repoint_branch("nb").expect("create");
+    assert_eq!(
+        storage.rev_parse("nb").unwrap(),
+        storage.rev_parse("origin/nb").unwrap()
+    );
+    assert!(
+        !clone_a.path().join("nb.txt").exists(),
+        "branch creation must not touch the working tree"
+    );
+
+    // repoint_branch_to_head: detach HEAD at main's tip, stamp nb there.
+    let main_sha = storage.rev_parse("main").unwrap();
+    run_git(clone_a.path(), &["checkout", &main_sha]);
+    storage.repoint_branch_to_head("nb").expect("repoint");
+    assert_eq!(storage.rev_parse("nb").unwrap(), main_sha);
+
+    // checkout_branch: reattach to main.
+    storage.checkout_branch("main").expect("checkout");
+    assert_eq!(storage.current_branch().unwrap(), "main");
+
+    // reset_to_origin_without_checkout: nb diverged from origin/nb above;
+    // realign it while main stays checked out and the working tree untouched.
+    storage
+        .reset_to_origin_without_checkout("nb")
+        .expect("reset without checkout");
+    assert_eq!(
+        storage.rev_parse("nb").unwrap(),
+        storage.rev_parse("origin/nb").unwrap()
+    );
+    assert_eq!(storage.current_branch().unwrap(), "main");
+    assert!(
+        !clone_a.path().join("nb.txt").exists(),
+        "update-ref must not materialize nb's tree"
+    );
+}
+
+#[test]
 fn write_redirect_commit_appends_to_current_branch() {
     use gitim_sync::git::GitStorage;
     use std::process::Command;

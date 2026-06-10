@@ -725,6 +725,69 @@ impl GitStorage {
         .map(|_| ())
     }
 
+    /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
+    /// `<old_base>..HEAD` onto `<new_base>`. The migrate primitive: snapshot
+    /// carries the full tree, so thread appends apply cleanly; conflicts
+    /// surface as Err and the caller falls back to capture-and-replay.
+    pub fn rebase_onto(&self, new_base: &str, old_base: &str) -> Result<(), GitError> {
+        run_git(&["rebase", "--onto", new_base, old_base], &self.root).map(|_| ())
+    }
+
+    /// Force-align a local branch to origin: checkout -f + reset --hard.
+    /// Lost/crash cleanup primitive.
+    pub fn reset_branch_to_origin(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["checkout", "-f", branch], &self.root)?;
+        let origin_ref = format!("origin/{branch}");
+        run_git(&["reset", "--hard", &origin_ref], &self.root).map(|_| ())
+    }
+
+    pub fn delete_local_branch(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["branch", "-D", branch], &self.root).map(|_| ())
+    }
+
+    pub fn checkout_branch(&self, branch: &str) -> Result<(), GitError> {
+        // -f: rotation holds commit_lock; any dirty state is crash residue
+        // and git history is the source of truth.
+        run_git(&["checkout", "-f", branch], &self.root).map(|_| ())
+    }
+
+    pub fn tag_archive(&self, tag: &str, sha: &str) -> Result<(), GitError> {
+        run_git(&["tag", tag, sha], &self.root).map(|_| ())
+    }
+
+    pub fn push_tag(&self, tag: &str) -> Result<(), GitError> {
+        run_git(&["push", "origin", tag], &self.root).map(|_| ())
+    }
+
+    pub fn bundle_to_path(&self, path: &Path, reference: &str) -> Result<(), GitError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let p = path.to_string_lossy();
+        run_git(&["bundle", "create", &p, reference], &self.root).map(|_| ())
+    }
+
+    /// `git branch -f <branch> origin/<branch>` — create or re-point a local
+    /// branch at its origin counterpart without checkout.
+    pub fn create_or_repoint_branch(&self, branch: &str) -> Result<(), GitError> {
+        let origin_ref = format!("origin/{branch}");
+        run_git(&["branch", "-f", branch, &origin_ref], &self.root).map(|_| ())
+    }
+
+    /// `git branch -f <branch> HEAD` — after a rebase leaves HEAD detached,
+    /// stamp the branch there.
+    pub fn repoint_branch_to_head(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["branch", "-f", branch, "HEAD"], &self.root).map(|_| ())
+    }
+
+    /// `git update-ref refs/heads/<branch> <origin sha>` — align a NON-checked-out
+    /// branch to origin without touching the working tree.
+    pub fn reset_to_origin_without_checkout(&self, branch: &str) -> Result<(), GitError> {
+        let origin_sha = self.rev_parse(&format!("origin/{branch}"))?;
+        let refname = format!("refs/heads/{branch}");
+        run_git(&["update-ref", &refname, &origin_sha], &self.root).map(|_| ())
+    }
+
     pub(crate) fn run_git_capture(&self, args: &[&str]) -> Result<String, GitError> {
         let output = run_git(args, &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
