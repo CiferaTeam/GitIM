@@ -703,3 +703,68 @@ fn cleanup_refuses_when_tracked_files_dirty() {
     // Residue R' still present (cleanup refused) — fence keeps it unpublished.
     assert!(clone.path().join("gitim.epoch.yaml").exists());
 }
+
+#[test]
+fn migrate_conflict_falls_back_to_renumber() {
+    // Design scenario 8: B's unpushed message collides with a message already
+    // published on the new epoch (same thread file, same line number). The
+    // rebase --onto conflict must degrade to content-aware renumber — B's
+    // message lands on the new branch with a shifted line number, nothing is
+    // lost, and the sync loop converges instead of fence-looping forever.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+    // A publishes L1 in general.thread on the new epoch.
+    commit_file(
+        &clone_a,
+        "general.thread",
+        "[L000001][P000000][@a][20260610T000000Z] first on epoch 2\n",
+    );
+    git(&clone_a, &["push", "origin", "main-epoch-2"]);
+
+    // B, unaware, writes its own L1 in the same file on sealed main.
+    commit_file(
+        &clone_b,
+        "general.thread",
+        "[L000001][P000000][@b][20260610T000001Z] conflicting line\n",
+    );
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let lock = std::sync::Mutex::new(());
+    // Cycle 1: push rejects -> fence (i) -> follow -> migrate CONFLICT ->
+    //          renumber fallback commits on the new branch.
+    // Cycle 2: pushes from the new branch.
+    run_one_sync_cycle(&storage_b, &lock);
+    run_one_sync_cycle(&storage_b, &lock);
+
+    assert_eq!(
+        head_branch(&clone_b),
+        "main-epoch-2",
+        "B must have switched"
+    );
+    git(&clone_b, &["fetch", "origin"]);
+    let out = Command::new("git")
+        .args(["show", "origin/main-epoch-2:general.thread"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "thread must exist on origin epoch-2");
+    let content = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        content.contains("first on epoch 2"),
+        "A's message intact: {content}"
+    );
+    assert!(
+        content.contains("conflicting line"),
+        "B's message survived migration: {content}"
+    );
+    assert!(
+        content.contains("[L000002]"),
+        "B's message renumbered to L000002: {content}"
+    );
+}

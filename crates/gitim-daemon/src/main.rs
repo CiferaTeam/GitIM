@@ -157,6 +157,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("epoch status refresh on boot failed: {}", e);
     }
 
+    // Epoch rotation crash recovery (design scenario 7). Two residue shapes:
+    //   - HEAD redirected, origin active  → a fire died before its atomic
+    //     push; the local redirect commit was never published. Clean it up
+    //     (subjects + dirty-tree verification inside refuse unsafe resets).
+    //   - origin redirected               → a rotation completed (ours or
+    //     another daemon's) while we were down. Follow it now.
+    // Holds commit_lock — handlers racing boot serialize behind it.
+    {
+        let storage = gitim_sync::git::GitStorage::new(&app_state.repo_root);
+        if storage.has_remote() {
+            if let Ok(branch) = storage.current_branch() {
+                let _ = storage.fetch();
+                let origin_redirected = matches!(
+                    gitim_sync::rotate::epoch_status_at_ref(&storage, &format!("origin/{branch}")),
+                    Ok(Some(gitim_core::epoch::EpochStatus::Redirected))
+                );
+                let head_redirected = matches!(
+                    gitim_sync::rotate::epoch_status_at_ref(&storage, "HEAD"),
+                    Ok(Some(gitim_core::epoch::EpochStatus::Redirected))
+                );
+                if head_redirected && !origin_redirected {
+                    let orphan = gitim_sync::rotate::epoch_file_at_ref(&storage, "HEAD")
+                        .ok()
+                        .flatten()
+                        .and_then(|f| f.redirect.map(|r| r.target_branch))
+                        .unwrap_or_default();
+                    let _guard = app_state
+                        .commit_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Err(e) =
+                        gitim_sync::rotate::cleanup_failed_fire(&storage, &branch, &orphan)
+                    {
+                        tracing::warn!("boot: partial-fire cleanup failed: {}", e);
+                    } else {
+                        let _ = app_state.refresh_epoch_status();
+                    }
+                } else if origin_redirected {
+                    let _guard = app_state
+                        .commit_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match gitim_sync::rotate::follow_redirect(&storage, &branch) {
+                        Ok(true) => {
+                            tracing::info!("boot: followed epoch redirect off {branch}");
+                            let _ = app_state.refresh_epoch_status();
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("boot: follow_redirect failed: {}", e),
+                    }
+                }
+            }
+        }
+    }
+
     // Reconcile any legacy orphan cards from pre-Task-3.x archive_channel
     // implementations that only moved channel meta+thread, leaving
     // channels/<ch>/cards/ behind. This is a one-shot boot-time migration;

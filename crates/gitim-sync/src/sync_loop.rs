@@ -551,7 +551,11 @@ fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
 /// Fail-closed: a CORRUPT epoch.yaml (`epoch_status_at_ref` Err) counts as
 /// fenced — we refuse to push rather than risk publishing onto a sealed
 /// branch we cannot read.
-fn epoch_fence_and_follow(repo: &GitStorage, commit_lock: &Mutex<()>) -> bool {
+fn epoch_fence_and_follow(
+    repo: &GitStorage,
+    commit_lock: &Mutex<()>,
+    rebase_author: Option<&(String, String)>,
+) -> bool {
     // Err => fenced (fail-closed); None / Active => open.
     let head_fenced = !matches!(
         crate::rotate::epoch_status_at_ref(repo, "HEAD"),
@@ -605,10 +609,92 @@ fn epoch_fence_and_follow(repo: &GitStorage, commit_lock: &Mutex<()>) -> bool {
             acted
         }
         Err(e) => {
-            warn!("epoch fence: follow_redirect failed: {e}");
-            // Stay on the sealed branch but NEVER push from it this cycle.
+            // Most likely a migrate (rebase --onto) conflict: the same
+            // thread line exists on both the sealed branch and the new
+            // epoch. Degrade to content-aware replay — without this the
+            // fence would re-follow and re-conflict every cycle, never
+            // publishing again (bricked, though lossless).
+            warn!("epoch fence: follow_redirect failed ({e}); trying content replay");
+            migrate_via_content_replay(repo, &branch, rebase_author);
+            // Whether or not the replay succeeded, never push this cycle;
+            // the next cycle re-evaluates from the (possibly new) branch.
             true
         }
+    }
+}
+
+/// Last-resort migrate: capture unpushed `.thread` additions, discard the
+/// local commits, follow the redirect with a clean tree, then re-apply the
+/// captured messages through the renumbering resolver (same machinery as
+/// sync's rebase-conflict path, different base branch).
+///
+/// Scope judgment (v1): only `.thread` content is carried — that's the
+/// zero-loss guarantee's object. Unpushed meta/board edits are state files
+/// with last-writer-wins semantics; losing one in this already-rare double
+/// conflict means redoing a join/rename, not losing a message. Renumber
+/// mappings are dropped (no on_renumbered here): SSE consumers may show a
+/// stale line number until the next poll.
+fn migrate_via_content_replay(
+    repo: &GitStorage,
+    branch: &str,
+    rebase_author: Option<&(String, String)>,
+) {
+    let additions = match repo.diff_unpushed("*.thread") {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("epoch migrate replay: capture failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = repo.discard_unpushed() {
+        warn!("epoch migrate replay: discard failed: {e}");
+        return;
+    }
+    match crate::rotate::follow_redirect(repo, branch) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("epoch migrate replay: follow was a no-op after discard");
+            return;
+        }
+        Err(e) => {
+            warn!("epoch migrate replay: clean follow failed: {e}");
+            return;
+        }
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let (resolved_files, mappings) = match conflict::resolve_content(&additions, repo.root()) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("epoch migrate replay: resolve failed: {e} — messages remain captured-only; manual recovery from reflog required");
+            return;
+        }
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for f in &resolved_files {
+        let abs = repo.root().join(&f.path);
+        if let Some(parent) = abs.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&abs, &f.content) {
+            warn!(
+                "epoch migrate replay: write {} failed: {e}",
+                f.path.display()
+            );
+            return;
+        }
+        paths.push(f.path.to_string_lossy().to_string());
+    }
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let msg = build_rebase_commit_msg(&mappings, &additions);
+    let author = rebase_author.map(|(n, e)| (n.as_str(), e.as_str()));
+    match repo.add_and_commit_as(&path_refs, &msg, author) {
+        Ok(()) => info!(
+            "epoch migrate replay: {} file(s) re-applied onto the new epoch",
+            paths.len()
+        ),
+        Err(e) => warn!("epoch migrate replay: commit failed: {e}"),
     }
 }
 
@@ -625,7 +711,7 @@ fn sync_with_push(
     // would put commits after R on the sealed branch — invariant 1 forbids
     // it. Follow first; local messages migrate inside follow_redirect and
     // publish next cycle from the new branch.
-    if epoch_fence_and_follow(repo, commit_lock) {
+    if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
         return SyncOutcome::Normal;
     }
 
@@ -687,7 +773,7 @@ fn sync_with_push(
         // sealed-branch publish); follow instead, which migrates them onto
         // the new epoch branch. Must run before the divergence safety net —
         // that path hard-discards local work, while follow preserves it.
-        if epoch_fence_and_follow(repo, commit_lock) {
+        if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
             return SyncOutcome::Normal;
         }
 
@@ -763,7 +849,7 @@ fn sync_with_push(
                 // Epoch fence, checkpoint (3) — backstop: the rebase may have
                 // replayed local messages on top of a just-pulled R. Never
                 // publish that chain (invariant 1); follow migrates instead.
-                if epoch_fence_and_follow(repo, commit_lock) {
+                if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
                     return SyncOutcome::Normal;
                 }
                 let push_after_rebase = repo.push();
