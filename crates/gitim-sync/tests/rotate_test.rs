@@ -563,3 +563,107 @@ fn boot_cleanup_resets_partial_fire_residue() {
         .unwrap();
     assert!(out.stdout.is_empty(), "stale orphan branch must be deleted");
 }
+
+// === Task 7: sync_loop fence integration ===
+
+/// One full sync cycle with no-op callbacks — exercises the real
+/// `run_sync_cycle` path (fence checkpoints included).
+fn run_one_sync_cycle(storage: &GitStorage, lock: &std::sync::Mutex<()>) {
+    let mut circuit = gitim_sync::sync_loop::AuthCircuit::new(std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    gitim_sync::sync_loop::run_sync_cycle(
+        storage,
+        &mut circuit,
+        lock,
+        &|| {},
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        None,
+    );
+}
+
+#[test]
+fn sync_cycle_routes_message_to_new_epoch_after_rotation() {
+    // B has an unpushed message; origin already rotated. Two sync cycles must
+    // land the message on origin/main-epoch-2 and never publish anything
+    // after R on origin/main (invariant 1).
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+    commit_file(
+        &clone_b,
+        "late.thread",
+        "[L1][@b][t] written before B knows",
+    );
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let lock = std::sync::Mutex::new(());
+    // Cycle 1: push rejects -> fetch -> fence (i) -> follow + migrate.
+    // Cycle 2: pushes from the new branch.
+    run_one_sync_cycle(&storage_b, &lock);
+    run_one_sync_cycle(&storage_b, &lock);
+
+    git(&clone_b, &["fetch", "origin"]);
+    let out = Command::new("git")
+        .args(["show", "origin/main-epoch-2:late.thread"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "message must land on origin/main-epoch-2"
+    );
+    let tip = Command::new("git")
+        .args(["log", "-1", "--format=%s", "origin/main"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&tip.stdout).starts_with("seal: redirect"),
+        "sealed branch tip must remain the redirect commit"
+    );
+}
+
+#[test]
+fn fence_self_heals_stranded_redirect_residue() {
+    // R' stranded locally (a lost fire whose cleanup failed) while origin is
+    // active -> one sync cycle retries the cleanup and unbricks the node.
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let redirect = gitim_core::epoch::EpochFile::new_redirect(
+        1,
+        "main".into(),
+        2,
+        "main-epoch-2".into(),
+        "deadbeef".into(),
+        "deadbeef".into(),
+        "t".into(),
+        None,
+    );
+    let yaml = serde_yaml::to_string(&redirect).unwrap();
+    storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            &yaml,
+            "seal: redirect epoch 1 -> main-epoch-2 (lost, cleanup failed)",
+            ("d", "d@g"),
+        )
+        .unwrap();
+
+    let lock = std::sync::Mutex::new(());
+    run_one_sync_cycle(&storage, &lock);
+
+    assert_eq!(
+        storage.rev_parse("main").unwrap(),
+        storage.rev_parse("origin/main").unwrap(),
+        "stranded R' must be cleaned up"
+    );
+    assert!(!clone.path().join("gitim.epoch.yaml").exists());
+}
