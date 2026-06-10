@@ -512,6 +512,14 @@ impl GitStorage {
         Ok(())
     }
 
+    /// `git reset --hard <rev>` — restore a previously snapshotted state.
+    /// The undo half of capture-discard-replay flows: when a step between
+    /// the discard and the re-apply fails, the caller rolls HEAD back here
+    /// so "any failure mode = delay, never loss" keeps holding.
+    pub fn reset_hard_to(&self, rev: &str) -> Result<(), GitError> {
+        run_git(&["reset", "--hard", rev], &self.root).map(|_| ())
+    }
+
     /// Abort any in-progress rebase and verify the on-disk markers are gone.
     ///
     /// Idempotent: returns Ok when no rebase exists. Returns Err when rebase

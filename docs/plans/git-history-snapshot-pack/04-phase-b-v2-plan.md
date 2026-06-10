@@ -16,6 +16,21 @@
 
 ---
 
+## 落地后实际偏离记录（final review 对账）
+
+- **Task 9 health 字段**：实现为 `workspace_epochs: [{slug, epoch}]`（O(1) 读 yaml），
+  原 spec 的 `epoch_count`/`total_commit_count` 不进 health——hot-polled 端点上跑
+  `rev-list --count`（1M repo 秒级）是性能事故；rotation 进度细节走 daemon status API。
+- **场景 8 测试**：落在 `gitim-sync/tests/rotate_test.rs::migrate_conflict_falls_back_to_renumber`
+  （驱动真实 `run_sync_cycle`），未按表落 daemon 集成层——sync 层驱动更真实。
+- **Final review C1 修复**：`migrate_via_content_replay` 的 discard 与 re-apply 之间有
+  网络往返，inner follow 失败时按 snapshot SHA 恢复（`reset_hard_to`），守住
+  "任何失败 = 延迟、永不丢失"；`fence_fails_closed_on_corrupt_epoch_yaml_without_losing_messages`
+  pin 住该契约 + fail-closed 行为。
+- **UI banner（design browser 段）**：v1 拦截完整落地（latch + 16 写 handler 拒绝 +
+  永不 push），worker 已发 `epoch_redirected` postMessage，但主线程 banner 消费未接——
+  跟进项在 CLAUDE.md Where we're going 的 epoch rotation v2 留位。
+
 ## Review 修正记录（Task 1-3 quality review 后并入）
 
 - **C1**：`atomic_push_two_refs` / `push_tag` 必须走 `classify_remote_error`（凭据脱敏 +

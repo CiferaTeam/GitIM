@@ -768,3 +768,52 @@ fn migrate_conflict_falls_back_to_renumber() {
         "B's message renumbered to L000002: {content}"
     );
 }
+
+#[test]
+fn fence_fails_closed_on_corrupt_epoch_yaml_without_losing_messages() {
+    // Review I1: an unreadable origin epoch.yaml must close the fence
+    // (no push), and the degradation path must NOT eat local messages —
+    // the discard-then-network-roundtrip window restores on failure.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+
+    // A pushes a CORRUPT epoch.yaml (says redirected, but garbage shape).
+    commit_file(
+        &clone_a,
+        "gitim.epoch.yaml",
+        "status: redirected\n:::garbage:::\n",
+    );
+    git(&clone_a, &["push", "origin", "main"]);
+
+    // B, unaware, writes a message.
+    commit_file(
+        &clone_b,
+        "precious.thread",
+        "[L000001][P000000][@b][20260610T000002Z] keep me",
+    );
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let lock = std::sync::Mutex::new(());
+    run_one_sync_cycle(&storage_b, &lock);
+    run_one_sync_cycle(&storage_b, &lock);
+
+    // Fail-closed: nothing reached origin/main beyond A's corrupt commit.
+    git(&clone_b, &["fetch", "origin"]);
+    let remote = Command::new("git")
+        .args(["show", "origin/main:precious.thread"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    assert!(
+        !remote.status.success(),
+        "message must NOT publish through a closed fence"
+    );
+
+    // Zero-loss: the message commit survives locally (restored after the
+    // failed degradation roundtrip), still on main.
+    assert_eq!(head_branch(&clone_b), "main");
+    assert!(
+        clone_b.path().join("precious.thread").exists(),
+        "local message must survive the fence cycles"
+    );
+}

@@ -646,6 +646,18 @@ fn migrate_via_content_replay(
             return;
         }
     };
+    // Snapshot before the discard. The inner follow does a NETWORK round
+    // trip (fetch) between the discard and the re-apply — if it fails
+    // (offline, unreadable origin epoch.yaml), rolling back to this sha is
+    // what keeps "any failure mode = delay, never loss" true. Without it
+    // the captured additions die with this stack frame.
+    let saved_sha = match repo.rev_parse("HEAD") {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            warn!("epoch migrate replay: HEAD snapshot failed: {e}");
+            return;
+        }
+    };
     if let Err(e) = repo.discard_unpushed() {
         warn!("epoch migrate replay: discard failed: {e}");
         return;
@@ -653,11 +665,17 @@ fn migrate_via_content_replay(
     match crate::rotate::follow_redirect(repo, branch) {
         Ok(true) => {}
         Ok(false) => {
-            warn!("epoch migrate replay: follow was a no-op after discard");
+            warn!("epoch migrate replay: follow was a no-op after discard; restoring");
+            if let Err(e) = repo.reset_hard_to(&saved_sha) {
+                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
+            }
             return;
         }
         Err(e) => {
-            warn!("epoch migrate replay: clean follow failed: {e}");
+            warn!("epoch migrate replay: clean follow failed ({e}); restoring");
+            if let Err(e) = repo.reset_hard_to(&saved_sha) {
+                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
+            }
             return;
         }
     }
