@@ -26,6 +26,27 @@
 - **I3**（design 已并入协议）：`try_fire_rotation` 开头加 `has_unpushed_commits` 守卫 →
   `NotReady`；`cleanup_failed_fire` reset 前验证 ahead-of-origin 全部是自产 commit。
 - **I4**（design 已并入约束）：混版本 workspace 不支持，运维约束，无代码。
+
+**rotate.rs review（第二轮，Task 4-5 后）追加修正：**
+
+- **R-I1**：Won arm 的 set-upstream 失败重试一次 + 修正"sync 会自愈"的错误注释
+  （sync_cycle 顶部 `@{upstream}` 探针 bail 在 push 之前，自愈到不了）；Task 8 的
+  daemon boot 增加 upstream 校验修复。
+- **R-I2**：fire 守卫扩展——`status --porcelain --untracked-files=no` 非空（dirty
+  tracked files = send.rs commit 失败后留盘等 sync 捡的消息）→ `NotReady`；
+  follow 无法推迟，在 follow doc 注明接受的残留窗口。
+- **R-I3**：`follow_redirect` 的 migrate Err 路径先 `abort_rebase()` 再传播
+  （恢复"Err ⇒ HEAD 回到原分支、消息完好"契约）。
+- **R-I4**：补 Shape B migrate 测试（R 已在本地链上 → follow → 消息上新分支、
+  无 seal commit 被重放、老分支对齐 origin）。
+- **R-I5**：fence helper 加"HEAD redirected ∧ origin active → 重试 cleanup"自愈分支
+  （已并入 Task 7 代码段）；fence 对 corrupt epoch.yaml fail-closed（同段）。
+- **R-M 系列**：`[..7]` 用 `.get(..7)` 防 panic；`SEAL_SUBJECT_PREFIX` 常量提取（生产
+  与校验共用）；`cleanup_failed_fire` doc 补 commit_lock 契约；`create_orphan_commit`
+  的存在性注释对齐实际 clobber 语义；`migrate_unpushed` 注明 HEAD-attached 前置条件。
+- **Task 8 注意**：`recover_from_stale_rebase` 的 reattach 目标走 `origin/HEAD`，
+  rotation 后指向 sealed 分支——reattach 后 fence+follow 会收敛，无需改机制，但
+  集成测试验证这条路径。
 - **M1**：`write_redirect_commit` 用 `commit --only -- <path>`（结构性保证 R 只含 yaml flip）。
 - **M5**：EpochFile 构造器测试加字段值断言。
 
@@ -1036,11 +1057,13 @@ fn boot_cleanup_resets_partial_fire_residue() {
     let storage = GitStorage::new(clone.path());
 
     // 手工制造残留：写 redirect commit + 开 orphan 分支（模拟 fire 中途死亡）。
+    // Subject 必须以 "seal: redirect" 开头——cleanup 的自产验证按此前缀放行。
     let redirect = gitim_core::epoch::EpochFile::new_redirect(
         1, "main".into(), 2, "main-epoch-2".into(),
         "deadbeef".into(), "deadbeef".into(), "t".into(), None);
     let yaml = serde_yaml::to_string(&redirect).unwrap();
-    storage.write_redirect_commit("gitim.epoch.yaml", &yaml, "seal: partial", ("d", "d@g")).unwrap();
+    storage.write_redirect_commit("gitim.epoch.yaml", &yaml,
+        "seal: redirect epoch 1 -> main-epoch-2 (partial fire)", ("d", "d@g")).unwrap();
     storage.create_orphan_commit("main-epoch-2", "gitim.epoch.yaml", "status: active\n",
         "snapshot: partial", ("d", "d@g")).unwrap();
 
@@ -1174,19 +1197,27 @@ rebase 成功后、`push_after_rebase` 之前加 fence (ii)：
 
 ```rust
 /// Shared fence handler: when HEAD (or caller-detected origin state) says
-/// redirected, take commit_lock and follow. Returns true when a follow
-/// happened (caller ends the cycle; next cycle pushes from the new branch).
+/// redirected, take commit_lock and follow. Returns true when this cycle
+/// must NOT push (a follow happened, or fencing state is unresolved).
+///
+/// Fail-closed (review): a CORRUPT epoch.yaml (epoch_status_at_ref Err) is
+/// treated as fenced — we refuse to push rather than risk publishing onto a
+/// sealed branch we can't read.
 fn epoch_fence_and_follow(repo: &GitStorage, commit_lock: &Mutex<()>) -> bool {
-    let fenced = matches!(crate::rotate::check_push_fence(repo), Ok(true));
+    // Err => fenced (fail-closed), None/Active => not fenced.
+    let head_fenced = !matches!(
+        crate::rotate::epoch_status_at_ref(repo, "HEAD"),
+        Ok(None) | Ok(Some(gitim_core::epoch::EpochStatus::Active))
+    );
     let origin_fenced = || -> bool {
         repo.current_branch().ok().is_some_and(|b| {
-            matches!(
+            !matches!(
                 crate::rotate::epoch_status_at_ref(repo, &format!("origin/{b}")),
-                Ok(Some(gitim_core::epoch::EpochStatus::Redirected))
+                Ok(None) | Ok(Some(gitim_core::epoch::EpochStatus::Active))
             )
         })
     };
-    if !fenced && !origin_fenced() {
+    if !head_fenced && !origin_fenced() {
         return false;
     }
     let _guard = commit_lock
@@ -1196,9 +1227,27 @@ fn epoch_fence_and_follow(repo: &GitStorage, commit_lock: &Mutex<()>) -> bool {
         Ok(b) => b,
         Err(e) => {
             warn!("epoch fence: current_branch failed: {e}");
-            return false;
+            return true; // unresolved — keep the fence closed this cycle
         }
     };
+
+    // Self-heal (review I5): HEAD redirected but ORIGIN active means a Lost
+    // cleanup failed earlier and left R' stranded locally. Retry the cleanup
+    // now, BEFORE any pull-rebase can mix message commits above R' (which
+    // would force human intervention). Pure-seal verification inside
+    // cleanup_failed_fire keeps this safe.
+    if head_fenced && !origin_fenced() {
+        let orphan = crate::rotate::epoch_file_at_ref(repo, "HEAD")
+            .ok()
+            .flatten()
+            .and_then(|f| f.redirect.map(|r| r.target_branch))
+            .unwrap_or_default();
+        if let Err(e) = crate::rotate::cleanup_failed_fire(repo, &branch, &orphan) {
+            warn!("epoch fence: residue cleanup failed: {e}");
+        }
+        return true; // don't push this cycle either way; next cycle re-evaluates
+    }
+
     match crate::rotate::follow_redirect(repo, &branch) {
         Ok(acted) => {
             if acted {
