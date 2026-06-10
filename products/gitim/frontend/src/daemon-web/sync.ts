@@ -106,6 +106,26 @@ async function runSyncOnce(): Promise<SyncResult> {
   return withRepoLock(runSyncOnceLocked);
 }
 
+/** Epoch fence, browser edition. Reads the working tree's
+ *  gitim.epoch.yaml after a sync brought remote state in; a redirected
+ *  status latches `epochRedirected` (write handlers refuse from then on)
+ *  and parks syncStatus on "epoch_redirected" for the UI banner.
+ *  Returns true when latched. */
+async function detectEpochRedirect(repoDir: string): Promise<boolean> {
+  try {
+    const { readFile } = await import("./storage");
+    const yaml = await readFile(`${repoDir}/gitim.epoch.yaml`);
+    if (/^status:\s*redirected/m.test(yaml)) {
+      setState({ epochRedirected: true, syncStatus: "epoch_redirected" });
+      postMessage({ type: "epoch_redirected" });
+      return true;
+    }
+  } catch {
+    // No epoch file (the normal case) or unreadable — stay open.
+  }
+  return false;
+}
+
 async function runSyncOnceLocked(): Promise<SyncResult> {
   const s = getState();
   const beforeHead = s.headCommit;
@@ -122,7 +142,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     // 1. Try push first (fast path: no conflicts)
     const localHead = await gitOps.resolveHead(s.repoDir);
 
-    if (localHead !== s.headCommit) {
+    if (localHead !== s.headCommit && !s.epochRedirected) {
       try {
         await gitOps.push(s.repoDir, s.corsProxy, onAuth, s.defaultBranch);
         setState({ headCommit: localHead, syncStatus: "idle" });
@@ -150,6 +170,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       );
       setState({ headCommit: remoteHead, syncStatus: "idle" });
       postRepoChanged(remoteHead, "fast_forward");
+      await detectEpochRedirect(s.repoDir);
       return syncResult(beforeHead, remoteHead, "fast_forwarded");
     }
 
@@ -238,6 +259,16 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       commitMessage,
       s.me.handler,
     );
+
+    // Epoch fence (invariant 1): the reset just materialized remote state
+    // in the working tree — if that includes a redirected gitim.epoch.yaml,
+    // this branch is sealed. The resolve-commit above keeps the user's
+    // messages safe locally; we just never publish them here. A Rust daemon
+    // (or a future browser follow) migrates them onto the new epoch.
+    if (await detectEpochRedirect(s.repoDir)) {
+      const fencedHead = await gitOps.resolveHead(s.repoDir);
+      return syncResult(beforeHead, fencedHead, "rebased");
+    }
 
     // Push with retry (max 3 attempts for concurrent-write races)
     for (let attempt = 0; attempt < 3; attempt++) {

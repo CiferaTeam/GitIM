@@ -120,6 +120,19 @@ function errCode(error: string, error_code: string): ApiResponse & { error_code:
   return { ok: false, error, error_code };
 }
 
+/** Epoch fence, browser edition (v1 read-only interception): once sync
+ *  latches `epochRedirected`, every commit-producing handler refuses.
+ *  Reload reconnects onto the new epoch branch. */
+function assertNotRedirected(): ApiResponse | null {
+  if (getState().epochRedirected) {
+    return errCode(
+      "This workspace has rotated to a new epoch branch. Reload the page to reconnect.",
+      "epoch_redirected",
+    );
+  }
+  return null;
+}
+
 function reconnectRequired(): ApiResponse & { error_code: string } {
   return errCode(
     "Reconnect token to send from this browser workspace.",
@@ -531,6 +544,8 @@ export async function send(
   _author?: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const writeResult: SendWriteResult = await withRepoLock(async () => {
       const s = getState();
@@ -669,6 +684,8 @@ export async function users(): Promise<ApiResponse> {
 }
 
 export async function joinChannel(channel: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   const s = getState();
   if (!s.token) return reconnectRequired();
   const invalidChannel = validateChannelName(channel);
@@ -740,6 +757,8 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
 }
 
 export async function archiveChannel(channel: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -851,6 +870,8 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
 }
 
 export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1055,6 +1076,8 @@ async function moveDmThread(
 }
 
 export async function archiveDm(peer: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1086,6 +1109,8 @@ export async function archiveDm(peer: string): Promise<ApiResponse> {
 }
 
 export async function unarchiveDm(peer: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1226,6 +1251,8 @@ export async function showBoard(handler: string): Promise<ApiResponse> {
 }
 
 export async function initBoard(): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1243,6 +1270,8 @@ export async function initBoard(): Promise<ApiResponse> {
 }
 
 export async function publishBoard(content?: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1262,6 +1291,8 @@ export async function publishBoard(content?: string): Promise<ApiResponse> {
 }
 
 export async function setBoard(field: string, value: string): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   return mutateBoard((board) =>
     setBoardField(board, field, value) as BoardDocument,
   );
@@ -1271,6 +1302,8 @@ export async function setBoardSectionValue(
   section: string,
   value: string,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   return mutateBoard((board) =>
     setBoardSection(board, section, value) as BoardDocument,
   );
@@ -1280,6 +1313,8 @@ export async function appendBoardSectionValue(
   section: string,
   value: string,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   return mutateBoard((board) =>
     appendBoardSection(board, section, value) as BoardDocument,
   );
@@ -1334,6 +1369,8 @@ export async function createCard(
   title: string,
   opts: CreateCardOptions = {},
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1416,6 +1453,8 @@ export async function sendCardMessage(
   body: string,
   replyTo?: number,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1460,6 +1499,8 @@ export async function updateCard(
   cardId: string,
   patch: UpdateCardPatch,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1519,6 +1560,8 @@ export async function archiveCard(
   channel: string,
   cardId: string,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();
@@ -1550,6 +1593,8 @@ export async function unarchiveCard(
   channel: string,
   cardId: string,
 ): Promise<ApiResponse> {
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
   try {
     const s = getState();
     if (!s.token) return reconnectRequired();

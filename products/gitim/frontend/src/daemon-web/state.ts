@@ -26,8 +26,13 @@ export interface DaemonWebState {
   channels: Map<string, ChannelMeta>;
   users: Map<string, UserMeta>;
   headCommit: string;
-  syncStatus: "idle" | "syncing" | "error" | "reconnect_required";
+  syncStatus: "idle" | "syncing" | "error" | "reconnect_required" | "epoch_redirected";
   defaultBranch: string;
+  /** Latched when sync detects a redirected gitim.epoch.yaml — this browser
+   *  workspace is on a sealed epoch branch. v1 is read-only interception:
+   *  all write handlers refuse with `epoch_redirected`; the user reloads to
+   *  reconnect. Full follow/migrate is the Rust daemon's job. */
+  epochRedirected: boolean;
 }
 
 let state: DaemonWebState | null = null;
@@ -77,6 +82,7 @@ export function initState(config: {
     headCommit: "",
     syncStatus: config.token ? "idle" : "reconnect_required",
     defaultBranch: "main",
+    epochRedirected: false,
   };
   return state;
 }

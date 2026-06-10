@@ -94,6 +94,18 @@ struct HealthResponse {
     /// `AgentSaturationLog::save` returns an error from the sampler tick.
     /// Surfaced on `/runtime/health`. Best-effort observability.
     saturation_save_failures: u64,
+    /// Per-workspace epoch number read from the human clone's
+    /// `gitim.epoch.yaml` (1 = never rotated / pre-rotation repo). Commit
+    /// counts are deliberately NOT here: health is polled hot and
+    /// `rev-list --count` on a million-commit repo is seconds — rotation
+    /// progress detail lives on the daemon status API instead.
+    workspace_epochs: Vec<WorkspaceEpochInfo>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceEpochInfo {
+    slug: String,
+    epoch: u32,
 }
 
 // -----------------------------------------------------------------------------
@@ -472,6 +484,26 @@ pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
     let s = crate::preconditions::arc_mutex_lock(&state);
+    let workspace_epochs = s
+        .workspaces
+        .iter()
+        .map(|(slug, w)| {
+            let epoch = w
+                .human_repo
+                .as_ref()
+                .and_then(|root| {
+                    gitim_core::epoch::EpochFile::load_from_path(&root.join("gitim.epoch.yaml"))
+                        .ok()
+                        .flatten()
+                })
+                .map(|f| f.epoch)
+                .unwrap_or(1);
+            WorkspaceEpochInfo {
+                slug: slug.clone(),
+                epoch,
+            }
+        })
+        .collect();
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
@@ -483,6 +515,7 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
         saturation_save_failures: s
             .saturation_save_failures
             .load(std::sync::atomic::Ordering::Relaxed),
+        workspace_epochs,
     })
 }
 
@@ -6612,6 +6645,8 @@ mod tests {
         );
         // 现存字段不能被破坏
         assert_eq!(body["service"], "gitim-runtime");
+        // epoch observability: empty array when no workspaces registered
+        assert_eq!(body["workspace_epochs"], serde_json::json!([]));
     }
 
     // -- introduction wire format coverage --

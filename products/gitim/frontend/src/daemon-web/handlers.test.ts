@@ -549,6 +549,19 @@ describe("daemon-web handlers", () => {
     expect(commits).toHaveLength(0);
   });
 
+  it("rejects writes with epoch_redirected once the epoch fence latches", async () => {
+    seedState();
+    setState({ epochRedirected: true });
+
+    const res = await send("general", "hello after rotation");
+
+    expect(res).toMatchObject({ ok: false, error_code: "epoch_redirected" });
+    expect(commits).toHaveLength(0);
+
+    const join = await joinChannel("general");
+    expect(join).toMatchObject({ ok: false, error_code: "epoch_redirected" });
+  });
+
   it("returns cached poll state without network when token is missing", async () => {
     initState({
       workspaceId: "ws_cached",
