@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use gitim_sync::git::GitStorage;
+use gitim_sync::git::{GitError, GitStorage};
 use tempfile::TempDir;
 
 /// Helper: create a bare repo and clone it, returning (bare_dir, clone_dir, GitStorage).
@@ -697,9 +697,13 @@ fn atomic_push_two_refs_all_or_nothing() {
 
     let storage_b = GitStorage::new(clone_b.path());
     let result = storage_b.atomic_push_two_refs("main", "feature-x");
+    // Typed PushConflict (not CommandFailed-with-raw-stderr): the reject
+    // path must go through classify_remote_error, which both redacts
+    // credentials from stderr and gives the rotation caller the
+    // "lost the race" signal as a matchable variant.
     assert!(
-        result.is_err(),
-        "non-ff main must reject the whole atomic push"
+        matches!(result, Err(GitError::PushConflict)),
+        "non-ff main must reject the whole atomic push as PushConflict, got {result:?}"
     );
 
     // feature-x must not exist on the bare (all-or-nothing).
@@ -847,6 +851,30 @@ fn tag_archive_bundle_roundtrip() {
 }
 
 #[test]
+fn push_tag_classifies_remote_reject_as_push_conflict() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    let storage = GitStorage::new(clone.path());
+    let sha1 = storage.rev_parse("HEAD").unwrap();
+    storage
+        .tag_archive("archive/epoch-1/dup", &sha1)
+        .expect("tag");
+    storage.push_tag("archive/epoch-1/dup").expect("first push");
+
+    // Move the tag locally; the remote already holds the old one →
+    // "[rejected] ... (already exists)" must classify as PushConflict,
+    // not surface as CommandFailed with raw (credential-bearing) stderr.
+    commit_file(clone.path(), "next.txt", "x");
+    let sha2 = storage.rev_parse("HEAD").unwrap();
+    run_git(clone.path(), &["tag", "-f", "archive/epoch-1/dup", &sha2]);
+
+    let res = storage.push_tag("archive/epoch-1/dup");
+    assert!(
+        matches!(res, Err(GitError::PushConflict)),
+        "re-pushing a moved tag must classify as PushConflict, got {res:?}"
+    );
+}
+
+#[test]
 fn branch_repoint_helpers_align_local_refs_with_origin() {
     // B publishes branch `nb`; A materializes it locally without checkout,
     // re-stamps it at a detached HEAD (the shape a finished `rebase --onto`
@@ -895,6 +923,59 @@ fn branch_repoint_helpers_align_local_refs_with_origin() {
     assert!(
         !clone_a.path().join("nb.txt").exists(),
         "update-ref must not materialize nb's tree"
+    );
+}
+
+#[test]
+fn subjects_ahead_of_origin_lists_unpushed_subjects_oldest_first() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    let storage = GitStorage::new(clone.path());
+
+    // In sync with origin → empty.
+    assert!(storage.subjects_ahead_of_origin("main").unwrap().is_empty());
+
+    commit_file(clone.path(), "one.txt", "1"); // subject = "one.txt"
+    commit_file(clone.path(), "two.txt", "2"); // subject = "two.txt"
+
+    assert_eq!(
+        storage.subjects_ahead_of_origin("main").unwrap(),
+        vec!["one.txt".to_string(), "two.txt".to_string()],
+        "subjects must list unpushed commits oldest first"
+    );
+}
+
+#[test]
+fn write_redirect_commit_contains_only_epoch_yaml() {
+    // Protocol invariant 1's foundation: the redirect commit R must
+    // structurally contain nothing but the epoch.yaml flip, even when
+    // unrelated changes happen to be staged at rotation time.
+    let (_bare, clone) = setup_bare_and_clone_main();
+    std::fs::write(clone.path().join("unrelated.txt"), "staged but not ours").unwrap();
+    run_git(clone.path(), &["add", "unrelated.txt"]);
+
+    let storage = GitStorage::new(clone.path());
+    let sha = storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: redirected\nepoch: 1\nbranch: main\n",
+            "redirect: seal epoch 1",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("redirect");
+
+    let files_out = Command::new("git")
+        .args(["diff-tree", "--no-commit-id", "--name-only", "-r", &sha])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    let files: Vec<String> = String::from_utf8_lossy(&files_out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        files,
+        vec!["gitim.epoch.yaml".to_string()],
+        "redirect commit must touch only the epoch yaml"
     );
 }
 

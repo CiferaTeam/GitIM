@@ -228,40 +228,65 @@ use tempfile::TempDir;
 
 #[test]
 fn new_active_constructs_valid_active_file() {
+    // Distinct sentinel per field: swapping any two constructor args
+    // (e.g. source_commit vs commit) must fail an assertion below.
     let f = EpochFile::new_active(
         2,
         "main-epoch-2".to_string(),
         "main".to_string(),
-        "aabbccddeeff00112233445566778899aabbccdd".to_string(),
-        "1122334455667788990011223344556677889900".to_string(),
+        "a".repeat(40),
+        "b".repeat(40),
         "2026-05-21T00:00:00Z".to_string(),
         Some(("archive/epoch-1/aabbccdd".to_string(), "0".repeat(64))),
     );
+    assert_eq!(f.schema_version, 1);
     assert_eq!(f.status, EpochStatus::Active);
     assert_eq!(f.epoch, 2);
     assert_eq!(f.branch, "main-epoch-2");
-    assert!(f.snapshot.is_some());
+
+    let snap = f.snapshot.as_ref().expect("active must carry snapshot");
+    assert_eq!(snap.source_branch, "main");
+    assert_eq!(snap.source_commit, "a".repeat(40));
+    assert_eq!(snap.commit, "b".repeat(40));
+    assert_eq!(snap.created_at, "2026-05-21T00:00:00Z");
+
     assert!(f.redirect.is_none());
+    let archive = f.archive.as_ref().expect("archive tuple maps in");
+    assert_eq!(archive.tag, "archive/epoch-1/aabbccdd");
+    assert_eq!(archive.bundle_sha256, "0".repeat(64));
     f.validate().expect("constructed active should validate");
 }
 
 #[test]
 fn new_redirect_constructs_valid_redirected_file() {
+    // Distinct sentinel per field: swapping any two constructor args
+    // (e.g. target_commit vs snapshot_of) must fail an assertion below.
     let f = EpochFile::new_redirect(
         1,
         "main".to_string(),
         2,
         "main-epoch-2".to_string(),
-        "1122334455667788990011223344556677889900".to_string(),
-        "aabbccddeeff00112233445566778899aabbccdd".to_string(),
-        "2026-05-21T00:00:00Z".to_string(),
-        Some(("archive/epoch-1/aabbccdd".to_string(), "0".repeat(64))),
+        "c".repeat(40),
+        "d".repeat(40),
+        "2026-05-21T01:02:03Z".to_string(),
+        Some(("archive/epoch-1/ffeeddcc".to_string(), "9".repeat(64))),
     );
+    assert_eq!(f.schema_version, 1);
     assert_eq!(f.status, EpochStatus::Redirected);
     assert_eq!(f.epoch, 1);
     assert_eq!(f.branch, "main");
-    assert!(f.redirect.is_some());
+
+    let redir = f.redirect.as_ref().expect("redirected must carry redirect");
+    assert_eq!(redir.target_epoch, 2);
+    assert_eq!(redir.target_branch, "main-epoch-2");
+    assert_eq!(redir.target_commit, "c".repeat(40));
+    assert_eq!(redir.snapshot_of, "d".repeat(40));
+    assert_eq!(redir.created_at, "2026-05-21T01:02:03Z");
+
     assert!(f.snapshot.is_none());
+    let archive = f.archive.as_ref().expect("archive tuple maps in");
+    assert_eq!(archive.tag, "archive/epoch-1/ffeeddcc");
+    assert_eq!(archive.bundle_sha256, "9".repeat(64));
     f.validate().expect("constructed redirect should validate");
 }
 

@@ -51,12 +51,31 @@ pub enum GitError {
 /// `GitError::Timeout` is returned. On success, stderr is checked for
 /// ENOSPC patterns before returning the output.
 fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
-    let child = Command::new("git")
-        .args(args)
+    run_git_command_with_env(args, current_dir, &[])
+}
+
+/// Like `run_git_command`, but with caller-supplied environment overrides
+/// (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). Every git subprocess in this file —
+/// env-ful or not — must route through here so all share the timeout + kill
+/// plumbing.
+fn run_git_command_with_env(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(current_dir)
+        // stderr classification throughout this file (auth / rate-limit /
+        // disk-full / path-missing matchers) depends on untranslated git
+        // messages — pin the locale so gettext-localized gits don't break it.
+        .env("LC_ALL", "C")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn()?;
 
     // Wait with timeout using a thread + channel.
     // We keep the Child's pid so we can kill it on timeout.
@@ -109,7 +128,17 @@ fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError
 /// Run a git subprocess with timeout, returning `Result<Output, GitError>`
 /// where non-zero exit is converted to `CommandFailed` (with ENOSPC check).
 fn run_git(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
-    let output = run_git_command(args, current_dir)?;
+    run_git_with_env(args, current_dir, &[])
+}
+
+/// Env-accepting sibling of `run_git`: same non-zero-exit mapping, with
+/// caller-supplied environment overrides.
+fn run_git_with_env(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    let output = run_git_command_with_env(args, current_dir, envs)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if is_disk_full(&stderr) {
@@ -342,16 +371,7 @@ impl GitStorage {
     /// like `--foo` produces a clean "bad revision" error rather than git's
     /// multi-line usage screen.
     pub fn count_commits_on_branch(&self, branch: &str) -> Result<u64, GitError> {
-        let output = Command::new("git")
-            .args(["rev-list", "--count", branch, "--"])
-            .current_dir(&self.root)
-            .output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(format!(
-                "rev-list --count {branch} failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+        let output = run_git(&["rev-list", "--count", branch, "--"], &self.root)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let trimmed = stdout.trim();
         trimmed
@@ -654,22 +674,19 @@ impl GitStorage {
             .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
         run_git(&["add", epoch_yaml_path], &self.root)?;
 
+        // `--only -- <path>`: the redirect commit must structurally contain
+        // nothing but the epoch.yaml flip (protocol invariant 1), even if
+        // unrelated changes happen to be staged at rotation time.
         let (name, email) = author;
-        let output = std::process::Command::new("git")
-            .args(["commit", "-m", message])
-            .env("GIT_AUTHOR_NAME", name)
-            .env("GIT_AUTHOR_EMAIL", email)
-            .env("GIT_COMMITTER_NAME", name)
-            .env("GIT_COMMITTER_EMAIL", email)
-            .current_dir(&self.root)
-            .output()
-            .map_err(|e| GitError::CommandFailed(format!("commit: {e}")))?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(format!(
-                "redirect commit failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
+        self.run_git_capture_with_env(
+            &["commit", "--only", "-m", message, "--", epoch_yaml_path],
+            &[
+                ("GIT_AUTHOR_NAME", name),
+                ("GIT_AUTHOR_EMAIL", email),
+                ("GIT_COMMITTER_NAME", name),
+                ("GIT_COMMITTER_EMAIL", email),
+            ],
+        )?;
         let sha = self.run_git_capture(&["rev-parse", "HEAD"])?;
         Ok(sha.trim().to_string())
     }
@@ -714,15 +731,31 @@ impl GitStorage {
 
     /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
     /// Both refs update or neither does — this is the rotation arbiter.
-    /// Reject (any cause) is an Err; caller treats it as "lost the race".
+    /// A reject classifies through `classify_remote_error` like every other
+    /// remote op (stderr embeds the credential-bearing remote URL, so it must
+    /// be redacted before entering the error value): non-fast-forward →
+    /// `PushConflict`, the caller's "lost the rotation race" signal.
     pub fn atomic_push_two_refs(&self, old_branch: &str, new_branch: &str) -> Result<(), GitError> {
         let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
         let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
-        run_git(
-            &["push", "--atomic", "origin", &new_spec, &old_spec],
-            &self.root,
-        )
-        .map(|_| ())
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "--atomic",
+            "origin",
+            &new_spec,
+            &old_spec,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
     }
 
     /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
@@ -755,8 +788,26 @@ impl GitStorage {
         run_git(&["tag", tag, sha], &self.root).map(|_| ())
     }
 
+    /// Push a tag to origin. Remote failures classify through
+    /// `classify_remote_error` (credential-redacting); an already-existing
+    /// tag rejects as `PushConflict`.
     pub fn push_tag(&self, tag: &str) -> Result<(), GitError> {
-        run_git(&["push", "origin", tag], &self.root).map(|_| ())
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "origin",
+            tag,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
     }
 
     pub fn bundle_to_path(&self, path: &Path, reference: &str) -> Result<(), GitError> {
@@ -788,6 +839,18 @@ impl GitStorage {
         run_git(&["update-ref", &refname, &origin_sha], &self.root).map(|_| ())
     }
 
+    /// Subjects of commits in `origin/<branch>..<branch>` (oldest first).
+    /// Empty when the branch is in sync with origin. Cleanup logic gates
+    /// `reset --hard` on what these unpushed commits actually are.
+    pub fn subjects_ahead_of_origin(&self, branch: &str) -> Result<Vec<String>, GitError> {
+        let range = format!("origin/{branch}..{branch}");
+        let out = run_git(&["log", "--reverse", "--format=%s", &range], &self.root)?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
     pub(crate) fn run_git_capture(&self, args: &[&str]) -> Result<String, GitError> {
         let output = run_git(args, &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -798,21 +861,7 @@ impl GitStorage {
         args: &[&str],
         envs: &[(&str, &str)],
     ) -> Result<String, GitError> {
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(args).current_dir(&self.root);
-        for (k, v) in envs {
-            cmd.env(k, v);
-        }
-        let output = cmd
-            .output()
-            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+        let output = run_git_with_env(args, &self.root, envs)?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
