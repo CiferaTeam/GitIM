@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use gitim_sync::git::GitStorage;
-use gitim_sync::rotate::{try_fire_rotation, RotationOutcome};
+use gitim_sync::rotate::{check_push_fence, follow_redirect, try_fire_rotation, RotationOutcome};
 use std::process::Command;
 
 // === helpers (shared by later tasks in this file) ===
@@ -174,5 +174,108 @@ fn cleanup_refuses_when_foreign_commits_ahead() {
     assert!(
         clone.path().join("user-msg.thread").exists(),
         "foreign commit must not be reset away"
+    );
+}
+
+#[test]
+fn follow_noop_when_origin_active() {
+    let (_bare, clone) = setup_bare_and_clone(2);
+    let storage = GitStorage::new(clone.path());
+    let acted = follow_redirect(&storage, "main").unwrap();
+    assert!(!acted);
+    assert_eq!(head_branch(&clone), "main");
+}
+
+#[test]
+fn follow_switches_and_migrates_unpushed() {
+    // A fires; B has one unpushed message → follow must carry it to the new branch.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let o = try_fire_rotation(
+        &storage_a,
+        "main",
+        3,
+        arch.path(),
+        ("a", "a@g"),
+        "2026-06-10T00:00:00Z",
+    )
+    .unwrap();
+    assert!(matches!(o, RotationOutcome::Won { .. }));
+
+    commit_file(
+        &clone_b,
+        "general.thread",
+        "[L1][@b][2026-06-10T00:00:01Z] hello",
+    );
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let acted = follow_redirect(&storage_b, "main").unwrap();
+    assert!(acted);
+    assert_eq!(head_branch(&clone_b), "main-epoch-2");
+    assert!(clone_b.path().join("general.thread").exists());
+    let yaml = std::fs::read_to_string(clone_b.path().join("gitim.epoch.yaml")).unwrap();
+    assert!(yaml.contains("status: active"));
+}
+
+#[test]
+fn follow_resolves_across_two_epochs() {
+    // Two consecutive rotations; a sleeping B follows once → lands on epoch 3.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t1").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+    for i in 0..3 {
+        commit_file(&clone_a, &format!("e2-{i}.txt"), "x");
+    }
+    git(&clone_a, &["push", "origin", "main-epoch-2"]);
+    assert!(matches!(
+        try_fire_rotation(
+            &storage_a,
+            "main-epoch-2",
+            3,
+            arch.path(),
+            ("a", "a@g"),
+            "t2"
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let acted = follow_redirect(&storage_b, "main").unwrap();
+    assert!(acted);
+    assert_eq!(head_branch(&clone_b), "main-epoch-3");
+}
+
+#[test]
+fn fence_blocks_push_when_head_redirected() {
+    // B pulled R (HEAD tree's epoch.yaml = redirected) → fence must report true.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+    git(&clone_b, &["fetch", "origin"]);
+    git(&clone_b, &["reset", "--hard", "origin/main"]); // simulate pulling R
+    commit_file(&clone_b, "late.thread", "[L1][@b][t] late msg"); // scenario 4
+
+    let storage_b = GitStorage::new(clone_b.path());
+    assert!(
+        check_push_fence(&storage_b).unwrap(),
+        "HEAD carries redirected epoch.yaml"
+    );
+    assert!(
+        !check_push_fence(&storage_a).unwrap(),
+        "active branch must pass the fence"
     );
 }

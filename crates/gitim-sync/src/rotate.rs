@@ -97,7 +97,13 @@ pub fn try_fire_rotation(
     // fire may only proceed from a clean local == origin state. Any backlog
     // (messages committed between push-success and our lock acquisition)
     // defers rotation to the next push.
-    if storage.has_unpushed_commits()? {
+    //
+    // Probed against `origin/<branch>..<branch>` rather than `@{upstream}`:
+    // fire-created epoch branches (update-ref + checkout -f) carry no
+    // upstream config until sync_loop's first `push -u`, but their
+    // remote-tracking ref always exists (the atomic push that created the
+    // branch updates it) — so this works on the second rotation too.
+    if !storage.subjects_ahead_of_origin(current_branch)?.is_empty() {
         return Ok(RotationOutcome::NotReady);
     }
 
@@ -204,4 +210,101 @@ pub fn try_fire_rotation(
             Err(RotationError::Git(e))
         }
     }
+}
+
+/// Walk the redirect chain from `start_branch` (reading each
+/// `origin/<b>:gitim.epoch.yaml`) until an active/absent epoch file.
+/// Returns the final branch. Errors after MAX_FOLLOW_HOPS (cycle guard).
+pub fn resolve_active_branch(
+    storage: &GitStorage,
+    start_branch: &str,
+) -> Result<String, RotationError> {
+    let mut branch = start_branch.to_string();
+    for _ in 0..MAX_FOLLOW_HOPS {
+        let origin_ref = format!("origin/{branch}");
+        match epoch_file_at_ref(storage, &origin_ref)? {
+            Some(f) if f.status == EpochStatus::Redirected => {
+                branch = f
+                    .redirect
+                    .as_ref()
+                    .ok_or_else(|| RotationError::Epoch("redirected but no redirect block".into()))?
+                    .target_branch
+                    .clone();
+            }
+            _ => return Ok(branch),
+        }
+    }
+    Err(RotationError::Epoch(format!(
+        "redirect chain exceeded {MAX_FOLLOW_HOPS} hops from {start_branch}"
+    )))
+}
+
+/// True iff HEAD's committed tree carries a redirected epoch.yaml — i.e. a
+/// redirect commit R is in the local chain. O(1) and complete: R writes the
+/// redirected yaml and no message commit ever touches that file (invariant 1).
+pub fn check_push_fence(storage: &GitStorage) -> Result<bool, RotationError> {
+    Ok(matches!(
+        epoch_status_at_ref(storage, "HEAD")?,
+        Some(EpochStatus::Redirected)
+    ))
+}
+
+/// Transplant unpushed commits of `from_branch` onto `target_branch`
+/// (design migrate, scenarios 3/4). The snapshot carries the full tree, so
+/// thread appends apply cleanly; a conflict surfaces as Err and the caller
+/// falls back to sync_loop's capture-and-replay.
+pub fn migrate_unpushed(
+    storage: &GitStorage,
+    from_branch: &str,
+    target_branch: &str,
+) -> Result<(), RotationError> {
+    let origin_from = format!("origin/{from_branch}");
+    let origin_target = format!("origin/{target_branch}");
+    storage.rebase_onto(&origin_target, &origin_from)?;
+    Ok(())
+}
+
+/// Follow a redirect published on origin: resolve the final active branch
+/// (multi-hop), carry any unpushed local commits over, and switch the
+/// checkout. Caller must hold `commit_lock`. Returns true if a switch
+/// happened. Decisions read origin state only (invariant 3) — a no-op when
+/// origin says active, regardless of local residue.
+pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<bool, RotationError> {
+    storage.fetch()?;
+    let target = resolve_active_branch(storage, current_branch)?;
+    if target == current_branch {
+        return Ok(false);
+    }
+
+    // Zero-loss: probe against `origin/<branch>..<branch>` (epoch branches
+    // may lack upstream config, see try_fire_rotation), and propagate errors
+    // rather than guessing — a swallowed "false" here would skip migrate and
+    // the final origin-align below would orphan the unpushed commits. The
+    // tracking ref provably resolves: resolve_active_branch just read
+    // `origin/<current_branch>` to decide we're redirected.
+    let has_unpushed = !storage.subjects_ahead_of_origin(current_branch)?.is_empty();
+
+    // Make the target branch exist locally, tracking origin.
+    storage.create_or_repoint_branch(&target)?;
+
+    if has_unpushed {
+        // HEAD is on current_branch; transplant <origin/current>..HEAD onto
+        // origin/target. The rebase drags the current branch's ref along to
+        // the migrated tip (HEAD stays attached to it) — stamp the target
+        // branch there before checkout; the origin-align below then puts the
+        // old branch ref back where origin says it belongs.
+        migrate_unpushed(storage, current_branch, &target)?;
+        storage.repoint_branch_to_head(&target)?;
+    }
+    storage.checkout_branch(&target)?;
+    tracing::info!("follow: switched {current_branch} -> {target}");
+
+    // The old local branch may still carry pre-redirect commits; align it to
+    // origin (ref-only — we must stay on `target`) so nothing resurrects
+    // content onto the sealed branch.
+    if let Err(e) = storage.reset_to_origin_without_checkout(current_branch) {
+        tracing::warn!("follow: aligning {current_branch} to origin failed (non-fatal): {e}");
+    }
+
+    Ok(true)
 }
