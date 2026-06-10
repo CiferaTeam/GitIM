@@ -83,7 +83,7 @@ describe("browser workspaces", () => {
       "gitim-local-config",
       JSON.stringify({
         remoteUrl: "https://github.com/acme/legacy",
-        corsProxy: "https://cors.isomorphic-git.org",
+        corsProxy: "https://git-cors.gitim.io",
       }),
     );
 
@@ -270,7 +270,7 @@ function migrateLegacyBrowserWorkspaceFromConfig() {
     "gitim-local-config",
     JSON.stringify({
       remoteUrl: "https://github.com/acme/legacy",
-      corsProxy: "https://cors.isomorphic-git.org",
+      corsProxy: "https://git-cors.gitim.io",
     }),
   );
   const legacy = migrateLegacyBrowserWorkspace();

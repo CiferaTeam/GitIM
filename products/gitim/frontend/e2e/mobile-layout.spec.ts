@@ -27,7 +27,7 @@ function browserWorkspaceRecord(
     slug: `browser-${id}`,
     workspace_name: workspaceName,
     remoteUrl,
-    corsProxy: "https://cors.isomorphic-git.org",
+    corsProxy: "https://git-cors.gitim.io",
     handler: "flame4",
     storage: { fsName: `gitim-ws-${id}`, repoDir: "/repo" },
     createdAt: timestamp,
@@ -1097,7 +1097,7 @@ test("browser mode preflights worker dependencies before clone", async ({ page }
       });
       return;
     }
-    if (url.startsWith("https://cors.isomorphic-git.org/")) {
+    if (url.startsWith("https://git-cors.gitim.io/")) {
       await route.fulfill({
         status: 500,
         contentType: "text/plain",

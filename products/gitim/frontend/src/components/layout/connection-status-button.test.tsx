@@ -95,7 +95,7 @@ describe("ConnectionStatusButton", () => {
     useConnectionDiagnosticsStore.getState().recordBrowserSyncEvent({
       status: "error",
       error: "Failed to fetch via CORS proxy",
-      corsProxy: "https://cors.isomorphic-git.org",
+      corsProxy: "https://git-cors.gitim.io",
       remoteUrl: "https://github.com/acme/team.git",
     });
 
@@ -119,6 +119,6 @@ describe("ConnectionStatusButton", () => {
     expect(document.body.textContent).toContain("Connection diagnostics");
     expect(document.body.textContent).toContain("Browser sync");
     expect(document.body.textContent).toContain("Failed to fetch via CORS proxy");
-    expect(document.body.textContent).toContain("https://cors.isomorphic-git.org");
+    expect(document.body.textContent).toContain("https://git-cors.gitim.io");
   });
 });
