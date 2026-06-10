@@ -47,6 +47,10 @@
 - **Task 8 注意**：`recover_from_stale_rebase` 的 reattach 目标走 `origin/HEAD`，
   rotation 后指向 sealed 分支——reattach 后 fence+follow 会收敛，无需改机制，但
   集成测试验证这条路径。
+- **Task 8 注意 2**：boot 的残留清理（`cleanup_failed_fire`）必须在 daemon 开始
+  accept handler 流量**之前**完成——清理含 `reset --hard`，若与 send.rs 的
+  deferred-dirty-file（commit 失败留盘）并发会丢未提交消息。boot 串行序保证即可，
+  无需额外 gate。
 - **M1**：`write_redirect_commit` 用 `commit --only -- <path>`（结构性保证 R 只含 yaml flip）。
 - **M5**：EpochFile 构造器测试加字段值断言。
 
