@@ -11,6 +11,16 @@ pub const EPOCH_FILE: &str = "gitim.epoch.yaml";
 /// Multi-hop follow guard (design scenario 6). 32 is unreachable in
 /// practice — it exists to turn a metadata cycle into an error, not a hang.
 pub const MAX_FOLLOW_HOPS: u32 = 32;
+/// Subject prefix of the seal (redirect) commit. Shared by the producer
+/// (`seal_commit_message`) and `cleanup_failed_fire`'s self-produced-commit
+/// checker — the zero-loss refusal logic keys on this exact prefix.
+pub const SEAL_SUBJECT_PREFIX: &str = "seal: redirect";
+
+/// The seal commit's message. Single producer so the checker prefix above
+/// can never drift from what fire actually writes.
+fn seal_commit_message(current_epoch: u32, new_branch: &str, orphan_short: &str) -> String {
+    format!("{SEAL_SUBJECT_PREFIX} epoch {current_epoch} -> {new_branch}@{orphan_short}")
+}
 
 #[derive(Debug)]
 pub enum RotationOutcome {
@@ -60,6 +70,7 @@ pub fn epoch_status_at_ref(
 /// Remove every local trace of a failed fire so the next cycle starts
 /// clean: reset old branch onto origin, drop the never-published orphan
 /// branch. Also the boot-time cleanup for crash residue (scenario 7).
+/// Caller must hold `commit_lock` — this runs `checkout -f` + `reset --hard`.
 ///
 /// Zero-loss guard (review I3): reset only when everything ahead of origin
 /// is rotation-self-produced. A foreign commit in that range means messages
@@ -71,7 +82,7 @@ pub fn cleanup_failed_fire(
     orphan_branch: &str,
 ) -> Result<(), RotationError> {
     let ahead = storage.subjects_ahead_of_origin(old_branch)?;
-    if ahead.iter().any(|s| !s.starts_with("seal: redirect")) {
+    if ahead.iter().any(|s| !s.starts_with(SEAL_SUBJECT_PREFIX)) {
         tracing::warn!(
             "cleanup_failed_fire: non-rotation commits ahead of origin/{old_branch} \
              ({ahead:?}); refusing to reset — residue stays fenced until resolved"
@@ -107,6 +118,16 @@ pub fn try_fire_rotation(
         return Ok(RotationOutcome::NotReady);
     }
 
+    // Zero-loss guard (review R-I2): a dirty tracked file is a deferred
+    // send — send.rs leaves the message on disk when its `git commit`
+    // fails, for sync_loop to commit later. That content exists nowhere
+    // but this working tree, and Won's `checkout -f` / Lost's
+    // `reset --hard` would destroy it permanently. Defer rotation; the
+    // next handler/sync activity commits it and a later push re-fires.
+    if storage.has_dirty_tracked_files()? {
+        return Ok(RotationOutcome::NotReady);
+    }
+
     let n = storage.count_commits_on_branch(current_branch)?;
     if n < threshold {
         return Ok(RotationOutcome::NotReady);
@@ -128,7 +149,7 @@ pub fn try_fire_rotation(
     let new_branch = format!("main-epoch-{new_epoch}");
 
     let sealed_commit_sha = storage.rev_parse(current_branch)?.trim().to_string();
-    let sealed_short = &sealed_commit_sha[..7];
+    let sealed_short = sealed_commit_sha.get(..7).unwrap_or(&sealed_commit_sha);
     let archive_tag = format!("archive/epoch-{current_epoch}/{sealed_short}");
 
     let active = EpochFile::new_active(
@@ -165,13 +186,11 @@ pub fn try_fire_rotation(
         &format!("snapshot: open epoch {new_epoch} from {current_branch}@{sealed_short}"),
         author,
     )?;
+    let orphan_short = orphan_commit_sha.get(..7).unwrap_or(&orphan_commit_sha);
     storage.write_redirect_commit(
         EPOCH_FILE,
         &redirect_yaml,
-        &format!(
-            "seal: redirect epoch {current_epoch} -> {new_branch}@{}",
-            &orphan_commit_sha[..7]
-        ),
+        &seal_commit_message(current_epoch, &new_branch, orphan_short),
         author,
     )?;
 
@@ -179,16 +198,25 @@ pub fn try_fire_rotation(
         Ok(()) => {
             storage.checkout_branch(&new_branch)?;
             // The orphan branch was born via update-ref and carries no
-            // upstream config; sync_loop's cycle top probes `@{upstream}`
-            // and bails the whole cycle when it doesn't resolve — an
-            // upstream-less branch would never publish again. The atomic
-            // push above just created origin/<new_branch>, so bind to it
-            // now. Failure is logged, not propagated: the rotation is
-            // already durable on origin, and an Err here would misreport a
-            // Won fire as failed; sync_loop's own `push -u origin HEAD`
-            // re-binds upstream on the first successful publish anyway.
-            if let Err(e) = storage.set_upstream_to_origin(&new_branch) {
-                tracing::error!("rotation: set upstream for {new_branch} failed: {e}");
+            // upstream config; run_sync_cycle's TOP-of-cycle `@{upstream}`
+            // probe bails the whole cycle on an upstream-less branch —
+            // before sync_with_push's `push -u` could ever run — so there
+            // is NO downstream self-heal: a persistent failure here wedges
+            // publishing. Hence the retry and the loud error. Failure
+            // still returns Won — the rotation is already durable on
+            // origin, and an Err would misreport it as failed.
+            if let Err(first) = storage.set_upstream_to_origin(&new_branch) {
+                tracing::warn!(
+                    "rotation: set upstream for {new_branch} failed ({first}); retrying once"
+                );
+                if let Err(second) = storage.set_upstream_to_origin(&new_branch) {
+                    tracing::error!(
+                        "rotation: set upstream for {new_branch} failed twice ({second}); \
+                         sync cycles will bail at the @{{upstream}} probe — publishing is \
+                         wedged until daemon restart or a manual \
+                         `git branch --set-upstream-to=origin/{new_branch} {new_branch}`"
+                    );
+                }
             }
             // Best-effort archive: tag + push + bundle. Failure warns, never
             // blocks — the rotation itself is already durable on origin.
@@ -262,9 +290,12 @@ pub fn check_push_fence(storage: &GitStorage) -> Result<bool, RotationError> {
 }
 
 /// Transplant unpushed commits of `from_branch` onto `target_branch`
-/// (design migrate, scenarios 3/4). The snapshot carries the full tree, so
-/// thread appends apply cleanly; a conflict surfaces as Err and the caller
-/// falls back to sync_loop's capture-and-replay.
+/// (design migrate, scenarios 3/4). Precondition: HEAD must be attached to
+/// `from_branch`'s tip — the rebase transplants `origin/<from>..HEAD`.
+/// The snapshot carries the full tree, so thread appends apply cleanly; a
+/// conflict surfaces as Err (mid-rebase state included — the caller is
+/// responsible for aborting) and the caller falls back to sync_loop's
+/// capture-and-replay.
 pub fn migrate_unpushed(
     storage: &GitStorage,
     from_branch: &str,
@@ -281,6 +312,16 @@ pub fn migrate_unpushed(
 /// checkout. Caller must hold `commit_lock`. Returns true if a switch
 /// happened. Decisions read origin state only (invariant 3) — a no-op when
 /// origin says active, regardless of local residue.
+///
+/// # Errors
+/// On Err the switch did not happen: HEAD remains on `current_branch` with
+/// all local commits intact (a conflicted migrate rebase is aborted back
+/// before propagating), so the caller can simply retry next cycle.
+///
+/// Dirty tracked files at follow time (a mid-write or deferred send) are an
+/// accepted residual risk window: unlike fire, follow cannot defer
+/// indefinitely — the old branch is sealed — so the `checkout -f` switch
+/// applies over them. Do not auto-commit here.
 pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<bool, RotationError> {
     storage.fetch()?;
     let target = resolve_active_branch(storage, current_branch)?;
@@ -315,7 +356,17 @@ pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<boo
         // the migrated tip (HEAD stays attached to it) — stamp the target
         // branch there before checkout; the origin-align below then puts the
         // old branch ref back where origin says it belongs.
-        migrate_unpushed(storage, current_branch, &target)?;
+        if let Err(e) = migrate_unpushed(storage, current_branch, &target) {
+            // Err contract (review R-I3): a conflicted rebase leaves
+            // `.git/rebase-merge` + detached HEAD — abort restores the
+            // pre-rebase state (HEAD on current_branch, commits intact)
+            // so the caller can retry cleanly. If even the abort fails,
+            // sync_loop's top-of-cycle stale-rebase recovery is the net.
+            if let Err(abort_err) = storage.abort_rebase() {
+                tracing::error!("follow: abort after failed migrate also failed: {abort_err}");
+            }
+            return Err(e);
+        }
         storage.repoint_branch_to_head(&target)?;
     }
     storage.checkout_branch(&target)?;
@@ -329,4 +380,20 @@ pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<boo
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seal_message_matches_cleanup_checker_prefix() {
+        // cleanup_failed_fire's refusal logic keys on this prefix; the
+        // producer and checker must never drift apart.
+        let msg = seal_commit_message(1, "main-epoch-2", "abc1234");
+        assert!(
+            msg.starts_with(SEAL_SUBJECT_PREFIX),
+            "producer message {msg:?} must start with checker prefix {SEAL_SUBJECT_PREFIX:?}"
+        );
+    }
 }

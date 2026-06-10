@@ -598,8 +598,10 @@ impl GitStorage {
     ///
     /// Caller must hold the workspace `commit_lock` to serialize index writes.
     ///
-    /// The branch ref is created (or updated, if pre-existing — caller must
-    /// guarantee it does not exist for first-fire semantics).
+    /// The branch ref is created or clobbered if pre-existing (`update-ref`
+    /// semantics). The clobber is load-bearing: a refused cleanup (foreign
+    /// commits ahead of origin) deliberately leaves a stale orphan ref
+    /// behind, and the next fire attempt overwrites it here.
     pub fn create_orphan_commit(
         &self,
         new_branch: &str,
@@ -779,9 +781,27 @@ impl GitStorage {
     }
 
     pub fn checkout_branch(&self, branch: &str) -> Result<(), GitError> {
-        // -f: rotation holds commit_lock; any dirty state is crash residue
-        // and git history is the source of truth.
+        // -f: rotation holds commit_lock. Dirty tracked state is not
+        // necessarily crash residue — it can be a deferred send (send.rs
+        // leaves the message on disk when its `git commit` fails). The fire
+        // path refuses to rotate over it (`has_dirty_tracked_files` gate);
+        // the follow path accepts a small residual window, documented on
+        // `rotate::follow_redirect`.
         run_git(&["checkout", "-f", branch], &self.root).map(|_| ())
+    }
+
+    /// True when tracked files carry uncommitted changes (worktree or
+    /// index): `git status --porcelain --untracked-files=no` is non-empty.
+    /// A dirty tracked file is typically a deferred send (send.rs leaves
+    /// the message on disk when `git commit` fails, for sync_loop to commit
+    /// later) — content that exists nowhere but this working tree, which
+    /// any `-f` / `--hard` operation would destroy permanently.
+    pub fn has_dirty_tracked_files(&self) -> Result<bool, GitError> {
+        let out = run_git(
+            &["status", "--porcelain", "--untracked-files=no"],
+            &self.root,
+        )?;
+        Ok(!out.stdout.is_empty())
     }
 
     pub fn tag_archive(&self, tag: &str, sha: &str) -> Result<(), GitError> {

@@ -306,3 +306,123 @@ fn fence_blocks_push_when_head_redirected() {
         "active branch must pass the fence"
     );
 }
+
+#[test]
+fn fire_with_dirty_tracked_file_returns_not_ready() {
+    // Zero-loss (review R-I2): send.rs defers a failed `git commit` by
+    // leaving the message on disk for sync_loop to commit later. That
+    // content exists nowhere but this working tree — Won's `checkout -f` /
+    // Lost's `reset --hard` would destroy it permanently, so fire must
+    // refuse to rotate over a dirty tracked file.
+    let (_bare, clone) = setup_bare_and_clone(5);
+    std::fs::write(
+        clone.path().join("f0.txt"),
+        "c0\n[L1][@x][t] deferred, uncommitted",
+    )
+    .unwrap();
+
+    let storage = GitStorage::new(clone.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let o = try_fire_rotation(
+        &storage,
+        "main",
+        3,
+        arch.path(),
+        ("d", "d@g"),
+        "2026-06-10T00:00:00Z",
+    )
+    .unwrap();
+    assert!(matches!(o, RotationOutcome::NotReady), "got {o:?}");
+    let content = std::fs::read_to_string(clone.path().join("f0.txt")).unwrap();
+    assert!(
+        content.contains("deferred, uncommitted"),
+        "dirty tracked content must survive"
+    );
+    assert_eq!(head_branch(&clone), "main");
+}
+
+#[test]
+fn follow_migrates_message_committed_on_top_of_pulled_redirect() {
+    // Design scenario 4, Shape B (review R-I4): B pulled R, then a handler
+    // committed a message on top of it. origin/main..HEAD = [msg] only —
+    // R is reachable from origin/main, so migrate transplants exactly the
+    // message and never replays the seal commit onto the new epoch.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+    git(&clone_b, &["fetch", "origin"]);
+    git(&clone_b, &["reset", "--hard", "origin/main"]); // R now in local chain
+    commit_file(&clone_b, "late.thread", "[L1][@b][t] late msg");
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let acted = follow_redirect(&storage_b, "main").unwrap();
+    assert!(acted);
+    assert_eq!(head_branch(&clone_b), "main-epoch-2");
+    assert!(clone_b.path().join("late.thread").exists());
+    let out = Command::new("git")
+        .args(["log", "--format=%s", "main-epoch-2"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    let subjects = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        subjects.contains("late.thread"),
+        "message must ride the new epoch: {subjects}"
+    );
+    assert!(
+        !subjects.contains("seal: redirect"),
+        "R must not be transplanted onto the new epoch: {subjects}"
+    );
+    let local = storage_b.rev_parse("main").unwrap();
+    let remote = storage_b.rev_parse("origin/main").unwrap();
+    assert_eq!(
+        local, remote,
+        "old branch must align to origin after follow"
+    );
+}
+
+#[test]
+fn follow_migrate_conflict_aborts_cleanly() {
+    // Review R-I3: a conflicted migrate rebase must not strand the clone
+    // mid-rebase (.git/rebase-merge + detached HEAD). Err contract: the
+    // switch did not happen — HEAD back on the old branch, message intact.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+
+    // A rewrites f0.txt and pushes, then fires: the snapshot tree carries
+    // "A version".
+    commit_file(&clone_a, "f0.txt", "A version");
+    git(&clone_a, &["push", "origin", "main"]);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    // B (stale base "c0") rewrites the same file differently → the migrate
+    // rebase onto the snapshot must conflict.
+    commit_file(&clone_b, "f0.txt", "B version");
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let result = follow_redirect(&storage_b, "main");
+    assert!(result.is_err(), "conflicted migrate must surface as Err");
+
+    assert!(
+        !clone_b.path().join(".git/rebase-merge").exists()
+            && !clone_b.path().join(".git/rebase-apply").exists(),
+        "no mid-rebase state may persist after a failed follow"
+    );
+    assert_eq!(
+        head_branch(&clone_b),
+        "main",
+        "HEAD must be back on the old branch"
+    );
+    let content = std::fs::read_to_string(clone_b.path().join("f0.txt")).unwrap();
+    assert_eq!(content, "B version", "local message commit must be intact");
+}
