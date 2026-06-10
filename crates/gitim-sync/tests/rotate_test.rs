@@ -426,3 +426,140 @@ fn follow_migrate_conflict_aborts_cleanly() {
     let content = std::fs::read_to_string(clone_b.path().join("f0.txt")).unwrap();
     assert_eq!(content, "B version", "local message commit must be intact");
 }
+
+#[test]
+fn race_two_daemons_only_one_wins_other_follows() {
+    // Design scenario 1: two daemons cross the threshold and fire over the
+    // same sealed tip — exactly one Won, the other Lost; the loser follows
+    // and both converge with zero residue.
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let storage_b = GitStorage::new(clone_b.path());
+    let arch_a = tempfile::TempDir::new().unwrap();
+    let arch_b = tempfile::TempDir::new().unwrap();
+
+    let oa = try_fire_rotation(&storage_a, "main", 3, arch_a.path(), ("a", "a@g"), "t").unwrap();
+    let ob = try_fire_rotation(&storage_b, "main", 3, arch_b.path(), ("b", "b@g"), "t").unwrap();
+    assert!(matches!(oa, RotationOutcome::Won { .. }), "got {oa:?}");
+    assert!(matches!(ob, RotationOutcome::Lost), "got {ob:?}");
+
+    // Loser follows; both converge on the same branch; loser has no residue.
+    let acted = follow_redirect(&storage_b, "main").unwrap();
+    assert!(acted);
+    for cl in [&clone_a, &clone_b] {
+        assert_eq!(head_branch(cl), "main-epoch-2");
+    }
+    let out = Command::new("git")
+        .args(["log", "--oneline", "main", "-1"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    let local_main_tip = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        local_main_tip.contains("seal: redirect"),
+        "loser's local main must equal origin (winner's R), got: {local_main_tip}"
+    );
+}
+
+#[test]
+fn normal_push_loses_to_fire_message_migrates() {
+    // Design scenario 3 end-to-end: B writes a message but fire already
+    // happened → B's push rejects, the message reaches the new branch via
+    // follow's migrate, AND the sealed branch tip remains R (invariant 1).
+    let (bare, clone_a) = setup_bare_and_clone(3);
+    let clone_b = clone_from(&bare);
+    let storage_a = GitStorage::new(clone_a.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(&storage_a, "main", 3, arch.path(), ("a", "a@g"), "t").unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    commit_file(
+        &clone_b,
+        "ch.thread",
+        "[L1][@b][t] msg born on sealed branch",
+    );
+    let storage_b = GitStorage::new(clone_b.path());
+    // B's push must reject (origin/main already carries R) — sync_loop would
+    // then run fence + follow.
+    assert!(storage_b.push().is_err());
+    let acted = follow_redirect(&storage_b, "main").unwrap();
+    assert!(acted);
+    assert_eq!(head_branch(&clone_b), "main-epoch-2");
+    assert!(
+        clone_b.path().join("ch.thread").exists(),
+        "message survived migration"
+    );
+
+    // Publish from the new branch, then verify invariant 1 on origin.
+    git(&clone_b, &["push", "origin", "main-epoch-2"]);
+    git(&clone_b, &["fetch", "origin"]);
+    let tip_msg = Command::new("git")
+        .args(["log", "-1", "--format=%s", "origin/main"])
+        .current_dir(clone_b.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&tip_msg.stdout).starts_with("seal: redirect"),
+        "sealed branch tip must remain the redirect commit"
+    );
+}
+
+#[test]
+fn boot_cleanup_resets_partial_fire_residue() {
+    // Design scenario 7: a fire that died after its local commits but before
+    // the atomic push leaves R' on local main + a stale orphan branch, while
+    // origin stays clean. Boot cleanup must reset both away.
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+
+    // Manufacture the residue in fire's real order: orphan first, then the
+    // redirect commit on main. Subject MUST start with "seal: redirect" —
+    // cleanup's self-produced-commit verification gates on that prefix.
+    storage
+        .create_orphan_commit(
+            "main-epoch-2",
+            "gitim.epoch.yaml",
+            "status: active\n",
+            "snapshot: partial",
+            ("d", "d@g"),
+        )
+        .unwrap();
+    let redirect = gitim_core::epoch::EpochFile::new_redirect(
+        1,
+        "main".into(),
+        2,
+        "main-epoch-2".into(),
+        "deadbeef".into(),
+        "deadbeef".into(),
+        "t".into(),
+        None,
+    );
+    let yaml = serde_yaml::to_string(&redirect).unwrap();
+    storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            &yaml,
+            "seal: redirect epoch 1 -> main-epoch-2 (partial fire)",
+            ("d", "d@g"),
+        )
+        .unwrap();
+
+    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+
+    assert_eq!(head_branch(&clone), "main");
+    assert!(!clone.path().join("gitim.epoch.yaml").exists());
+    assert_eq!(
+        storage.rev_parse("main").unwrap(),
+        storage.rev_parse("origin/main").unwrap(),
+        "local main must be back on origin"
+    );
+    let out = Command::new("git")
+        .args(["branch", "-l", "main-epoch-2"])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(out.stdout.is_empty(), "stale orphan branch must be deleted");
+}
