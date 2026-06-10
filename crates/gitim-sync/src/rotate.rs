@@ -89,6 +89,18 @@ pub fn cleanup_failed_fire(
         );
         return Ok(());
     }
+    // Same zero-loss posture for UNCOMMITTED state: a deferred-send dirty
+    // file (handler commit failed; sync picks it up later) would be eaten by
+    // the reset. The fire path never reaches here dirty (its own guard), so
+    // this only triggers on the boot / fence-self-heal entries — refuse and
+    // let a later attempt run once the file has been committed.
+    if storage.has_dirty_tracked_files()? {
+        tracing::warn!(
+            "cleanup_failed_fire: dirty tracked files present; refusing to reset \
+             — residue stays fenced until the working tree is committed"
+        );
+        return Ok(());
+    }
     storage.reset_branch_to_origin(old_branch)?;
     // Branch may not exist if we crashed before creating it — best-effort.
     let _ = storage.delete_local_branch(orphan_branch);

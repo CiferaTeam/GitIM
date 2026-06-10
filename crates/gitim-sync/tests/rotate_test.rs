@@ -667,3 +667,39 @@ fn fence_self_heals_stranded_redirect_residue() {
     );
     assert!(!clone.path().join("gitim.epoch.yaml").exists());
 }
+
+#[test]
+fn cleanup_refuses_when_tracked_files_dirty() {
+    // A deferred-send dirty file (commit failed, left on disk for sync to
+    // pick up) must never be eaten by cleanup's reset --hard.
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let redirect = gitim_core::epoch::EpochFile::new_redirect(
+        1,
+        "main".into(),
+        2,
+        "main-epoch-2".into(),
+        "deadbeef".into(),
+        "deadbeef".into(),
+        "t".into(),
+        None,
+    );
+    let yaml = serde_yaml::to_string(&redirect).unwrap();
+    storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            &yaml,
+            "seal: redirect epoch 1 -> main-epoch-2 (partial fire)",
+            ("d", "d@g"),
+        )
+        .unwrap();
+    // Dirty a TRACKED file after the residue commit (f0.txt exists from setup).
+    std::fs::write(clone.path().join("f0.txt"), "deferred message content").unwrap();
+
+    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+
+    let dirty = std::fs::read_to_string(clone.path().join("f0.txt")).unwrap();
+    assert_eq!(dirty, "deferred message content", "dirty file must survive");
+    // Residue R' still present (cleanup refused) — fence keeps it unpublished.
+    assert!(clone.path().join("gitim.epoch.yaml").exists());
+}
