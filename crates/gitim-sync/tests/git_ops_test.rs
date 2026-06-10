@@ -612,6 +612,140 @@ fn create_orphan_commit_restores_existing_epoch_yaml_in_head() {
     );
 }
 
+// ── epoch-rotation primitives ─────────────────────────────────
+//
+// The helpers below differ from `setup_repo_pair` in one way that matters:
+// they pin the branch name to `main` (`init --bare -b main`), because the
+// rotation tests address branches by name instead of `HEAD`.
+
+/// Clone `bare` into a fresh TempDir and configure a commit identity.
+fn clone_from(bare: &TempDir) -> TempDir {
+    let clone = TempDir::new().unwrap();
+    run_git(
+        clone.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            clone.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone.path(), &["config", "user.email", "test@test.com"]);
+    run_git(clone.path(), &["config", "user.name", "Test"]);
+    clone
+}
+
+/// Write `content` to `dir/name`, stage everything, commit (message = name).
+fn commit_file(dir: &Path, name: &str, content: &str) {
+    std::fs::write(dir.join(name), content).unwrap();
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-m", name]);
+}
+
+/// Bare repo on branch `main` + one clone with the initial commit pushed.
+fn setup_bare_and_clone_main() -> (TempDir, TempDir) {
+    let bare = TempDir::new().unwrap();
+    run_git(bare.path(), &["init", "--bare", "-b", "main"]);
+    let clone = clone_from(&bare);
+    commit_file(clone.path(), "init.txt", "init");
+    run_git(clone.path(), &["push", "-u", "origin", "main"]);
+    (bare, clone)
+}
+
+/// Bare + two clones. A pushed the initial commit; B cloned afterwards, so
+/// both start at the same `main` tip.
+fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
+    let (bare, clone_a) = setup_bare_and_clone_main();
+    let clone_b = clone_from(&bare);
+    (bare, clone_a, clone_b)
+}
+
+#[test]
+fn show_file_at_ref_reads_committed_content_without_checkout() {
+    let (_bare, clone_dir, storage) = setup_repo_pair();
+    std::fs::write(clone_dir.path().join("probe.txt"), "v1").unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add probe"]);
+
+    let content = storage.show_file_at_ref("HEAD", "probe.txt").expect("call");
+    assert_eq!(content.as_deref(), Some("v1"));
+
+    // Missing path at the ref → Ok(None), not Err.
+    assert!(storage
+        .show_file_at_ref("HEAD", "nope.txt")
+        .unwrap()
+        .is_none());
+
+    // Missing ref entirely (pre-rotation branch not yet born) → Ok(None) too.
+    assert!(storage
+        .show_file_at_ref("origin/never-born", "probe.txt")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn atomic_push_two_refs_all_or_nothing() {
+    // A and B share a bare. A pushes a commit first, occupying main.
+    // B, still on the old tip, atomically pushes main + a new branch →
+    // the whole push must be rejected; the new branch must not appear.
+    let (bare, clone_a, clone_b) = setup_two_clones();
+    commit_file(clone_a.path(), "fa", "wins");
+    run_git(clone_a.path(), &["push", "origin", "main"]);
+
+    // B local: commit on main + new branch at that (stale-based) tip.
+    commit_file(clone_b.path(), "fb", "loses");
+    run_git(clone_b.path(), &["branch", "feature-x"]);
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let result = storage_b.atomic_push_two_refs("main", "feature-x");
+    assert!(
+        result.is_err(),
+        "non-ff main must reject the whole atomic push"
+    );
+
+    // feature-x must not exist on the bare (all-or-nothing).
+    let refs = Command::new("git")
+        .args(["branch", "-l", "feature-x"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(
+        refs.stdout.is_empty(),
+        "feature-x must not exist on remote, got: {}",
+        String::from_utf8_lossy(&refs.stdout)
+    );
+}
+
+#[test]
+fn atomic_push_two_refs_succeeds_when_unraced() {
+    let (bare, clone_a, _clone_b) = setup_two_clones();
+    commit_file(clone_a.path(), "m1.txt", "tip");
+    run_git(clone_a.path(), &["branch", "main-epoch-2"]);
+
+    let storage = GitStorage::new(clone_a.path());
+    storage
+        .atomic_push_two_refs("main", "main-epoch-2")
+        .expect("uncontended atomic push must succeed");
+
+    // Both refs landed on the bare.
+    let refs = Command::new("git")
+        .args(["branch", "-l", "main-epoch-2"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(!refs.stdout.is_empty(), "main-epoch-2 must exist on remote");
+    let bare_main = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    let local_main = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(clone_a.path())
+        .output()
+        .unwrap();
+    assert_eq!(bare_main.stdout, local_main.stdout, "main must be updated");
+}
+
 #[test]
 fn write_redirect_commit_appends_to_current_branch() {
     use gitim_sync::git::GitStorage;

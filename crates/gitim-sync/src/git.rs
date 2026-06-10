@@ -594,7 +594,7 @@ impl GitStorage {
             .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
 
         // 2. Stage.
-        self.run_git(&["add", epoch_yaml_path])?;
+        run_git(&["add", epoch_yaml_path], &self.root)?;
 
         // 3. Write-tree.
         let tree = self.run_git_capture(&["write-tree"])?;
@@ -614,16 +614,19 @@ impl GitStorage {
         let commit = commit.trim().to_string();
 
         // 5. Update ref.
-        self.run_git(&["update-ref", &format!("refs/heads/{new_branch}"), &commit])?;
+        run_git(
+            &["update-ref", &format!("refs/heads/{new_branch}"), &commit],
+            &self.root,
+        )?;
 
         // 6. Reset index back to HEAD so the OLD branch's working tree is clean
         //    (the OLD branch will get its own redirect commit separately).
-        self.run_git(&["reset", "--mixed", "HEAD"])?;
+        run_git(&["reset", "--mixed", "HEAD"], &self.root)?;
         // If the file existed in HEAD, `checkout` restores it. If it did NOT exist,
         // `checkout` fails (path not in HEAD's tree) and we must remove the
         // orphan-only file we placed in the working tree at step 1.
-        match self.run_git(&["checkout", "HEAD", "--", epoch_yaml_path]) {
-            Ok(()) => {
+        match run_git(&["checkout", "HEAD", "--", epoch_yaml_path], &self.root) {
+            Ok(_) => {
                 // File restored from HEAD — leave it.
             }
             Err(_) => {
@@ -649,7 +652,7 @@ impl GitStorage {
         let yaml_path = self.root.join(epoch_yaml_path);
         std::fs::write(&yaml_path, epoch_yaml_content)
             .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
-        self.run_git(&["add", epoch_yaml_path])?;
+        run_git(&["add", epoch_yaml_path], &self.root)?;
 
         let (name, email) = author;
         let output = std::process::Command::new("git")
@@ -682,35 +685,48 @@ impl GitStorage {
         Ok(out.trim().to_string())
     }
 
-    fn run_git(&self, args: &[&str]) -> Result<(), GitError> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&self.root)
-            .output()
-            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+    /// `git show <ref>:<path>` — read a file's committed content without
+    /// touching the working tree. Returns Ok(None) when the path does not
+    /// exist at that ref (including when the ref itself is unborn); other
+    /// failures map to GitError.
+    pub fn show_file_at_ref(
+        &self,
+        reference: &str,
+        path: &str,
+    ) -> Result<Option<String>, GitError> {
+        let spec = format!("{reference}:{path}");
+        match run_git(&["show", &spec], &self.root) {
+            Ok(out) => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
+            // Path-missing classification, per git's stderr wording:
+            //   "fatal: path 'x' does not exist in 'REF'"
+            //   "fatal: path 'x' exists on disk, but not in 'REF'"
+            //   "fatal: invalid object name 'REF'"   (ref not born yet)
+            Err(GitError::CommandFailed(stderr))
+                if stderr.contains("does not exist")
+                    || stderr.contains("exists on disk, but not in")
+                    || stderr.contains("invalid object name") =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
-        Ok(())
+    }
+
+    /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
+    /// Both refs update or neither does — this is the rotation arbiter.
+    /// Reject (any cause) is an Err; caller treats it as "lost the race".
+    pub fn atomic_push_two_refs(&self, old_branch: &str, new_branch: &str) -> Result<(), GitError> {
+        let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
+        let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
+        run_git(
+            &["push", "--atomic", "origin", &new_spec, &old_spec],
+            &self.root,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn run_git_capture(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&self.root)
-            .output()
-            .map_err(|e| GitError::CommandFailed(format!("git {}: {e}", args.join(" "))))?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+        let output = run_git(args, &self.root)?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
