@@ -46,6 +46,18 @@ fn head_branch(dir: &tempfile::TempDir) -> String {
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
+/// Configured upstream of `branch` ("" when none) — sync_loop's cycle top
+/// probes `@{upstream}` and bails the whole cycle when it doesn't resolve,
+/// so every epoch-branch switch must leave upstream set to stay publishable.
+fn upstream_of(dir: &tempfile::TempDir, branch: &str) -> String {
+    let spec = format!("{branch}@{{upstream}}");
+    let out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", &spec])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
 
 #[test]
 fn under_threshold_returns_not_ready() {
@@ -92,6 +104,11 @@ fn solo_fire_wins_switches_branch_tags_and_bundles() {
         ("main", "main-epoch-2", 2)
     );
     assert_eq!(head_branch(&clone), "main-epoch-2");
+    assert_eq!(
+        upstream_of(&clone, "main-epoch-2"),
+        "origin/main-epoch-2",
+        "won fire must leave the new branch publishable"
+    );
     let yaml = std::fs::read_to_string(clone.path().join("gitim.epoch.yaml")).unwrap();
     assert!(yaml.contains("status: active") && yaml.contains("epoch: 2"));
     assert!(arch.path().join("epoch-1.bundle").exists());
@@ -215,6 +232,11 @@ fn follow_switches_and_migrates_unpushed() {
     let acted = follow_redirect(&storage_b, "main").unwrap();
     assert!(acted);
     assert_eq!(head_branch(&clone_b), "main-epoch-2");
+    assert_eq!(
+        upstream_of(&clone_b, "main-epoch-2"),
+        "origin/main-epoch-2",
+        "follow must leave the target branch publishable"
+    );
     assert!(clone_b.path().join("general.thread").exists());
     let yaml = std::fs::read_to_string(clone_b.path().join("gitim.epoch.yaml")).unwrap();
     assert!(yaml.contains("status: active"));
@@ -252,6 +274,11 @@ fn follow_resolves_across_two_epochs() {
     let acted = follow_redirect(&storage_b, "main").unwrap();
     assert!(acted);
     assert_eq!(head_branch(&clone_b), "main-epoch-3");
+    assert_eq!(
+        upstream_of(&clone_b, "main-epoch-3"),
+        "origin/main-epoch-3",
+        "multi-hop follow must leave the final branch publishable"
+    );
 }
 
 #[test]

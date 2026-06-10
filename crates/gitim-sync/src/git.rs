@@ -831,6 +831,20 @@ impl GitStorage {
         run_git(&["branch", "-f", branch, "HEAD"], &self.root).map(|_| ())
     }
 
+    /// `git branch --set-upstream-to=origin/<branch> <branch>` — make a
+    /// freshly created/switched branch publishable by the `@{upstream}`
+    /// probes and pushes the sync loop runs. The remote-tracking ref
+    /// already exists in every rotation context (atomic push / fetch
+    /// created it).
+    pub fn set_upstream_to_origin(&self, branch: &str) -> Result<(), GitError> {
+        let upstream = format!("origin/{branch}");
+        run_git(
+            &["branch", "--set-upstream-to", &upstream, branch],
+            &self.root,
+        )
+        .map(|_| ())
+    }
+
     /// `git update-ref refs/heads/<branch> <origin sha>` — align a NON-checked-out
     /// branch to origin without touching the working tree.
     pub fn reset_to_origin_without_checkout(&self, branch: &str) -> Result<(), GitError> {

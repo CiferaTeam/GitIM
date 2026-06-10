@@ -178,6 +178,18 @@ pub fn try_fire_rotation(
     match storage.atomic_push_two_refs(current_branch, &new_branch) {
         Ok(()) => {
             storage.checkout_branch(&new_branch)?;
+            // The orphan branch was born via update-ref and carries no
+            // upstream config; sync_loop's cycle top probes `@{upstream}`
+            // and bails the whole cycle when it doesn't resolve — an
+            // upstream-less branch would never publish again. The atomic
+            // push above just created origin/<new_branch>, so bind to it
+            // now. Failure is logged, not propagated: the rotation is
+            // already durable on origin, and an Err here would misreport a
+            // Won fire as failed; sync_loop's own `push -u origin HEAD`
+            // re-binds upstream on the first successful publish anyway.
+            if let Err(e) = storage.set_upstream_to_origin(&new_branch) {
+                tracing::error!("rotation: set upstream for {new_branch} failed: {e}");
+            }
             // Best-effort archive: tag + push + bundle. Failure warns, never
             // blocks — the rotation itself is already durable on origin.
             if let Err(e) = storage.tag_archive(&archive_tag, &sealed_commit_sha) {
@@ -286,6 +298,16 @@ pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<boo
 
     // Make the target branch exist locally, tracking origin.
     storage.create_or_repoint_branch(&target)?;
+    // Bind upstream explicitly — `branch -f` only sets it when git's
+    // ambient branch.autoSetupMerge config allows, and sync_loop's
+    // `@{upstream}` probes wedge permanently on an upstream-less branch.
+    // Unlike the Won arm this propagates: nothing durable happened yet
+    // (we are still on the old branch), so an Err is an honest "follow
+    // didn't happen" and the next cycle retries the whole switch. That
+    // retry guarantee is also why this runs BEFORE the checkout — once
+    // HEAD sits on `target`, a re-entered follow no-ops at
+    // `target == current_branch` and would never repair the upstream.
+    storage.set_upstream_to_origin(&target)?;
 
     if has_unpushed {
         // HEAD is on current_branch; transplant <origin/current>..HEAD onto
