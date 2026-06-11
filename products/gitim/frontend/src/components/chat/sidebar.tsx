@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Pin, Plus, Search } from "lucide-react";
+import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
+import { useProjectStore } from "../../hooks/use-project-store";
 import { chatScopeKeyForChannel, clearChatScopeUnread } from "../../lib/chat-ui-state";
 import * as client from "../../lib/client";
 import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { resolveDisplayName } from "../../lib/format-handler-display";
+import { buildSidebarTree } from "../../lib/sidebar-tree";
 import { HandlerName } from "./handler-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
@@ -35,6 +37,7 @@ interface SidebarProps {
 const KNOWN_AGENT_STORAGE_PREFIX = "gitim-known-agents:";
 const PINNED_CONVERSATIONS_STORAGE_PREFIX = "gitim-pinned-conversations:";
 const FOLDED_CHANNELS_STORAGE_PREFIX = "gitim-folded-channels:";
+const EXPANDED_PROJECTS_STORAGE_PREFIX = "gitim-expanded-projects:";
 
 // Archived DMs are loaded one page at a time. 5 is a sidebar-friendly batch
 // — small enough that the section doesn't dwarf the active DM list, large
@@ -49,6 +52,7 @@ const ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS = 300;
 interface PinnedConversations {
   channels: Set<string>;
   dms: Set<string>;
+  projects: Set<string>;
 }
 
 function knownAgentStorageKey(workspaceKey: string): string {
@@ -61,6 +65,10 @@ function pinnedConversationsStorageKey(workspaceKey: string): string {
 
 function foldedChannelsStorageKey(workspaceKey: string): string {
   return `${FOLDED_CHANNELS_STORAGE_PREFIX}${workspaceKey}`;
+}
+
+function expandedProjectsStorageKey(workspaceKey: string): string {
+  return `${EXPANDED_PROJECTS_STORAGE_PREFIX}${workspaceKey}`;
 }
 
 function readKnownAgentIds(workspaceKey: string | null): Set<string> {
@@ -79,7 +87,7 @@ function writeKnownAgentIds(workspaceKey: string, ids: Set<string>) {
 }
 
 function emptyPinnedConversations(): PinnedConversations {
-  return { channels: new Set(), dms: new Set() };
+  return { channels: new Set(), dms: new Set(), projects: new Set() };
 }
 
 function readPinnedConversations(workspaceKey: string | null): PinnedConversations {
@@ -89,13 +97,16 @@ function readPinnedConversations(workspaceKey: string | null): PinnedConversatio
     const parsed = raw ? (JSON.parse(raw) as unknown) : {};
     const record =
       parsed && typeof parsed === "object"
-        ? (parsed as { channels?: unknown; dms?: unknown })
+        ? (parsed as { channels?: unknown; dms?: unknown; projects?: unknown })
         : {};
     const channels = Array.isArray(record.channels) ? record.channels : [];
     const dms = Array.isArray(record.dms) ? record.dms : [];
+    const projects = Array.isArray(record.projects) ? record.projects : [];
     return {
       channels: new Set(channels.filter((v): v is string => typeof v === "string")),
       dms: new Set(dms.filter((v): v is string => typeof v === "string")),
+      // Backward compat: old schema without projects field → empty Set
+      projects: new Set(projects.filter((v): v is string => typeof v === "string")),
     };
   } catch {
     return emptyPinnedConversations();
@@ -108,6 +119,7 @@ function writePinnedConversations(workspaceKey: string, pins: PinnedConversation
     JSON.stringify({
       channels: [...pins.channels].sort(),
       dms: [...pins.dms].sort(),
+      projects: [...pins.projects].sort(),
     }),
   );
 }
@@ -116,7 +128,26 @@ function clonePinnedConversations(pins: PinnedConversations): PinnedConversation
   return {
     channels: new Set(pins.channels),
     dms: new Set(pins.dms),
+    projects: new Set(pins.projects),
   };
+}
+
+function readExpandedProjects(workspaceKey: string | null): Set<string> {
+  if (!workspaceKey) return new Set();
+  try {
+    const raw = localStorage.getItem(expandedProjectsStorageKey(workspaceKey));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeExpandedProjects(workspaceKey: string, expanded: Set<string>) {
+  localStorage.setItem(
+    expandedProjectsStorageKey(workspaceKey),
+    JSON.stringify([...expanded].sort()),
+  );
 }
 
 function readFoldedChannels(workspaceKey: string | null): Set<string> {
@@ -193,6 +224,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const agents = useAgentStore((s) => s.agents);
   const currentUser = useChatStore((s) => s.currentUser);
+  const projects = useProjectStore((s) => s.projects);
+  const fetchProjects = useProjectStore((s) => s.fetch);
   const channels = useChatStore((s) => s.channels);
   const archivedChannels = useChatStore((s) => s.archivedChannels);
   const archivedChannelsView = useChatStore((s) => s.archivedChannelsView);
@@ -259,6 +292,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     () => readFoldedChannels(activeWorkspaceKey),
   );
   const [foldedOpen, setFoldedOpen] = useState(false);
+  // Project collapse state: default COLLAPSED (not in expanded set).
+  // Persisted to localStorage per workspace key.
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    () => readExpandedProjects(activeWorkspaceKey),
+  );
 
   const [dmSearchOpen, setDmSearchOpen] = useState(false);
   const [dmQuery, setDmQuery] = useState("");
@@ -300,8 +338,22 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   useEffect(() => {
     setPinnedConversations(readPinnedConversations(activeWorkspaceKey));
     setFoldedChannels(readFoldedChannels(activeWorkspaceKey));
+    setExpandedProjects(readExpandedProjects(activeWorkspaceKey));
     setFoldedOpen(false);
   }, [activeWorkspaceKey]);
+
+  // Fetch projects whenever the workspace changes.
+  useEffect(() => {
+    if (activeSlug) {
+      void fetchProjects(activeSlug);
+    }
+  }, [activeSlug, fetchProjects]);
+
+  // Persist expanded projects to localStorage whenever they change.
+  useEffect(() => {
+    if (!activeWorkspaceKey) return;
+    writeExpandedProjects(activeWorkspaceKey, expandedProjects);
+  }, [expandedProjects, activeWorkspaceKey]);
 
   async function handleCreateChannel() {
     if (!activeSlug) {
@@ -354,18 +406,27 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }, [dmSearchOpen]);
 
   const allRegularChannels = channels.filter((c) => c.kind === "channel");
-  const pinnedRegularChannels = sortUnreadThenPinned(
-    allRegularChannels.filter((c) => pinnedConversations.channels.has(c.name)),
-    pinnedConversations.channels,
-  );
+  // foldedRegularChannels: channels that are folded (hidden from main list).
+  // Used for the "Folded" section which groups them under a collapsible toggle.
   const foldedRegularChannels = allRegularChannels.filter(
     (c) => !pinnedConversations.channels.has(c.name) && foldedChannels.has(c.name),
   );
-  const unfoldedUnpinnedChannels = sortUnreadThenPinned(
-    allRegularChannels.filter(
-      (c) => !pinnedConversations.channels.has(c.name) && !foldedChannels.has(c.name),
-    ),
-    pinnedConversations.channels,
+
+  // Build the combined pin key Set used by buildSidebarTree.
+  // Computed from stable inputs (pinnedConversations is replaced on every
+  // write but never mutated in place — no fresh literal risk here).
+  const pinnedKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const ch of pinnedConversations.channels) s.add(`channel:${ch}`);
+    for (const pr of pinnedConversations.projects) s.add(`project:${pr}`);
+    return s;
+  }, [pinnedConversations]);
+
+  // Build the mixed sidebar tree (projects as folders + standalone channels).
+  // allRegularChannels and projects are both stable-reference arrays.
+  const sidebarTree = useMemo(
+    () => buildSidebarTree(allRegularChannels, projects, pinnedKeys),
+    [allRegularChannels, projects, pinnedKeys],
   );
   const liveAgentIds = useMemo(
     () => new Set(agents.map((agent) => agent.id)),
@@ -391,14 +452,17 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const channelQueryNeedle = channelQuery.trim().toLowerCase();
   const matchesChannelQuery = (c: Channel) =>
     !channelQueryNeedle || c.name.toLowerCase().includes(channelQueryNeedle);
-  const filteredPinnedChannels = pinnedRegularChannels.filter(matchesChannelQuery);
   const filteredFoldedChannels = foldedRegularChannels.filter(matchesChannelQuery);
-  const filteredUnfoldedChannels = unfoldedUnpinnedChannels.filter(matchesChannelQuery);
-  const hasAnyVisibleChannel =
-    filteredPinnedChannels.length +
-      filteredFoldedChannels.length +
-      filteredUnfoldedChannels.length >
-    0;
+  // With tree rendering: "any visible channel" means any node in sidebarTree
+  // passes the current search query (channel matches directly, or project has
+  // at least one matching child). Used only for "No channels found" empty state.
+  const hasAnyVisibleChannel = channelQueryNeedle
+    ? sidebarTree.some((node) =>
+        node.kind === "channel"
+          ? matchesChannelQuery(node.channel)
+          : node.children.some(matchesChannelQuery),
+      )
+    : sidebarTree.length > 0;
   // Force the Folded section open when the user is searching, so matches
   // inside it are reachable without an extra click.
   const showFoldedExpanded = foldedOpen || channelQueryNeedle.length > 0;
@@ -467,6 +531,32 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         return next;
       });
     }
+  }
+
+  function handleTogglePinnedProject(slug: string) {
+    if (!activeWorkspaceKey) return;
+    setPinnedConversations((prev) => {
+      const next = clonePinnedConversations(prev);
+      if (next.projects.has(slug)) {
+        next.projects.delete(slug);
+      } else {
+        next.projects.add(slug);
+      }
+      writePinnedConversations(activeWorkspaceKey, next);
+      return next;
+    });
+  }
+
+  function handleToggleProjectExpanded(slug: string) {
+    setExpandedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) {
+        next.delete(slug);
+      } else {
+        next.add(slug);
+      }
+      return next;
+    });
   }
 
   function handleToggleFoldedChannel(channel: Channel) {
@@ -782,26 +872,61 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto -mx-1 px-1 space-y-0.5">
-          {filteredPinnedChannels.map((ch) => (
-            <ChannelItem
-              key={ch.name}
-              icon={<Hash className="size-3.5 text-text-muted" />}
-              label={ch.name}
-              unread={ch.unreadCount}
-              hasMention={ch.hasMention}
-              active={currentChannel === ch.name}
-              pinned
-              pinLabel={`Pin #${ch.name}`}
-              unpinLabel={`Unpin #${ch.name}`}
-              folded={false}
-              foldLabel={`Hide #${ch.name}`}
-              unfoldLabel={`Show #${ch.name}`}
-              testId="sidebar-channel-item"
-              onClick={() => onChannelSelect(ch.name)}
-              onTogglePin={() => handleTogglePinnedConversation(ch)}
-              onToggleFold={() => handleToggleFoldedChannel(ch)}
-            />
-          ))}
+          {sidebarTree.map((node) => {
+            if (node.kind === "channel") {
+              const ch = node.channel;
+              if (!matchesChannelQuery(ch)) return null;
+              const isFolded = !pinnedConversations.channels.has(ch.name) && foldedChannels.has(ch.name);
+              if (isFolded) return null;
+              return (
+                <ChannelItem
+                  key={ch.name}
+                  icon={<Hash className="size-3.5 text-text-muted" />}
+                  label={ch.name}
+                  unread={ch.unreadCount}
+                  hasMention={ch.hasMention}
+                  active={currentChannel === ch.name}
+                  pinned={pinnedConversations.channels.has(ch.name)}
+                  pinLabel={`Pin #${ch.name}`}
+                  unpinLabel={`Unpin #${ch.name}`}
+                  folded={false}
+                  foldLabel={`Hide #${ch.name}`}
+                  unfoldLabel={`Show #${ch.name}`}
+                  testId="sidebar-channel-item"
+                  onClick={() => onChannelSelect(ch.name)}
+                  onTogglePin={() => handleTogglePinnedConversation(ch)}
+                  onToggleFold={() => handleToggleFoldedChannel(ch)}
+                />
+              );
+            }
+            // project node
+            const proj = node.project;
+            const children = node.children;
+            // Filter: hide project if search is active and no child matches
+            const matchingChildren = channelQueryNeedle
+              ? children.filter(matchesChannelQuery)
+              : children;
+            if (channelQueryNeedle && matchingChildren.length === 0) return null;
+            const isExpanded = expandedProjects.has(proj.slug) || channelQueryNeedle.length > 0;
+            const isPinned = pinnedConversations.projects.has(proj.slug);
+            return (
+              <ProjectItem
+                key={proj.slug}
+                project={proj}
+                children={matchingChildren}
+                pinned={isPinned}
+                expanded={isExpanded}
+                currentChannel={currentChannel}
+                onToggleExpand={() => handleToggleProjectExpanded(proj.slug)}
+                onTogglePin={() => handleTogglePinnedProject(proj.slug)}
+                onChannelSelect={onChannelSelect}
+                onTogglePinnedChannel={handleTogglePinnedConversation}
+                onToggleFoldChannel={handleToggleFoldedChannel}
+                pinnedChannels={pinnedConversations.channels}
+                foldedChannels={foldedChannels}
+              />
+            );
+          })}
           {foldedRegularChannels.length > 0 && (
             <div className="pt-1">
               <button
@@ -851,26 +976,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
               )}
             </div>
           )}
-          {filteredUnfoldedChannels.map((ch) => (
-            <ChannelItem
-              key={ch.name}
-              icon={<Hash className="size-3.5 text-text-muted" />}
-              label={ch.name}
-              unread={ch.unreadCount}
-              hasMention={ch.hasMention}
-              active={currentChannel === ch.name}
-              pinned={false}
-              pinLabel={`Pin #${ch.name}`}
-              unpinLabel={`Unpin #${ch.name}`}
-              folded={false}
-              foldLabel={`Hide #${ch.name}`}
-              unfoldLabel={`Show #${ch.name}`}
-              testId="sidebar-channel-item"
-              onClick={() => onChannelSelect(ch.name)}
-              onTogglePin={() => handleTogglePinnedConversation(ch)}
-              onToggleFold={() => handleToggleFoldedChannel(ch)}
-            />
-          ))}
           {!hasAnyVisibleChannel && channelQueryNeedle && (
             <p className="px-2 py-1 text-[11px] text-text-muted">No channels found</p>
           )}
@@ -1518,5 +1623,111 @@ function ChannelItem({
         </Button>
       )}
     </li>
+  );
+}
+
+interface ProjectItemProps {
+  project: import("../../lib/types").Project;
+  children: Channel[];
+  pinned: boolean;
+  expanded: boolean;
+  currentChannel: string | null;
+  onToggleExpand(): void;
+  onTogglePin(): void;
+  onChannelSelect(name: string): void;
+  onTogglePinnedChannel(ch: Channel): void;
+  onToggleFoldChannel(ch: Channel): void;
+  pinnedChannels: Set<string>;
+  foldedChannels: Set<string>;
+}
+
+function ProjectItem({
+  project,
+  children,
+  pinned,
+  expanded,
+  currentChannel,
+  onToggleExpand,
+  onTogglePin,
+  onChannelSelect,
+  onTogglePinnedChannel,
+  onToggleFoldChannel,
+  pinnedChannels,
+  foldedChannels,
+}: ProjectItemProps) {
+  const pinButtonLabel = pinned ? `Unpin project ${project.meta.display_name}` : `Pin project ${project.meta.display_name}`;
+  return (
+    <div className="flex flex-col" data-testid="sidebar-project-item">
+      {/* Project folder header row */}
+      <div
+        className="group flex items-center rounded-md border-l-2 border-transparent hover:bg-surface/60 transition-all duration-150 cursor-pointer"
+        onClick={onToggleExpand}
+        role="button"
+        aria-expanded={expanded}
+        aria-label={`Project ${project.meta.display_name}`}
+        data-testid="sidebar-project-header"
+      >
+        <button
+          type="button"
+          className="min-w-0 flex-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left text-text-secondary hover:text-foreground"
+          onClick={onToggleExpand}
+        >
+          <ChevronRight
+            className={[
+              "size-3 text-text-muted shrink-0 transition-transform duration-150",
+              expanded ? "rotate-90" : "",
+            ].join(" ")}
+          />
+          <Folder className="size-3.5 text-text-muted shrink-0" />
+          <span className="truncate flex-1 font-medium">{project.meta.display_name}</span>
+          <span className="text-[10px] text-text-faint font-mono shrink-0 mr-1">
+            {children.length}
+          </span>
+        </button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={pinButtonLabel}
+          aria-pressed={pinned}
+          title={pinButtonLabel}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePin();
+          }}
+          className={[
+            "mr-1 text-text-faint transition-opacity hover:text-primary focus-visible:opacity-100",
+            pinned ? "opacity-100 text-primary" : "opacity-0 group-hover:opacity-100",
+          ].join(" ")}
+        >
+          <Pin className={["size-3", pinned ? "fill-current" : ""].join(" ")} />
+        </Button>
+      </div>
+      {/* Children: rendered when expanded */}
+      {expanded && (
+        <div className="ml-4 space-y-0.5" data-testid="sidebar-project-children">
+          {children.map((ch) => (
+            <ChannelItem
+              key={ch.name}
+              icon={<Hash className="size-3.5 text-text-muted" />}
+              label={ch.name}
+              unread={ch.unreadCount}
+              hasMention={ch.hasMention}
+              active={currentChannel === ch.name}
+              pinned={pinnedChannels.has(ch.name)}
+              pinLabel={`Pin #${ch.name}`}
+              unpinLabel={`Unpin #${ch.name}`}
+              folded={foldedChannels.has(ch.name)}
+              foldLabel={`Hide #${ch.name}`}
+              unfoldLabel={`Show #${ch.name}`}
+              testId="sidebar-project-channel-item"
+              onClick={() => onChannelSelect(ch.name)}
+              onTogglePin={() => onTogglePinnedChannel(ch)}
+              onToggleFold={() => onToggleFoldChannel(ch)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

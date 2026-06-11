@@ -7,6 +7,8 @@ export interface ChannelMeta {
   created_at: string;
   introduction: string;
   members: string[];
+  /** Project slug this channel belongs to, or absent/null = unassigned. */
+  project?: string | null;
 }
 
 export interface UserMeta {
