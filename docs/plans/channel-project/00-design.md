@@ -215,7 +215,7 @@ v1 决策:
 
 - `createProject` / `setChannelProject` → friendly error "project management is unavailable in browser mode",不打 HTTP、不加 daemon-web worker method
 - `listProjects` → 返回空列表(sidebar 退化为纯 channel 平铺,行为等同 feature 不存在)
-- daemon-web `channels()` 不透传 `project` 字段(现状),**透传留 v1.5**
+- daemon-web `channels()` **透传** `project` 字段(实施时发现只是 state.ts ChannelMeta 一行 + 构造点一行,顺手做了)。但 browser mode 的 `listProjects` 返回 `[]`,`buildSidebarTree` 的孤儿防御把带 project 字段的 channel 照常归入 unassigned 平铺 —— **可见行为仍是全降级**。v1.5 只需把 listProjects 接到 daemon-web 即可点亮分组
 
 理由:browser mode 本来就是受限模式(无 create channel / agents / flows / cron),先例一致性优先;读路径透传涉及 WASM 端 meta parse 验证,是独立增量。已验证 `refreshChannelsCache` 只扫 `channels/` 目录,`projects/` 顶层目录不会被 browser 端误认成 channel。
 
