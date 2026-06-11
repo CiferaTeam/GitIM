@@ -1672,7 +1672,7 @@ function ProjectItem({
         <button
           type="button"
           className="min-w-0 flex-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left text-text-secondary hover:text-foreground"
-          onClick={onToggleExpand}
+          onClick={(e) => { e.stopPropagation(); onToggleExpand(); }}
         >
           <ChevronRight
             className={[
