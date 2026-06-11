@@ -3,6 +3,7 @@ use crate::card_handlers::push_with_retry;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 
+use gitim_core::responses::{ListProjectsResponse, ProjectEntry};
 use gitim_core::types::{ChannelMeta, ChannelName, Handler, ProjectMeta, ProjectSlug};
 use gitim_core::validator::validate_project_meta;
 use tracing::info;
@@ -100,46 +101,82 @@ pub async fn handle_create_project(
 pub async fn handle_list_projects(state: SharedState) -> Response {
     let projects_dir = state.repo_root.join("projects");
     if !projects_dir.exists() {
-        return Response::success(serde_json::json!({"projects": []}));
+        return Response::json(ListProjectsResponse { projects: vec![] });
     }
 
-    let mut projects = Vec::new();
+    // --- Step 1: collect valid slugs sorted alphabetically ---
+    let mut slugs: Vec<String> = Vec::new();
     let rd = match std::fs::read_dir(&projects_dir) {
         Ok(rd) => rd,
         Err(e) => return Response::error(format!("failed to read projects dir: {e}")),
     };
-
     for entry in rd.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+        let fname = entry.file_name();
+        let Some(name) = fname.to_str() else { continue };
         let Some(slug) = name.strip_suffix(".meta.yaml") else {
             continue;
         };
-        let yaml = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Ok(meta) = validate_project_meta(&yaml) {
-            projects.push(serde_json::json!({
-                "slug": slug,
-                "display_name": meta.display_name,
-                "created_by": meta.created_by,
-                "created_at": meta.created_at,
-                "introduction": meta.introduction,
-            }));
+        if ProjectSlug::new(slug).is_ok() {
+            slugs.push(slug.to_string());
+        }
+    }
+    slugs.sort();
+
+    // --- Step 2: build project→channel count map by scanning channels/ (active only) ---
+    // Archived channels live under archive/channels/ and are excluded.
+    let channels_dir = state.repo_root.join("channels");
+    let mut slug_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    if channels_dir.exists() {
+        if let Ok(crd) = std::fs::read_dir(&channels_dir) {
+            for cent in crd.flatten() {
+                let cname = cent.file_name();
+                let Some(cn) = cname.to_str() else { continue };
+                if !cn.ends_with(".meta.yaml") {
+                    continue;
+                }
+                let path = cent.path();
+                let yaml = match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let cm: Result<ChannelMeta, _> = serde_yaml::from_str(&yaml);
+                if let Ok(cm) = cm {
+                    if let Some(p) = cm.project {
+                        *slug_counts.entry(p).or_insert(0) += 1;
+                    }
+                }
+            }
         }
     }
 
-    projects.sort_by(|a, b| {
-        a["slug"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["slug"].as_str().unwrap_or(""))
-    });
+    // --- Step 3: build response entries ---
+    let mut entries: Vec<ProjectEntry> = Vec::new();
+    for slug in &slugs {
+        let meta_path = projects_dir.join(format!("{slug}.meta.yaml"));
+        let yaml = match std::fs::read_to_string(&meta_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let meta: ProjectMeta = match serde_yaml::from_str(&yaml) {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::warn!("project meta corrupted, skipping: {slug}");
+                continue;
+            }
+        };
+        let channel_count = slug_counts.get(slug).copied().unwrap_or(0);
+        entries.push(ProjectEntry {
+            slug: slug.clone(),
+            display_name: meta.display_name,
+            created_by: meta.created_by,
+            created_at: meta.created_at,
+            introduction: meta.introduction,
+            channel_count,
+        });
+    }
 
-    Response::success(serde_json::json!({"projects": projects}))
+    Response::json(ListProjectsResponse { projects: entries })
 }
 
 pub async fn handle_set_channel_project(
@@ -607,5 +644,130 @@ mod tests {
         .await;
         assert!(!r.ok);
         assert_eq!(r.error_code.as_deref(), Some("project_meta_corrupted"));
+    }
+
+    // --- Task 8: handle_list_projects tests ---
+
+    #[tokio::test]
+    async fn list_projects_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        let r = handle_list_projects(state).await;
+        assert!(r.ok, "{:?}", r.error);
+        let data: gitim_core::responses::ListProjectsResponse =
+            serde_json::from_value(r.data.unwrap()).unwrap();
+        assert!(data.projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_projects_with_channel_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        // Create two projects
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "Design Sprint".into(),
+            "All UX work".into(),
+            "alice".into(),
+        )
+        .await;
+        handle_create_project(
+            state.clone(),
+            "infra".into(),
+            "Infrastructure".into(),
+            "All infra work".into(),
+            "alice".into(),
+        )
+        .await;
+
+        // Create three channels
+        setup_channel(&state, "dev", "alice").await;
+        setup_channel(&state, "ml", "alice").await;
+        setup_channel(&state, "ops", "alice").await;
+
+        // Assign dev + ml to design; leave ops unassigned
+        handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        handle_set_channel_project(
+            state.clone(),
+            "ml".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+
+        let r = handle_list_projects(state).await;
+        assert!(r.ok, "{:?}", r.error);
+        let data: gitim_core::responses::ListProjectsResponse =
+            serde_json::from_value(r.data.unwrap()).unwrap();
+
+        assert_eq!(data.projects.len(), 2);
+        // Results must be sorted alphabetically by slug
+        assert_eq!(data.projects[0].slug, "design");
+        assert_eq!(data.projects[1].slug, "infra");
+
+        let design = data.projects.iter().find(|p| p.slug == "design").unwrap();
+        let infra = data.projects.iter().find(|p| p.slug == "infra").unwrap();
+        assert_eq!(design.channel_count, 2);
+        assert_eq!(infra.channel_count, 0);
+    }
+
+    #[tokio::test]
+    async fn list_projects_archived_channels_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "Design".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        setup_channel(&state, "dev", "alice").await;
+        setup_channel(&state, "old", "alice").await;
+
+        // Assign both to design
+        handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        handle_set_channel_project(
+            state.clone(),
+            "old".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+
+        // Archive 'old' — its meta moves to archive/channels/ and must not be counted
+        do_archive_channel(&state, "old", "alice").await;
+
+        let r = handle_list_projects(state).await;
+        assert!(r.ok, "{:?}", r.error);
+        let data: gitim_core::responses::ListProjectsResponse =
+            serde_json::from_value(r.data.unwrap()).unwrap();
+
+        let design = data.projects.iter().find(|p| p.slug == "design").unwrap();
+        // 'old' was archived and must not be counted
+        assert_eq!(
+            design.channel_count, 1,
+            "archived channel must not inflate channel_count"
+        );
     }
 }

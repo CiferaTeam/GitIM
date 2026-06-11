@@ -1657,3 +1657,24 @@ pub struct CancelFlowRunResponse {
     pub run_id: String,
     pub commit_id: String,
 }
+
+/// One row in `ListProjectsResponse`.
+///
+/// `channel_count` is derived on-demand by scanning `channels/*.meta.yaml`
+/// and counting entries whose `project` field matches this slug. Archived
+/// channels (`archive/channels/`) are excluded from the count.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectEntry {
+    pub slug: String,
+    pub display_name: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub introduction: String,
+    pub channel_count: usize,
+}
+
+/// Response payload for `Request::ListProjects`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListProjectsResponse {
+    pub projects: Vec<ProjectEntry>,
+}
