@@ -1,48 +1,8 @@
-// @vitest-environment jsdom
-// Tests for the URL round-trip helpers in card-kanban.tsx.
-// These are pure functions; no rendering required.
+// Tests for the URL round-trip helpers (pure functions; no rendering).
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-// card-kanban.tsx imports modules that rely on the browser environment.
-// Mock the heavy deps so we can import the pure URL helpers in isolation.
-vi.mock("react-router", () => ({
-  useSearchParams: vi.fn(() => [new URLSearchParams(), vi.fn()]),
-}));
-vi.mock("@/hooks/use-card-store", () => ({
-  useCardStore: vi.fn(),
-  selectAllLabels: vi.fn(),
-  selectFilteredCards: vi.fn(() => []),
-  sortByUpdatedDesc: vi.fn((x: unknown[]) => x),
-}));
-vi.mock("@/hooks/use-chat-store", () => ({ useChatStore: vi.fn() }));
-vi.mock("@/hooks/use-workspace-store", () => ({ useWorkspaceStore: vi.fn() }));
-vi.mock("@/lib/client", () => ({ listCards: vi.fn() }));
-vi.mock("./card-filter-bar", () => ({
-  CardFilterBar: () => null,
-  EMPTY_CARD_FILTER: {
-    channels: [],
-    labels: [],
-    assignee: null,
-    mineOnly: false,
-    project: null,
-  },
-}));
-vi.mock("./card-kanban-column", () => ({ CardKanbanColumn: () => null }));
-vi.mock("./card-create-dialog", () => ({ CardCreateDialog: () => null }));
-vi.mock("@/components/mobile/mobile-card-list", () => ({
-  MobileCardList: () => null,
-}));
-vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: unknown }) => children,
-}));
-vi.mock("lucide-react", () => ({ Plus: () => null }));
-vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
-
-import {
-  readFilterFromURL,
-  writeFilterToURL,
-} from "./card-kanban";
+import { readFilterFromURL, writeFilterToURL } from "./card-filter-url";
 import type { CardFilterState } from "./card-filter-bar";
 
 const EMPTY: CardFilterState = {

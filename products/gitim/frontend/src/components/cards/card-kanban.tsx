@@ -15,38 +15,9 @@ import * as client from "@/lib/client";
 import type { Card, CardFilter, CardStatus } from "@/lib/types";
 import { MobileCardList } from "@/components/mobile/mobile-card-list";
 import { CardFilterBar, EMPTY_CARD_FILTER, type CardFilterState } from "./card-filter-bar";
+import { readFilterFromURL, writeFilterToURL } from "./card-filter-url";
 import { CardKanbanColumn } from "./card-kanban-column";
 import { CardCreateDialog } from "./card-create-dialog";
-
-// Exported for unit-testing the URL round-trip; not part of the public API.
-export function readFilterFromURL(params: URLSearchParams): CardFilterState {
-  const assignee = params.get("assignee");
-  return {
-    channels: params.getAll("channel"),
-    labels: params.getAll("label"),
-    // Canonical "my cards" form is assignee=__me__; both the toggle and the
-    // URL bind to the same field to keep a single source of truth.
-    assignee: assignee === "__me__" ? null : assignee,
-    mineOnly: assignee === "__me__",
-    project: params.get("project"),
-  };
-}
-
-// Exported for unit-testing the URL round-trip; not part of the public API.
-export function writeFilterToURL(filter: CardFilterState): URLSearchParams {
-  const p = new URLSearchParams();
-  for (const ch of filter.channels) p.append("channel", ch);
-  for (const l of filter.labels) p.append("label", l);
-  if (filter.mineOnly) {
-    p.set("assignee", "__me__");
-  } else if (filter.assignee) {
-    p.set("assignee", filter.assignee);
-  }
-  if (filter.project) {
-    p.set("project", filter.project);
-  }
-  return p;
-}
 
 export function CardKanban() {
   const [searchParams, setSearchParams] = useSearchParams();

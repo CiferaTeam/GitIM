@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { configDefaults, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
@@ -38,6 +38,10 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 800,
+  },
+  test: {
+    // e2e/ is Playwright's tree — its test() throws when vitest collects it.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
   server: {
     fs: {
