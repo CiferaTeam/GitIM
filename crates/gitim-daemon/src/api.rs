@@ -116,6 +116,16 @@ pub enum Event {
         unarchived_by: String,
         timestamp: String,
     },
+
+    #[serde(rename = "project_created")]
+    ProjectCreated { slug: String },
+
+    /// Fired on assign, reassign, and clear (`project: None` = cleared).
+    #[serde(rename = "channel_project_changed")]
+    ChannelProjectChanged {
+        channel: String,
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]

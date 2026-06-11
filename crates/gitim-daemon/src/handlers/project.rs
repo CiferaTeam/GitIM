@@ -1,4 +1,4 @@
-use crate::api::Response;
+use crate::api::{Event, Response};
 use crate::card_handlers::push_with_retry;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
@@ -93,6 +93,10 @@ pub async fn handle_create_project(
     if let Err(e) = push_with_retry(&state, "create_project").await {
         return Response::error(e);
     }
+
+    let _ = state.event_tx.send(Event::ProjectCreated {
+        slug: project_slug.to_string(),
+    });
 
     info!("project created: {project_slug} by @{author}");
     Response::success(serde_json::json!({"slug": project_slug.as_str()}))
@@ -306,6 +310,11 @@ pub async fn handle_set_channel_project(
     if let Err(e) = push_with_retry(&state, "set_channel_project").await {
         return Response::error(e);
     }
+
+    let _ = state.event_tx.send(Event::ChannelProjectChanged {
+        channel: channel_name.to_string(),
+        project: project.clone(),
+    });
 
     info!(
         "set_channel_project: #{channel_name} {old:?} → {new:?} by @{author}",
@@ -769,5 +778,162 @@ mod tests {
             design.channel_count, 1,
             "archived channel must not inflate channel_count"
         );
+    }
+
+    // --- Task 8b: SSE event tests ---
+
+    #[tokio::test]
+    async fn create_project_pushes_project_created_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        let mut rx = state.event_tx.subscribe();
+
+        let r = handle_create_project(
+            state.clone(),
+            "design".into(),
+            "Design".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "{:?}", r.error);
+
+        let ev = rx.try_recv().expect("expected ProjectCreated event");
+        match ev {
+            Event::ProjectCreated { slug } => assert_eq!(slug, "design"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_project_failure_no_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        // Create once to trigger duplicate_error on second call
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+
+        let mut rx = state.event_tx.subscribe();
+
+        // This will fail with project_exists
+        let r = handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        assert!(!r.ok);
+        assert!(rx.try_recv().is_err(), "failure path must not push event");
+    }
+
+    #[tokio::test]
+    async fn set_channel_project_assign_pushes_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+
+        let mut rx = state.event_tx.subscribe();
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "{:?}", r.error);
+
+        let ev = rx.try_recv().expect("expected ChannelProjectChanged event");
+        match ev {
+            Event::ChannelProjectChanged { channel, project } => {
+                assert_eq!(channel, "dev");
+                assert_eq!(project, Some("design".to_string()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_channel_project_clear_pushes_event_with_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        // Assign first
+        handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+
+        let mut rx = state.event_tx.subscribe();
+
+        // Now clear
+        let r = handle_set_channel_project(state.clone(), "dev".into(), None, "alice".into()).await;
+        assert!(r.ok, "{:?}", r.error);
+
+        let ev = rx
+            .try_recv()
+            .expect("expected ChannelProjectChanged event on clear");
+        match ev {
+            Event::ChannelProjectChanged { channel, project } => {
+                assert_eq!(channel, "dev");
+                assert!(project.is_none(), "project should be None on clear");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_channel_project_failure_no_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        // Note: project "ghost" does not exist
+
+        let mut rx = state.event_tx.subscribe();
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("ghost".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(!r.ok);
+        assert_eq!(r.error_code.as_deref(), Some("project_not_found"));
+        assert!(rx.try_recv().is_err(), "failure path must not push event");
     }
 }
