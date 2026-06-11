@@ -165,11 +165,11 @@ v1 **不做**:
 
 ## 8. CLI surface
 
-新增子命令:
+新增子命令(实施时对齐 CLI 现役 flat 顶层命令惯例 —— `Channels` / `CreateChannel` / `ArchiveChannel` 都是 flat,没有 `channel` 子命令组):
 - `gitim projects list` —— 列 workspace 所有 project,展示 slug / display_name / channel 计数
-- `gitim projects create <slug> --name "..." --intro "..."` —— 创建 project
-- `gitim channel set-project <ch> <project_slug>` —— 把 channel 划进 project
-- `gitim channel set-project <ch> --clear` —— 从 project 拿出来
+- `gitim projects create <slug> --name "..." --intro "..."` —— 创建 project(`--intro` 必填,daemon 强制 1-500 字符)
+- `gitim set-channel-project <ch> <project_slug>` —— 把 channel 划进 project
+- `gitim set-channel-project <ch> --clear` —— 从 project 拿出来
 
 不做:
 - `gitim projects archive / rename / edit` (v2+)

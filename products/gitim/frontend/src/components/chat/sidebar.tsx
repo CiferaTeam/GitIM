@@ -405,7 +405,10 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     }
   }, [dmSearchOpen]);
 
-  const allRegularChannels = channels.filter((c) => c.kind === "channel");
+  const allRegularChannels = useMemo(
+    () => channels.filter((c) => c.kind === "channel"),
+    [channels],
+  );
   // foldedRegularChannels: channels that are folded (hidden from main list).
   // Used for the "Folded" section which groups them under a collapsible toggle.
   const foldedRegularChannels = allRegularChannels.filter(
@@ -423,7 +426,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   }, [pinnedConversations]);
 
   // Build the mixed sidebar tree (projects as folders + standalone channels).
-  // allRegularChannels and projects are both stable-reference arrays.
   const sidebarTree = useMemo(
     () => buildSidebarTree(allRegularChannels, projects, pinnedKeys),
     [allRegularChannels, projects, pinnedKeys],

@@ -8,9 +8,11 @@
 //!
 //! Coverage:
 //! - GET /im/projects  → list_projects (200 with data, empty list)
-//! - POST /im/projects → create_project (200 success, 422 daemon error)
+//! - POST /im/projects → create_project (200 success, 200 + ok:false daemon error)
 //! - PATCH /im/channels/{name}/project → set_channel_project (200 set, 200 clear)
-//! - Write endpoints surface daemon errors (including departed-user) as 422
+//! - Write endpoints surface daemon errors (including departed-user) as
+//!   200 with `ok: false` body — the api_response_to_json convention shared
+//!   with /im/channels and /im/labels (not the flow-runs 422 style)
 //! - Workspace 404 for unknown slug
 
 use std::path::PathBuf;
