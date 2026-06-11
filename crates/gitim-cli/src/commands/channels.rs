@@ -185,6 +185,44 @@ pub async fn cmd_unarchive_channel(client: &GitimClient, mode: &OutputMode, name
     }
 }
 
+pub async fn cmd_set_channel_project(
+    client: &GitimClient,
+    mode: &OutputMode,
+    channel: &str,
+    project: Option<&str>,
+) {
+    match client.set_channel_project(channel, project).await {
+        Ok(resp) => {
+            if !resp.ok {
+                let code = resp.error_code.as_deref().unwrap_or("");
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("Error ({code}): {msg}");
+                process::exit(1);
+            }
+            match mode {
+                OutputMode::Human => match project {
+                    Some(p) => println!("Channel #{channel} → project '{p}'"),
+                    None => println!("Channel #{channel} removed from project"),
+                },
+                OutputMode::Json => {
+                    let data = resp.data.unwrap_or(serde_json::Value::Null);
+                    match serde_json::to_string(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("Error: failed to format output: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_archived_channels(client: &GitimClient, mode: &OutputMode) {
     let mut all_channels: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
