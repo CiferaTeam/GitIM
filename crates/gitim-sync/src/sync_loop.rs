@@ -539,6 +539,183 @@ fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
     }
 }
 
+/// Epoch push-fence (protocol invariant 1: a sealed branch's tip is always
+/// the redirect commit). Returns true when this cycle must NOT push — either
+/// a follow happened, or the fencing state is unresolved.
+///
+/// Checks run lock-free; only the handling takes `commit_lock` (the lock is
+/// not re-entrant — callers must not hold it). `sync_pull_only` needs no
+/// fence: it has no push, and a pulled-in R is caught here on the next
+/// cycle (or by the daemon's on_synced follow) before anything publishes.
+///
+/// Fail-closed: a CORRUPT epoch.yaml (`epoch_status_at_ref` Err) counts as
+/// fenced — we refuse to push rather than risk publishing onto a sealed
+/// branch we cannot read.
+fn epoch_fence_and_follow(
+    repo: &GitStorage,
+    commit_lock: &Mutex<()>,
+    rebase_author: Option<&(String, String)>,
+) -> bool {
+    // Err => fenced (fail-closed); None / Active => open.
+    let head_fenced = !matches!(
+        crate::rotate::epoch_status_at_ref(repo, "HEAD"),
+        Ok(None) | Ok(Some(gitim_core::epoch::EpochStatus::Active))
+    );
+    let origin_fenced = || -> bool {
+        repo.current_branch().ok().is_some_and(|b| {
+            !matches!(
+                crate::rotate::epoch_status_at_ref(repo, &format!("origin/{b}")),
+                Ok(None) | Ok(Some(gitim_core::epoch::EpochStatus::Active))
+            )
+        })
+    };
+    let origin_is_fenced = origin_fenced();
+    if !head_fenced && !origin_is_fenced {
+        return false;
+    }
+    let _guard = commit_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let branch = match repo.current_branch() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("epoch fence: current_branch failed: {e}");
+            return true; // unresolved — keep the fence closed this cycle
+        }
+    };
+
+    // Self-heal: HEAD redirected while ORIGIN is active means a lost fire's
+    // cleanup failed and R' is stranded locally. Retry the cleanup now,
+    // BEFORE any pull-rebase can stack message commits above R' (which
+    // would force human intervention). The pure-seal subjects verification
+    // inside cleanup_failed_fire keeps this safe.
+    if head_fenced && !origin_is_fenced {
+        let orphan = crate::rotate::epoch_file_at_ref(repo, "HEAD")
+            .ok()
+            .flatten()
+            .and_then(|f| f.redirect.map(|r| r.target_branch))
+            .unwrap_or_default();
+        if let Err(e) = crate::rotate::cleanup_failed_fire(repo, &branch, &orphan) {
+            warn!("epoch fence: residue cleanup failed: {e}");
+        }
+        return true; // don't push this cycle either way; next cycle re-evaluates
+    }
+
+    match crate::rotate::follow_redirect(repo, &branch) {
+        Ok(acted) => {
+            if acted {
+                info!("epoch fence: followed redirect off sealed branch {branch}");
+            }
+            acted
+        }
+        Err(e) => {
+            // Most likely a migrate (rebase --onto) conflict: the same
+            // thread line exists on both the sealed branch and the new
+            // epoch. Degrade to content-aware replay — without this the
+            // fence would re-follow and re-conflict every cycle, never
+            // publishing again (bricked, though lossless).
+            warn!("epoch fence: follow_redirect failed ({e}); trying content replay");
+            migrate_via_content_replay(repo, &branch, rebase_author);
+            // Whether or not the replay succeeded, never push this cycle;
+            // the next cycle re-evaluates from the (possibly new) branch.
+            true
+        }
+    }
+}
+
+/// Last-resort migrate: capture unpushed `.thread` additions, discard the
+/// local commits, follow the redirect with a clean tree, then re-apply the
+/// captured messages through the renumbering resolver (same machinery as
+/// sync's rebase-conflict path, different base branch).
+///
+/// Scope judgment (v1): only `.thread` content is carried — that's the
+/// zero-loss guarantee's object. Unpushed meta/board edits are state files
+/// with last-writer-wins semantics; losing one in this already-rare double
+/// conflict means redoing a join/rename, not losing a message. Renumber
+/// mappings are dropped (no on_renumbered here): SSE consumers may show a
+/// stale line number until the next poll.
+fn migrate_via_content_replay(
+    repo: &GitStorage,
+    branch: &str,
+    rebase_author: Option<&(String, String)>,
+) {
+    let additions = match repo.diff_unpushed("*.thread") {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("epoch migrate replay: capture failed: {e}");
+            return;
+        }
+    };
+    // Snapshot before the discard. The inner follow does a NETWORK round
+    // trip (fetch) between the discard and the re-apply — if it fails
+    // (offline, unreadable origin epoch.yaml), rolling back to this sha is
+    // what keeps "any failure mode = delay, never loss" true. Without it
+    // the captured additions die with this stack frame.
+    let saved_sha = match repo.rev_parse("HEAD") {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            warn!("epoch migrate replay: HEAD snapshot failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = repo.discard_unpushed() {
+        warn!("epoch migrate replay: discard failed: {e}");
+        return;
+    }
+    match crate::rotate::follow_redirect(repo, branch) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("epoch migrate replay: follow was a no-op after discard; restoring");
+            if let Err(e) = repo.reset_hard_to(&saved_sha) {
+                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
+            }
+            return;
+        }
+        Err(e) => {
+            warn!("epoch migrate replay: clean follow failed ({e}); restoring");
+            if let Err(e) = repo.reset_hard_to(&saved_sha) {
+                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
+            }
+            return;
+        }
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let (resolved_files, mappings) = match conflict::resolve_content(&additions, repo.root()) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("epoch migrate replay: resolve failed: {e} — messages remain captured-only; manual recovery from reflog required");
+            return;
+        }
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for f in &resolved_files {
+        let abs = repo.root().join(&f.path);
+        if let Some(parent) = abs.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&abs, &f.content) {
+            warn!(
+                "epoch migrate replay: write {} failed: {e}",
+                f.path.display()
+            );
+            return;
+        }
+        paths.push(f.path.to_string_lossy().to_string());
+    }
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let msg = build_rebase_commit_msg(&mappings, &additions);
+    let author = rebase_author.map(|(n, e)| (n.as_str(), e.as_str()));
+    match repo.add_and_commit_as(&path_refs, &msg, author) {
+        Ok(()) => info!(
+            "epoch migrate replay: {} file(s) re-applied onto the new epoch",
+            paths.len()
+        ),
+        Err(e) => warn!("epoch migrate replay: commit failed: {e}"),
+    }
+}
+
 fn sync_with_push(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
@@ -547,6 +724,15 @@ fn sync_with_push(
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome {
+    // Epoch fence, checkpoint (1): R may already sit in the local chain (a
+    // prior cycle's pull, or stranded fire residue). Publishing from here
+    // would put commits after R on the sealed branch — invariant 1 forbids
+    // it. Follow first; local messages migrate inside follow_redirect and
+    // publish next cycle from the new branch.
+    if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
+        return SyncOutcome::Normal;
+    }
+
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
         let push_result = repo.push();
@@ -597,6 +783,16 @@ fn sync_with_push(
                 return SyncOutcome::Normal;
             }
             Ok(()) => {}
+        }
+
+        // Epoch fence, checkpoint (2): the fetch may have just brought in a
+        // redirect — origin/<branch>'s tip is now R (design scenario 3). Do
+        // NOT rebase local messages onto R (that would stage them for a
+        // sealed-branch publish); follow instead, which migrates them onto
+        // the new epoch branch. Must run before the divergence safety net —
+        // that path hard-discards local work, while follow preserves it.
+        if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
+            return SyncOutcome::Normal;
         }
 
         // Hard safety net before we touch the commit tree: if a previous
@@ -668,6 +864,12 @@ fn sync_with_push(
         match repo.rebase_onto_origin() {
             Ok(()) => {
                 drop(rebase_guard);
+                // Epoch fence, checkpoint (3) — backstop: the rebase may have
+                // replayed local messages on top of a just-pulled R. Never
+                // publish that chain (invariant 1); follow migrates instead.
+                if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
+                    return SyncOutcome::Normal;
+                }
                 let push_after_rebase = repo.push();
                 observe_auth(circuit, &push_after_rebase);
                 match push_after_rebase {

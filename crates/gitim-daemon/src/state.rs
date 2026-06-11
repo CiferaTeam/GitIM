@@ -10,6 +10,22 @@ use tokio::sync::{broadcast, Notify, RwLock};
 
 pub type SharedState = Arc<AppState>;
 
+/// Default production rotation threshold: 1,000,000 commits per epoch.
+/// Test/debug override via `GITIM_ROTATION_THRESHOLD`.
+pub const ROTATION_THRESHOLD_DEFAULT: u64 = 1_000_000;
+
+/// Min interval between rotation checks. `rev-list --count` on a
+/// million-commit repo isn't free per-push; the threshold is soft by
+/// design — a few hundred commits of overshoot are irrelevant.
+const ROTATION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn rotation_threshold() -> u64 {
+    std::env::var("GITIM_ROTATION_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ROTATION_THRESHOLD_DEFAULT)
+}
+
 /// In-flight tracker for a locally-committed message that the sync loop
 /// has not yet pushed to the remote.
 ///
@@ -70,6 +86,9 @@ pub struct AppState {
     /// to gate write paths; Subtask D will expose `epoch_status_snapshot`
     /// through the status API.
     pub epoch_status: std::sync::RwLock<Option<gitim_core::epoch::EpochFile>>,
+    /// Last rotation-check instant — throttles the per-push commit count
+    /// (see `ROTATION_CHECK_INTERVAL`). `None` until the first check.
+    last_rotation_check: StdMutex<Option<std::time::Instant>>,
     /// Epoch seconds of last client connection. Used by idle watchdog.
     pub last_client_activity: AtomicU64,
     /// Tripped by sync_loop after 3 consecutive auth failures. Readers can
@@ -134,6 +153,7 @@ impl AppState {
             is_guest: AtomicBool::new(false),
             index: std::sync::RwLock::new(None),
             epoch_status: std::sync::RwLock::new(None),
+            last_rotation_check: StdMutex::new(None),
             last_client_activity: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -165,6 +185,82 @@ impl AppState {
         (handler.to_string(), email)
     }
 
+    /// Rotation commits carry the daemon owner's identity, same as
+    /// rebase-resolution commits. Sync context (called from the blocking
+    /// pool) — `try_read` on the async lock; contention or pre-onboard
+    /// falls back to the generic daemon author.
+    fn rotation_author(&self) -> (String, String) {
+        let handler = self
+            .current_user
+            .try_read()
+            .ok()
+            .and_then(|u| u.clone())
+            .unwrap_or_else(|| "daemon".to_string());
+        self.author_for(&handler)
+    }
+
+    /// True at most once per `ROTATION_CHECK_INTERVAL` — gates the
+    /// commit-count probe so a chatty workspace doesn't pay `rev-list
+    /// --count` on every push.
+    pub fn rotation_check_due(&self) -> bool {
+        let mut last = self
+            .last_rotation_check
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        match *last {
+            Some(t) if now.duration_since(t) < ROTATION_CHECK_INTERVAL => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
+
+    /// Test entry exercising the same path the `on_pushed` hook runs, with
+    /// an explicit threshold (no env vars — cargo test races `set_var`).
+    /// Returns true iff a rotation fired and won.
+    pub fn attempt_rotation_for_test(&self, threshold: u64) -> Result<bool, String> {
+        self.try_rotate_inner(threshold).map_err(|e| e.to_string())
+    }
+
+    /// Acquire commit_lock and run the fire/follow state machine once.
+    /// Blocking (git shell-outs throughout) — async callers go through
+    /// `tokio::task::spawn_blocking`.
+    fn try_rotate_inner(&self, threshold: u64) -> Result<bool, gitim_sync::rotate::RotationError> {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = GitStorage::new(&self.repo_root);
+        let branch = storage.current_branch()?;
+        // Per-clone, git-ignored archive landing zone for epoch bundles.
+        let archive_dir = self.repo_root.join(".gitim").join("archive");
+        let (name, email) = self.rotation_author();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let outcome = gitim_sync::rotate::try_fire_rotation(
+            &storage,
+            &branch,
+            threshold,
+            &archive_dir,
+            (name.as_str(), email.as_str()),
+            &created_at,
+        )?;
+        let fired = match outcome {
+            gitim_sync::rotate::RotationOutcome::Won { .. } => true,
+            gitim_sync::rotate::RotationOutcome::Lost => {
+                gitim_sync::rotate::follow_redirect(&storage, &branch)?;
+                false
+            }
+            gitim_sync::rotate::RotationOutcome::NotReady => return Ok(false),
+        };
+        if let Err(e) = self.refresh_epoch_status() {
+            tracing::warn!("rotation: epoch status refresh failed: {}", e);
+        }
+        Ok(fired)
+    }
+
     /// Read `<repo_root>/gitim.epoch.yaml` and store the result in
     /// `self.epoch_status`. Called once at daemon boot and once per
     /// successful sync cycle.
@@ -176,17 +272,11 @@ impl AppState {
     /// daemon's tolerance for a malformed file.
     pub fn refresh_epoch_status(&self) -> Result<(), String> {
         let path = self.repo_root.join("gitim.epoch.yaml");
-        let parsed = match gitim_core::epoch::EpochFile::load_from_path(&path) {
-            Ok(file) => Some(file),
-            Err(gitim_core::epoch::EpochError::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
-                None
-            }
-            Err(e) => {
-                return Err(format!("failed to load {}: {}", path.display(), e));
-            }
-        };
+        // `load_from_path` returns `Ok(None)` for the missing-file case
+        // (legacy repos, freshly-cloned pre-pack workspaces) — only true
+        // parse / validate / non-NotFound IO failures surface as `Err`.
+        let parsed = gitim_core::epoch::EpochFile::load_from_path(&path)
+            .map_err(|e| format!("failed to load {}: {}", path.display(), e))?;
         let mut guard = self
             .epoch_status
             .write()
@@ -348,6 +438,20 @@ impl AppState {
                             line_numbers,
                         });
                     }
+
+                    // Rotation check: this push may have tipped the epoch
+                    // over threshold. Throttled (60s) — counting a 1M-commit
+                    // branch isn't free. Blocking pool because the whole
+                    // path is git shell-outs; fire-and-forget because the
+                    // outcome lands in epoch_status, not in this callback.
+                    if push_state.rotation_check_due() {
+                        let st = push_state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = st.try_rotate_inner(rotation_threshold()) {
+                                tracing::warn!("rotation attempt failed: {}", e);
+                            }
+                        });
+                    }
                 },
                 move |file, old_line, new_line| {
                     // on_renumbered: broadcast MessageRenumbered and update pending_push
@@ -405,6 +509,39 @@ impl AppState {
                     // must happen on every cycle regardless.
                     if let Err(e) = synced_state.refresh_epoch_status() {
                         tracing::warn!("on_synced: epoch status refresh failed: {}", e);
+                    }
+
+                    // A pull-only cycle can bring in a redirect without ever
+                    // hitting the push fence (no unpushed commits → no push).
+                    // Follow now so this daemon switches promptly instead of
+                    // waiting for its next outbound message. Runs on the
+                    // sync worker thread; commit_lock is free here (the
+                    // cycle's guards dropped before on_synced fires).
+                    if synced_state.is_redirected() {
+                        let _guard = synced_state
+                            .commit_lock
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let storage = GitStorage::new(&synced_state.repo_root);
+                        match storage.current_branch() {
+                            Ok(branch) => {
+                                match gitim_sync::rotate::follow_redirect(&storage, &branch) {
+                                    Ok(true) => {
+                                        if let Err(e) = synced_state.refresh_epoch_status() {
+                                            tracing::warn!(
+                                                "on_synced: post-follow refresh failed: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        tracing::warn!("on_synced: follow_redirect failed: {}", e)
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!("on_synced: current_branch failed: {}", e),
+                        }
                     }
 
                     // update index after each sync cycle

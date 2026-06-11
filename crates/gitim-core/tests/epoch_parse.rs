@@ -35,7 +35,9 @@ archive:
   bundle_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 "#;
     let f = write_yaml(yaml);
-    let epoch = EpochFile::load_from_path(f.path()).expect("load active epoch file");
+    let epoch = EpochFile::load_from_path(f.path())
+        .expect("load active epoch file")
+        .expect("active fixture is present on disk");
 
     assert_eq!(epoch.schema_version, 1);
     assert_eq!(epoch.status, EpochStatus::Active);
@@ -56,9 +58,13 @@ archive:
         "active epoch must not carry redirect"
     );
 
-    assert_eq!(epoch.archive.tag, "archive/epoch-1/aabbccdd");
+    let archive = epoch
+        .archive
+        .as_ref()
+        .expect("fixture YAML carries archive");
+    assert_eq!(archive.tag, "archive/epoch-1/aabbccdd");
     assert_eq!(
-        epoch.archive.bundle_sha256,
+        archive.bundle_sha256,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
 }
@@ -81,7 +87,9 @@ archive:
   bundle_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 "#;
     let f = write_yaml(yaml);
-    let epoch = EpochFile::load_from_path(f.path()).expect("load redirected epoch file");
+    let epoch = EpochFile::load_from_path(f.path())
+        .expect("load redirected epoch file")
+        .expect("redirected fixture is present on disk");
 
     assert_eq!(epoch.schema_version, 1);
     assert_eq!(epoch.status, EpochStatus::Redirected);
@@ -109,7 +117,11 @@ archive:
         "redirected epoch must not carry snapshot"
     );
 
-    assert_eq!(epoch.archive.tag, "archive/epoch-1/aabbccdd");
+    let archive = epoch
+        .archive
+        .as_ref()
+        .expect("fixture YAML carries archive");
+    assert_eq!(archive.tag, "archive/epoch-1/aabbccdd");
 }
 
 #[test]
@@ -197,4 +209,146 @@ archive:
         matches!(err, EpochError::MissingRedirect),
         "expected MissingRedirect, got {err:?}",
     );
+}
+
+// --------------------------------------------------------------------------
+// Phase B PR 3 / Task 1: constructors + atomic save_to_path.
+//
+// The constructors are the canonical way for the pack coordinator (and any
+// future writer) to build a well-formed `EpochFile` — they fix the schema
+// version, populate the matching `snapshot` / `redirect` arm for the chosen
+// status, and accept the archive as an optional tuple so callers can defer
+// bundle SHA computation until after the orphan commit lands. `save_to_path`
+// must be atomic on the existing-target overwrite path so reader processes
+// never observe a partial file mid-rotation.
+// --------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use tempfile::TempDir;
+
+#[test]
+fn new_active_constructs_valid_active_file() {
+    // Distinct sentinel per field: swapping any two constructor args
+    // (e.g. source_commit vs commit) must fail an assertion below.
+    let f = EpochFile::new_active(
+        2,
+        "main-epoch-2".to_string(),
+        "main".to_string(),
+        "a".repeat(40),
+        "b".repeat(40),
+        "2026-05-21T00:00:00Z".to_string(),
+        Some(("archive/epoch-1/aabbccdd".to_string(), "0".repeat(64))),
+    );
+    assert_eq!(f.schema_version, 1);
+    assert_eq!(f.status, EpochStatus::Active);
+    assert_eq!(f.epoch, 2);
+    assert_eq!(f.branch, "main-epoch-2");
+
+    let snap = f.snapshot.as_ref().expect("active must carry snapshot");
+    assert_eq!(snap.source_branch, "main");
+    assert_eq!(snap.source_commit, "a".repeat(40));
+    assert_eq!(snap.commit, "b".repeat(40));
+    assert_eq!(snap.created_at, "2026-05-21T00:00:00Z");
+
+    assert!(f.redirect.is_none());
+    let archive = f.archive.as_ref().expect("archive tuple maps in");
+    assert_eq!(archive.tag, "archive/epoch-1/aabbccdd");
+    assert_eq!(archive.bundle_sha256, "0".repeat(64));
+    f.validate().expect("constructed active should validate");
+}
+
+#[test]
+fn new_redirect_constructs_valid_redirected_file() {
+    // Distinct sentinel per field: swapping any two constructor args
+    // (e.g. target_commit vs snapshot_of) must fail an assertion below.
+    let f = EpochFile::new_redirect(
+        1,
+        "main".to_string(),
+        2,
+        "main-epoch-2".to_string(),
+        "c".repeat(40),
+        "d".repeat(40),
+        "2026-05-21T01:02:03Z".to_string(),
+        Some(("archive/epoch-1/ffeeddcc".to_string(), "9".repeat(64))),
+    );
+    assert_eq!(f.schema_version, 1);
+    assert_eq!(f.status, EpochStatus::Redirected);
+    assert_eq!(f.epoch, 1);
+    assert_eq!(f.branch, "main");
+
+    let redir = f.redirect.as_ref().expect("redirected must carry redirect");
+    assert_eq!(redir.target_epoch, 2);
+    assert_eq!(redir.target_branch, "main-epoch-2");
+    assert_eq!(redir.target_commit, "c".repeat(40));
+    assert_eq!(redir.snapshot_of, "d".repeat(40));
+    assert_eq!(redir.created_at, "2026-05-21T01:02:03Z");
+
+    assert!(f.snapshot.is_none());
+    let archive = f.archive.as_ref().expect("archive tuple maps in");
+    assert_eq!(archive.tag, "archive/epoch-1/ffeeddcc");
+    assert_eq!(archive.bundle_sha256, "9".repeat(64));
+    f.validate().expect("constructed redirect should validate");
+}
+
+#[test]
+fn save_to_path_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    let path: PathBuf = tmp.path().join("gitim.epoch.yaml");
+
+    let f = EpochFile::new_active(
+        2,
+        "main-epoch-2".to_string(),
+        "main".to_string(),
+        "a".repeat(40),
+        "b".repeat(40),
+        "2026-05-21T00:00:00Z".to_string(),
+        None,
+    );
+    f.save_to_path(&path).expect("save");
+    assert!(path.exists());
+
+    let loaded = EpochFile::load_from_path(&path)
+        .expect("load")
+        .expect("present");
+    assert_eq!(loaded.status, EpochStatus::Active);
+    assert_eq!(loaded.epoch, 2);
+    assert_eq!(loaded.branch, "main-epoch-2");
+    assert!(loaded.archive.is_none());
+}
+
+#[test]
+fn save_to_path_overwrites_existing_with_valid_content() {
+    // Verifies clean overwrite end-to-end: write an Active file, then save a
+    // Redirected file at the same path, and read back the second one in full.
+    // Crash-safety (no partial file mid-write) is a property of the OS
+    // `rename` syscall, not something this test can prove.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("gitim.epoch.yaml");
+    let f1 = EpochFile::new_active(
+        1,
+        "main".to_string(),
+        "main".to_string(),
+        "a".repeat(40),
+        "b".repeat(40),
+        "2026-05-21T00:00:00Z".to_string(),
+        None,
+    );
+    f1.save_to_path(&path).unwrap();
+
+    let f2 = EpochFile::new_redirect(
+        1,
+        "main".to_string(),
+        2,
+        "main-epoch-2".to_string(),
+        "c".repeat(40),
+        "d".repeat(40),
+        "2026-05-21T01:00:00Z".to_string(),
+        None,
+    );
+    f2.save_to_path(&path).unwrap();
+
+    let loaded = EpochFile::load_from_path(&path).unwrap().unwrap();
+    assert_eq!(loaded.status, EpochStatus::Redirected);
+    let redirect = loaded.redirect.as_ref().unwrap();
+    assert_eq!(redirect.target_branch, "main-epoch-2");
 }

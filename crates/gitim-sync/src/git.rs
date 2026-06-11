@@ -51,12 +51,31 @@ pub enum GitError {
 /// `GitError::Timeout` is returned. On success, stderr is checked for
 /// ENOSPC patterns before returning the output.
 fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
-    let child = Command::new("git")
-        .args(args)
+    run_git_command_with_env(args, current_dir, &[])
+}
+
+/// Like `run_git_command`, but with caller-supplied environment overrides
+/// (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). Every git subprocess in this file —
+/// env-ful or not — must route through here so all share the timeout + kill
+/// plumbing.
+fn run_git_command_with_env(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(current_dir)
+        // stderr classification throughout this file (auth / rate-limit /
+        // disk-full / path-missing matchers) depends on untranslated git
+        // messages — pin the locale so gettext-localized gits don't break it.
+        .env("LC_ALL", "C")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn()?;
 
     // Wait with timeout using a thread + channel.
     // We keep the Child's pid so we can kill it on timeout.
@@ -109,7 +128,17 @@ fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError
 /// Run a git subprocess with timeout, returning `Result<Output, GitError>`
 /// where non-zero exit is converted to `CommandFailed` (with ENOSPC check).
 fn run_git(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
-    let output = run_git_command(args, current_dir)?;
+    run_git_with_env(args, current_dir, &[])
+}
+
+/// Env-accepting sibling of `run_git`: same non-zero-exit mapping, with
+/// caller-supplied environment overrides.
+fn run_git_with_env(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    let output = run_git_command_with_env(args, current_dir, envs)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if is_disk_full(&stderr) {
@@ -335,6 +364,21 @@ impl GitStorage {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Return the number of commits reachable from `branch` head.
+    /// Equivalent to `git rev-list --count <branch>`. Missing or unborn branch
+    /// (no commits yet) → `Err`. The trailing `--` separator forces git to
+    /// treat `branch` as a revision, not a flag, so a caller-side mistake
+    /// like `--foo` produces a clean "bad revision" error rather than git's
+    /// multi-line usage screen.
+    pub fn count_commits_on_branch(&self, branch: &str) -> Result<u64, GitError> {
+        let output = run_git(&["rev-list", "--count", branch, "--"], &self.root)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        trimmed
+            .parse::<u64>()
+            .map_err(|e| GitError::CommandFailed(format!("parse count {trimmed:?}: {e}")))
+    }
+
     pub fn diff_range(&self, from: &str, to: &str) -> Result<HashMap<PathBuf, String>, GitError> {
         let range = format!("{}..{}", from, to);
         // `--no-renames` is load-bearing: `git mv` (how we archive channels
@@ -468,6 +512,14 @@ impl GitStorage {
         Ok(())
     }
 
+    /// `git reset --hard <rev>` — restore a previously snapshotted state.
+    /// The undo half of capture-discard-replay flows: when a step between
+    /// the discard and the re-apply fails, the caller rolls HEAD back here
+    /// so "any failure mode = delay, never loss" keeps holding.
+    pub fn reset_hard_to(&self, rev: &str) -> Result<(), GitError> {
+        run_git(&["reset", "--hard", rev], &self.root).map(|_| ())
+    }
+
     /// Abort any in-progress rebase and verify the on-disk markers are gone.
     ///
     /// Idempotent: returns Ok when no rebase exists. Returns Err when rebase
@@ -546,6 +598,313 @@ impl GitStorage {
         full.strip_prefix("refs/remotes/origin/")
             .map(str::to_string)
             .ok_or_else(|| GitError::CommandFailed(format!("unexpected origin/HEAD: {full}")))
+    }
+
+    /// Create an orphan commit on `new_branch` whose tree is the current
+    /// working-tree HEAD's tree, with `epoch_yaml_path` overwritten by
+    /// `epoch_yaml_content`. Returns the new commit's SHA.
+    ///
+    /// Caller must hold the workspace `commit_lock` to serialize index writes.
+    ///
+    /// The branch ref is created or clobbered if pre-existing (`update-ref`
+    /// semantics). The clobber is load-bearing: a refused cleanup (foreign
+    /// commits ahead of origin) deliberately leaves a stale orphan ref
+    /// behind, and the next fire attempt overwrites it here.
+    pub fn create_orphan_commit(
+        &self,
+        new_branch: &str,
+        epoch_yaml_path: &str,
+        epoch_yaml_content: &str,
+        message: &str,
+        author: (&str, &str),
+    ) -> Result<String, GitError> {
+        // 1. Write epoch.yaml content to working tree.
+        let yaml_path = self.root.join(epoch_yaml_path);
+        std::fs::write(&yaml_path, epoch_yaml_content)
+            .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
+
+        // 2. Stage.
+        run_git(&["add", epoch_yaml_path], &self.root)?;
+
+        // 3. Write-tree.
+        let tree = self.run_git_capture(&["write-tree"])?;
+        let tree = tree.trim().to_string();
+
+        // 4. Commit-tree (orphan — no -p flag).
+        let (name, email) = author;
+        let commit = self.run_git_capture_with_env(
+            &["commit-tree", &tree, "-m", message],
+            &[
+                ("GIT_AUTHOR_NAME", name),
+                ("GIT_AUTHOR_EMAIL", email),
+                ("GIT_COMMITTER_NAME", name),
+                ("GIT_COMMITTER_EMAIL", email),
+            ],
+        )?;
+        let commit = commit.trim().to_string();
+
+        // 5. Update ref.
+        run_git(
+            &["update-ref", &format!("refs/heads/{new_branch}"), &commit],
+            &self.root,
+        )?;
+
+        // 6. Reset index back to HEAD so the OLD branch's working tree is clean
+        //    (the OLD branch will get its own redirect commit separately).
+        run_git(&["reset", "--mixed", "HEAD"], &self.root)?;
+        // If the file existed in HEAD, `checkout` restores it. If it did NOT exist,
+        // `checkout` fails (path not in HEAD's tree) and we must remove the
+        // orphan-only file we placed in the working tree at step 1.
+        match run_git(&["checkout", "HEAD", "--", epoch_yaml_path], &self.root) {
+            Ok(_) => {
+                // File restored from HEAD — leave it.
+            }
+            Err(_) => {
+                // File was not in HEAD — delete our working-tree copy.
+                let _ = std::fs::remove_file(&yaml_path);
+            }
+        }
+
+        Ok(commit)
+    }
+
+    /// Append a single commit to the current branch that overwrites
+    /// `epoch_yaml_path` with `epoch_yaml_content`. Returns new commit SHA.
+    ///
+    /// Caller must hold the workspace `commit_lock` to serialize index writes.
+    pub fn write_redirect_commit(
+        &self,
+        epoch_yaml_path: &str,
+        epoch_yaml_content: &str,
+        message: &str,
+        author: (&str, &str),
+    ) -> Result<String, GitError> {
+        let yaml_path = self.root.join(epoch_yaml_path);
+        std::fs::write(&yaml_path, epoch_yaml_content)
+            .map_err(|e| GitError::CommandFailed(format!("write epoch.yaml: {e}")))?;
+        run_git(&["add", epoch_yaml_path], &self.root)?;
+
+        // `--only -- <path>`: the redirect commit must structurally contain
+        // nothing but the epoch.yaml flip (protocol invariant 1), even if
+        // unrelated changes happen to be staged at rotation time.
+        let (name, email) = author;
+        self.run_git_capture_with_env(
+            &["commit", "--only", "-m", message, "--", epoch_yaml_path],
+            &[
+                ("GIT_AUTHOR_NAME", name),
+                ("GIT_AUTHOR_EMAIL", email),
+                ("GIT_COMMITTER_NAME", name),
+                ("GIT_COMMITTER_EMAIL", email),
+            ],
+        )?;
+        let sha = self.run_git_capture(&["rev-parse", "HEAD"])?;
+        Ok(sha.trim().to_string())
+    }
+
+    /// Return the current branch name (`git symbolic-ref --short HEAD`).
+    /// Returns `GitError::DetachedHead` if HEAD is not on a branch — caller
+    /// must handle this case before assuming a branch name is available.
+    pub fn current_branch(&self) -> Result<String, GitError> {
+        if !self.head_is_on_branch()? {
+            return Err(GitError::DetachedHead);
+        }
+        let out = self.run_git_capture(&["symbolic-ref", "--short", "HEAD"])?;
+        Ok(out.trim().to_string())
+    }
+
+    /// `git show <ref>:<path>` — read a file's committed content without
+    /// touching the working tree. Returns Ok(None) when the path does not
+    /// exist at that ref (including when the ref itself is unborn); other
+    /// failures map to GitError.
+    pub fn show_file_at_ref(
+        &self,
+        reference: &str,
+        path: &str,
+    ) -> Result<Option<String>, GitError> {
+        let spec = format!("{reference}:{path}");
+        match run_git(&["show", &spec], &self.root) {
+            Ok(out) => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
+            // Path-missing classification, per git's stderr wording:
+            //   "fatal: path 'x' does not exist in 'REF'"
+            //   "fatal: path 'x' exists on disk, but not in 'REF'"
+            //   "fatal: invalid object name 'REF'"   (ref not born yet)
+            Err(GitError::CommandFailed(stderr))
+                if stderr.contains("does not exist")
+                    || stderr.contains("exists on disk, but not in")
+                    || stderr.contains("invalid object name") =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
+    /// Both refs update or neither does — this is the rotation arbiter.
+    /// A reject classifies through `classify_remote_error` like every other
+    /// remote op (stderr embeds the credential-bearing remote URL, so it must
+    /// be redacted before entering the error value): non-fast-forward →
+    /// `PushConflict`, the caller's "lost the rotation race" signal.
+    pub fn atomic_push_two_refs(&self, old_branch: &str, new_branch: &str) -> Result<(), GitError> {
+        let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
+        let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "--atomic",
+            "origin",
+            &new_spec,
+            &old_spec,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
+    }
+
+    /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
+    /// `<old_base>..HEAD` onto `<new_base>`. The migrate primitive: snapshot
+    /// carries the full tree, so thread appends apply cleanly; conflicts
+    /// surface as Err and the caller falls back to capture-and-replay.
+    pub fn rebase_onto(&self, new_base: &str, old_base: &str) -> Result<(), GitError> {
+        run_git(&["rebase", "--onto", new_base, old_base], &self.root).map(|_| ())
+    }
+
+    /// Force-align a local branch to origin: checkout -f + reset --hard.
+    /// Lost/crash cleanup primitive.
+    pub fn reset_branch_to_origin(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["checkout", "-f", branch], &self.root)?;
+        let origin_ref = format!("origin/{branch}");
+        run_git(&["reset", "--hard", &origin_ref], &self.root).map(|_| ())
+    }
+
+    pub fn delete_local_branch(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["branch", "-D", branch], &self.root).map(|_| ())
+    }
+
+    pub fn checkout_branch(&self, branch: &str) -> Result<(), GitError> {
+        // -f: rotation holds commit_lock. Dirty tracked state is not
+        // necessarily crash residue — it can be a deferred send (send.rs
+        // leaves the message on disk when its `git commit` fails). The fire
+        // path refuses to rotate over it (`has_dirty_tracked_files` gate);
+        // the follow path accepts a small residual window, documented on
+        // `rotate::follow_redirect`.
+        run_git(&["checkout", "-f", branch], &self.root).map(|_| ())
+    }
+
+    /// True when tracked files carry uncommitted changes (worktree or
+    /// index): `git status --porcelain --untracked-files=no` is non-empty.
+    /// A dirty tracked file is typically a deferred send (send.rs leaves
+    /// the message on disk when `git commit` fails, for sync_loop to commit
+    /// later) — content that exists nowhere but this working tree, which
+    /// any `-f` / `--hard` operation would destroy permanently.
+    pub fn has_dirty_tracked_files(&self) -> Result<bool, GitError> {
+        let out = run_git(
+            &["status", "--porcelain", "--untracked-files=no"],
+            &self.root,
+        )?;
+        Ok(!out.stdout.is_empty())
+    }
+
+    pub fn tag_archive(&self, tag: &str, sha: &str) -> Result<(), GitError> {
+        run_git(&["tag", tag, sha], &self.root).map(|_| ())
+    }
+
+    /// Push a tag to origin. Remote failures classify through
+    /// `classify_remote_error` (credential-redacting); an already-existing
+    /// tag rejects as `PushConflict`.
+    pub fn push_tag(&self, tag: &str) -> Result<(), GitError> {
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "origin",
+            tag,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn bundle_to_path(&self, path: &Path, reference: &str) -> Result<(), GitError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let p = path.to_string_lossy();
+        run_git(&["bundle", "create", &p, reference], &self.root).map(|_| ())
+    }
+
+    /// `git branch -f <branch> origin/<branch>` — create or re-point a local
+    /// branch at its origin counterpart without checkout.
+    pub fn create_or_repoint_branch(&self, branch: &str) -> Result<(), GitError> {
+        let origin_ref = format!("origin/{branch}");
+        run_git(&["branch", "-f", branch, &origin_ref], &self.root).map(|_| ())
+    }
+
+    /// `git branch -f <branch> HEAD` — after a rebase leaves HEAD detached,
+    /// stamp the branch there.
+    pub fn repoint_branch_to_head(&self, branch: &str) -> Result<(), GitError> {
+        run_git(&["branch", "-f", branch, "HEAD"], &self.root).map(|_| ())
+    }
+
+    /// `git branch --set-upstream-to=origin/<branch> <branch>` — make a
+    /// freshly created/switched branch publishable by the `@{upstream}`
+    /// probes and pushes the sync loop runs. The remote-tracking ref
+    /// already exists in every rotation context (atomic push / fetch
+    /// created it).
+    pub fn set_upstream_to_origin(&self, branch: &str) -> Result<(), GitError> {
+        let upstream = format!("origin/{branch}");
+        run_git(
+            &["branch", "--set-upstream-to", &upstream, branch],
+            &self.root,
+        )
+        .map(|_| ())
+    }
+
+    /// `git update-ref refs/heads/<branch> <origin sha>` — align a NON-checked-out
+    /// branch to origin without touching the working tree.
+    pub fn reset_to_origin_without_checkout(&self, branch: &str) -> Result<(), GitError> {
+        let origin_sha = self.rev_parse(&format!("origin/{branch}"))?;
+        let refname = format!("refs/heads/{branch}");
+        run_git(&["update-ref", &refname, &origin_sha], &self.root).map(|_| ())
+    }
+
+    /// Subjects of commits in `origin/<branch>..<branch>` (oldest first).
+    /// Empty when the branch is in sync with origin. Cleanup logic gates
+    /// `reset --hard` on what these unpushed commits actually are.
+    pub fn subjects_ahead_of_origin(&self, branch: &str) -> Result<Vec<String>, GitError> {
+        let range = format!("origin/{branch}..{branch}");
+        let out = run_git(&["log", "--reverse", "--format=%s", &range], &self.root)?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub(crate) fn run_git_capture(&self, args: &[&str]) -> Result<String, GitError> {
+        let output = run_git(args, &self.root)?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn run_git_capture_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<String, GitError> {
+        let output = run_git_with_env(args, &self.root, envs)?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
 

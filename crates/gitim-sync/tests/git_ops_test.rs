@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use gitim_sync::git::GitStorage;
+use gitim_sync::git::{GitError, GitStorage};
 use tempfile::TempDir;
 
 /// Helper: create a bare repo and clone it, returning (bare_dir, clone_dir, GitStorage).
@@ -382,4 +382,663 @@ fn test_changed_files_unpushed_empty_when_pushed() {
 
     let changed = repo.changed_files_unpushed("*.meta.yaml").unwrap();
     assert!(changed.is_empty());
+}
+
+#[test]
+fn count_commits_on_branch_returns_total_reachable_count() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    // Make 3 commits.
+    for i in 0..3 {
+        std::fs::write(dir.path().join(format!("f{i}")), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", &format!("c{i}")])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+    }
+
+    let storage = GitStorage::new(dir.path());
+    let n = storage.count_commits_on_branch("main").expect("count");
+    assert_eq!(n, 3);
+}
+
+#[test]
+fn count_commits_on_branch_errs_for_missing_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    // Empty branch is not yet born — count should error (chosen contract).
+    let res = storage.count_commits_on_branch("nonexistent");
+    assert!(
+        res.is_err(),
+        "missing branch must surface error, got {:?}",
+        res
+    );
+}
+
+#[test]
+fn create_orphan_commit_produces_root_commit_on_new_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    let sha = storage
+        .create_orphan_commit(
+            "main-epoch-2",
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: active\nepoch: 2\nbranch: main-epoch-2\n",
+            "snapshot: epoch 2 from main",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("orphan");
+    assert!(!sha.is_empty(), "orphan commit must return sha");
+
+    // Verify branch exists and is a root commit (no parents).
+    let parents = std::process::Command::new("git")
+        .args(["rev-list", "--parents", "-n", "1", "main-epoch-2"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let parents_str = String::from_utf8_lossy(&parents.stdout);
+    let parts: Vec<&str> = parents_str.split_whitespace().collect();
+    assert_eq!(
+        parts.len(),
+        1,
+        "orphan must have zero parents, got {:?}",
+        parts
+    );
+
+    // Verify the new file is in the orphan tree AND existing working tree files are too.
+    let ls = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "main-epoch-2"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let names: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(names.contains(&"gitim.epoch.yaml".to_string()));
+    assert!(
+        names.contains(&"a.txt".to_string()),
+        "orphan must include existing working tree files, got {:?}",
+        names
+    );
+
+    // After the orphan op, OLD branch's working tree must be clean.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "working tree must be clean after orphan op, got: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn create_orphan_commit_restores_existing_epoch_yaml_in_head() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    // Seed: gitim.epoch.yaml ALREADY exists in HEAD with "ORIGINAL" content.
+    std::fs::write(
+        dir.path().join("gitim.epoch.yaml"),
+        "schema_version: 1\nstatus: active\nepoch: 2\nbranch: main\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "seed"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let original = std::fs::read_to_string(dir.path().join("gitim.epoch.yaml")).unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    storage
+        .create_orphan_commit(
+            "main-epoch-3",
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: active\nepoch: 3\nbranch: main-epoch-3\n",
+            "snapshot: epoch 3",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("orphan");
+
+    // OLD branch's working tree must still contain the ORIGINAL content.
+    let after = std::fs::read_to_string(dir.path().join("gitim.epoch.yaml"))
+        .expect("file must still exist (restored from HEAD)");
+    assert_eq!(
+        after, original,
+        "epoch.yaml content must be restored from HEAD"
+    );
+
+    // git status clean.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "working tree must be clean after orphan op, got: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+// ── epoch-rotation primitives ─────────────────────────────────
+//
+// The helpers below differ from `setup_repo_pair` in one way that matters:
+// they pin the branch name to `main` (`init --bare -b main`), because the
+// rotation tests address branches by name instead of `HEAD`.
+
+/// Clone `bare` into a fresh TempDir and configure a commit identity.
+fn clone_from(bare: &TempDir) -> TempDir {
+    let clone = TempDir::new().unwrap();
+    run_git(
+        clone.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            clone.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone.path(), &["config", "user.email", "test@test.com"]);
+    run_git(clone.path(), &["config", "user.name", "Test"]);
+    clone
+}
+
+/// Write `content` to `dir/name`, stage everything, commit (message = name).
+fn commit_file(dir: &Path, name: &str, content: &str) {
+    std::fs::write(dir.join(name), content).unwrap();
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-m", name]);
+}
+
+/// Bare repo on branch `main` + one clone with the initial commit pushed.
+fn setup_bare_and_clone_main() -> (TempDir, TempDir) {
+    let bare = TempDir::new().unwrap();
+    run_git(bare.path(), &["init", "--bare", "-b", "main"]);
+    let clone = clone_from(&bare);
+    commit_file(clone.path(), "init.txt", "init");
+    run_git(clone.path(), &["push", "-u", "origin", "main"]);
+    (bare, clone)
+}
+
+/// Bare + two clones. A pushed the initial commit; B cloned afterwards, so
+/// both start at the same `main` tip.
+fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
+    let (bare, clone_a) = setup_bare_and_clone_main();
+    let clone_b = clone_from(&bare);
+    (bare, clone_a, clone_b)
+}
+
+#[test]
+fn show_file_at_ref_reads_committed_content_without_checkout() {
+    let (_bare, clone_dir, storage) = setup_repo_pair();
+    std::fs::write(clone_dir.path().join("probe.txt"), "v1").unwrap();
+    run_git(clone_dir.path(), &["add", "."]);
+    run_git(clone_dir.path(), &["commit", "-m", "add probe"]);
+
+    let content = storage.show_file_at_ref("HEAD", "probe.txt").expect("call");
+    assert_eq!(content.as_deref(), Some("v1"));
+
+    // Missing path at the ref → Ok(None), not Err.
+    assert!(storage
+        .show_file_at_ref("HEAD", "nope.txt")
+        .unwrap()
+        .is_none());
+
+    // Missing ref entirely (pre-rotation branch not yet born) → Ok(None) too.
+    assert!(storage
+        .show_file_at_ref("origin/never-born", "probe.txt")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn atomic_push_two_refs_all_or_nothing() {
+    // A and B share a bare. A pushes a commit first, occupying main.
+    // B, still on the old tip, atomically pushes main + a new branch →
+    // the whole push must be rejected; the new branch must not appear.
+    let (bare, clone_a, clone_b) = setup_two_clones();
+    commit_file(clone_a.path(), "fa", "wins");
+    run_git(clone_a.path(), &["push", "origin", "main"]);
+
+    // B local: commit on main + new branch at that (stale-based) tip.
+    commit_file(clone_b.path(), "fb", "loses");
+    run_git(clone_b.path(), &["branch", "feature-x"]);
+
+    let storage_b = GitStorage::new(clone_b.path());
+    let result = storage_b.atomic_push_two_refs("main", "feature-x");
+    // Typed PushConflict (not CommandFailed-with-raw-stderr): the reject
+    // path must go through classify_remote_error, which both redacts
+    // credentials from stderr and gives the rotation caller the
+    // "lost the race" signal as a matchable variant.
+    assert!(
+        matches!(result, Err(GitError::PushConflict)),
+        "non-ff main must reject the whole atomic push as PushConflict, got {result:?}"
+    );
+
+    // feature-x must not exist on the bare (all-or-nothing).
+    let refs = Command::new("git")
+        .args(["branch", "-l", "feature-x"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(
+        refs.stdout.is_empty(),
+        "feature-x must not exist on remote, got: {}",
+        String::from_utf8_lossy(&refs.stdout)
+    );
+}
+
+#[test]
+fn atomic_push_two_refs_succeeds_when_unraced() {
+    let (bare, clone_a, _clone_b) = setup_two_clones();
+    commit_file(clone_a.path(), "m1.txt", "tip");
+    run_git(clone_a.path(), &["branch", "main-epoch-2"]);
+
+    let storage = GitStorage::new(clone_a.path());
+    storage
+        .atomic_push_two_refs("main", "main-epoch-2")
+        .expect("uncontended atomic push must succeed");
+
+    // Both refs landed on the bare.
+    let refs = Command::new("git")
+        .args(["branch", "-l", "main-epoch-2"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(!refs.stdout.is_empty(), "main-epoch-2 must exist on remote");
+    let bare_main = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    let local_main = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(clone_a.path())
+        .output()
+        .unwrap();
+    assert_eq!(bare_main.stdout, local_main.stdout, "main must be updated");
+}
+
+#[test]
+fn rebase_onto_moves_unpushed_commits_to_new_base() {
+    // main: c0 pushed; local-only m1 on top. nb branches from origin/main,
+    // adds b1, gets pushed. rebase_onto("origin/nb", "origin/main") while on
+    // main transplants m1 onto nb's tip: both contents present afterwards.
+    let (_bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "m1.txt", "local msg");
+
+    run_git(clone.path(), &["branch", "nb", "origin/main"]);
+    run_git(clone.path(), &["checkout", "nb"]);
+    commit_file(clone.path(), "b1.txt", "on new base");
+    run_git(clone.path(), &["push", "origin", "nb"]);
+    run_git(clone.path(), &["checkout", "main"]);
+
+    let storage = GitStorage::new(clone.path());
+    storage
+        .rebase_onto("origin/nb", "origin/main")
+        .expect("rebase");
+
+    assert!(
+        clone.path().join("b1.txt").exists(),
+        "new base content present"
+    );
+    assert!(
+        clone.path().join("m1.txt").exists(),
+        "migrated commit content present"
+    );
+    // Chain shape: m1' sits directly on nb's tip.
+    assert_eq!(
+        storage.rev_parse("HEAD^").unwrap(),
+        storage.rev_parse("origin/nb").unwrap(),
+        "migrated commit must be parented on the new base"
+    );
+}
+
+#[test]
+fn reset_branch_and_delete_branch_cleanup() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "residue.txt", "local-only");
+    run_git(clone.path(), &["branch", "stale-orphan"]);
+
+    let storage = GitStorage::new(clone.path());
+    storage.reset_branch_to_origin("main").expect("reset");
+    assert!(!clone.path().join("residue.txt").exists());
+
+    storage.delete_local_branch("stale-orphan").expect("delete");
+    let out = Command::new("git")
+        .args(["branch", "-l", "stale-orphan"])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn tag_archive_bundle_roundtrip() {
+    let (bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "second.txt", "more history");
+    run_git(clone.path(), &["push", "origin", "main"]);
+
+    let storage = GitStorage::new(clone.path());
+    let sha = storage.rev_parse("HEAD").unwrap().trim().to_string();
+
+    storage
+        .tag_archive("archive/epoch-1/abc1234", &sha)
+        .expect("tag");
+    storage
+        .push_tag("archive/epoch-1/abc1234")
+        .expect("push tag");
+
+    // Tag must exist on the remote after push_tag.
+    let remote_tag = Command::new("git")
+        .args(["tag", "-l", "archive/epoch-1/abc1234"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(
+        !remote_tag.stdout.is_empty(),
+        "tag must exist on remote after push_tag"
+    );
+
+    // Bundle into a not-yet-existing subdirectory (parent dir is created).
+    let dir = TempDir::new().unwrap();
+    let bundle = dir.path().join("archives/epoch-1.bundle");
+    storage
+        .bundle_to_path(&bundle, "archive/epoch-1/abc1234")
+        .expect("bundle");
+    assert!(bundle.exists());
+    let verify = Command::new("git")
+        .args(["bundle", "verify", bundle.to_str().unwrap()])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(
+        verify.status.success(),
+        "bundle verify failed: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
+fn push_tag_classifies_remote_reject_as_push_conflict() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    let storage = GitStorage::new(clone.path());
+    let sha1 = storage.rev_parse("HEAD").unwrap();
+    storage
+        .tag_archive("archive/epoch-1/dup", &sha1)
+        .expect("tag");
+    storage.push_tag("archive/epoch-1/dup").expect("first push");
+
+    // Move the tag locally; the remote already holds the old one →
+    // "[rejected] ... (already exists)" must classify as PushConflict,
+    // not surface as CommandFailed with raw (credential-bearing) stderr.
+    commit_file(clone.path(), "next.txt", "x");
+    let sha2 = storage.rev_parse("HEAD").unwrap();
+    run_git(clone.path(), &["tag", "-f", "archive/epoch-1/dup", &sha2]);
+
+    let res = storage.push_tag("archive/epoch-1/dup");
+    assert!(
+        matches!(res, Err(GitError::PushConflict)),
+        "re-pushing a moved tag must classify as PushConflict, got {res:?}"
+    );
+}
+
+#[test]
+fn branch_repoint_helpers_align_local_refs_with_origin() {
+    // B publishes branch `nb`; A materializes it locally without checkout,
+    // re-stamps it at a detached HEAD (the shape a finished `rebase --onto`
+    // leaves behind), then realigns it to origin without touching A's
+    // checked-out working tree.
+    let (_bare, clone_a, clone_b) = setup_two_clones();
+
+    run_git(clone_b.path(), &["checkout", "-b", "nb"]);
+    commit_file(clone_b.path(), "nb.txt", "on nb");
+    run_git(clone_b.path(), &["push", "origin", "nb"]);
+
+    let storage = GitStorage::new(clone_a.path());
+    storage.fetch().expect("fetch");
+
+    // create_or_repoint_branch: local nb appears at origin/nb, no checkout.
+    storage.create_or_repoint_branch("nb").expect("create");
+    assert_eq!(
+        storage.rev_parse("nb").unwrap(),
+        storage.rev_parse("origin/nb").unwrap()
+    );
+    assert!(
+        !clone_a.path().join("nb.txt").exists(),
+        "branch creation must not touch the working tree"
+    );
+
+    // repoint_branch_to_head: detach HEAD at main's tip, stamp nb there.
+    let main_sha = storage.rev_parse("main").unwrap();
+    run_git(clone_a.path(), &["checkout", &main_sha]);
+    storage.repoint_branch_to_head("nb").expect("repoint");
+    assert_eq!(storage.rev_parse("nb").unwrap(), main_sha);
+
+    // checkout_branch: reattach to main.
+    storage.checkout_branch("main").expect("checkout");
+    assert_eq!(storage.current_branch().unwrap(), "main");
+
+    // reset_to_origin_without_checkout: nb diverged from origin/nb above;
+    // realign it while main stays checked out and the working tree untouched.
+    storage
+        .reset_to_origin_without_checkout("nb")
+        .expect("reset without checkout");
+    assert_eq!(
+        storage.rev_parse("nb").unwrap(),
+        storage.rev_parse("origin/nb").unwrap()
+    );
+    assert_eq!(storage.current_branch().unwrap(), "main");
+    assert!(
+        !clone_a.path().join("nb.txt").exists(),
+        "update-ref must not materialize nb's tree"
+    );
+}
+
+#[test]
+fn subjects_ahead_of_origin_lists_unpushed_subjects_oldest_first() {
+    let (_bare, clone) = setup_bare_and_clone_main();
+    let storage = GitStorage::new(clone.path());
+
+    // In sync with origin → empty.
+    assert!(storage.subjects_ahead_of_origin("main").unwrap().is_empty());
+
+    commit_file(clone.path(), "one.txt", "1"); // subject = "one.txt"
+    commit_file(clone.path(), "two.txt", "2"); // subject = "two.txt"
+
+    assert_eq!(
+        storage.subjects_ahead_of_origin("main").unwrap(),
+        vec!["one.txt".to_string(), "two.txt".to_string()],
+        "subjects must list unpushed commits oldest first"
+    );
+}
+
+#[test]
+fn write_redirect_commit_contains_only_epoch_yaml() {
+    // Protocol invariant 1's foundation: the redirect commit R must
+    // structurally contain nothing but the epoch.yaml flip, even when
+    // unrelated changes happen to be staged at rotation time.
+    let (_bare, clone) = setup_bare_and_clone_main();
+    std::fs::write(clone.path().join("unrelated.txt"), "staged but not ours").unwrap();
+    run_git(clone.path(), &["add", "unrelated.txt"]);
+
+    let storage = GitStorage::new(clone.path());
+    let sha = storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: redirected\nepoch: 1\nbranch: main\n",
+            "redirect: seal epoch 1",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("redirect");
+
+    let files_out = Command::new("git")
+        .args(["diff-tree", "--no-commit-id", "--name-only", "-r", &sha])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    let files: Vec<String> = String::from_utf8_lossy(&files_out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        files,
+        vec!["gitim.epoch.yaml".to_string()],
+        "redirect commit must touch only the epoch yaml"
+    );
+}
+
+#[test]
+fn write_redirect_commit_appends_to_current_branch() {
+    use gitim_sync::git::GitStorage;
+    use std::process::Command;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "t@t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let storage = GitStorage::new(dir.path());
+    let sha = storage
+        .write_redirect_commit(
+            "gitim.epoch.yaml",
+            "schema_version: 1\nstatus: redirected\nepoch: 1\nbranch: main\n",
+            "redirect: seal epoch 1",
+            ("daemon", "daemon@gitim"),
+        )
+        .expect("redirect");
+    assert!(!sha.is_empty());
+
+    // Verify main is one commit ahead of the previous tip.
+    let log = Command::new("git")
+        .args(["log", "--format=%H", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let commits: Vec<&str> = std::str::from_utf8(&log.stdout)
+        .unwrap()
+        .trim()
+        .lines()
+        .collect();
+    assert_eq!(
+        commits.len(),
+        2,
+        "expected 2 commits on main, got {:?}",
+        commits
+    );
+    assert_eq!(commits[0], sha.trim());
 }

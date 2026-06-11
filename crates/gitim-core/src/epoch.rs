@@ -89,9 +89,14 @@ pub struct EpochFile {
     /// Present iff `status == Redirected`. Cross-field validated at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<RedirectInfo>,
-    /// Required in both states — the archive tag and bundle exist
-    /// independently of which side of the boundary you read.
-    pub archive: ArchiveInfo,
+    /// The archive tag + bundle that seal the old epoch's history. Optional
+    /// because the pack coordinator builds an `EpochFile` *before* the orphan
+    /// commit lands (so the bundle SHA isn't known yet) and patches the
+    /// archive block in later. Fixture YAML written by humans / Phase A
+    /// populates it; Task 5's `try_fire_rotation` leaves it `None` on first
+    /// write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveInfo>,
 }
 
 #[derive(Debug, Error)]
@@ -106,20 +111,33 @@ pub enum EpochError {
     ParseError(#[from] serde_yaml::Error),
     #[error("failed to read epoch file: {0}")]
     IoError(#[from] io::Error),
+    /// Returned by `save_to_path` when `serde_yaml::to_string` rejects the
+    /// value (currently only reachable via deliberately corrupt struct
+    /// fields — `validate()` runs first to keep the common case clean).
+    #[error("serialize epoch yaml: {0}")]
+    Serialize(String),
 }
 
 impl EpochFile {
     /// Read + parse + validate a `gitim.epoch.yaml` from disk.
     ///
-    /// On success the returned `EpochFile` has already passed `validate()`,
-    /// so callers can match on `status` and unwrap the matching arm
-    /// (`snapshot` for active, `redirect` for redirected) without further
-    /// checks.
-    pub fn load_from_path(p: &Path) -> Result<EpochFile, EpochError> {
-        let f = File::open(p)?;
+    /// File-not-found is a normal "no epoch metadata yet" state (legacy repos
+    /// and freshly-cloned pre-pack workspaces both look like this), so the
+    /// missing-file case returns `Ok(None)` rather than an error. Any other
+    /// IO failure, parse failure, or validate failure surfaces as `Err`.
+    ///
+    /// On `Ok(Some(file))` the file has already passed `validate()`, so
+    /// callers can match on `status` and unwrap the matching arm (`snapshot`
+    /// for active, `redirect` for redirected) without further checks.
+    pub fn load_from_path(p: &Path) -> Result<Option<EpochFile>, EpochError> {
+        let f = match File::open(p) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         let parsed: EpochFile = serde_yaml::from_reader(f)?;
         parsed.validate()?;
-        Ok(parsed)
+        Ok(Some(parsed))
     }
 
     /// Enforce the invariants that aren't expressible in serde alone:
@@ -140,5 +158,88 @@ impl EpochFile {
             EpochStatus::Redirected if self.redirect.is_none() => Err(EpochError::MissingRedirect),
             _ => Ok(()),
         }
+    }
+
+    /// Build an `Active`-state epoch file pointing at `branch` with the
+    /// `source_*` fields describing the commit that was sealed as snapshot
+    /// ancestor. `archive` is optional because the bundle SHA isn't known
+    /// until after the orphan commit lands — Task 5's `try_fire_rotation`
+    /// writes the YAML first with `None`, then patches the archive block in
+    /// later phases if needed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_active(
+        epoch: u32,
+        branch: String,
+        source_branch: String,
+        source_commit: String,
+        commit: String,
+        created_at: String,
+        archive: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            status: EpochStatus::Active,
+            epoch,
+            branch,
+            snapshot: Some(SnapshotInfo {
+                source_branch,
+                source_commit,
+                commit,
+                created_at,
+            }),
+            redirect: None,
+            archive: archive.map(|(tag, sha)| ArchiveInfo {
+                tag,
+                bundle_sha256: sha,
+            }),
+        }
+    }
+
+    /// Build a `Redirected`-state epoch file on the sealed `branch` pointing
+    /// at `target_branch` (the freshly-opened next epoch). See `new_active`
+    /// re. `archive` being optional.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_redirect(
+        epoch: u32,
+        branch: String,
+        target_epoch: u32,
+        target_branch: String,
+        target_commit: String,
+        snapshot_of: String,
+        created_at: String,
+        archive: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            status: EpochStatus::Redirected,
+            epoch,
+            branch,
+            snapshot: None,
+            redirect: Some(RedirectInfo {
+                target_epoch,
+                target_branch,
+                target_commit,
+                snapshot_of,
+                created_at,
+            }),
+            archive: archive.map(|(tag, sha)| ArchiveInfo {
+                tag,
+                bundle_sha256: sha,
+            }),
+        }
+    }
+
+    /// Atomically write this file to `path`. `validate()` runs first so a
+    /// caller can never persist a malformed state. Implementation: write to
+    /// `<path>.tmp` then `rename(.tmp, .)` so a reader process never observes
+    /// a partial file across the rotation boundary — `rename` is atomic on
+    /// the same filesystem on both Unix (`renameat`) and modern Windows.
+    pub fn save_to_path(&self, path: &Path) -> Result<(), EpochError> {
+        self.validate()?;
+        let yaml = serde_yaml::to_string(self).map_err(|e| EpochError::Serialize(e.to_string()))?;
+        let tmp = path.with_extension("yaml.tmp");
+        std::fs::write(&tmp, yaml)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 }
