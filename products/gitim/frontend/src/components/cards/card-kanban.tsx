@@ -18,7 +18,8 @@ import { CardFilterBar, EMPTY_CARD_FILTER, type CardFilterState } from "./card-f
 import { CardKanbanColumn } from "./card-kanban-column";
 import { CardCreateDialog } from "./card-create-dialog";
 
-function readFilterFromURL(params: URLSearchParams): CardFilterState {
+// Exported for unit-testing the URL round-trip; not part of the public API.
+export function readFilterFromURL(params: URLSearchParams): CardFilterState {
   const assignee = params.get("assignee");
   return {
     channels: params.getAll("channel"),
@@ -27,10 +28,12 @@ function readFilterFromURL(params: URLSearchParams): CardFilterState {
     // URL bind to the same field to keep a single source of truth.
     assignee: assignee === "__me__" ? null : assignee,
     mineOnly: assignee === "__me__",
+    project: params.get("project"),
   };
 }
 
-function writeFilterToURL(filter: CardFilterState): URLSearchParams {
+// Exported for unit-testing the URL round-trip; not part of the public API.
+export function writeFilterToURL(filter: CardFilterState): URLSearchParams {
   const p = new URLSearchParams();
   for (const ch of filter.channels) p.append("channel", ch);
   for (const l of filter.labels) p.append("label", l);
@@ -38,6 +41,9 @@ function writeFilterToURL(filter: CardFilterState): URLSearchParams {
     p.set("assignee", "__me__");
   } else if (filter.assignee) {
     p.set("assignee", filter.assignee);
+  }
+  if (filter.project) {
+    p.set("project", filter.project);
   }
   return p;
 }
@@ -54,6 +60,7 @@ export function CardKanban() {
   const unmarkCardInFlight = useCardStore((s) => s.unmarkCardInFlight);
   const allLabels = useCardStore(selectAllLabels);
   const currentUser = useChatStore((s) => s.currentUser);
+  const channels = useChatStore((s) => s.channels);
 
   const filter: CardFilterState = useMemo(
     () => readFilterFromURL(searchParams),
@@ -78,6 +85,21 @@ export function CardKanban() {
     [setSearchParams],
   );
 
+  // Derive the set of channel names belonging to the selected project.
+  // null = no project filter (pass-through); '__unassigned__' = channels with
+  // no project assigned; '<slug>' = channels whose .project matches the slug.
+  const channelsInProject = useMemo<Set<string> | null>(() => {
+    if (filter.project === null) return null;
+    if (filter.project === "__unassigned__") {
+      return new Set(channels.filter((c) => !c.project).map((c) => c.name));
+    }
+    return new Set(
+      channels
+        .filter((c) => c.project === filter.project)
+        .map((c) => c.name),
+    );
+  }, [filter.project, channels]);
+
   const filteredCards = useMemo(() => {
     const cf: CardFilter = {
       channels: filter.channels.length > 0 ? filter.channels : undefined,
@@ -86,8 +108,10 @@ export function CardKanban() {
         ? "__me__"
         : filter.assignee ?? undefined,
     };
-    return sortByUpdatedDesc(selectFilteredCards(cards, cf, currentUser));
-  }, [cards, filter, currentUser]);
+    const base = sortByUpdatedDesc(selectFilteredCards(cards, cf, currentUser));
+    if (channelsInProject === null) return base;
+    return base.filter((c) => channelsInProject.has(c.channel));
+  }, [cards, filter, currentUser, channelsInProject]);
 
   const filteredArchivedCards = useMemo(() => {
     if (!showArchived) return [];
@@ -98,8 +122,12 @@ export function CardKanban() {
         ? "__me__"
         : filter.assignee ?? undefined,
     };
-    return sortByUpdatedDesc(selectFilteredCards(archivedCards, cf, currentUser));
-  }, [archivedCards, showArchived, filter, currentUser]);
+    const base = sortByUpdatedDesc(
+      selectFilteredCards(archivedCards, cf, currentUser),
+    );
+    if (channelsInProject === null) return base;
+    return base.filter((c) => channelsInProject.has(c.channel));
+  }, [archivedCards, showArchived, filter, currentUser, channelsInProject]);
 
   const byStatus = useMemo(() => {
     const g: Record<CardStatus, Card[]> = { todo: [], doing: [], done: [] };
@@ -151,7 +179,8 @@ export function CardKanban() {
     filter.channels.length > 0 ||
     filter.labels.length > 0 ||
     !!filter.assignee ||
-    filter.mineOnly;
+    filter.mineOnly ||
+    filter.project !== null;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
