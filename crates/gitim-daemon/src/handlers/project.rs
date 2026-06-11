@@ -947,4 +947,157 @@ mod tests {
         assert_eq!(r.error_code.as_deref(), Some("project_not_found"));
         assert!(rx.try_recv().is_err(), "failure path must not push event");
     }
+
+    // --- Phase B review findings ---
+
+    /// Helper: count commits reachable from HEAD in the given repo dir.
+    fn git_commit_count(repo: &std::path::Path) -> u64 {
+        let out = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("git rev-list failed");
+        std::str::from_utf8(&out.stdout)
+            .expect("utf8")
+            .trim()
+            .parse()
+            .expect("parse commit count")
+    }
+
+    /// §11.2 — reassign a channel from one project to another.
+    /// Exercises the `(Some(from), Some(to))` commit-message arm (project.rs:288-290)
+    /// which previously had zero coverage, and verifies the SSE event carries the
+    /// new project slug.
+    #[tokio::test]
+    async fn set_assign_reassign_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "eng", "alice").await;
+
+        // Create both projects
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "Design Sprint".into(),
+            "UX work".into(),
+            "alice".into(),
+        )
+        .await;
+        handle_create_project(
+            state.clone(),
+            "infra".into(),
+            "Infrastructure".into(),
+            "Infra work".into(),
+            "alice".into(),
+        )
+        .await;
+
+        // Assign to "design" first
+        let r1 = handle_set_channel_project(
+            state.clone(),
+            "eng".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r1.ok, "initial assign failed: {:?}", r1.error);
+
+        // Subscribe before the reassign call so we capture exactly its event
+        let mut rx = state.event_tx.subscribe();
+
+        // Reassign to "infra" — exercises (Some(from), Some(to)) arm
+        let r2 = handle_set_channel_project(
+            state.clone(),
+            "eng".into(),
+            Some("infra".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r2.ok, "reassign failed: {:?}", r2.error);
+
+        // Disk state: channel meta must reference "infra"
+        let yaml = std::fs::read_to_string(state.repo_root.join("channels/eng.meta.yaml")).unwrap();
+        assert!(
+            yaml.contains("project: infra"),
+            "channel meta should reference 'infra' after reassign; yaml:\n{yaml}"
+        );
+
+        // SSE event: project field must carry Some("infra")
+        let ev = rx
+            .try_recv()
+            .expect("expected ChannelProjectChanged event on reassign");
+        match ev {
+            Event::ChannelProjectChanged { channel, project } => {
+                assert_eq!(channel, "eng");
+                assert_eq!(
+                    project,
+                    Some("infra".to_string()),
+                    "SSE event should carry the new project slug"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Single-commit invariant: `handle_set_channel_project` must produce exactly
+    /// one git commit per call, regardless of whether it's an initial assign or a
+    /// reassign. Verified in both the existing assign case and a fresh reassign.
+    #[tokio::test]
+    async fn set_channel_project_single_commit_invariant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        handle_create_project(
+            state.clone(),
+            "infra".into(),
+            "I".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+
+        // -- initial assign: must produce exactly 1 commit --
+        let before_assign = git_commit_count(&state.repo_root);
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "{:?}", r.error);
+        let after_assign = git_commit_count(&state.repo_root);
+        assert_eq!(
+            after_assign - before_assign,
+            1,
+            "initial assign must produce exactly 1 commit"
+        );
+
+        // -- reassign (Some→Some): must also produce exactly 1 commit --
+        let before_reassign = git_commit_count(&state.repo_root);
+        let r2 = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("infra".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r2.ok, "{:?}", r2.error);
+        let after_reassign = git_commit_count(&state.repo_root);
+        assert_eq!(
+            after_reassign - before_reassign,
+            1,
+            "reassign (Some→Some) must produce exactly 1 commit"
+        );
+    }
 }
