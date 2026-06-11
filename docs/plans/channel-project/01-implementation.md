@@ -1257,6 +1257,61 @@ git commit -m "feat(daemon): handle_list_projects with channel_count derived on-
 
 ---
 
+### Task 8b: Project mutation SSE events (handler 推送)
+
+**对齐现役 convention**(实测,见 design §9.4):event 由 handler 直接推,参考 `card_handlers.rs` 的 `Event::CardCreated` pattern。Watcher 不动 —— 远端 sync 拉回的 project 变更跟 channel meta 现状同等待遇(不推),前端实时性走 poll loop。
+
+**Files:**
+- Modify: `crates/gitim-daemon/src/api.rs` (Event enum 加 2 variant)
+- Modify: `crates/gitim-daemon/src/handlers/project.rs` (2 个 handler 末尾推 event)
+- Modify: 对应 handler 测试文件 (event 断言)
+
+- [ ] **Step 1: Event enum 加 2 个 variant**
+
+```rust
+// crates/gitim-daemon/src/api.rs — Event enum 末尾追加,对齐现有 serde rename convention:
+#[serde(rename = "project_created")]
+ProjectCreated { slug: String },
+
+#[serde(rename = "channel_project_changed")]
+ChannelProjectChanged {
+    channel: String,
+    project: Option<String>,
+},
+```
+
+- [ ] **Step 2: handler 推送(commit 成功后、返回 response 前)**
+
+`handle_create_project`:
+```rust
+let _ = state.event_tx.send(Event::ProjectCreated { slug: slug.clone() });
+```
+
+`handle_set_channel_project`(assign / clear / reassign 都推,`project` 字段携带新值):
+```rust
+let _ = state.event_tx.send(Event::ChannelProjectChanged {
+    channel: channel.clone(),
+    project: project.clone(),
+});
+```
+
+- [ ] **Step 3: 测试** —— 在现有 handler 测试里 `let mut rx = state.event_tx.subscribe()` 后调 handler,`rx.try_recv()` 断言:
+  - create_project happy path → 收到 `ProjectCreated`,slug 正确
+  - set_channel_project assign → 收到 `ChannelProjectChanged { project: Some(..) }`
+  - set_channel_project clear → 收到 `ChannelProjectChanged { project: None }`
+  - 失败路径(project_not_found 等)→ **不**推 event
+
+- [ ] **Step 4: 跑测试 + Commit**
+
+```bash
+cargo test -p gitim-daemon project 2>&1 | tail -5
+git add -A && git commit -m "feat(daemon): project_created / channel_project_changed SSE events"
+```
+
+**明确不做**(v1):watcher 对远端 project meta 变更的推送;前端消费这两个 event(前端不消费 daemon `/api/events`)。
+
+---
+
 ### Task 9: meta.yaml dispatch path audit (review finding 1.A)
 
 **Files:**
@@ -2038,6 +2093,15 @@ export async function setChannelProject(
   }
 }
 ```
+
+- [ ] **Step 2b: Browser mode (local) 分流** —— 对齐 create-channel 先例(design §10.1)
+
+`lib/client.ts` 在 browser/local mode(`useConnectionStore.getState().mode === "local"`)下不打 HTTP。三个函数开头加分流,**返回形态对齐该文件现有同类函数的风格**(grep `unavailable in browser mode` 看 createChannel 怎么处理):
+
+- `listProjects` → 返回 `[]`(空列表;sidebar 退化为纯 channel 平铺)
+- `createProject` / `setChannelProject` → friendly error `"project management is unavailable in browser mode"`
+
+daemon-web worker 端**不加** project method(v1 决策,见 design §10.1);daemon-web `channels()` 不透传 project 字段,透传留 v1.5。
 
 - [ ] **Step 3: Build + type-check**
 

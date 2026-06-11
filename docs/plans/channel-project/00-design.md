@@ -193,11 +193,14 @@ v1 **不做**:
 - `POST /im/projects` → 同 CreateProject
 - `PATCH /im/channels/{ch}/project` body `{ project: Option<String> }` → 同 SetChannelProject
 
-### 9.4 SSE / push events
+### 9.4 SSE / push events(实测后定稿,2026-06-11)
 
-实施时对齐现有 SSE event 命名 convention(待 plan-eng-review 中确认现有 convention):
-- `project_created { slug, meta }` 或 `projects_changed { added: [...], removed: [] }` —— Watcher 检测到 `projects/<slug>/meta.yaml` 新增时推
-- channel.project 变更:复用现有 channel meta update 通道 (`channel_meta_updated` 或等价 event),不另开新 event 类型
+实施前 audit 现役 convention 发现:所有 event 由 **handler 直接推**(`state.event_tx.send(Event::CardCreated {...})`,见 `card_handlers.rs` / `flow_handlers.rs`),watcher 对 meta 类变更只 debug log 不推 event(daemon `main.rs` 的 `FileEvent::MetaModified` 分支)。初稿设想的"watcher 检测推送"不符合现役 convention,弃用。
+
+v1 决策:
+- `handle_create_project` 推 `Event::ProjectCreated { slug }`(wire name `project_created`)
+- `handle_set_channel_project` 推 `Event::ChannelProjectChanged { channel, project: Option<String> }`(wire name `channel_project_changed`)
+- **远端 sync 拉回的 project 变更不推 event** —— 跟 channel meta 现状同等待遇;WebUI 实时性由 poll loop 覆盖(前端不消费 daemon `/api/events`,channel 列表刷新本来就走 poll)
 
 ## 10. Migration & backward-compat
 
@@ -205,6 +208,16 @@ v1 **不做**:
 - 旧 daemon 读到 channel meta 的 `project` 字段:serde unknown field 在 strict mode 会报错,**但 gitim 现在的 ChannelMeta serde 未开 deny_unknown_fields,所以会被 silently ignore** —— ✓ 安全
 - 老客户端连新 daemon:`ListChannels` response 多了 `project` 字段,老 client 忽略它 → ✓
 - `projects/` 目录在首次 `CreateProject` 时由 daemon mkdir + commit(`system@gitim` author)
+
+### 10.1 Browser mode (daemon-web) 姿态(2026-06-11 决策)
+
+`products/gitim/frontend/src/daemon-web/` 是完整的浏览器内 daemon(WASM git,写 handler 带 epoch_redirected 拦截),跟 Rust daemon 双端维护。channel-project v1 在 browser mode **全降级**,对齐 create-channel 先例(`lib/client.ts` 已有 "channel creation is unavailable in browser mode"):
+
+- `createProject` / `setChannelProject` → friendly error "project management is unavailable in browser mode",不打 HTTP、不加 daemon-web worker method
+- `listProjects` → 返回空列表(sidebar 退化为纯 channel 平铺,行为等同 feature 不存在)
+- daemon-web `channels()` 不透传 `project` 字段(现状),**透传留 v1.5**
+
+理由:browser mode 本来就是受限模式(无 create channel / agents / flows / cron),先例一致性优先;读路径透传涉及 WASM 端 meta parse 验证,是独立增量。已验证 `refreshChannelsCache` 只扫 `channels/` 目录,`projects/` 顶层目录不会被 browser 端误认成 channel。
 
 ## 11. Test plan
 
