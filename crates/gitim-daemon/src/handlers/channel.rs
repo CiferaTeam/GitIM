@@ -1146,3 +1146,154 @@ pub(super) async fn write_channel_event(
     };
     Response::json(payload)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::handlers::project::{handle_create_project, handle_set_channel_project};
+    use crate::state::AppState;
+    use gitim_core::types::config::Config;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    /// Build a bare-remote + clone repo (matches project.rs harness pattern).
+    fn setup_state(tmp: &std::path::Path) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(repo, Config::default(), tx, None))
+    }
+
+    async fn register(state: &SharedState, handler: &str) {
+        use crate::handlers::user::handle_register_user;
+        let resp = handle_register_user(
+            state.clone(),
+            handler.to_string(),
+            "Display".to_string(),
+            "member".to_string(),
+            "GitIM user".to_string(),
+        )
+        .await;
+        assert!(resp.ok, "register_user failed: {:?}", resp.error);
+    }
+
+    async fn setup_channel_helper(state: &SharedState, channel: &str, author: &str) {
+        let resp = handle_create_channel(
+            state.clone(),
+            channel.to_string(),
+            None,
+            None,
+            author.to_string(),
+            vec![],
+        )
+        .await;
+        assert!(
+            resp.ok,
+            "setup_channel failed for '{channel}': {:?}",
+            resp.error
+        );
+    }
+
+    /// REGRESSION TEST — Task 10
+    ///
+    /// Verifies that the `project` field on a channel's meta.yaml is preserved
+    /// byte-for-byte through a full archive → unarchive round-trip.
+    ///
+    /// The archive handler uses `git mv` (byte-identical copy), so the field
+    /// should survive. If someone changes the handler to deserialize+rewrite
+    /// the meta, this test will catch the regression.
+    #[tokio::test]
+    async fn archive_unarchive_preserves_project_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        // Create a project and a channel, then assign the channel to the project.
+        let r = handle_create_project(
+            state.clone(),
+            "design".into(),
+            "Design".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "create_project failed: {:?}", r.error);
+
+        setup_channel_helper(&state, "dev", "alice").await;
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "set_channel_project failed: {:?}", r.error);
+
+        // Confirm the project field is present in the active meta before archiving.
+        let before = std::fs::read_to_string(state.repo_root.join("channels/dev.meta.yaml"))
+            .expect("active meta should exist");
+        assert!(
+            before.contains("project: design"),
+            "pre-archive meta must contain project field:\n{before}"
+        );
+
+        // --- Archive ---
+        let r = handle_archive_channel(state.clone(), "dev".into(), "alice".into()).await;
+        assert!(r.ok, "archive_channel failed: {:?}", r.error);
+
+        let archived =
+            std::fs::read_to_string(state.repo_root.join("archive/channels/dev.meta.yaml"))
+                .expect("archived meta should exist at archive/channels/dev.meta.yaml");
+        assert!(
+            archived.contains("project: design"),
+            "REGRESSION: archive_channel dropped the project field.\nmeta after archive:\n{archived}"
+        );
+
+        // --- Unarchive ---
+        let r = handle_unarchive_channel(state.clone(), "dev".into(), "alice".into()).await;
+        assert!(r.ok, "unarchive_channel failed: {:?}", r.error);
+
+        let restored = std::fs::read_to_string(state.repo_root.join("channels/dev.meta.yaml"))
+            .expect("restored meta should exist at channels/dev.meta.yaml");
+        assert!(
+            restored.contains("project: design"),
+            "REGRESSION: unarchive_channel dropped the project field.\nmeta after unarchive:\n{restored}"
+        );
+    }
+}
