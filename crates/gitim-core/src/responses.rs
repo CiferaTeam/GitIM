@@ -1658,7 +1658,12 @@ pub struct CancelFlowRunResponse {
     pub commit_id: String,
 }
 
-/// One row in `ListProjectsResponse`.
+use crate::types::ProjectMeta;
+
+/// One row in `ListProjectsResponse`. Wire shape locked by design §9.1
+/// (docs/plans/channel-project/00-design.md): `{ slug, meta, channel_count }`
+/// with `meta` nested — gitim-client / CLI / frontend all deserialize
+/// against this nesting.
 ///
 /// `channel_count` is derived on-demand by scanning `channels/*.meta.yaml`
 /// and counting entries whose `project` field matches this slug. Archived
@@ -1666,10 +1671,7 @@ pub struct CancelFlowRunResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectEntry {
     pub slug: String,
-    pub display_name: String,
-    pub created_by: String,
-    pub created_at: String,
-    pub introduction: String,
+    pub meta: ProjectMeta,
     pub channel_count: usize,
 }
 

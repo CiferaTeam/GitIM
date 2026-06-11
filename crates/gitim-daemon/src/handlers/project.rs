@@ -172,10 +172,7 @@ pub async fn handle_list_projects(state: SharedState) -> Response {
         let channel_count = slug_counts.get(slug).copied().unwrap_or(0);
         entries.push(ProjectEntry {
             slug: slug.clone(),
-            display_name: meta.display_name,
-            created_by: meta.created_by,
-            created_at: meta.created_at,
-            introduction: meta.introduction,
+            meta,
             channel_count,
         });
     }
@@ -717,8 +714,18 @@ mod tests {
 
         let r = handle_list_projects(state).await;
         assert!(r.ok, "{:?}", r.error);
+        let raw = r.data.unwrap();
+
+        // Wire-shape lock (design §9.1): meta is NESTED under each entry.
+        // Raw key-path assertion so a flat/nested drift can't slip past the
+        // typed deserialization below.
+        assert_eq!(
+            raw["projects"][0]["meta"]["display_name"], "Design Sprint",
+            "meta must be nested; raw payload:\n{raw:#}"
+        );
+
         let data: gitim_core::responses::ListProjectsResponse =
-            serde_json::from_value(r.data.unwrap()).unwrap();
+            serde_json::from_value(raw).unwrap();
 
         assert_eq!(data.projects.len(), 2);
         // Results must be sorted alphabetically by slug
@@ -729,6 +736,10 @@ mod tests {
         let infra = data.projects.iter().find(|p| p.slug == "infra").unwrap();
         assert_eq!(design.channel_count, 2);
         assert_eq!(infra.channel_count, 0);
+        assert_eq!(design.meta.display_name, "Design Sprint");
+        assert_eq!(design.meta.created_by, "alice");
+        assert_eq!(design.meta.introduction, "All UX work");
+        assert_eq!(infra.meta.display_name, "Infrastructure");
     }
 
     #[tokio::test]
