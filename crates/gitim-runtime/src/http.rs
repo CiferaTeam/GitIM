@@ -1272,6 +1272,72 @@ async fn im_channel_unarchive(
     api_response_to_json(client.unarchive_channel(&name).await)
 }
 
+// -- /im/projects --
+
+async fn im_projects(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.list_projects().await)
+}
+
+#[derive(Deserialize)]
+struct CreateProjectReq {
+    slug: String,
+    display_name: String,
+    introduction: String,
+}
+
+async fn im_projects_create(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(body): Json<CreateProjectReq>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .create_project(&body.slug, &body.display_name, &body.introduction)
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct SetChannelProjectReq {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+async fn im_channel_set_project(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, channel)): axum::extract::Path<(String, String)>,
+    Json(body): Json<SetChannelProjectReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(e) = crate::slug::validate(&slug) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {e}"))),
+        )
+            .into_response();
+    }
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .set_channel_project(&channel, body.project.as_deref())
+            .await,
+    )
+}
+
 #[derive(serde::Deserialize)]
 struct ArchivedChannelsQuery {
     #[serde(default)]
@@ -6148,6 +6214,8 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/channels/archived", get(im_list_archived_channels))
         .route("/im/channels/{name}/archive", post(im_channel_archive))
         .route("/im/channels/{name}/unarchive", post(im_channel_unarchive))
+        .route("/im/channels/{name}/project", patch(im_channel_set_project))
+        .route("/im/projects", get(im_projects).post(im_projects_create))
         .route("/im/dm/archived", get(im_list_archived_dms))
         .route("/im/dm/{peer}/archive", post(im_dm_archive))
         .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
