@@ -88,6 +88,10 @@ pub struct ChannelSummary {
     pub members: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
+    /// Project slug this channel belongs to.  `None` = not in any project.
+    /// DMs always serialize as absent.  Old clients ignore unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Response payload for `Request::ListChannels` and
@@ -814,12 +818,14 @@ mod tests {
 
     #[test]
     fn list_channels_response_wire_shape() {
+        // Channel with a project — project key must appear in JSON.
         let r = ListChannelsResponse {
             channels: vec![ChannelSummary {
                 name: "general".to_string(),
                 kind: "channel".to_string(),
                 members: vec!["alice".to_string(), "bob".to_string()],
                 created_by: Some("alice".to_string()),
+                project: Some("eng".to_string()),
             }],
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -837,6 +843,31 @@ mod tests {
                 .and_then(|v| v.as_array())
                 .map(|a| a.len()),
             Some(2),
+        );
+        assert_eq!(
+            first.get("project").and_then(|v| v.as_str()),
+            Some("eng"),
+            "project field must appear in JSON when Some",
+        );
+    }
+
+    #[test]
+    fn list_channels_response_no_project_key_absent() {
+        // Channel without a project — project key must be absent (skip_serializing_if).
+        let r = ListChannelsResponse {
+            channels: vec![ChannelSummary {
+                name: "random".to_string(),
+                kind: "channel".to_string(),
+                members: vec!["bob".to_string()],
+                created_by: Some("bob".to_string()),
+                project: None,
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let first = v["channels"][0].as_object().unwrap();
+        assert!(
+            !first.contains_key("project"),
+            "project key must be absent from JSON when None; got: {first:?}",
         );
     }
 

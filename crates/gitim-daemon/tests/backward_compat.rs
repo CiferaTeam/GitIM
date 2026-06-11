@@ -213,7 +213,101 @@ fn new_channel_meta_none_project_absent_from_yaml() {
     );
 }
 
-// ─── 5. Old YAML without project field → ChannelMeta.project == None ─────────
+// ─── 5. list_channels wire: project field present iff channel assigned ────────
+//
+// Design §9.2 requires `project` to be exposed in the channels list response
+// so the frontend sidebar can group channels by project.
+// • channel with project assigned  → JSON object contains `"project": "<slug>"`
+// • channel without project        → `project` key absent from JSON object (skip_serializing_if)
+
+#[tokio::test]
+async fn list_channels_wire_project_field_present_iff_assigned() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+
+    std::fs::create_dir_all(root.join("users")).unwrap();
+    std::fs::create_dir_all(root.join("channels")).unwrap();
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+
+    // Register alice.
+    std::fs::write(
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\n",
+    )
+    .unwrap();
+
+    // Channel assigned to a project.
+    std::fs::write(
+        root.join("channels/eng.meta.yaml"),
+        "display_name: Eng\ncreated_by: alice\ncreated_at: \"2026-01-01T00:00:00Z\"\nintroduction: Engineering\nmembers:\n- alice\nproject: myproject\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("channels/eng.thread"), "").unwrap();
+
+    // Channel NOT assigned to a project.
+    std::fs::write(
+        root.join("channels/random.meta.yaml"),
+        "display_name: Random\ncreated_by: alice\ncreated_at: \"2026-01-01T00:00:00Z\"\nintroduction: Random\nmembers:\n- alice\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("channels/random.thread"), "").unwrap();
+
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+    run_git(&["init"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init"]);
+
+    let (tx, _) = broadcast::channel(100);
+    let state = Arc::new(AppState::new(
+        root,
+        make_config(),
+        tx,
+        Some("alice".to_string()),
+    ));
+    {
+        let mut users = state.users.write().await;
+        *users = vec!["alice".to_string()];
+    }
+
+    let req: Request = serde_json::from_value(serde_json::json!({ "method": "channels" })).unwrap();
+    let resp = handle_request(req, state).await;
+    assert!(resp.ok, "list_channels failed: {:?}", resp.error);
+
+    let channels = resp.data.unwrap()["channels"].as_array().unwrap().to_vec();
+
+    // Find eng channel — must have project = "myproject".
+    let eng = channels
+        .iter()
+        .find(|c| c["name"].as_str() == Some("eng"))
+        .expect("eng channel must appear in list_channels response");
+    assert_eq!(
+        eng.get("project").and_then(|v| v.as_str()),
+        Some("myproject"),
+        "eng channel must expose project field in list_channels JSON (design §9.2): {eng}",
+    );
+
+    // Find random channel — project key must be absent.
+    let random = channels
+        .iter()
+        .find(|c| c["name"].as_str() == Some("random"))
+        .expect("random channel must appear in list_channels response");
+    assert!(
+        random.get("project").is_none(),
+        "random channel (no project) must not have project key in JSON: {random}",
+    );
+}
+
+// ─── 6. Old YAML without project field → ChannelMeta.project == None ─────────
 
 #[test]
 fn old_yaml_without_project_parses_to_none() {
