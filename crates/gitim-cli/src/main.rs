@@ -684,8 +684,8 @@ enum ProjectAction {
         /// Display name
         #[arg(short = 'n', long = "name")]
         name: String,
-        /// Introduction (1-500 chars)
-        #[arg(short = 'i', long = "intro", default_value = "")]
+        /// Introduction (1-500 chars; daemon rejects empty)
+        #[arg(short = 'i', long = "intro")]
         intro: String,
     },
 }
@@ -1526,8 +1526,12 @@ mod tests {
         assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
     }
 
+    /// --intro is required at the clap layer: the daemon's
+    /// validate_project_meta rejects empty introduction (1-500 chars),
+    /// so an optional/defaulted intro would be a guaranteed round-trip
+    /// failure. Fail fast locally instead.
     #[test]
-    fn projects_create_with_name_parses() {
+    fn projects_create_requires_intro() {
         let r = Cli::try_parse_from([
             "gitim",
             "projects",
@@ -1536,7 +1540,11 @@ mod tests {
             "--name",
             "Infrastructure",
         ]);
-        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+        let err = match r {
+            Ok(_) => panic!("expected clap to require --intro"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
