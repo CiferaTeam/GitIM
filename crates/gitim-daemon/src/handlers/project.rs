@@ -3,7 +3,7 @@ use crate::card_handlers::push_with_retry;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 
-use gitim_core::types::{Handler, ProjectMeta, ProjectSlug};
+use gitim_core::types::{ChannelMeta, ChannelName, Handler, ProjectMeta, ProjectSlug};
 use gitim_core::validator::validate_project_meta;
 use tracing::info;
 
@@ -142,9 +142,149 @@ pub async fn handle_list_projects(state: SharedState) -> Response {
     Response::success(serde_json::json!({"projects": projects}))
 }
 
+pub async fn handle_set_channel_project(
+    state: SharedState,
+    channel: String,
+    project: Option<String>,
+    author: String,
+) -> Response {
+    // 1. Validate author
+    if Handler::new(&author).is_err() {
+        return Response::error(format!("invalid author: {author}"));
+    }
+    if let Err(resp) = ensure_author_not_departed(&state, &author) {
+        return resp;
+    }
+    {
+        let users = state.users.read().await;
+        if !users.contains(&author) {
+            return Response::error(format!("unknown user: {author}"));
+        }
+    }
+
+    // 2. Validate channel name
+    let channel_name = match ChannelName::new(&channel) {
+        Ok(n) => n,
+        Err(e) => return Response::error(format!("invalid channel name: {e}")),
+    };
+
+    // 3. Validate project (if Some) exists and is parseable
+    if let Some(ref p_slug) = project {
+        let validated_slug = match ProjectSlug::new(p_slug) {
+            Ok(s) => s,
+            Err(e) => return Response::error(format!("invalid_slug: {e}")),
+        };
+        let p_meta_path = state
+            .repo_root
+            .join(format!("projects/{validated_slug}.meta.yaml"));
+        if !p_meta_path.exists() {
+            return Response::error_with_code(
+                format!("project '{p_slug}' does not exist"),
+                "project_not_found",
+            );
+        }
+        let p_yaml = match std::fs::read_to_string(&p_meta_path) {
+            Ok(s) => s,
+            Err(e) => return Response::error(format!("read project meta: {e}")),
+        };
+        if validate_project_meta(&p_yaml).is_err() {
+            return Response::error_with_code(
+                format!("project '{p_slug}' meta is corrupted"),
+                "project_meta_corrupted",
+            );
+        }
+    }
+
+    // 4. Find channel meta — active only; archived channels are frozen
+    let active_meta_path = state
+        .repo_root
+        .join(format!("channels/{channel_name}.meta.yaml"));
+    let archived_meta_path = state
+        .repo_root
+        .join(format!("archive/channels/{channel_name}.meta.yaml"));
+    if !active_meta_path.exists() {
+        if archived_meta_path.exists() {
+            return Response::error_with_code(
+                format!("channel '{channel}' is archived; meta is frozen"),
+                "channel_archived",
+            );
+        }
+        return Response::error_with_code(
+            format!("channel '{channel}' does not exist"),
+            "channel_not_found",
+        );
+    }
+
+    // 5. Read + mutate channel meta
+    let yaml = match std::fs::read_to_string(&active_meta_path) {
+        Ok(s) => s,
+        Err(e) => return Response::error(format!("read channel meta: {e}")),
+    };
+    let mut meta: ChannelMeta = match serde_yaml::from_str(&yaml) {
+        Ok(m) => m,
+        Err(e) => return Response::error(format!("parse channel meta: {e}")),
+    };
+
+    let old_project = meta.project.clone();
+    meta.project = project.clone();
+
+    let new_yaml = match serde_yaml::to_string(&meta) {
+        Ok(s) => s,
+        Err(e) => return Response::error(format!("ser channel meta: {e}")),
+    };
+
+    // 6. commit_lock + write + commit (rollback on failure)
+    let commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = std::fs::write(&active_meta_path, &new_yaml) {
+        return Response::error(format!("write channel meta: {e}"));
+    }
+
+    let meta_rel = format!("channels/{channel_name}.meta.yaml");
+    let commit_msg = match (old_project.as_deref(), project.as_deref()) {
+        (None, Some(p)) => {
+            format!("channel: assign #{channel_name} to project '{p}' by @{author}")
+        }
+        (Some(p), None) => {
+            format!("channel: remove #{channel_name} from project '{p}' by @{author}")
+        }
+        (Some(from), Some(to)) => {
+            format!("channel: move #{channel_name} from project '{from}' to '{to}' by @{author}")
+        }
+        (None, None) => format!("channel: #{channel_name} project unchanged by @{author}"),
+    };
+
+    let (author_name, author_email) = state.author_for(&author);
+    if let Err(e) = state.git_storage.add_and_commit_as(
+        &[&meta_rel],
+        &commit_msg,
+        Some((&author_name, &author_email)),
+    ) {
+        // Rollback the disk write
+        let _ = std::fs::write(&active_meta_path, &yaml);
+        return Response::error(format!("commit set_channel_project: {e}"));
+    }
+    drop(commit_guard);
+
+    // 7. Push with retry (skip if no remote)
+    if let Err(e) = push_with_retry(&state, "set_channel_project").await {
+        return Response::error(e);
+    }
+
+    info!(
+        "set_channel_project: #{channel_name} {old:?} → {new:?} by @{author}",
+        old = old_project,
+        new = project
+    );
+    Response::success(serde_json::json!({
+        "channel": channel_name.as_str(),
+        "project": project,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::{handle_archive_channel, handle_create_channel};
     use crate::state::AppState;
     use gitim_core::types::config::Config;
     use std::sync::Arc;
@@ -293,5 +433,179 @@ mod tests {
             "expected invalid_slug in error, got: {:?}",
             r.error
         );
+    }
+
+    // --- handle_set_channel_project tests ---
+
+    /// Create a channel with the given name (creator = author).
+    async fn setup_channel(state: &SharedState, channel: &str, author: &str) {
+        let resp = handle_create_channel(
+            state.clone(),
+            channel.to_string(),
+            None,
+            None,
+            author.to_string(),
+            vec![],
+        )
+        .await;
+        assert!(
+            resp.ok,
+            "setup_channel failed for '{channel}': {:?}",
+            resp.error
+        );
+    }
+
+    /// Archive the given channel (creator must match the registered author).
+    async fn do_archive_channel(state: &SharedState, channel: &str, author: &str) {
+        let resp =
+            handle_archive_channel(state.clone(), channel.to_string(), author.to_string()).await;
+        assert!(
+            resp.ok,
+            "do_archive_channel failed for '{channel}': {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn set_assign_happy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(r.ok, "{:?}", r.error);
+
+        let yaml = std::fs::read_to_string(state.repo_root.join("channels/dev.meta.yaml")).unwrap();
+        assert!(
+            yaml.contains("project: design"),
+            "project not set; yaml:\n{yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_unassign_happy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        // Assign first
+        handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+
+        // Then unassign (project: None)
+        let r = handle_set_channel_project(state.clone(), "dev".into(), None, "alice".into()).await;
+        assert!(r.ok, "{:?}", r.error);
+
+        let yaml = std::fs::read_to_string(state.repo_root.join("channels/dev.meta.yaml")).unwrap();
+        assert!(
+            !yaml.contains("project:"),
+            "project field should be absent after unassign; yaml:\n{yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_not_found_returns_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("ghost".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(!r.ok);
+        assert_eq!(r.error_code.as_deref(), Some("project_not_found"));
+
+        // Channel meta must be unchanged (no project field written)
+        let yaml = std::fs::read_to_string(state.repo_root.join("channels/dev.meta.yaml")).unwrap();
+        assert!(
+            !yaml.contains("project:"),
+            "channel meta must not be mutated; yaml:\n{yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_channel_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+        handle_create_project(
+            state.clone(),
+            "design".into(),
+            "D".into(),
+            "intro".into(),
+            "alice".into(),
+        )
+        .await;
+        do_archive_channel(&state, "dev", "alice").await;
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(!r.ok);
+        assert_eq!(r.error_code.as_deref(), Some("channel_archived"));
+    }
+
+    #[tokio::test]
+    async fn project_meta_corrupted_returns_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        setup_channel(&state, "dev", "alice").await;
+
+        // Write a corrupted project meta directly — no valid YAML structure
+        std::fs::create_dir_all(state.repo_root.join("projects")).unwrap();
+        std::fs::write(
+            state.repo_root.join("projects/design.meta.yaml"),
+            "this: is: not: valid: yaml: at: all:::",
+        )
+        .unwrap();
+
+        let r = handle_set_channel_project(
+            state.clone(),
+            "dev".into(),
+            Some("design".into()),
+            "alice".into(),
+        )
+        .await;
+        assert!(!r.ok);
+        assert_eq!(r.error_code.as_deref(), Some("project_meta_corrupted"));
     }
 }

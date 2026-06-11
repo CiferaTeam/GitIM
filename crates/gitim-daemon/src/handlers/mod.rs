@@ -754,8 +754,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             project,
             author,
         } => {
-            let _ = (channel, project, author);
-            Response::error("set_channel_project not yet implemented")
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            project::handle_set_channel_project(state, channel, project, resolved_author).await
         }
     }
 }
