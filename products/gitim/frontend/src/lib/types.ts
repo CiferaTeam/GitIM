@@ -159,6 +159,21 @@ export interface Channel {
   hasMention: boolean;
   members: string[];
   created_by?: string | null;
+  /** Project slug this channel belongs to; null/undefined = unassigned. */
+  project?: string | null;
+}
+
+export interface ProjectMeta {
+  display_name: string;
+  created_by: string;
+  created_at: string;
+  introduction: string;
+}
+
+export interface Project {
+  slug: string;
+  meta: ProjectMeta;
+  channel_count: number;
 }
 
 export interface UserInfo {
