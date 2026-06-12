@@ -1,3 +1,5 @@
+import { validateHandler as wasmValidateHandler } from "gitim-wasm";
+
 export type ThreadTarget =
   | {
       kind: "channel";
@@ -11,17 +13,20 @@ export type ThreadTarget =
       members: [string, string];
     };
 
-const HANDLER_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const CHANNEL_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
+// Handler validation is delegated to the authoritative Rust `Handler::new`
+// via wasm. wasm must be initialized before this runs (callers go through
+// ensureWasmReady). Returns null on valid, an error message on invalid —
+// preserving this module's existing string-or-null contract by catching the
+// wasm error.
 export function validateHandler(handler: string): string | null {
-  if (!handler) return "handler is empty";
-  if (handler.length > 39) return "handler exceeds 39 characters";
-  if (handler === "system") return "handler 'system' is reserved";
-  if (!HANDLER_RE.test(handler) || handler.includes("--")) {
-    return `invalid handler: ${handler}`;
+  try {
+    wasmValidateHandler(handler);
+    return null;
+  } catch (e) {
+    return String((e as Error)?.message ?? `invalid handler: ${handler}`);
   }
-  return null;
 }
 
 export function validateChannelName(channel: string): string | null {

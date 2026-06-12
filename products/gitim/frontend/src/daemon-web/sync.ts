@@ -8,6 +8,7 @@ import { tokenAuth } from "./auth";
 import { isAuthFailure } from "./auth-errors";
 import { validateHandler } from "./paths";
 import { withRepoLock } from "./repo-lock";
+import { ensureWasmReady } from "./wasm-ready";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -304,6 +305,9 @@ async function runSync(options: RunSyncOptions = {}): Promise<SyncResult> {
 
   const previous = syncInFlight;
   const next = (async () => {
+    // Conflict resolution and the board-path handler validator reach wasm;
+    // this loop can fire on a timer independent of any handler, so gate here.
+    await ensureWasmReady();
     if (previous) {
       try {
         await previous;

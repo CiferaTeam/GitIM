@@ -20,7 +20,7 @@ import { parseThread, type ThreadEntry } from "./parser";
 import { formatMessage, formatEvent } from "./formatter";
 import { runSync } from "./sync";
 import { isAuthFailure } from "./auth-errors";
-import initWasm, {
+import {
   appendBoardSection,
   defaultBoard,
   parseBoardMarkdown,
@@ -31,7 +31,10 @@ import initWasm, {
   stringifyCardMeta,
   validateCardId,
   validateCardLabels,
+  parseChannelMeta,
+  parseUserMeta,
 } from "gitim-wasm";
+import { ensureWasmReady } from "./wasm-ready";
 import {
   channelMetaPath,
   channelNameFromMetaFile,
@@ -105,8 +108,6 @@ interface LocatedCard {
   absDir: string;
   archived: boolean;
 }
-
-let wasmReady: Promise<void> | null = null;
 
 function ok(data: Record<string, unknown> = {}): ApiResponse {
   return { ok: true, data };
@@ -182,11 +183,6 @@ async function syncAfterCommit(options?: { trackCommitId?: boolean }): Promise<{
   }
 }
 
-async function ensureWasmReady(): Promise<void> {
-  wasmReady ??= initWasm().then(() => undefined);
-  await wasmReady;
-}
-
 async function resolveSyncBaseline(repoDir: string, localHead: string): Promise<string> {
   try {
     return await gitOps.resolveRemoteHead(repoDir);
@@ -221,6 +217,9 @@ export async function init(config: {
   handler: string;
   storage?: StorageConfig;
 }): Promise<ApiResponse> {
+  // Worker startup gate: resolve wasm init once, up front, so every
+  // synchronous parse/format/validate/conflict call downstream is safe.
+  await ensureWasmReady();
   const { initState, restoreState, snapshotState } = await import("./state");
   const storage = config.storage ?? { fsName: "gitim", repoDir: "/repo" as const };
   const workspaceId = config.workspaceId ?? "local";
@@ -338,6 +337,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
   }
 
   try {
+    await ensureWasmReady();
     await runSync();
     const currentHead = await gitOps.resolveHead(s.repoDir);
 
@@ -458,6 +458,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
 }
 
 export async function channels(): Promise<ApiResponse> {
+  await ensureWasmReady();
   const s = getState();
   await refreshChannelsCache();
 
@@ -531,6 +532,7 @@ export async function read(
   since?: number,
 ): Promise<ApiResponse> {
   try {
+    await ensureWasmReady();
     const { entries, archived } = await readChannelEntriesWithArchive(channel);
     const sliced = applyReadSliceSemantics(entries, limit, since);
     return ok({ channel, entries: sliced, archived });
@@ -548,6 +550,7 @@ export async function send(
   const fenced = assertNotRedirected();
   if (fenced) return fenced;
   try {
+    await ensureWasmReady();
     const writeResult: SendWriteResult = await withRepoLock(async () => {
       const s = getState();
       if (!s.token) return { kind: "response", response: reconnectRequired() };
@@ -563,7 +566,7 @@ export async function send(
             response: err(`channel '${target.name}' not found`),
           };
         }
-        const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
+        const meta = parseChannelMeta(await readFile(metaPath)) as ChannelMeta;
         if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
           return { kind: "response", response: err("not_member") };
         }
@@ -644,6 +647,7 @@ export async function thread(
   line: number,
 ): Promise<ApiResponse> {
   try {
+    await ensureWasmReady();
     const entries = await readChannelEntries(channel);
     // Build thread tree: root message + all replies pointing to it
     const root = entries.find((e) => e.line_number === line);
@@ -667,6 +671,7 @@ export async function thread(
 }
 
 export async function users(): Promise<ApiResponse> {
+  await ensureWasmReady();
   const s = getState();
   await refreshUsersCache();
   // Sort to match the Rust daemon (read.rs sorts before building both lists).
@@ -694,12 +699,13 @@ export async function joinChannel(channel: string): Promise<ApiResponse> {
   const metaPath = `${s.repoDir}/${channelMetaPath(channel)}`;
 
   try {
+    await ensureWasmReady();
     if (!(await exists(metaPath))) {
       return err(`channel '${channel}' not found`);
     }
 
     const content = await readFile(metaPath);
-    const meta = parseYaml(content) as unknown as ChannelMeta;
+    const meta = parseChannelMeta(content) as ChannelMeta;
 
     if (meta.members.includes(s.me.handler)) {
       return ok({ already_member: true });
@@ -761,6 +767,7 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
   const fenced = assertNotRedirected();
   if (fenced) return fenced;
   try {
+    await ensureWasmReady();
     const s = getState();
     if (!s.token) return reconnectRequired();
     const invalidChannel = validateChannelName(channel);
@@ -772,7 +779,7 @@ export async function archiveChannel(channel: string): Promise<ApiResponse> {
       return err(`channel '${channel}' does not exist`);
     }
 
-    const meta = parseYaml(await readFile(metaAbsPath)) as unknown as ChannelMeta;
+    const meta = parseChannelMeta(await readFile(metaAbsPath)) as ChannelMeta;
     if (meta.created_by !== s.me.handler) {
       return err("only channel creator can archive");
     }
@@ -874,6 +881,7 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
   const fenced = assertNotRedirected();
   if (fenced) return fenced;
   try {
+    await ensureWasmReady();
     const s = getState();
     if (!s.token) return reconnectRequired();
     const invalidChannel = validateChannelName(channel);
@@ -885,7 +893,7 @@ export async function unarchiveChannel(channel: string): Promise<ApiResponse> {
       return err(`archive source does not exist for channel '${channel}'`);
     }
 
-    const meta = parseYaml(await readFile(archiveMetaAbsPath)) as unknown as ChannelMeta;
+    const meta = parseChannelMeta(await readFile(archiveMetaAbsPath)) as ChannelMeta;
     if (meta.created_by !== s.me.handler) {
       return err("only channel creator can unarchive");
     }
@@ -991,6 +999,7 @@ export async function listArchivedChannels(opts?: {
   limit?: number;
 }): Promise<ApiResponse> {
   try {
+    await ensureWasmReady();
     const prefix = (opts?.prefix ?? "").toLowerCase();
     const offset = Math.max(0, opts?.offset ?? 0);
     const limit = Math.min(100, Math.max(1, opts?.limit ?? 10));
@@ -1010,9 +1019,16 @@ export async function listArchivedChannels(opts?: {
       if (!channelName) continue;
       if (prefix && !channelName.toLowerCase().startsWith(prefix)) continue;
 
-      const meta = parseYaml(
-        await readFile(`${archiveChannelsDir}/${item}`),
-      ) as unknown as ChannelMeta;
+      let meta: ChannelMeta;
+      try {
+        meta = parseChannelMeta(
+          await readFile(`${archiveChannelsDir}/${item}`),
+        ) as ChannelMeta;
+      } catch {
+        // Skip un-deserializable archived meta, matching the daemon's
+        // `serde_yaml::from_str(...).ok()` read posture.
+        continue;
+      }
       const members = meta.members ?? [];
       if (members.length > 0 && !members.includes(s.me.handler)) {
         continue;
@@ -1381,7 +1397,7 @@ export async function createCard(
 
     const channelMeta = `${s.repoDir}/${channelMetaPath(channel)}`;
     if (!(await exists(channelMeta))) return err(`channel '${channel}' not found`);
-    const meta = parseYaml(await readFile(channelMeta)) as unknown as ChannelMeta;
+    const meta = parseChannelMeta(await readFile(channelMeta)) as ChannelMeta;
     if (meta.members.length > 0 && !meta.members.includes(s.me.handler)) {
       return err("not_member");
     }
@@ -1457,6 +1473,7 @@ export async function sendCardMessage(
   const fenced = assertNotRedirected();
   if (fenced) return fenced;
   try {
+    await ensureWasmReady();
     const s = getState();
     if (!s.token) return reconnectRequired();
     const located = await locateActiveCard(channel, cardId);
@@ -1806,7 +1823,14 @@ async function enrichEntriesWithRecipients(
     : `${s.repoDir}/${channelMetaPath(target.name)}`;
   if (!(await exists(metaPath))) return entries;
 
-  const meta = parseYaml(await readFile(metaPath)) as unknown as ChannelMeta;
+  let meta: ChannelMeta;
+  try {
+    meta = parseChannelMeta(await readFile(metaPath)) as ChannelMeta;
+  } catch {
+    // Recipient enrichment is best-effort; a malformed meta must not break
+    // reading the channel. Fall back to un-enriched entries.
+    return entries;
+  }
   const messages = entries.filter(isMessageEntry);
 
   return entries.map((entry) => {
@@ -2079,8 +2103,12 @@ async function refreshChannelsCache(): Promise<void> {
       const metaPath = `${channelsDir}/${item}`;
       if (await exists(metaPath)) {
         const content = await readFile(metaPath);
-        const meta = parseYaml(content) as unknown as ChannelMeta;
-        channelsMap.set(channelName, meta);
+        try {
+          channelsMap.set(channelName, parseChannelMeta(content) as ChannelMeta);
+        } catch {
+          // Skip un-deserializable channel meta; the daemon reads these with
+          // `serde_yaml::from_str(...).ok()` and drops failures the same way.
+        }
       }
     }
   }
@@ -2123,8 +2151,12 @@ async function refreshUsersCache(): Promise<void> {
       if (!item.endsWith(".meta.yaml")) continue;
       const handler = item.replace(".meta.yaml", "");
       const content = await readFile(`${usersDir}/${item}`);
-      const meta = parseYaml(content) as unknown as UserMeta;
-      usersMap.set(handler, meta);
+      try {
+        usersMap.set(handler, parseUserMeta(content) as UserMeta);
+      } catch {
+        // Skip un-deserializable user meta; matches the daemon's lenient
+        // `serde_yaml::from_str(...).ok()` read posture.
+      }
     }
   }
 

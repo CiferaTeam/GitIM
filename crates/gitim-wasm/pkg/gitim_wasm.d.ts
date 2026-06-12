@@ -25,7 +25,11 @@ export function parseBoardMarkdown(markdown: string): any;
 
 export function parseCardMeta(yaml: string): any;
 
+export function parseChannelMeta(yaml: string): any;
+
 export function parseThread(text: string): any;
+
+export function parseUserMeta(yaml: string): any;
 
 export function renumberBatch(batch: string, max_existing: bigint): string;
 
@@ -69,6 +73,8 @@ export interface InitOutput {
     readonly validateJoin: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateHandler: (a: number, b: number) => [number, number, number, number];
+    readonly parseChannelMeta: (a: number, b: number) => [number, number, number];
+    readonly parseUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseCardMeta: (a: number, b: number) => [number, number, number];

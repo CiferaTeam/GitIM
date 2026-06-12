@@ -1,13 +1,39 @@
-// Pure conflict resolution — TS equivalent of gitim-sync's resolve_content_pure.
-// Renumbers local additions so they follow the remote's max line number,
-// then appends them to the remote content.
+// Conflict resolution for browser sync.
+//
+// The substantive work — parsing, renumbering local additions after the
+// remote's last line, and building the rebase commit message — is the Rust
+// pure functions `resolve_content_pure` / `build_rebase_commit_msg`, reached
+// through wasm. This module is just the IO-shape orchestration around them.
+//
+// `extractThreadAdditions` has no Rust pure-fn equivalent: the native daemon
+// computes additions from the filesystem inside `resolve_content`. In the
+// browser we derive them from already-read content (base/local), so this
+// append-only diff stays here as TS glue. It does string work only — no
+// .thread parsing — so it needs no wasm.
 
-import { parseThread } from "./parser";
-import { formatMessage, formatEvent } from "./formatter";
+import {
+  resolveContentPure,
+  buildRebaseCommitMsg,
+} from "gitim-wasm";
 
 export interface ResolveResult {
   files: Record<string, string>;
   commitMessage: string;
+}
+
+// Shape of gitim-sync's ResolvedFile / RenumberMapping as serialized by wasm.
+interface ResolvedFile {
+  path: string;
+  content: string;
+}
+interface RenumberMapping {
+  file: string;
+  old_line: number;
+  new_line: number;
+}
+interface ResolveContentResult {
+  files: ResolvedFile[];
+  mappings: RenumberMapping[];
 }
 
 export function extractThreadAdditions(
@@ -30,83 +56,21 @@ export function resolveConflicts(
   localAdditions: Record<string, string>,
   remoteContents: Record<string, string>,
 ): ResolveResult {
-  const files: Record<string, string> = {};
-  const messageParts: string[] = [];
+  const additionsJson = JSON.stringify(localAdditions);
+  const { files, mappings } = resolveContentPure(
+    additionsJson,
+    JSON.stringify(remoteContents),
+  ) as ResolveContentResult;
 
-  for (const [filePath, localContent] of Object.entries(localAdditions)) {
-    const remote = remoteContents[filePath] ?? "";
-
-    // Find the highest line number in the remote content
-    let maxLine = 0;
-    if (remote) {
-      const remoteFile = parseThread(remote);
-      for (const entry of remoteFile.entries) {
-        if (entry.line_number > maxLine) maxLine = entry.line_number;
-      }
-    }
-
-    // Parse local additions and build a renumbering map
-    const localFile = parseThread(localContent);
-    const lineMap = new Map<number, number>();
-    let nextLine = maxLine + 1;
-
-    for (const entry of localFile.entries) {
-      lineMap.set(entry.line_number, nextLine);
-      nextLine++;
-    }
-
-    // Renumber entries, preserving parent references where possible
-    let renumbered = "";
-    for (const entry of localFile.entries) {
-      const newLn = lineMap.get(entry.line_number)!;
-
-      if (entry.type === "message") {
-        const newPt =
-          entry.point_to === 0
-            ? 0
-            : lineMap.get(entry.point_to) ?? entry.point_to;
-        renumbered += formatMessage(
-          newLn,
-          newPt,
-          entry.author,
-          entry.timestamp,
-          entry.body,
-        );
-      } else {
-        renumbered += formatEvent(
-          newLn,
-          entry.author,
-          entry.timestamp,
-          entry.event_type,
-          entry.meta,
-        );
-      }
-    }
-
-    // Merge: remote content + renumbered local appended
-    let merged = remote;
-    if (merged && !merged.endsWith("\n")) merged += "\n";
-    merged += renumbered;
-
-    files[filePath] = merged;
-
-    // Build commit message lines
-    const channel = filePath
-      .replace(/.*\//, "")
-      .replace(/\.thread$/, "");
-    for (const entry of localFile.entries) {
-      const newLn = lineMap.get(entry.line_number)!;
-      messageParts.push(
-        `msg: @${entry.author} -> ${channel} L${String(newLn).padStart(6, "0")}(rebased)`,
-      );
-    }
+  const fileMap: Record<string, string> = {};
+  for (const f of files) {
+    fileMap[f.path] = f.content;
   }
 
-  return {
-    files,
-    commitMessage:
-      messageParts.length > 0
-        ? messageParts.join("\n")
-        : "msg: sync after rebase",
-  };
+  const commitMessage = buildRebaseCommitMsg(
+    JSON.stringify(mappings),
+    additionsJson,
+  );
+
+  return { files: fileMap, commitMessage };
 }

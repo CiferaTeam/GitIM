@@ -131,6 +131,26 @@ pub fn validate_handler(handler: &str) -> Result<String, JsError> {
     Ok(h.as_str().to_string())
 }
 
+// `parseChannelMeta` / `parseUserMeta` mirror the daemon's *read* path, which
+// is a lenient `serde_yaml::from_str::<ChannelMeta/UserMeta>` (see
+// gitim-daemon handlers — channel listing/poll/read all deserialize without
+// the strict field-constraint validator). daemon-web only ever reads meta, so
+// it needs this lenient parse, not `validateChannelMeta` (which additionally
+// enforces write-time constraints and would be stricter than the daemon).
+#[wasm_bindgen(js_name = "parseChannelMeta")]
+pub fn parse_channel_meta(yaml: &str) -> Result<JsValue, JsError> {
+    let meta: gitim_core::types::ChannelMeta =
+        serde_yaml::from_str(yaml).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "parseUserMeta")]
+pub fn parse_user_meta(yaml: &str) -> Result<JsValue, JsError> {
+    let meta: gitim_core::types::UserMeta =
+        serde_yaml::from_str(yaml).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|e| JsError::new(&e.to_string()))
+}
+
 #[wasm_bindgen(js_name = "validateUserMeta")]
 pub fn validate_user_meta(yaml: &str) -> Result<JsValue, JsError> {
     let meta = gitim_core::validator::validate_user_meta(yaml)
