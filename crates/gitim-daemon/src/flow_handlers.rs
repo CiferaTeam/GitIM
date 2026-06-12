@@ -435,6 +435,12 @@ fn format_warning(w: &FlowWarning) -> String {
         FlowWarning::TooManyNodes { count, limit } => {
             format!("node count {} exceeds limit {}", count, limit)
         }
+        FlowWarning::Phase2NodeType { node_id, node_type } => format!(
+            "node '{}' has type {:?} which is a Phase 2 placeholder — \
+             this node type is not executed in v1 and will remain pending; \
+             coordinator will not be triggered",
+            node_id, node_type
+        ),
     }
 }
 

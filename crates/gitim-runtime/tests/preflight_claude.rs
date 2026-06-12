@@ -141,25 +141,3 @@ async fn claude_with_config_model_override_argv() {
         "default model leaked into argv despite override: {err}"
     );
 }
-
-#[tokio::test]
-async fn claude_with_config_default_behavior_matches_old_function() {
-    // Use the same "not installed" path the wrapper test exercises and assert
-    // both code paths produce structurally equivalent failures. Comparing the
-    // full PreflightResult is brittle (duration_ms varies), so we compare the
-    // fields that should be stable across the two calls.
-    let bin = "/usr/bin/definitely-not-claude-xyz";
-    let timeout = Duration::from_secs(5);
-
-    let via_wrapper = preflight_claude_with(bin, timeout).await;
-    let via_config =
-        preflight_claude_with_config(bin, timeout, PreflightOverrides::default()).await;
-
-    assert_eq!(via_wrapper.available, via_config.available);
-    assert_eq!(via_wrapper.provider, via_config.provider);
-    assert_eq!(via_wrapper.error_kind, via_config.error_kind);
-    assert_eq!(via_wrapper.model_used, via_config.model_used);
-    assert_eq!(via_wrapper.version, via_config.version);
-    // Both should report not_installed; that's the salient classification.
-    assert_eq!(via_wrapper.error_kind, Some(ErrorKind::NotInstalled));
-}

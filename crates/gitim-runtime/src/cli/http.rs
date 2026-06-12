@@ -213,8 +213,8 @@ impl Client {
     /// (runtime `git clone`s inline) and `update-agent` (runtime can write
     /// up to 64KB dotenv content to disk).
     ///
-    /// Picking the timeout: pass [`LONG_REQUEST_TIMEOUT`] (`Duration::from_secs(300)`)
-    /// for those two verbs; the constant is the canonical envelope. We accept
+    /// Picking the timeout: pass [`LONG_REQUEST_TIMEOUT`] for those two verbs;
+    /// the constant is the canonical envelope. We accept
     /// a `Duration` parameter rather than a hardcoded value here so that
     /// future verbs with different bounds (e.g. a `migrate-agent` with a
     /// longer envelope) can opt into their own value without another helper.
@@ -1003,7 +1003,7 @@ mod tests {
     ///
     /// Why pin: the whole point of the split is "fast verbs fail in seconds,
     /// provisioning verbs survive minutes". Quiet drift to e.g.
-    /// `DEFAULT_REQUEST_TIMEOUT = 300s` would silently re-introduce the bug
+    /// `DEFAULT_REQUEST_TIMEOUT = 360s` would silently re-introduce the bug
     /// the split was created to fix.
     #[test]
     fn timeout_constants_have_expected_values() {

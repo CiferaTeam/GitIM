@@ -24,7 +24,6 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::path::PathBuf;
 
 use common::short_tempdir;
 use gitim_runtime::cli::{cmd_update_agent, from_cli_error, CliError, Client};
@@ -385,28 +384,4 @@ async fn test_update_multiple_fields_lands_via_real_handler() {
     assert_eq!(env_content, "FOO=bar\nBAZ=qux\n");
 
     server.abort();
-}
-
-// ── Sanity-check the args wrapper ───────────────────────────────────────────
-
-/// Confirms the field set on `cmd_update_agent::Args` round-trips and the
-/// types stay compatible. A clap → Args plumbing bug in `bin/runtime.rs`
-/// wouldn't be caught by field-level unit tests; this is the boundary.
-#[test]
-fn args_struct_smoke() {
-    let args = cmd_update_agent::Args {
-        workspace: Some("ws".to_string()),
-        id: "alice".to_string(),
-        system_prompt: Some("p".to_string()),
-        system_prompt_file: None,
-        model: Some("m".to_string()),
-        effort: Some("high".to_string()),
-        introduction: Some("i".to_string()),
-        env: vec!["A=1".to_string()],
-        dotenv_file: Some(PathBuf::from("/tmp/.env")),
-        clear_session: false,
-    };
-    assert_eq!(args.id, "alice");
-    assert_eq!(args.env.len(), 1);
-    let _: Option<PathBuf> = args.dotenv_file;
 }

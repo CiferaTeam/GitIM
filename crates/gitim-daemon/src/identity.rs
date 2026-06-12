@@ -89,10 +89,10 @@ pub fn infer_identity(
 
         AuthPayload::GitHub { token } => {
             let auth_header = format!("Authorization: token {}", token);
-            // E2E test seam mirroring the one in gitim-runtime: points at a
-            // local stub so a compiled daemon binary can run the full onboard
-            // flow without talking to github.com. Unset in production.
-            let api_base = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+            // Override for tests (and non-production deployments): set
+            // GITIM_GITHUB_API_BASE to point at a local stub. Unset in
+            // production. Mirrors the same env var used in gitim-runtime.
+            let api_base = std::env::var("GITIM_GITHUB_API_BASE")
                 .unwrap_or_else(|_| "https://api.github.com".to_string());
             let url = format!("{}/user", api_base.trim_end_matches('/'));
             let body = run_curl(&["-H", &auth_header, &url])?;
@@ -217,7 +217,7 @@ mod tests {
         let api_base = serve_github_user_once(
             r#"{"id":12345,"login":"octocat","name":"Octocat","email":null}"#,
         );
-        std::env::set_var("GITIM_TEST_GITHUB_API_BASE", api_base);
+        std::env::set_var("GITIM_GITHUB_API_BASE", api_base);
 
         let result = infer_identity(
             GitServer::GitHub,
@@ -227,7 +227,7 @@ mod tests {
         )
         .unwrap();
 
-        std::env::remove_var("GITIM_TEST_GITHUB_API_BASE");
+        std::env::remove_var("GITIM_GITHUB_API_BASE");
         assert_eq!(
             result.email.as_deref(),
             Some("12345+octocat@users.noreply.github.com")

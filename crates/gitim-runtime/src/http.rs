@@ -38,9 +38,15 @@ use gitim_sync::url_redact::redacted_url;
 /// of the ephemeral-port band on macOS / Linux.
 pub const DEFAULT_PORT: u16 = 16868;
 
-/// Max bytes accepted for the `dotenv` field on `PATCH /agents/{id}`.
-/// Typical `.env` is < 1 KB; cap is generous headroom without enabling abuse.
-pub const DOTENV_MAX_BYTES: usize = 64 * 1024;
+/// Max bytes accepted for agent configuration files: `dotenv` on
+/// `PATCH /agents/{id}`, `--system-prompt-file` on `add-agent`, and
+/// `--system-prompt-file` / `--dotenv-file` on `update-agent`.
+/// Typical files are < 1 KB; the cap is generous headroom without enabling
+/// abuse. All three file-size checks in the CLI subcommands share this value.
+pub const AGENT_FILE_MAX_BYTES: u64 = 64 * 1024;
+
+/// Alias for callers that need a `usize` (e.g. the HTTP body length check).
+pub const DOTENV_MAX_BYTES: usize = AGENT_FILE_MAX_BYTES as usize;
 
 /// Seam for tests: production hits github.com, tests hit a mockito server.
 /// Kept inside the runtime crate so the call sites in `git_init` don't care
@@ -424,11 +430,10 @@ impl RuntimeState {
 
 impl Default for RuntimeState {
     fn default() -> Self {
-        // E2E test seam: env vars let a compiled binary point at a stub
-        // github API + a local `file://` bare repo instead of github.com.
-        // Unset in production; Rust integration tests still override directly
-        // via `state.lock()`.
-        let base_url = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+        // Override seam: GITIM_GITHUB_API_BASE lets a compiled binary point at
+        // a stub (shared with gitim-daemon). Unset in production; Rust
+        // integration tests override directly via `state.lock()`.
+        let base_url = std::env::var("GITIM_GITHUB_API_BASE")
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
         // Best-effort canonical exe for test constructors. Production boots

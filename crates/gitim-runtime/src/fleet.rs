@@ -777,6 +777,7 @@ impl SseDataParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::DEFAULT_PORT;
 
     #[test]
     fn parser_extracts_data_frames() {
@@ -805,7 +806,7 @@ mod tests {
             ssh_tunnel: Some(crate::user_config::FleetSshTunnelConfig {
                 ssh_target: " ".to_string(),
                 remote_host: "127.0.0.1".to_string(),
-                remote_port: 16868,
+                remote_port: DEFAULT_PORT,
                 local_port: Some(18068),
             }),
         };
@@ -847,7 +848,7 @@ mod tests {
             ssh_tunnel: Some(crate::user_config::FleetSshTunnelConfig {
                 ssh_target: "lewis@host".to_string(),
                 remote_host: "127.0.0.1".to_string(),
-                remote_port: 16868,
+                remote_port: DEFAULT_PORT,
                 local_port,
             }),
         }

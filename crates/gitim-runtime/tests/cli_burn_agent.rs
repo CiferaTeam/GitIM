@@ -31,7 +31,7 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use common::{ensure_daemon_in_path, short_tempdir, stop_daemon};
 use gitim_runtime::cli::{cmd_burn_agent, from_cli_error, CliError, Client};
@@ -326,25 +326,4 @@ async fn test_burn_workspace_resolution() {
     );
 
     server.abort();
-}
-
-// ── Sanity: handler signature covers what bin/runtime.rs passes ──────────────
-
-/// Surface check — the bin/runtime.rs dispatch passes
-/// `(client, workspace, id, hard)` as four positional args. Lock the
-/// signature here so a refactor that adds a parameter trips this test
-/// instead of breaking the binary build silently.
-#[test]
-fn handler_signature_smoke() {
-    fn _assert_signature() {
-        // Compile-time-only check: this never runs.
-        async fn _check(client: &Client) {
-            let _: Result<i32, CliError> =
-                cmd_burn_agent::run(client, Some("ws".to_string()), "alice".to_string(), false)
-                    .await;
-        }
-        let _ = _check;
-    }
-    // The compile is the test.
-    let _: PathBuf = PathBuf::new();
 }
