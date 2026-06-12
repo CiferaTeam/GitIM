@@ -5,65 +5,18 @@
 //! archive it (using the existing archive_channel handler as the fixture), then
 //! exercise the new unarchive_channel handler across the five scenarios below.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
+use std::sync::Arc;
+
 use gitim_daemon::api::{Event, Request};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 /// Build a temp git repo with alice + bob registered, and a single channel "dev"
 /// created by alice. Returns (_tmp, state) — keep _tmp alive for the test.
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::create_dir_all(root.join("channels")).unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("users/bob.meta.yaml"),
-        "display_name: Bob\nrole: dev\nintroduction: hello\n",
-    )
-    .unwrap();
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    // Make the working tree non-empty before first commit so the repo has a HEAD
-    // consistent with our downstream handlers expecting the dir tracked.
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    let (tmp, state) = common::setup_repo_alice_bob().await;
 
     // Create channel "dev" as alice via the real handler so the git history mirrors
     // production reality (create → archive → unarchive).

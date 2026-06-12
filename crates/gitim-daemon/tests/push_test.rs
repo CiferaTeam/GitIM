@@ -1,51 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
-use gitim_daemon::api::{Event, Request};
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    std::fs::create_dir_all(root.join("channels")).unwrap();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    // Create "general" channel meta (required by handle_send)
-    std::fs::write(
-        root.join("channels/general.meta.yaml"),
-        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
-    )
-    .unwrap();
-
-    let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-
-    {
-        let mut users = state.users.write().await;
-        users.push("alice".to_string());
-    }
-
-    (tmp, state)
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_with_channel("general").await
 }
 
 #[test]

@@ -5,75 +5,32 @@
 //! Pattern mirrors `archive_user_test.rs`: temp git repo + AppState
 //! in-process, exercise via `handle_request`. No daemon process spawned.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
+use std::sync::Arc;
+
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
 
 /// Build a temp git repo with alice + bob + charlie registered, plus
 /// an `dm/alice--bob.thread` populated with one line so archive has
 /// something to move. Returns (_tmp, state) — keep _tmp alive for the
 /// duration of the test.
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    for h in ["alice", "bob", "charlie"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
-    }
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    let (tmp, state) = common::setup_repo_with_users(&["alice", "bob", "charlie"]).await;
 
     // dm/alice--bob.thread — one message so the file is non-empty (archive
     // operation moves an existing file; `git mv` on missing file errors out).
-    let dm_dir = root.join("dm");
+    let dm_dir = state.repo_root.join("dm");
     std::fs::create_dir_all(&dm_dir).unwrap();
     std::fs::write(
         dm_dir.join("alice--bob.thread"),
         "[L000001][P000000][@alice][20260509T100000Z] hey bob\n",
     )
     .unwrap();
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "charlie".to_string(),
-        ];
-    }
+    common::run_git(&state.repo_root, &["add", "."]);
+    common::run_git(&state.repo_root, &["commit", "-m", "add dm thread"]);
 
     (tmp, state)
 }
@@ -476,24 +433,8 @@ async fn test_list_archived_dms_empty_then_sorted() {
         "[L000001][P000000][@alice][20260509T101000Z] hey charlie\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "dm/alice--charlie.thread"])
-        .current_dir(&state.repo_root)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add charlie dm"])
-        .current_dir(&state.repo_root)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
+    common::run_git(&state.repo_root, &["add", "dm/alice--charlie.thread"]);
+    common::run_git(&state.repo_root, &["commit", "-m", "add charlie dm"]);
 
     // Archive bob first, then charlie (insertion order != alphabetical).
     let resp = archive_dm(state.clone(), "bob", "alice").await;
@@ -834,19 +775,8 @@ async fn test_poll_dm_archived_visibility_respects_participants() {
         "[L000001][P000000][@alice][20260509T101000Z] hey charlie\n",
     )
     .unwrap();
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&state.repo_root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["add", "dm/alice--charlie.thread"]);
-    run_git(&["commit", "-m", "add charlie dm"]);
+    common::run_git(&state.repo_root, &["add", "dm/alice--charlie.thread"]);
+    common::run_git(&state.repo_root, &["commit", "-m", "add charlie dm"]);
 
     // Switch the daemon's "current user" to bob — he's NOT a participant
     // in the alice<->charlie DM and must not see its archived event.
@@ -1010,19 +940,8 @@ async fn seed_archived_dms(state: &Arc<AppState>, me: &str, peers: &[&str]) {
         )
         .unwrap();
     }
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&state.repo_root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "seed archived dms"]);
+    common::run_git(&state.repo_root, &["add", "."]);
+    common::run_git(&state.repo_root, &["commit", "-m", "seed archived dms"]);
 }
 
 fn peers_in(resp: &gitim_daemon::api::Response) -> Vec<String> {

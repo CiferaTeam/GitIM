@@ -5,64 +5,18 @@
 //! Pattern mirrors `unarchive_channel.rs`: temp git repo + AppState in-process,
 //! exercise via `handle_request`. No daemon process spawned.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
+use std::sync::Arc;
+
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 /// Build a temp git repo with alice + bob registered in `users/`. Returns
 /// (_tmp, state) — keep _tmp alive for the test.
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("users/bob.meta.yaml"),
-        "display_name: Bob\nrole: dev\nintroduction: hello\n",
-    )
-    .unwrap();
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
-
-    (tmp, state)
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_alice_bob().await
 }
 
 async fn archive_user(

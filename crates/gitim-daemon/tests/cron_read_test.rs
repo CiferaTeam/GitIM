@@ -7,59 +7,16 @@
 //! covered in 2.2's tests) and seed `<ts>.thread` files manually for run
 //! history.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
+use std::sync::Arc;
+
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    for h in ["alice", "bob"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
-    }
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
-    (tmp, state)
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_with_users(&["alice", "bob"]).await
 }
 
 async fn create_cron(

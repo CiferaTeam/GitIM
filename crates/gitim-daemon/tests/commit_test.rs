@@ -1,94 +1,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use gitim_core::types::Config;
-use gitim_daemon::api::{Event, Request};
+use gitim_daemon::api::Event;
+use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-fn init_git_repo(root: &std::path::Path) {
-    let run = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("git command failed");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-
-    run(&["init"]);
-    run(&["commit", "--allow-empty", "-m", "init"]);
-}
-
 async fn setup_git_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    // Initialize git repo with an initial commit
-    init_git_repo(&root);
-
-    // Create required directory structure
-    std::fs::create_dir_all(root.join("channels")).unwrap();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::create_dir_all(root.join(".gitim")).unwrap();
-    std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    // Create "general" channel meta (required by handle_send)
-    std::fs::write(
-        root.join("channels/general.meta.yaml"),
-        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
-    )
-    .unwrap();
-
-    // Git add and commit the initial structure
-    let run = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("git command failed");
-    };
-    run(&["add", "."]);
-    run(&["commit", "-m", "add initial structure"]);
-
-    let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-
-    {
-        let mut users = state.users.write().await;
-        users.push("alice".to_string());
-    }
-
-    (tmp, state)
+    common::setup_repo_with_channel("general").await
 }
 
 #[tokio::test]
@@ -134,40 +58,22 @@ async fn setup_git_test_repo_with_email(email: Option<String>) -> (TempDir, Arc<
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
 
-    init_git_repo(&root);
     std::fs::create_dir_all(root.join("channels")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("channels/general.meta.yaml"),
-        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
-    )
-    .unwrap();
+    common::write_alice(&root);
+    common::write_channel_meta(&root, "general", "alice", &[]);
 
-    let run = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("git command failed");
-    };
-    run(&["add", "."]);
-    run(&["commit", "-m", "add initial structure"]);
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["commit", "--allow-empty", "-m", "init"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add initial structure"]);
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
     let state = Arc::new(AppState::new_with_email(
         root,
-        make_config(),
+        common::make_config(),
         event_tx,
         Some("alice".to_string()),
         email,
