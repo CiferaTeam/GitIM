@@ -4,6 +4,7 @@ mod depart;
 mod dm;
 mod labels;
 mod poll;
+pub mod project;
 mod read;
 mod search;
 mod send;
@@ -152,6 +153,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::JoinChannel { .. }
                 | Request::LeaveChannel { .. }
                 | Request::CreateChannel { .. }
+                | Request::CreateProject { .. }
+                | Request::SetChannelProject { .. }
                 | Request::ArchiveChannel { .. }
                 | Request::UnarchiveChannel { .. }
                 | Request::CreateCard { .. }
@@ -730,5 +733,32 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         }
         Request::LabelsList { target } => handle_labels_list(state, target).await,
         Request::AgentsWithLabels { labels } => handle_agents_with_labels(state, labels).await,
+
+        // Channel-project — see docs/plans/channel-project/
+        Request::ListProjects => project::handle_list_projects(state).await,
+        Request::CreateProject {
+            slug,
+            display_name,
+            introduction,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            project::handle_create_project(state, slug, display_name, introduction, resolved_author)
+                .await
+        }
+        Request::SetChannelProject {
+            channel,
+            project,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            project::handle_set_channel_project(state, channel, project, resolved_author).await
+        }
     }
 }

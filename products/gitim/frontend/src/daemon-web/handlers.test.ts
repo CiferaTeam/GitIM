@@ -619,6 +619,7 @@ describe("daemon-web handlers", () => {
         unreadCount: 0,
         members: ["alice", "lewis"],
         created_by: "alice",
+        project: null,
       },
       {
         name: "alice--lewis",
@@ -875,6 +876,7 @@ describe("daemon-web handlers", () => {
         unreadCount: 0,
         members: ["alice", "lewis"],
         created_by: "lewis",
+        project: null,
       },
       {
         name: "alice--lewis",

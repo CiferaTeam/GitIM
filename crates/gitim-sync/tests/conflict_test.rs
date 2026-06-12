@@ -292,6 +292,7 @@ fn test_merge_channel_meta_union_and_dedup() {
         created_at: "20260330T120000Z".into(),
         introduction: "默认频道".into(),
         members: vec!["alice".into(), "god".into()],
+        project: None,
     };
     let remote = ChannelMeta {
         display_name: "General".into(),
@@ -299,6 +300,7 @@ fn test_merge_channel_meta_union_and_dedup() {
         created_at: "20260330T120000Z".into(),
         introduction: "默认频道".into(),
         members: vec!["bob".into(), "god".into()],
+        project: None,
     };
     let merged = merge_channel_meta(&local, &remote);
     assert_eq!(merged.members, vec!["alice", "bob", "god"]);
@@ -310,6 +312,7 @@ fn test_merge_channel_meta_union_and_dedup() {
         created_at: "20260330T120000Z".into(),
         introduction: "默认频道".into(),
         members: vec!["alice".into(), "bob".into(), "god".into()],
+        project: None,
     };
     let remote = ChannelMeta {
         display_name: "General".into(),
@@ -317,6 +320,7 @@ fn test_merge_channel_meta_union_and_dedup() {
         created_at: "20260330T120000Z".into(),
         introduction: "默认频道".into(),
         members: vec!["alice".into(), "god".into()],
+        project: None,
     };
     let merged = merge_channel_meta(&local, &remote);
     assert_eq!(merged.members, vec!["alice", "bob", "god"]);
@@ -330,6 +334,7 @@ fn test_merge_channel_meta_scalars_from_remote() {
         created_at: "20260330T120000Z".into(),
         introduction: "local intro".into(),
         members: vec!["alice".into()],
+        project: None,
     };
     let remote = ChannelMeta {
         display_name: "Remote Name".into(),
@@ -337,6 +342,7 @@ fn test_merge_channel_meta_scalars_from_remote() {
         created_at: "20260330T120000Z".into(),
         introduction: "remote intro".into(),
         members: vec!["bob".into()],
+        project: None,
     };
     let merged = merge_channel_meta(&local, &remote);
     assert_eq!(merged.display_name, "Remote Name");

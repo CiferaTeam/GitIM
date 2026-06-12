@@ -12,6 +12,7 @@ import { useAgentStore } from "@/hooks/use-agent-store";
 import { useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { useProjectStore } from "@/hooks/use-project-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import { writeUiState } from "@/lib/ui-state";
@@ -23,6 +24,8 @@ export interface CardFilterState {
   labels: string[];
   assignee: string | null;
   mineOnly: boolean;
+  /** null = All projects; '__unassigned__' = channels with no project; '<slug>' = specific project */
+  project: string | null;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- same-file constant used by CardKanban; matches project pattern (badge/button/tabs)
@@ -31,6 +34,7 @@ export const EMPTY_CARD_FILTER: CardFilterState = {
   labels: [],
   assignee: null,
   mineOnly: false,
+  project: null,
 };
 
 export interface CardFilterBarProps {
@@ -47,6 +51,7 @@ export function CardFilterBar({
   const channels = useChatStore((s) => s.channels);
   const users = useChatStore((s) => s.users);
   const agents = useAgentStore((s) => s.agents);
+  const projects = useProjectStore((s) => s.projects);
   const showArchived = useCardStore((s) => s.showArchived);
   const toggleShowArchived = useCardStore((s) => s.toggleShowArchived);
   const setArchivedCards = useCardStore((s) => s.setArchivedCards);
@@ -74,7 +79,8 @@ export function CardFilterBar({
     value.channels.length > 0 ||
     value.labels.length > 0 ||
     !!value.assignee ||
-    value.mineOnly;
+    value.mineOnly ||
+    value.project !== null;
 
   // Fetch archived cards for the current channel filter. When zero or many
   // channels are selected we drop the scope and fetch all archived — the
@@ -141,6 +147,11 @@ export function CardFilterBar({
 
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-filter-bar-bg flex-wrap">
+      <ProjectSelect
+        projects={projects}
+        selected={value.project}
+        onChange={(project) => onChange({ ...value, project })}
+      />
       <ChannelMulti
         options={channelOptions}
         selected={value.channels}
@@ -198,6 +209,84 @@ export function CardFilterBar({
         </Button>
       )}
     </div>
+  );
+}
+
+function ProjectSelect({
+  projects,
+  selected,
+  onChange,
+}: {
+  projects: import("@/lib/types").Project[];
+  selected: string | null;
+  onChange: (next: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const label =
+    selected === null
+      ? "All projects"
+      : selected === "__unassigned__"
+        ? "Unassigned"
+        : (projects.find((p) => p.slug === selected)?.meta.display_name ??
+          selected);
+
+  function select(value: string | null) {
+    onChange(value);
+    setOpen(false);
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="gap-1 text-xs">
+          {label}
+          <ChevronDown className="h-3 w-3" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-48 max-h-72 overflow-auto p-1">
+        <ProjectOption active={selected === null} onSelect={() => select(null)}>
+          All projects
+        </ProjectOption>
+        <ProjectOption
+          active={selected === "__unassigned__"}
+          onSelect={() => select("__unassigned__")}
+        >
+          Unassigned
+        </ProjectOption>
+        {projects.length > 0 && <div className="h-px bg-border my-1" />}
+        {projects.map((p) => (
+          <ProjectOption
+            key={p.slug}
+            active={selected === p.slug}
+            onSelect={() => select(p.slug)}
+          >
+            {p.meta.display_name}
+          </ProjectOption>
+        ))}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function ProjectOption({
+  children,
+  active,
+  onSelect,
+}: {
+  children: React.ReactNode;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      onClick={onSelect}
+      className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent hover:text-accent-foreground"
+    >
+      <Check
+        className={cn("h-3 w-3 shrink-0", active ? "opacity-100" : "opacity-0")}
+      />
+      <span className="truncate">{children}</span>
+    </button>
   );
 }
 

@@ -32,6 +32,7 @@ import type {
   Message,
   NodeStatus,
   PollResponse,
+  Project,
   RunStatus,
   WorkspaceSummary,
 } from "./types";
@@ -1245,6 +1246,73 @@ export async function listArchivedDms(
     ok: true,
     data: { dms: json.data.dms, hasMore: json.data.has_more },
   };
+}
+
+// --- Project API: real runtime HTTP (all scoped to a workspace) ---
+//
+// Wire contract: the runtime forwards daemon ApiResponse envelopes verbatim.
+// Success: { ok: true, data: { projects: [...] } } (list) or { ok: true, data: {...} } (write).
+// Failure: { ok: false, error: "...", error_code?: "..." } — checked via body.ok, not HTTP status.
+//
+// Browser mode: listProjects returns [] (sidebar degrades to flat channel list).
+// createProject / setChannelProject return friendly error — no daemon-web support in v1.
+
+export async function listProjects(workspaceSlug: string): Promise<Project[]> {
+  if (isLocalMode()) {
+    return [];
+  }
+  const res = await fetch(`${wsBase(workspaceSlug)}/im/projects`);
+  const body = (await res.json()) as ApiResponse<{ projects: Project[] }>;
+  if (!body.ok) return [];
+  return body.data?.projects ?? [];
+}
+
+export async function createProject(
+  workspaceSlug: string,
+  slug: string,
+  display_name: string,
+  introduction: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return { ok: false, error: "project management is unavailable in browser mode" };
+  }
+  try {
+    const res = await fetch(`${wsBase(workspaceSlug)}/im/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug, display_name, introduction }),
+    });
+    const body = await res.json() as ApiResponse;
+    if (!body.ok) return body;
+    return { ok: true, data: body.data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function setChannelProject(
+  workspaceSlug: string,
+  channel: string,
+  project: string | null,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return { ok: false, error: "project management is unavailable in browser mode" };
+  }
+  try {
+    const res = await fetch(
+      `${wsBase(workspaceSlug)}/im/channels/${encodeURIComponent(channel)}/project`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project }),
+      },
+    );
+    const body = await res.json() as ApiResponse;
+    if (!body.ok) return body;
+    return { ok: true, data: body.data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // --- Preflight (global, no slug) ---

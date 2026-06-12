@@ -923,6 +923,44 @@ impl GitimClient {
         self.request("flow_run_cancel", json!({"run_id": run_id}))
             .await
     }
+
+    // ===== Channel-project association (docs/plans/channel-project/) =====
+
+    pub async fn list_projects(&self) -> Result<ApiResponse, ClientError> {
+        self.request("list_projects", json!({})).await
+    }
+
+    pub async fn create_project(
+        &self,
+        slug: &str,
+        display_name: &str,
+        introduction: &str,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "create_project",
+            json!({
+                "slug": slug,
+                "display_name": display_name,
+                "introduction": introduction,
+            }),
+        )
+        .await
+    }
+
+    pub async fn set_channel_project(
+        &self,
+        channel: &str,
+        project: Option<&str>,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request(
+            "set_channel_project",
+            json!({
+                "channel": channel,
+                "project": project,
+            }),
+        )
+        .await
+    }
 }
 
 /// Decode a daemon response into a typed payload `T`. Used by the cron
@@ -1347,6 +1385,72 @@ mod tests {
             parsed.with_timezone(&Utc).to_rfc3339(),
             "2026-05-11T16:00:00+00:00"
         );
+    }
+
+    // -- Project methods (channel-project) ----------------------------------
+
+    #[test]
+    fn list_projects_request_shape() {
+        use crate::types::build_request;
+        let req = build_request("list_projects", json!({}));
+        assert_eq!(req, json!({"method": "list_projects"}));
+    }
+
+    #[test]
+    fn create_project_request_shape() {
+        use crate::types::build_request;
+        let req = build_request(
+            "create_project",
+            json!({
+                "slug": "infra",
+                "display_name": "Infrastructure",
+                "introduction": "All infra work",
+            }),
+        );
+        assert_eq!(
+            req,
+            json!({
+                "method": "create_project",
+                "slug": "infra",
+                "display_name": "Infrastructure",
+                "introduction": "All infra work",
+            }),
+        );
+    }
+
+    #[test]
+    fn set_channel_project_with_slug_request_shape() {
+        use crate::types::build_request;
+        let req = build_request(
+            "set_channel_project",
+            json!({
+                "channel": "backend",
+                "project": "infra",
+            }),
+        );
+        assert_eq!(
+            req,
+            json!({
+                "method": "set_channel_project",
+                "channel": "backend",
+                "project": "infra",
+            }),
+        );
+    }
+
+    #[test]
+    fn set_channel_project_clear_sends_null() {
+        use crate::types::build_request;
+        // project: None serialises to null — daemon's Option<String> accepts both
+        // missing key and null and treats both as "remove project association".
+        let req = build_request(
+            "set_channel_project",
+            json!({
+                "channel": "backend",
+                "project": null,
+            }),
+        );
+        assert_eq!(req.get("project"), Some(&serde_json::Value::Null));
     }
 
     /// next_fire absent is propagated as Ok(None) — disabled spec or

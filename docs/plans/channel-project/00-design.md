@@ -1,0 +1,309 @@
+# Channel Project Grouping (v1) — Design
+
+Status: draft, ready for plan-eng-review
+Slug: `channel-project`
+Last brainstorm: 2026-05-21
+
+## 问题
+
+Channel 数量长大后,sidebar 列表平铺难以管理。需要在 channel 上面加一层"项目"(project)的归属,让相关 channel 能聚到一个 project 文件夹下。本特性增量上线 —— 已经存在的 channel 默认不在任何 project 里,后续可选择性加入。
+
+## 心智模型
+
+- **Channel** = 一次对话/一个话题
+- **Project** = channel 的集合,**只承担管理(grouping)语义**,不参与 routing、不参与 permission gating、不影响 search/index/flows/cards lifecycle
+- Project 是 workspace-scoped 的一等公民,但功能面薄到极致 —— v1 只能 create + 把 channel 装进/拿出
+
+## 1. Data model (git-native)
+
+### 1.1 `ChannelMeta` 加 optional `project` 字段
+
+```rust
+// crates/gitim-core/src/types/meta.rs
+pub struct ChannelMeta {
+    pub display_name: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub introduction: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// 所属 project slug。None = 不在任何 project 下。
+    /// 旧 channel meta 缺省 → None,backward-compat。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+```
+
+### 1.2 `ProjectMeta` 新类型
+
+```rust
+// crates/gitim-core/src/types/meta.rs
+// NOTE: ProjectMeta 跟 ChannelMeta 共享 display_name / created_by / created_at / introduction
+//       4 个字段。v1 不抽象 (YAGNI)。若未来出现第 3 个 meta type (UserMeta 已经独立),
+//       考虑提取 MetaCommon base struct 或 derive macro。修改 ChannelMeta 共享字段时记得检查这里。
+pub struct ProjectMeta {
+    pub display_name: String,
+    pub created_by: String,
+    pub created_at: String,  // RFC 3339
+    pub introduction: String,
+}
+```
+
+### 1.3 Filesystem layout
+
+对齐**现有** channel meta 扁平 layout (`channels/<n>.meta.yaml` + `channels/<n>.thread` + `channels/<n>/cards/*`):
+
+```
+<repo>/
+├── channels/
+│   ├── <ch>.meta.yaml         # 加 project: <slug> 字段(optional)
+│   ├── <ch>.thread
+│   └── <ch>/
+│       └── cards/
+└── projects/                  # 新顶层目录
+    └── <slug>.meta.yaml       # ProjectMeta — 扁平,跟 channel meta convention 对齐
+```
+
+为什么扁平:跟 `channels/<n>.meta.yaml` 一致;`projects/` 目录下只放 meta,没有其他 per-project artifact (没 thread、没 cards);glob `projects/*.meta.yaml` 跟 `channels/*.meta.yaml` 对称。
+
+Archive 路径(v1 不用,留 anchor):`archive/projects/<slug>.meta.yaml`。
+
+### 1.4 Slug 规则
+
+跟现有 `ChannelName` newtype 规则对齐 + 加 reserved set:
+- 小写 `a-z 0-9 -`,1–32 字符 (跟 ChannelName 一致)
+- 含大写字母 / 下划线 / 空格 / 斜杠 → 拒绝
+- 不能以 `-` 开头/结尾,不能连续 `--`
+- **Reserved set**:`["archive", "channels", "projects", "users", "dms", "cards", "flows", "system"]`(跟系统保留目录名 + 系统 handler 重名禁止)
+- 现有 `ChannelName::new` **无 reserved set 检查**,但 v1 不动 channel 行为
+- 实施路径:`ProjectSlug` 新 newtype 在 `crates/gitim-core/src/types/project.rs`,内部用 `ChannelName::new` 同款字符集校验,然后追加 reserved 检查;**不抽 generic helper**(YAGNI,两个 newtype 共 20 行代码,提取的代价比重复高)
+
+## 2. Mutation surface (v1)
+
+- `CreateProject { slug, display_name, introduction }` —— 写 `projects/<slug>/meta.yaml` + 单次 commit
+- `SetChannelProject { channel, project: Option<String> }` —— 改 `channels/<ch>/meta.yaml` 的 `project` 字段 + 单次 commit;`None` / `Some("X")` 走同一接口,assign / unassign / reassign 都靠这一个
+
+v1 **不做**:
+- project rename(display_name 改动)
+- project archive / unarchive
+- project edit introduction
+- project hard delete
+- per-channel "project label only" (没有就是没有)
+
+## 3. Validation
+
+- `SetChannelProject { project: Some("X"), .. }` 校验:`projects/X/meta.yaml` 必须存在,否则 daemon 返 `error_code: project_not_found`
+- `SetChannelProject` 校验:目标 channel 必须是 **active** (即 `channels/<ch>/meta.yaml` 存在,非 archive)。archived channel 拒绝 mutation,返 `error_code: channel_archived`。理由:archive 是 freeze state,meta 不应再变;改 project 字段会破坏 archive 的 "瞬态切片" 语义
+- Project meta 解析失败语义:若 `projects/X/meta.yaml` 文件存在但 yaml parse 失败 / 字段不全 / 类型不对,daemon 返 server-side error code `project_meta_corrupted` (跟 `project_not_found` 区分)。client 看到 `corrupted` 知道是 server 状态异常,不是自己传错 slug
+- `CreateProject` 校验:slug 合法 + slug 不冲突(已存在 → `error_code: project_exists`)
+- channel.project 字段反向跟踪 unused project:**不做** —— project 可以是空的(只是 sidebar 不显示而已)
+- channel archive 时:`project` 字段原样跟 meta 进 `archive/channels/<ch>/`,**不做 special handling**
+- channel unarchive:`project` 字段原样回来。如果指向的 project 已被(未来的 v2)archive,这是 v2 关心的问题,v1 不会有
+
+## 4. Permission (workspace-flat)
+
+跟现有 channel mutation 一致:
+- 任何 workspace member(`users/<handler>.meta.yaml` 存在)都能 `CreateProject`
+- 任何 workspace member 都能 `SetChannelProject`(无 channel 群主 / project 群主 gate)
+- daemon 的 write-guard:check `author handler ∈ users/`(已有路径,不动)
+
+理由:project 是管理工具,过度 gating 反而降低使用率;workspace 已经是 trust boundary,内部不再 gate。
+
+## 5. Routing / Archive / Flows / Cards / Index 边界确认
+
+- **Routing v1 (recipients)**:不受 project 影响。`gitim-core::recipients` 的 input/output 不动。
+- **Cards-follow-channel-archive**:不受影响。cards 跟 channel 走,channel 跟 project 走是 orthogonal。
+- **Flows**:不受影响。flow 是 channel-orthogonal,不绑 project。
+- **gitim-index (FTS5)**:不动 schema。v1 不加 by-project filter (YAGNI)。
+- **Agent routing v1 recipients**:不动。
+- **Agent provision / preflight**:不动。
+- **Runtime CLI** (`gitim-runtime` subcommand):不动 (project mutation 走 daemon,不是 runtime workspace 概念)。
+
+## 6. UI: Sidebar
+
+### 6.1 视觉模型
+
+- ⭐ asterisk = channel
+- 📁 folder = project
+- Channel 和 project 在同一层 mixed sort (用户的核心偏好)
+- Project 文件夹 collapsible,展开后是它的成员 channel
+- **空 project (无成员 channel) 隐式不显示** —— 渲染时 reduce `channels.filter(c => c.project === slug).length > 0`
+
+### 6.2 排序
+
+- 平级排序:每一项要么是 unassigned channel,要么是 non-empty project
+- 默认排序:`pinned 在前(localStorage)` → 字典序
+- Project 折叠状态 by default = collapsed (减少视觉噪音);用户展开后 localStorage 持久化
+
+### 6.3 Pinned
+
+- **Pinned 沿用现有 `gitim-pinned-conversations:<workspace>` localStorage**,新增 entry 类型
+  - 当前 schema:`{ channels: string[], dms: string[] }`
+  - 新增:`projects: string[]`
+- **不写 git** —— 跟 channel pinned 一致,是 personal preference
+- Project pin/unpin 操作通过 sidebar 上的 hover icon 或 context menu
+
+## 7. UI: Cards
+
+### 7.1 Filter bar 加 project filter
+
+- Filter bar 加单选 dropdown:`All | Unassigned | <project A> | <project B> | ...`
+- 选 project 后,channel filter 自动 derived(scope 到该 project 下的 channel)
+- Kanban 列保持 todo / doing / done 不变
+
+### 7.2 URL 参数
+
+- 加 `project=<slug>` query param,跟现有 `channel=` / `label=` / `assignee=__me__` 并列
+- `project=__unassigned__` 表示 "no project"
+- `writeFilterToURL` / `readFilterFromURL` 同步更新
+
+### 7.3 v1 不做
+
+- per-project kanban section(像 sidebar 那样的视觉划分)
+- project breadcrumb / header banner
+- cards 排序按 project 分组(简单 filter 已经能达到"划分"效果)
+
+## 8. CLI surface
+
+新增子命令(实施时对齐 CLI 现役 flat 顶层命令惯例 —— `Channels` / `CreateChannel` / `ArchiveChannel` 都是 flat,没有 `channel` 子命令组):
+- `gitim projects list` —— 列 workspace 所有 project,展示 slug / display_name / channel 计数
+- `gitim projects create <slug> --name "..." --intro "..."` —— 创建 project(`--intro` 必填,daemon 强制 1-500 字符)
+- `gitim set-channel-project <ch> <project_slug>` —— 把 channel 划进 project
+- `gitim set-channel-project <ch> --clear` —— 从 project 拿出来
+
+不做:
+- `gitim projects archive / rename / edit` (v2+)
+- `gitim projects show <slug>` (`list` 已经足够)
+
+## 9. Daemon API surface
+
+### 9.1 新增 IPC methods
+
+- `ListProjects` → `Vec<{ slug, meta: ProjectMeta, channel_count: usize }>`
+- `CreateProject { slug, display_name, introduction }` → `()`
+- `SetChannelProject { channel, project: Option<String> }` → `()`
+
+### 9.2 现有 method response 扩展
+
+- `ListChannels` / `ReadChannelMeta` response 的 `ChannelMeta` 暴露 `project: Option<String>` (新字段,backward-compat 通过 `Option<String>` + `skip_serializing_if`)
+
+### 9.3 HTTP gateway (SSE / Runtime / WebUI)
+
+- `GET /im/projects` → 同 ListProjects
+- `POST /im/projects` → 同 CreateProject
+- `PATCH /im/channels/{ch}/project` body `{ project: Option<String> }` → 同 SetChannelProject
+
+### 9.4 SSE / push events(实测后定稿,2026-06-11)
+
+实施前 audit 现役 convention 发现:所有 event 由 **handler 直接推**(`state.event_tx.send(Event::CardCreated {...})`,见 `card_handlers.rs` / `flow_handlers.rs`),watcher 对 meta 类变更只 debug log 不推 event(daemon `main.rs` 的 `FileEvent::MetaModified` 分支)。初稿设想的"watcher 检测推送"不符合现役 convention,弃用。
+
+v1 决策:
+- `handle_create_project` 推 `Event::ProjectCreated { slug }`(wire name `project_created`)
+- `handle_set_channel_project` 推 `Event::ChannelProjectChanged { channel, project: Option<String> }`(wire name `channel_project_changed`)
+- **远端 sync 拉回的 project 变更不推 event** —— 跟 channel meta 现状同等待遇;WebUI 实时性由 poll loop 覆盖(前端不消费 daemon `/api/events`,channel 列表刷新本来就走 poll)
+
+## 10. Migration & backward-compat
+
+- 旧 channel meta 没有 `project` 字段 → serde `#[serde(default)]` → `None`
+- 旧 daemon 读到 channel meta 的 `project` 字段:serde unknown field 在 strict mode 会报错,**但 gitim 现在的 ChannelMeta serde 未开 deny_unknown_fields,所以会被 silently ignore** —— ✓ 安全
+- 老客户端连新 daemon:`ListChannels` response 多了 `project` 字段,老 client 忽略它 → ✓
+- `projects/` 目录在首次 `CreateProject` 时由 daemon mkdir + commit(`system@gitim` author)
+
+### 10.1 Browser mode (daemon-web) 姿态(2026-06-11 决策)
+
+`products/gitim/frontend/src/daemon-web/` 是完整的浏览器内 daemon(WASM git,写 handler 带 epoch_redirected 拦截),跟 Rust daemon 双端维护。channel-project v1 在 browser mode **全降级**,对齐 create-channel 先例(`lib/client.ts` 已有 "channel creation is unavailable in browser mode"):
+
+- `createProject` / `setChannelProject` → friendly error "project management is unavailable in browser mode",不打 HTTP、不加 daemon-web worker method
+- `listProjects` → 返回空列表(sidebar 退化为纯 channel 平铺,行为等同 feature 不存在)
+- daemon-web `channels()` **透传** `project` 字段(实施时发现只是 state.ts ChannelMeta 一行 + 构造点一行,顺手做了)。但 browser mode 的 `listProjects` 返回 `[]`,`buildSidebarTree` 的孤儿防御把带 project 字段的 channel 照常归入 unassigned 平铺 —— **可见行为仍是全降级**。v1.5 只需把 listProjects 接到 daemon-web 即可点亮分组
+
+理由:browser mode 本来就是受限模式(无 create channel / agents / flows / cron),先例一致性优先;读路径透传涉及 WASM 端 meta parse 验证,是独立增量。已验证 `refreshChannelsCache` 只扫 `channels/` 目录,`projects/` 顶层目录不会被 browser 端误认成 channel。
+
+## 11. Test plan
+
+按 TDD,以下 unit + 集成测试:
+
+### 11.1 `gitim-core`
+- `ChannelMeta` 序列化:有/无 `project` 字段都能 round-trip
+- `ProjectMeta` 序列化:基本 round-trip + 缺字段时反序列化失败 (`display_name` 必填等)
+- Slug 校验复用 channel slug 路径
+
+### 11.2 `gitim-daemon`
+- `CreateProject` happy path:写 `projects/<slug>/meta.yaml` + 1 commit
+- `CreateProject` 重复:返 `project_exists`
+- `CreateProject` 非法 slug / reserved slug:返 `invalid_slug` / `reserved_slug`
+- `SetChannelProject(Some)` 指向不存在 project:返 `project_not_found`,channel meta 不变
+- `SetChannelProject(Some)` happy path:channel.meta.project 变成 Some(X) + 1 commit
+- `SetChannelProject(None)` happy path:从 Some(X) 变 None + 1 commit
+- `SetChannelProject` reassign:从 Some(X) 变 Some(Y) + 1 commit
+- `SetChannelProject` 对 archived channel:返 `channel_archived`,meta 不变 (review finding 2.A)
+- `SetChannelProject(Some)` 指向 corrupted project meta:返 `project_meta_corrupted` (review finding 1.B)
+- `ListProjects` 返回 channel_count 正确(空 project = 0)
+- **[REGRESSION, IRON RULE]** Channel archive → unarchive 全链路,`channel.meta.project` 字段值在 archive/unarchive 后**完全保留** (review finding 3.A)。测试覆盖 `archived_via = manual` 和 `archived_via = channel` 两条路径
+- **[BACKWARD-COMPAT]** 老 channel meta yaml (无 project 字段) 反序列化 → `project = None`,无错;写回时 `skip_serializing_if` 不写 project 字段,文件 byte-identical (review finding 3.B)
+- **[BACKWARD-COMPAT]** 老 daemon 反序列化新 channel meta (有 project 字段),`deny_unknown_fields` 未开,silently ignore 通过。实测验证假设而非假设 (review finding 3.B)
+
+### 11.3 `gitim-cli`
+- `gitim projects list` / `create` argv 解析 + happy path 通 daemon IPC
+- `gitim channel set-project <ch> <slug>` / `--clear` argv 解析 + happy path
+
+### 11.4 `gitim-runtime` HTTP gateway
+- `GET /im/projects` / `POST /im/projects` / `PATCH /im/channels/{ch}/project`
+- write-guard 触发 (departed user 不能 mutate)
+
+### 11.5 `gitim-frontend`
+- Sidebar 平级 sort 算法 (mixed channel + project) —— unit test
+- 空 project 隐式不显示 —— unit test
+- Pin/unpin project (localStorage) —— unit test
+- Cards filter bar project dropdown —— unit test
+- URL param `project=` round-trip —— unit test
+- **[E2E]** Create project → assign channel → sidebar 渲染 project folder + 内含 channel → click expand → click channel → send message → 验 routing 不被 project 影响 → pin project → reload → 仍 pinned (review finding 3.C)
+
+## 12. Implementation guardrails (来自 plan-eng-review)
+
+### 12.1 meta.yaml dispatch path audit (review finding 1.A)
+
+`projects/<slug>/meta.yaml` 跟 `channels/<ch>/meta.yaml` 同名,实施前必须 audit 以下处理路径,确认 path 前缀 filter 严格区分两类:
+
+- `crates/gitim-sync` 的 file watcher (`watcher.rs`):新增 / 修改 / 删除事件分发要按顶层目录 (`channels/` vs `projects/` vs `archive/`) 分支
+- `crates/gitim-index` (FTS5 indexer):如果按 yaml glob 扫描,新增 `projects/` 跳过逻辑 (v1 不索引 project meta)
+- `crates/gitim-daemon` onboard 路径 (`onboard.rs`):workspace 初始化时 `projects/` 不应该被 channel 发现器扫到
+- `crates/gitim-daemon` archive / unarchive handler:`channels/<ch>/` 路径处理不能误伤 `projects/<slug>/`
+- `crates/gitim-daemon` reconcile (孤儿卡片 reconcile):path 前缀过滤要更新
+
+每个 audit 点在 PR 里 commit message 显式标注 "verified path prefix filter"。
+
+### 12.2 SSE event 命名 convention 实测确认
+
+实施时 grep 现有 SSE event 类型 (`channel_archived` / `channel_unarchived` / `card_*` / `members_changed` 等),按现役命名风格定 `project_*` event。文档 (本 design Section 9.4) 在实施 PR 里同步更新明确选定的 event 名。
+
+## 13. v2+ out-of-scope (锁定不做)
+
+- Project rename / archive / edit introduction
+- Project owner / members 概念 (permission 更细粒度)
+- Per-project kanban section (cards 视图视觉划分)
+- Search by project filter (gitim-index)
+- Project pinned 写 git (跨设备同步偏好)
+- Project 嵌套 (project 包 project) —— 永远不做
+- 多归属 (channel.projects: Vec) —— 永远不做 (这次锁的是 0..1)
+- Project 自己有 thread/messages —— 永远不做
+
+## 14. Open question
+
+无 —— plan-eng-review 完成,findings 已全部 patch 进 design。下一步进 writing-plans (Phase 4) 生成 TDD 实施计划。
+
+---
+
+## Appendix A: 关键决策溯源
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| Project 载体 | channel.meta 加 `project` 字段 + `projects/<slug>/meta.yaml` 独立 | 增量最干净;旧 channel 不动 |
+| 归属基数 | 0..1 | 简单清晰;UI sidebar 干净;v2 想加 0..N 可以加字段 backward-compat |
+| ProjectMeta 字段 | display_name / created_by / created_at / introduction | 对齐 ChannelMeta 心智;color/icon/members YAGNI |
+| Mutation v1 | create project + set channel.project | 锁到"用户最低能用起来"的 set |
+| Permission | workspace-flat (任何 member) | 跟现有 channel mutation 一致;trust boundary 是 workspace |
+| Sidebar | 平级 mixed sort,空 project 隐式不显示 | 用户偏好;符合"project 跟 channel 平级"的心智 |
+| Pinned | 沿用现有 localStorage | 对齐现有 channel pin,personal preference 不入 git |
+| Cards 视图 | filter bar 加 project filter | 最小复用现有 kanban,YAGNI |
+| Routing | project 不影响 recipients | project 是管理层,不动行为 |

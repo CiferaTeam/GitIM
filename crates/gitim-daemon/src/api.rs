@@ -116,6 +116,16 @@ pub enum Event {
         unarchived_by: String,
         timestamp: String,
     },
+
+    #[serde(rename = "project_created")]
+    ProjectCreated { slug: String },
+
+    /// Fired on assign, reassign, and clear (`project: None` = cleared).
+    #[serde(rename = "channel_project_changed")]
+    ChannelProjectChanged {
+        channel: String,
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +237,28 @@ pub enum Request {
         #[serde(default)]
         invitees: Vec<String>,
     },
+    #[serde(rename = "list_projects")]
+    ListProjects,
+
+    #[serde(rename = "create_project")]
+    CreateProject {
+        slug: String,
+        display_name: String,
+        introduction: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+
+    #[serde(rename = "set_channel_project")]
+    SetChannelProject {
+        channel: String,
+        /// None = unassign, Some("X") = assign/reassign
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+
     #[serde(rename = "search")]
     Search {
         #[serde(default)]

@@ -263,6 +263,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::labels::LabelsCommand,
     },
+
+    /// Project management — list or create
+    Projects {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
+    /// Assign a channel to a project (use --clear to unassign)
+    SetChannelProject {
+        /// Channel name
+        channel: String,
+        /// Project slug (omit --clear to remove)
+        #[arg(conflicts_with = "clear")]
+        project: Option<String>,
+        /// Remove the channel from any project
+        #[arg(long, conflicts_with = "project")]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -653,6 +671,23 @@ enum FlowCommands {
     },
     /// Cancel an in-progress run (terminal state)
     RunCancel { run_id: String },
+}
+
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// List all projects with channel counts
+    List,
+    /// Create a new project
+    Create {
+        /// Project slug (lowercase, a-z 0-9 -, ≤32 chars)
+        slug: String,
+        /// Display name
+        #[arg(short = 'n', long = "name")]
+        name: String,
+        /// Introduction (1-500 chars; daemon rejects empty)
+        #[arg(short = 'i', long = "intro")]
+        intro: String,
+    },
 }
 
 #[tokio::main]
@@ -1081,6 +1116,27 @@ async fn main() {
             }
         },
         Commands::Labels { cmd } => commands::labels::run(&client, cmd, mode).await,
+        Commands::Projects { action } => match action {
+            ProjectAction::List => {
+                commands::project::cmd_list_projects(&client, &mode).await;
+            }
+            ProjectAction::Create { slug, name, intro } => {
+                commands::project::cmd_create_project(&client, &mode, &slug, &name, &intro).await;
+            }
+        },
+        Commands::SetChannelProject {
+            channel,
+            project,
+            clear,
+        } => {
+            if project.is_none() && !clear {
+                eprintln!("Error: provide a project slug or --clear");
+                process::exit(2);
+            }
+            let project_arg = if clear { None } else { project.as_deref() };
+            commands::channels::cmd_set_channel_project(&client, &mode, &channel, project_arg)
+                .await;
+        }
     }
 }
 
@@ -1459,6 +1515,95 @@ mod tests {
     #[test]
     fn flow_create_requires_name() {
         let r = Cli::try_parse_from(["gitim", "flow", "create", "release"]);
+        assert!(r.is_err());
+    }
+
+    // -- projects subcommand parsing ----------------------------------------
+
+    #[test]
+    fn projects_list_parses() {
+        let r = Cli::try_parse_from(["gitim", "projects", "list"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    /// --intro is required at the clap layer: the daemon's
+    /// validate_project_meta rejects empty introduction (1-500 chars),
+    /// so an optional/defaulted intro would be a guaranteed round-trip
+    /// failure. Fail fast locally instead.
+    #[test]
+    fn projects_create_requires_intro() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "projects",
+            "create",
+            "infra",
+            "--name",
+            "Infrastructure",
+        ]);
+        let err = match r {
+            Ok(_) => panic!("expected clap to require --intro"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn projects_create_with_intro_parses() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "projects",
+            "create",
+            "design",
+            "--name",
+            "Design Sprint",
+            "--intro",
+            "All UX work",
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn projects_create_requires_name() {
+        // --name is required; omitting it should fail.
+        let r = Cli::try_parse_from(["gitim", "projects", "create", "infra"]);
+        assert!(r.is_err(), "projects create should require --name");
+    }
+
+    #[test]
+    fn projects_subcommand_requires_action() {
+        let r = Cli::try_parse_from(["gitim", "projects"]);
+        assert!(r.is_err());
+    }
+
+    // -- set-channel-project subcommand parsing -----------------------------
+
+    #[test]
+    fn set_channel_project_with_slug_parses() {
+        let r = Cli::try_parse_from(["gitim", "set-channel-project", "backend", "infra"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn set_channel_project_with_clear_parses() {
+        let r = Cli::try_parse_from(["gitim", "set-channel-project", "backend", "--clear"]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn set_channel_project_rejects_both_slug_and_clear() {
+        let r = Cli::try_parse_from([
+            "gitim",
+            "set-channel-project",
+            "backend",
+            "infra",
+            "--clear",
+        ]);
+        assert!(r.is_err(), "slug and --clear should conflict");
+    }
+
+    #[test]
+    fn set_channel_project_requires_channel() {
+        let r = Cli::try_parse_from(["gitim", "set-channel-project"]);
         assert!(r.is_err());
     }
 }
