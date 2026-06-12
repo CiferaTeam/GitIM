@@ -25,3 +25,27 @@
 **Context:** Phase 3 eng-review (2026-04-20) 产出。触发信号:项目受众扩大 / 公网人气起来 / maintainer 机器被定向攻击的证据 / 出现 sigstore 类本地友好的方案。选型推荐优先 `minisign` (单文件 key,tiny binary);GPG 为备选 (复杂度高,但用户生态更熟)。
 **Depends on:** 受众量 signal 或攻击证据;公钥首次分发方案确定。
 **Added:** 2026-04-20 via /plan-eng-review (cross-compile-release review)
+
+### uptime_secs 真实值
+**What:** `GET /runtime/status` 的 `uptime_secs` 字段当前硬编码为 0。需要在 `RuntimeState` 中记录 `started_at: SystemTime`，并在响应构造时计算 `(now - started_at).as_secs()`。
+**Why:** Agent 用 `cli status` 做健康检查时，uptime 为 0 让人误以为 runtime 刚刚重启，掩盖了真实的存活时间信息。
+**Context:** 硬编码位置：`crates/gitim-runtime/src/cli/cmd_status.rs:55`。注释已说明需要 `RuntimeState` 记 `started_at`。`RuntimeState::default()` 是注入点；HTTP handler 读取并减法即可。
+**Added:** 2026-06-12 via architecture audit
+
+### update-agent --clear-env flag
+**What:** `update-agent` 子命令当前无法清空 agent 的 `.env` 文件。需要加 `--clear-env` flag，body builder 发送 `dotenv: null`，runtime PATCH handler 删除 `<agent-clone>/.env`。
+**Why:** Agent 被重新配置时可能需要彻底移除旧的 secret，但 v1 只支持覆盖写，不支持清空。
+**Context:** 设计预留位置：`crates/gitim-runtime/src/cli/cmd_update_agent.rs:182`（注释提及 v2 `--clear-env`）。三态语义（absent / null / set）的 `deser_triple_option` 基础设施已存在，只需在 CLI 层增加 flag 并路由到 `Some(None)`。
+**Added:** 2026-06-12 via architecture audit
+
+### Agent "burned" 事件独立 UI 渲染
+**What:** `AgentStatusPanel` 当前对未知事件类型（包括 `"burned"`、`"usage"` 等）做字符串 fallback 渲染，导致显示标签缺失。需要为 `"burned"` 事件加专用渲染分支，显示如"Agent 已归档"之类的用户友好信息。
+**Why:** Burn 操作后 agent 状态面板无明确视觉反馈，用户不确定操作是否成功。
+**Context:** TODO 标记位置：`products/gitim/frontend/src/components/chat/agent-status-panel.tsx:111`（TODO E.3）。该 panel 已有 `"connected"` / `"disconnected"` 等分支，加 `"burned"` 分支是直接扩展。
+**Added:** 2026-06-12 via architecture audit
+
+### Cron run 深度链接
+**What:** Cron day panel 显示每次 cron run 的结果，但点击无法跳转到对应的 channel/thread。需要在 run 条目上加链接，路由到触发该 run 的频道消息。
+**Why:** 用户想排查某次 cron run 的输出时，需要手动去频道里翻找，体验差。
+**Context:** 注释位置：`products/gitim/frontend/src/components/crons/cron-day-panel.tsx:27`（"v2 nice-to-have"）。每个 cron run 已有关联的 `channel`，前端可以用 `useNavigate` 跳转到该频道并高亮对应消息。
+**Added:** 2026-06-12 via architecture audit
