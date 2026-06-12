@@ -430,11 +430,10 @@ impl RuntimeState {
 
 impl Default for RuntimeState {
     fn default() -> Self {
-        // E2E test seam: env vars let a compiled binary point at a stub
-        // github API + a local `file://` bare repo instead of github.com.
-        // Unset in production; Rust integration tests still override directly
-        // via `state.lock()`.
-        let base_url = std::env::var("GITIM_TEST_GITHUB_API_BASE")
+        // Override seam: GITIM_GITHUB_API_BASE lets a compiled binary point at
+        // a stub (shared with gitim-daemon). Unset in production; Rust
+        // integration tests override directly via `state.lock()`.
+        let base_url = std::env::var("GITIM_GITHUB_API_BASE")
             .unwrap_or_else(|_| "https://api.github.com".to_string());
         let clone_url_override = std::env::var("GITIM_TEST_CLONE_URL_OVERRIDE").ok();
         // Best-effort canonical exe for test constructors. Production boots
