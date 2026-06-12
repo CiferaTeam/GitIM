@@ -6,74 +6,25 @@
 //! (channel owner + parent chain + explicit mentions). DM messages get
 //! `recipients = sorted member pair`. Event entries never carry recipients.
 
-use std::path::Path;
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
-use gitim_daemon::api::{Event, Request};
+use std::sync::Arc;
+
+use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-fn run_git(root: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 /// Build a temp git repo with alice/bob/charlie registered, alice as the
 /// daemon's identity. Returns `(tmp, state, initial_cursor)` where
 /// `initial_cursor` is the commit id at setup time — pass it as `since`
 /// for the test's poll call.
-async fn setup_repo() -> (TempDir, Arc<AppState>, String) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::create_dir_all(root.join("channels")).unwrap();
-    std::fs::create_dir_all(root.join("dm")).unwrap();
-    for h in ["alice", "bob", "charlie"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
-    }
+async fn setup_repo() -> (tempfile::TempDir, Arc<AppState>, String) {
+    let (tmp, state) = common::setup_repo_with_users(&["alice", "bob", "charlie"]).await;
 
-    run_git(&root, &["init"]);
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel::<Event>(100);
-    let state = Arc::new(AppState::new(
-        root.clone(),
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "charlie".to_string(),
-        ];
-    }
+    // Ensure dm/ and channels/ dirs exist for tests that write files there.
+    // (empty dirs aren't tracked by git; no commit needed)
+    std::fs::create_dir_all(state.repo_root.join("dm")).unwrap();
+    std::fs::create_dir_all(state.repo_root.join("channels")).unwrap();
 
     // Get the cursor as of the initial commit so test polls only see
     // diffs we add below.
@@ -112,8 +63,8 @@ async fn poll_attaches_recipients_to_channel_message_entries() {
     )
     .unwrap();
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add channel"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add channel"]);
 
     let poll_resp = handle_request(
         Request::Poll {
@@ -179,8 +130,8 @@ async fn read_attaches_recipients_to_channel_message_entries() {
     )
     .unwrap();
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add channel"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add channel"]);
 
     let read_resp = handle_request(
         Request::Read {
@@ -229,8 +180,8 @@ async fn poll_attaches_recipients_to_dm_message_entries() {
     )
     .unwrap();
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add dm"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add dm"]);
 
     let poll_resp = handle_request(
         Request::Poll {
@@ -275,8 +226,8 @@ async fn poll_admin_sees_other_dm_message_entries() {
     )
     .unwrap();
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add other dm"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add other dm"]);
 
     let non_admin_resp = handle_request(
         Request::Poll {
@@ -348,8 +299,8 @@ async fn poll_does_not_attach_recipients_to_event_entries() {
     )
     .unwrap();
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add channel with event"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "add channel with event"]);
 
     let poll_resp = handle_request(
         Request::Poll {

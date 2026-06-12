@@ -6,61 +6,20 @@
 //! temp git repo + AppState in-process, exercise via `handle_request`.
 //! No daemon process spawned.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::Config;
+use std::sync::Arc;
+
+use tempfile::TempDir;
+
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 /// Build a temp git repo with alice + bob + carol registered. Caller
 /// adds channels / DMs as needed for the specific test.
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    for h in ["alice", "bob", "carol"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
-    }
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
-    }
-
-    (tmp, state)
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_with_users(&["alice", "bob", "carol"]).await
 }
 
 async fn create_channel(
@@ -957,54 +916,21 @@ async fn test_poll_returns_self_departed_when_handler_archived() {
 //         not, it catches origin up before reporting success. ─────────────
 #[tokio::test]
 async fn test_depart_terminal_state_pushes_pending_commits_to_origin() {
-    use std::path::Path;
     use std::process::Command;
-    fn run_git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("git failed");
-        assert!(
-            output.status.success(),
-            "git {:?} failed in {}: {}",
-            args,
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     // 1) Bare origin + working clone with alice + bob registered.
     let bare = TempDir::new().unwrap();
     let clone_dir = TempDir::new().unwrap();
-    run_git(bare.path(), &["init", "--bare"]);
-    run_git(
-        clone_dir.path().parent().unwrap(),
-        &[
-            "clone",
-            bare.path().to_str().unwrap(),
-            clone_dir.path().to_str().unwrap(),
-        ],
-    );
-    run_git(clone_dir.path(), &["config", "user.email", "test@test.com"]);
-    run_git(clone_dir.path(), &["config", "user.name", "test"]);
+    common::init_bare_and_clone(bare.path(), clone_dir.path());
 
     let root = clone_dir.path().to_path_buf();
     std::fs::create_dir_all(root.join("users")).unwrap();
     for h in ["alice", "bob"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
+        common::write_user(&root, h, h, "dev", "hi");
     }
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "init"]);
-    run_git(&root, &["push", "-u", "origin", "HEAD"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "init"]);
+    common::run_git(&root, &["push", "-u", "origin", "HEAD"]);
 
     // Capture the SHA of the pre-depart tip so we can rewind origin to it
     // later — simulating "Phase 4's commit never reached origin".
@@ -1017,17 +943,7 @@ async fn test_depart_terminal_state_pushes_pending_commits_to_origin() {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
 
-    let (event_tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root.clone(),
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
+    let state = common::make_state(root.clone(), Some("alice"), &["alice", "bob"]).await;
 
     // 2) Normal depart — all phases land locally and on origin.
     let resp = depart_user(state.clone(), "alice").await;
@@ -1072,7 +988,7 @@ async fn test_depart_terminal_state_pushes_pending_commits_to_origin() {
     //    `update-ref` on the bare repo's branch is the cleanest way to
     //    achieve this without running an interactive rewind on the live
     //    clone.
-    run_git(
+    common::run_git(
         bare.path(),
         &[
             "update-ref",

@@ -5,62 +5,22 @@
 //! repo + AppState in-process, exercise via `handle_request`. No daemon
 //! process spawned.
 
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
+mod common;
 
-use gitim_core::types::{Config, CronSpec};
+use std::sync::Arc;
+
+use gitim_core::types::CronSpec;
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 /// Build a temp git repo with alice + bob registered. `current_user =
 /// alice` so dispatch resolves "no author" to alice. Same shape as the
 /// other archive_*_test fixtures.
-async fn setup_test_repo() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    for h in ["alice", "bob"] {
-        std::fs::write(
-            root.join(format!("users/{}.meta.yaml", h)),
-            format!("display_name: {}\nrole: dev\nintroduction: hi\n", h),
-        )
-        .unwrap();
-    }
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
-
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
-    (tmp, state)
+///
+/// Note: uses `display_name = handler` (lowercase) via `setup_repo_with_users`.
+async fn setup_test_repo() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_with_users(&["alice", "bob"]).await
 }
 
 async fn create_cron(

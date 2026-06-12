@@ -9,18 +9,14 @@
 //!      `project` is skipped on serialization when `None`, and old callers that
 //!      read the raw response JSON see no unexpected `project` key.
 
+mod common;
+
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::broadcast;
 
-use gitim_core::types::Config;
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
 
 /// Build a repo that already contains a channel whose meta.yaml was written by
 /// an older daemon that did NOT know about the `project` field.
@@ -32,11 +28,7 @@ async fn setup_repo_with_legacy_channel() -> (TempDir, Arc<AppState>) {
     std::fs::create_dir_all(root.join("channels")).unwrap();
 
     // Register alice using the old-style user meta (no newer fields).
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_alice(&root);
 
     // Write a channel meta WITHOUT the `project` field — simulating an old repo.
     std::fs::write(
@@ -47,32 +39,11 @@ async fn setup_repo_with_legacy_channel() -> (TempDir, Arc<AppState>) {
     // A minimal thread file is required for the channel to be valid.
     std::fs::write(root.join("channels/general.thread"), "").unwrap();
 
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "init"]);
 
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string()];
-    }
+    let state = common::make_state(root, Some("alice"), &["alice"]).await;
 
     (tmp, state)
 }
@@ -230,11 +201,7 @@ async fn list_channels_wire_project_field_present_iff_assigned() {
     std::fs::create_dir_all(root.join("projects")).unwrap();
 
     // Register alice.
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_alice(&root);
 
     // Channel assigned to a project.
     std::fs::write(
@@ -252,32 +219,11 @@ async fn list_channels_wire_project_field_present_iff_assigned() {
     .unwrap();
     std::fs::write(root.join("channels/random.thread"), "").unwrap();
 
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "init"]);
 
-    let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string()];
-    }
+    let state = common::make_state(root, Some("alice"), &["alice"]).await;
 
     let req: Request = serde_json::from_value(serde_json::json!({ "method": "channels" })).unwrap();
     let resp = handle_request(req, state).await;

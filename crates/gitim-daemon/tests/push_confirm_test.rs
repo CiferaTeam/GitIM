@@ -1,39 +1,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::broadcast;
 
 use gitim_core::formatter::format_message;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{Config, Handler};
-use gitim_daemon::api::{Event, Request};
+use gitim_core::types::Handler;
+use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn run_git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .expect("git command failed");
-    assert!(
-        output.status.success(),
-        "git {:?} failed in {}: {}",
-        args,
-        dir.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 fn run_git_capture(dir: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
@@ -51,52 +33,10 @@ fn run_git_capture(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 /// Set up a local-only git repo (no remote) with GitIM structure.
 /// Returns (TempDir, AppState).
 async fn setup_no_remote() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    run_git(&root, &["init"]);
-    run_git(&root, &["commit", "--allow-empty", "-m", "init"]);
-
-    std::fs::create_dir_all(root.join("channels")).unwrap();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::create_dir_all(root.join(".gitim")).unwrap();
-    std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    // Create "general" channel meta (required by handle_send)
-    std::fs::write(
-        root.join("channels/general.meta.yaml"),
-        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
-    )
-    .unwrap();
-
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "add initial structure"]);
-
-    let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-
-    {
-        let mut users = state.users.write().await;
-        users.push("alice".to_string());
-    }
-
-    (tmp, state)
+    common::setup_repo_with_channel("general").await
 }
 
 /// Set up a bare repo + clone with GitIM structure, suitable for push tests.
@@ -105,58 +45,21 @@ async fn setup_with_remote() -> (TempDir, TempDir, Arc<AppState>) {
     let bare_dir = TempDir::new().unwrap();
     let clone_dir = TempDir::new().unwrap();
 
-    // Init bare repo
-    run_git(bare_dir.path(), &["init", "--bare"]);
-
-    // Clone
-    run_git(
-        clone_dir.path().parent().unwrap(),
-        &[
-            "clone",
-            bare_dir.path().to_str().unwrap(),
-            clone_dir.path().to_str().unwrap(),
-        ],
-    );
-    run_git(clone_dir.path(), &["config", "user.email", "test@test.com"]);
-    run_git(clone_dir.path(), &["config", "user.name", "test"]);
+    common::init_bare_and_clone(bare_dir.path(), clone_dir.path());
 
     let root = clone_dir.path().to_path_buf();
-
-    // Create GitIM structure
     std::fs::create_dir_all(root.join("channels")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    // Create "general" channel meta (required by handle_send)
-    std::fs::write(
-        root.join("channels/general.meta.yaml"),
-        "display_name: general\ncreated_by: alice\ncreated_at: \"20260323T000000Z\"\nintroduction: general channel\nmembers: []\n",
-    )
-    .unwrap();
-    // Create an empty thread file so the channel exists
-    std::fs::write(root.join("channels/general.thread"), "").unwrap();
+    common::write_alice(&root);
+    common::write_channel_meta(&root, "general", "alice", &[]);
 
-    run_git(&root, &["add", "."]);
-    run_git(&root, &["commit", "-m", "initial structure"]);
-    run_git(&root, &["push", "-u", "origin", "HEAD"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "initial structure"]);
+    common::run_git(&root, &["push", "-u", "origin", "HEAD"]);
 
-    let (event_tx, _) = broadcast::channel::<Event>(256);
-    let state = Arc::new(AppState::new(
-        root,
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-
-    {
-        let mut users = state.users.write().await;
-        users.push("alice".to_string());
-    }
+    let state = common::make_state(root, Some("alice"), &["alice"]).await;
 
     (bare_dir, clone_dir, state)
 }
@@ -173,7 +76,7 @@ fn send_request(channel: &str, body: &str) -> Request {
 /// Clone the bare repo into a fresh tempdir and return (TempDir, path).
 fn clone_bare(bare_path: &Path) -> TempDir {
     let verify = TempDir::new().unwrap();
-    run_git(
+    common::run_git(
         verify.path().parent().unwrap(),
         &[
             "clone",
@@ -324,8 +227,8 @@ async fn push_conflict_still_succeeds() {
 
     // Create a second clone that will push a conflicting commit
     let rival = clone_bare(_bare_dir.path());
-    run_git(rival.path(), &["config", "user.email", "rival@test.com"]);
-    run_git(rival.path(), &["config", "user.name", "rival"]);
+    common::run_git(rival.path(), &["config", "user.email", "rival@test.com"]);
+    common::run_git(rival.path(), &["config", "user.name", "rival"]);
 
     // Rival writes a message directly to the thread and pushes
     let bob = Handler::new("bob").unwrap();
@@ -333,14 +236,10 @@ async fn push_conflict_still_succeeds() {
     std::fs::write(rival.path().join("channels/general.thread"), &rival_msg).unwrap();
     // Also create bob's user file so the thread content is valid
     std::fs::create_dir_all(rival.path().join("users")).ok();
-    std::fs::write(
-        rival.path().join("users/bob.meta.yaml"),
-        "display_name: Bob\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    run_git(rival.path(), &["add", "."]);
-    run_git(rival.path(), &["commit", "-m", "rival: bob msg"]);
-    run_git(rival.path(), &["push"]);
+    common::write_user(rival.path(), "bob", "Bob", "dev", "hi");
+    common::run_git(rival.path(), &["add", "."]);
+    common::run_git(rival.path(), &["commit", "-m", "rival: bob msg"]);
+    common::run_git(rival.path(), &["push"]);
 
     // Now spawn sync loop and send from the daemon
     AppState::spawn_sync_loop(state.clone());

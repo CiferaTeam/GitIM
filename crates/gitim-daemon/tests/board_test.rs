@@ -1,15 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 
-use gitim_core::types::Config;
-use gitim_daemon::api::{Event, Request};
+use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
-use tempfile::TempDir;
-use tokio::sync::broadcast;
 
+/// Run git and capture stdout. Used by tests that need to inspect git output.
 fn git(root: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
@@ -29,46 +29,8 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-async fn setup() -> (TempDir, Arc<AppState>) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    git(root, &["init"]);
-    git(root, &["config", "user.name", "test"]);
-    git(root, &["config", "user.email", "test@example.com"]);
-
-    std::fs::create_dir_all(root.join(".gitim")).unwrap();
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("users/bob.meta.yaml"),
-        "display_name: Bob\nrole: dev\nintroduction: hello\n",
-    )
-    .unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "init"]);
-
-    let (event_tx, _) = broadcast::channel::<Event>(64);
-    let state = Arc::new(AppState::new(
-        root.to_path_buf(),
-        make_config(),
-        event_tx,
-        Some("alice".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["alice".to_string(), "bob".to_string()];
-    }
-
-    (tmp, state)
+async fn setup() -> (tempfile::TempDir, Arc<AppState>) {
+    common::setup_repo_alice_bob().await
 }
 
 #[tokio::test]

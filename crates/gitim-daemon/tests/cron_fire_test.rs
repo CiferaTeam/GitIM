@@ -5,6 +5,8 @@
 //! `cron_lifecycle_test.rs`: temp git repo + AppState, no spawned
 //! daemon. Tests assert filesystem + git state directly.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -12,14 +14,11 @@ use chrono::{DateTime, TimeZone, Utc};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use gitim_core::types::{Config, CronSpec, Handler};
+use gitim_core::types::{CronSpec, Handler};
+use gitim_daemon::api::Event;
 use gitim_daemon::cron_engine::{fire, FireRequest};
 use gitim_daemon::cron_paths::format_thread_filename_ts;
 use gitim_daemon::state::AppState;
-
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
 
 /// Build a temp git repo with `current_user = alice`, an existing
 /// `crons/<spec_name>/spec.yaml`, and `users/alice.meta.yaml` so author
@@ -33,12 +32,7 @@ async fn setup_with_spec(
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
 
-    std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_alice(&root);
 
     let spec = CronSpec {
         version: 1,
@@ -55,25 +49,14 @@ async fn setup_with_spec(
     std::fs::create_dir_all(&spec_dir).unwrap();
     std::fs::write(spec_dir.join("spec.yaml"), spec.to_yaml().unwrap()).unwrap();
 
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "init"]);
 
-    let (tx, _) = broadcast::channel(100);
+    let (tx, _) = broadcast::channel::<Event>(100);
     let state = Arc::new(AppState::new_with_email(
         root,
-        make_config(),
+        common::make_config(),
         tx,
         Some("alice".to_string()),
         github_email,
