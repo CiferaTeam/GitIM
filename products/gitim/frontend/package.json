@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run src",
     "test:e2e": "playwright test e2e/sidebar-layout.spec.ts e2e/mobile-layout.spec.ts",
+    "build:wasm": "cd ../../../crates/gitim-wasm && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build --target web",
     "preview": "vite preview",
     "deploy": "tsc -b && vite build && wrangler pages deploy dist --project-name gitim --commit-dirty=true"
   },
