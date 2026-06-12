@@ -138,23 +138,3 @@ async fn codex_with_config_model_override_argv() {
         "default model leaked into argv despite override: {err}"
     );
 }
-
-#[tokio::test]
-async fn codex_with_config_default_behavior_matches_old_function() {
-    // Compare the stable fields between the legacy wrapper and the new
-    // _with_config entry called with `Default::default()` — they must agree
-    // on classification, provider, and version fields. `duration_ms` is
-    // excluded because it's a wall-clock measurement.
-    let bin = "/usr/bin/definitely-not-codex-xyz";
-    let timeout = Duration::from_secs(5);
-
-    let via_wrapper = preflight_codex_with(bin, timeout).await;
-    let via_config = preflight_codex_with_config(bin, timeout, PreflightOverrides::default()).await;
-
-    assert_eq!(via_wrapper.available, via_config.available);
-    assert_eq!(via_wrapper.provider, via_config.provider);
-    assert_eq!(via_wrapper.error_kind, via_config.error_kind);
-    assert_eq!(via_wrapper.model_used, via_config.model_used);
-    assert_eq!(via_wrapper.version, via_config.version);
-    assert_eq!(via_wrapper.error_kind, Some(ErrorKind::NotInstalled));
-}

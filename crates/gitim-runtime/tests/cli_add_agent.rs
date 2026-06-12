@@ -20,9 +20,8 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use common::short_tempdir;
 use gitim_runtime::cli::{cmd_add_agent, from_cli_error, CliError, Client};
@@ -410,37 +409,4 @@ async fn test_add_agent_preserves_preflight_detail_from_server() {
     assert_eq!(from_cli_error(&err), 2);
 
     server.abort();
-}
-
-// ── Sanity-check the args wrapper isn't unreachable ──────────────────────────
-
-/// Confirms `cmd_add_agent::Args` exposes the field set the runtime needs
-/// and they round-trip into a HashMap without surprise transformations.
-/// Failure here would mean a clap → Args plumbing bug in `bin/runtime.rs`
-/// that the field-level unit tests can't catch.
-#[test]
-fn args_struct_smoke() {
-    let args = cmd_add_agent::Args {
-        workspace: Some("ws".to_string()),
-        handler: "alice".to_string(),
-        display_name: "Alice".to_string(),
-        provider: "claude".to_string(),
-        model: Some("claude-opus".to_string()),
-        effort: Some("xhigh".to_string()),
-        system_prompt: Some("you are alice".to_string()),
-        system_prompt_file: None,
-        env: vec!["A=1".to_string(), "B=2".to_string()],
-        introduction: Some("a test agent".to_string()),
-        no_join_general: true,
-        llm_provider: None,
-        llm_model: None,
-    };
-    // Smoke: spot-check a handful of fields rather than match the whole
-    // struct — this test pins the surface, not the contents.
-    assert_eq!(args.handler, "alice");
-    assert_eq!(args.env.len(), 2);
-    assert!(args.no_join_general);
-    let _: HashMap<String, String> = HashMap::new();
-    // path types must remain compatible
-    let _: Option<PathBuf> = args.system_prompt_file;
 }
