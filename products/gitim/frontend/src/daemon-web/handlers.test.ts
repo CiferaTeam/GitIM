@@ -41,8 +41,13 @@ function unregisterPath(path: string): void {
   dirs.set(parent, entries.filter((entry) => entry !== basename(path)));
 }
 
-vi.mock("gitim-wasm", () => ({
-  default: vi.fn(async () => undefined),
+// Use the REAL wasm module for the converged .thread paths (parseThread,
+// formatMessage/Event, validateHandler, parseChannelMeta/UserMeta) so these
+// tests exercise the authoritative Rust logic — not a mock re-implementation.
+// Only the board/card helpers stay mocked (simplified, pre-existing). The
+// real wasm singleton is initialized by the global test-setup-wasm.ts.
+vi.mock("gitim-wasm", async (importActual) => ({
+  ...(await importActual<typeof import("gitim-wasm")>()),
   appendBoardSection: vi.fn((doc: Record<string, unknown>, section: string, value: string) => ({
     ...doc,
     body: `${doc.body as string}\n## ${section}\n\n${value}\n`,
@@ -804,7 +809,15 @@ describe("daemon-web handlers", () => {
     for (const name of ["alpha", "beta", "gamma"]) {
       files.set(
         `/repo/archive/channels/${name}.meta.yaml`,
-        ["display_name: Test", "members:", "  - lewis", ""].join("\n"),
+        [
+          "display_name: Test",
+          "created_by: lewis",
+          "created_at: 20260101T000000Z",
+          "introduction: test channel",
+          "members:",
+          "  - lewis",
+          "",
+        ].join("\n"),
       );
       registerFile(`/repo/archive/channels/${name}.meta.yaml`);
     }
@@ -1786,6 +1799,9 @@ describe("daemon-web listArchivedChannels pagination", () => {
         `/repo/archive/channels/${name}.meta.yaml`,
         [
           `display_name: ${name}`,
+          "created_by: lewis",
+          "created_at: 20260101T000000Z",
+          `introduction: ${name} channel`,
           "members:",
           "  - lewis",
           "",

@@ -42,6 +42,9 @@ export default defineConfig({
   test: {
     // e2e/ is Playwright's tree — its test() throws when vitest collects it.
     exclude: [...configDefaults.exclude, 'e2e/**'],
+    // Initialize real gitim-wasm (from disk bytes) before any test — the
+    // daemon-web parse/format/conflict/meta paths run the actual Rust logic.
+    setupFiles: ['./src/daemon-web/test-setup-wasm.ts'],
   },
   server: {
     fs: {
