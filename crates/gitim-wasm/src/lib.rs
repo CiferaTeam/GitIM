@@ -125,6 +125,12 @@ pub fn validate_leave(
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+#[wasm_bindgen(js_name = "validateHandler")]
+pub fn validate_handler(handler: &str) -> Result<String, JsError> {
+    let h = gitim_core::types::Handler::new(handler).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(h.as_str().to_string())
+}
+
 #[wasm_bindgen(js_name = "validateUserMeta")]
 pub fn validate_user_meta(yaml: &str) -> Result<JsValue, JsError> {
     let meta = gitim_core::validator::validate_user_meta(yaml)

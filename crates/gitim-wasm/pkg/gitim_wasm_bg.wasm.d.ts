@@ -8,6 +8,7 @@ export const formatEvent: (a: bigint, b: number, c: number, d: number, e: number
 export const validateAppend: (a: number, b: number, c: number, d: number, e: any, f: any) => [number, number];
 export const validateJoin: (a: number, b: number, c: any, d: any, e: any) => [number, number];
 export const validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
+export const validateHandler: (a: number, b: number) => [number, number, number, number];
 export const validateUserMeta: (a: number, b: number) => [number, number, number];
 export const validateChannelMeta: (a: number, b: number) => [number, number, number];
 export const parseCardMeta: (a: number, b: number) => [number, number, number];

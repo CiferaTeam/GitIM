@@ -49,6 +49,8 @@ export function validateCardMeta(meta: any): void;
 
 export function validateChannelMeta(yaml: string): any;
 
+export function validateHandler(handler: string): string;
+
 export function validateJoin(author: string, targets: any, users: any, members: any): void;
 
 export function validateLeave(author: string, targets: any, users: any, members: any): void;
@@ -66,6 +68,7 @@ export interface InitOutput {
     readonly validateAppend: (a: number, b: number, c: number, d: number, e: any, f: any) => [number, number];
     readonly validateJoin: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
+    readonly validateHandler: (a: number, b: number) => [number, number, number, number];
     readonly validateUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseCardMeta: (a: number, b: number) => [number, number, number];

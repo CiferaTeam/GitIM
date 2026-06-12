@@ -25,6 +25,15 @@ tracing.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fs2 = "0.4"
 
+# `preconditions::random_bytes` (used by flow run-id generation) is NOT
+# wasm-gated, so `getrandom` must link on wasm32. getrandom 0.2 has no OS
+# entropy backend for `wasm32-unknown-unknown` unless the `js` feature is on
+# (routes to `crypto.getRandomValues`). Cargo unions features across targets,
+# so native keeps `std` (above) and wasm additionally gets `js`. Without this
+# `wasm-pack build` fails to compile getrandom.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 pretty_assertions = "1"
 
