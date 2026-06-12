@@ -207,6 +207,11 @@ pub enum FlowWarning {
     OversizedFile { actual: usize, limit: usize },
     /// 节点数超过 50
     TooManyNodes { count: usize, limit: usize },
+    /// Phase 2 留位节点类型 — v1 不执行，节点将保持 pending，coordinator 不会被触发
+    Phase2NodeType {
+        node_id: String,
+        node_type: NodeType,
+    },
 }
 
 #[cfg(test)]

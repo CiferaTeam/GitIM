@@ -128,6 +128,14 @@ pub fn validate_flow_for_storage(doc: &FlowDocument, file_size: usize) -> Vec<Fl
             limit: MAX_NODE_COUNT,
         });
     }
+    for n in &doc.meta.nodes {
+        if matches!(n.node_type, NodeType::HumanReview | NodeType::WaitForSignal) {
+            w.push(FlowWarning::Phase2NodeType {
+                node_id: n.id.clone(),
+                node_type: n.node_type.clone(),
+            });
+        }
+    }
     w
 }
 
@@ -377,5 +385,56 @@ mod tests {
         n.required_labels = vec!["rust".into(), "backend".into()];
         let d = doc_with_nodes(vec![n]);
         assert!(validate_flow_document(&d, "test").is_ok());
+    }
+
+    #[test]
+    fn test_human_review_node_produces_phase2_warning() {
+        let mut n = node("approval", &[]);
+        n.node_type = NodeType::HumanReview;
+        n.owner = None;
+        let d = doc_with_nodes(vec![n]);
+        // validate_flow_document accepts it (no error)
+        assert!(validate_flow_document(&d, "test").is_ok());
+        // validate_flow_for_storage emits a Phase2NodeType warning
+        let warnings = validate_flow_for_storage(&d, 100);
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                FlowWarning::Phase2NodeType { node_id, node_type }
+                if node_id == "approval" && *node_type == NodeType::HumanReview
+            )),
+            "expected Phase2NodeType warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_signal_node_produces_phase2_warning() {
+        let mut n = node("gate", &[]);
+        n.node_type = NodeType::WaitForSignal;
+        n.owner = None;
+        n.signal = Some("deploy-approved".into());
+        let d = doc_with_nodes(vec![n]);
+        assert!(validate_flow_document(&d, "test").is_ok());
+        let warnings = validate_flow_for_storage(&d, 100);
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                FlowWarning::Phase2NodeType { node_id, node_type }
+                if node_id == "gate" && *node_type == NodeType::WaitForSignal
+            )),
+            "expected Phase2NodeType warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_v1_node_types_produce_no_phase2_warning() {
+        let d = doc_with_nodes(vec![node("a", &[])]);
+        let warnings = validate_flow_for_storage(&d, 100);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| matches!(w, FlowWarning::Phase2NodeType { .. })),
+            "unexpected Phase2NodeType warning for v1 node: {warnings:?}"
+        );
     }
 }
