@@ -2,15 +2,15 @@
 //! Flow run handler integration tests. Tempdir repo + in-process daemon state.
 //! Follows the same setup pattern as flow_handlers.rs.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 
-use gitim_core::types::Config;
-use gitim_daemon::api::Event;
 use gitim_daemon::state::AppState;
 use tempfile::TempDir;
-use tokio::sync::broadcast;
 
+/// Returns captured stdout — kept local because common::run_git asserts-and-discards.
 fn git(root: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
@@ -30,26 +30,15 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
 async fn setup() -> (TempDir, Arc<AppState>) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    git(root, &["init"]);
-    git(root, &["config", "user.name", "test"]);
-    git(root, &["config", "user.email", "test@example.com"]);
 
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
     std::fs::create_dir_all(root.join("channels")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/lewis.meta.yaml"),
-        "display_name: Lewis\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_user(root, "lewis", "Lewis", "dev", "hi");
     // channel used by run tests
     std::fs::write(
         root.join("channels/release-discuss.meta.yaml"),
@@ -57,20 +46,11 @@ async fn setup() -> (TempDir, Arc<AppState>) {
     )
     .unwrap();
     std::fs::write(root.join("channels/release-discuss.thread"), "").unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "init"]);
+    common::run_git(root, &["init"]);
+    common::run_git(root, &["add", "."]);
+    common::run_git(root, &["commit", "-m", "init"]);
 
-    let (event_tx, _) = broadcast::channel::<Event>(64);
-    let state = Arc::new(AppState::new(
-        root.to_path_buf(),
-        make_config(),
-        event_tx,
-        Some("lewis".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["lewis".to_string()];
-    }
+    let state = common::make_state(root.to_path_buf(), Some("lewis"), &["lewis"]).await;
 
     // create a flow template with 2 nodes (changelog -> e2e)
     let r = gitim_daemon::flow_handlers::handle_flow_create(
@@ -304,39 +284,23 @@ async fn run_cancel_then_node_set_rejected() {
 async fn setup_zero_node() -> (TempDir, Arc<AppState>) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    git(root, &["init"]);
-    git(root, &["config", "user.name", "test"]);
-    git(root, &["config", "user.email", "test@example.com"]);
 
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
     std::fs::create_dir_all(root.join("channels")).unwrap();
     std::fs::write(root.join(".gitim/config.yaml"), "version: 1").unwrap();
-    std::fs::write(
-        root.join("users/lewis.meta.yaml"),
-        "display_name: Lewis\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_user(root, "lewis", "Lewis", "dev", "hi");
     std::fs::write(
         root.join("channels/release-discuss.meta.yaml"),
         "name: release-discuss\ndisplay_name: Release\nintroduction: x\nmembers: [lewis]\ncreated_at: 2026-05-17T10:00:00Z\n",
     )
     .unwrap();
     std::fs::write(root.join("channels/release-discuss.thread"), "").unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-m", "init"]);
+    common::run_git(root, &["init"]);
+    common::run_git(root, &["add", "."]);
+    common::run_git(root, &["commit", "-m", "init"]);
 
-    let (event_tx, _) = broadcast::channel::<Event>(64);
-    let state = Arc::new(AppState::new(
-        root.to_path_buf(),
-        make_config(),
-        event_tx,
-        Some("lewis".to_string()),
-    ));
-    {
-        let mut users = state.users.write().await;
-        *users = vec!["lewis".to_string()];
-    }
+    let state = common::make_state(root.to_path_buf(), Some("lewis"), &["lewis"]).await;
 
     // Create a flow with no nodes (empty nodes list — the default stub state).
     let flow_dir = root.join("flows").join("empty");

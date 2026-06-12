@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -17,45 +19,20 @@ fn make_config_indexer_enabled() -> Config {
     serde_yaml::from_str("version: 1\nindexer:\n  enabled: true\n").unwrap()
 }
 
-/// Initialise a git repo at `root`, staging all existing files before the
-/// initial commit so the tree object exists in production-shaped form.
-fn init_git_repo(root: &std::path::Path) {
-    let run = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("git command failed");
-        assert!(
-            out.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    run(&["init"]);
-    run(&["add", "users/alice.meta.yaml"]);
-    run(&["commit", "-m", "init"]);
-}
-
+/// Setup with a custom config (different indexer settings).
+/// Writes alice.meta.yaml, inits git, builds AppState with the given config.
 async fn setup_repo(config: Config) -> (TempDir, Arc<AppState>) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
 
     std::fs::create_dir_all(root.join(".gitim")).unwrap();
     std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(
-        root.join("users/alice.meta.yaml"),
-        "display_name: Alice\nrole: dev\nintroduction: hi\n",
-    )
-    .unwrap();
+    common::write_alice(&root);
 
-    // init repo after files are in place so the initial commit has a real tree
-    init_git_repo(&root);
+    // init after files so the initial commit has a real tree
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["add", "users/alice.meta.yaml"]);
+    common::run_git(&root, &["commit", "-m", "init"]);
 
     let (event_tx, _) = broadcast::channel::<Event>(256);
     let state = Arc::new(AppState::new(
@@ -64,7 +41,6 @@ async fn setup_repo(config: Config) -> (TempDir, Arc<AppState>) {
         event_tx,
         Some("alice".to_string()),
     ));
-
     {
         let mut users = state.users.write().await;
         users.push("alice".to_string());

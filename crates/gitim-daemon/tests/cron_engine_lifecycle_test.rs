@@ -17,6 +17,8 @@
 //! The CAS / startup / shutdown invariants don't need a 60s wait and
 //! stay in the default-run set.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -24,43 +26,22 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use gitim_core::types::{Config, CronSpec, Handler};
+use gitim_core::types::{CronSpec, Handler};
 use gitim_daemon::api::Request;
 use gitim_daemon::cron_engine::{fire, FireRequest};
 use gitim_daemon::cron_paths::format_thread_filename_ts;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
 
-fn make_config() -> Config {
-    serde_yaml::from_str("version: 1").unwrap()
-}
-
-/// Build a temp git repo with one user (alice) and a default `current_user`.
+/// Build a temp git repo with one user and return (TempDir, root_path).
 fn setup_repo(handler: &str) -> (TempDir, std::path::PathBuf) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
-
     std::fs::create_dir_all(root.join("users")).unwrap();
-    std::fs::write(
-        root.join(format!("users/{handler}.meta.yaml")),
-        format!("display_name: {handler}\nrole: dev\nintroduction: hi\n"),
-    )
-    .unwrap();
-
-    let run_git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
-    };
-    run_git(&["init"]);
-    run_git(&["add", "."]);
-    run_git(&["commit", "-m", "init"]);
+    common::write_user(&root, handler, handler, "dev", "hi");
+    common::run_git(&root, &["init"]);
+    common::run_git(&root, &["add", "."]);
+    common::run_git(&root, &["commit", "-m", "init"]);
     (tmp, root)
 }
 
@@ -68,7 +49,7 @@ fn make_state(root: std::path::PathBuf, handler: &str) -> Arc<AppState> {
     let (tx, _) = broadcast::channel(100);
     Arc::new(AppState::new(
         root,
-        make_config(),
+        common::make_config(),
         tx,
         Some(handler.to_string()),
     ))
@@ -127,7 +108,7 @@ async fn engine_spawn_is_cas_gated() {
 async fn engine_exits_cleanly_without_identity() {
     let (_tmp, root) = setup_repo("alice");
     let (tx, _) = broadcast::channel(100);
-    let state = Arc::new(AppState::new(root, make_config(), tx, None));
+    let state = Arc::new(AppState::new(root, common::make_config(), tx, None));
 
     AppState::spawn_cron_engine(state.clone());
     // Task started; if it didn't crash, our setup contract holds.
