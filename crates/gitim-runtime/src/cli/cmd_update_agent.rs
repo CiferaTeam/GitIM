@@ -30,12 +30,7 @@ use serde_json::json;
 
 use crate::cli::http::{CliError, Client, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
-
-/// Soft cap for `--system-prompt-file` and `--dotenv-file` reads. The
-/// runtime enforces 64 KB on `dotenv`; we mirror the same cap on prompt
-/// files because anything beyond that smells like a wrong-path mistake
-/// (transcript, log dump) more than a real prompt.
-const FILE_MAX_BYTES: u64 = 64 * 1024;
+use crate::http::AGENT_FILE_MAX_BYTES;
 
 /// Bundled args from the clap subcommand. Mirrors `Command::UpdateAgent` in
 /// `bin/runtime.rs` field-for-field — the destructuring site there feeds
@@ -168,7 +163,7 @@ fn read_capped_file(
     };
     let metadata = std::fs::metadata(path)
         .map_err(|e| CliError::InvalidConfig(format!("{label} stat: {e}")))?;
-    if metadata.len() > FILE_MAX_BYTES {
+    if metadata.len() > AGENT_FILE_MAX_BYTES {
         return Err(CliError::InvalidConfig(format!("{label} exceeds 64KB")));
     }
     let content = std::fs::read_to_string(path)

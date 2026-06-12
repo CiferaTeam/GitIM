@@ -27,11 +27,7 @@ use serde_json::json;
 use crate::cli::dto::AddAgentResponse;
 use crate::cli::http::{CliError, Client, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
-
-/// Soft cap for `--system-prompt-file` reads. Real system prompts are at most
-/// a few KB; multi-megabyte input is almost always a typo (transcripts,
-/// log files, etc.) and we'd rather fail fast than POST a wall of bytes.
-const SYSTEM_PROMPT_FILE_MAX_BYTES: u64 = 64 * 1024;
+use crate::http::AGENT_FILE_MAX_BYTES;
 
 /// Bundled args from the clap subcommand. Keeping this as a struct (rather
 /// than 12 positional parameters) makes the `bin/runtime.rs` dispatch site
@@ -135,7 +131,7 @@ fn resolve_system_prompt(
     // skips the case where someone hands us /dev/zero or a gigabyte file.
     let metadata = std::fs::metadata(path)
         .map_err(|e| CliError::InvalidConfig(format!("system_prompt_file stat: {e}")))?;
-    if metadata.len() > SYSTEM_PROMPT_FILE_MAX_BYTES {
+    if metadata.len() > AGENT_FILE_MAX_BYTES {
         return Err(CliError::InvalidConfig(
             "system_prompt_file exceeds 64KB".to_string(),
         ));
