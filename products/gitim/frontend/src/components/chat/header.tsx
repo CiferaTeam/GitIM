@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
-import { Archive, AtSign, Crown, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
+import { Archive, Crown, Hash, LayoutGrid, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 import { useCardStore } from "../../hooks/use-card-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import * as client from "../../lib/client";
-import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
 import type { Channel } from "../../lib/types";
+import { DmLabel } from "./dm-label";
 import { HandlerName } from "./handler-name";
 import { Button } from "../ui/button";
 import {
@@ -94,11 +94,6 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
     );
   }
 
-  const displayName = isDm
-    ? formatDmDisplayName(currentChannel, currentUser)
-    : currentChannel;
-  const dmPeer = isDm ? dmPeerHandler(currentChannel, currentUser) : null;
-
   const members = channel?.members ?? [];
   const canInvite = !isDm && !!currentUser && members.includes(currentUser);
   const creator = !isDm ? channel?.created_by?.trim() : null;
@@ -110,16 +105,14 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
       <div className="flex items-center gap-2 min-w-0">
         {children}
         <div className="flex items-center gap-1.5">
-          {isDm ? (
-            <AtSign className="size-4 text-primary shrink-0" />
-          ) : (
+          {!isDm && (
             <Hash className="size-4 text-primary shrink-0" />
           )}
           <span className="font-semibold text-sm tracking-tight truncate">
-            {dmPeer && dmPeer !== currentUser ? (
-              <HandlerName handler={dmPeer} />
+            {isDm ? (
+              <DmLabel name={currentChannel} currentUser={currentUser} />
             ) : (
-              displayName
+              currentChannel
             )}
           </span>
         </div>

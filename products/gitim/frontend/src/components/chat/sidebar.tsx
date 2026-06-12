@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, AtSign, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, Pin, Plus, Search } from "lucide-react";
+import { Hash, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
@@ -12,6 +12,7 @@ import { dmPeerHandler, formatDmDisplayName } from "../../lib/dm-display-name";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { resolveDisplayName } from "../../lib/format-handler-display";
 import { buildSidebarTree } from "../../lib/sidebar-tree";
+import { DmLabel } from "./dm-label";
 import { HandlerName } from "./handler-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
@@ -1258,13 +1259,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             return (
               <ChannelItem
                 key={ch.name}
-                icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
-                labelNode={
-                  peer && peer !== currentUser ? (
-                    <HandlerName handler={peer} />
-                  ) : undefined
-                }
+                labelNode={<DmLabel name={ch.name} currentUser={currentUser} />}
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
@@ -1307,13 +1303,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
             return (
               <ChannelItem
                 key={ch.name}
-                icon={<AtSign className="size-3.5 text-text-muted" />}
                 label={label}
-                labelNode={
-                  peer && peer !== currentUser ? (
-                    <HandlerName handler={peer} />
-                  ) : undefined
-                }
+                labelNode={<DmLabel name={ch.name} currentUser={currentUser} />}
                 unread={ch.unreadCount}
                 hasMention={ch.hasMention}
                 active={currentChannel === ch.name}
@@ -1442,8 +1433,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                         title="Archived — read only. Click to view; use the restore button to unarchive."
                         onClick={() => onChannelSelect(name)}
                       >
-                        <AtSign className="size-3 text-text-faint shrink-0" />
-                        <span className="truncate flex-1">{label}</span>
+                        <span className="truncate flex-1">
+                          <HandlerName handler={label} />
+                        </span>
                         <Button
                           variant="ghost"
                           size="icon-xs"
@@ -1489,7 +1481,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 }
 
 interface ChannelItemProps {
-  icon: React.ReactNode;
+  icon?: React.ReactNode;
   /** Plain-text label — also feeds the pin/unpin aria strings. */
   label: string;
   /** Optional rich label for the visual row (e.g. a <HandlerName> for DM

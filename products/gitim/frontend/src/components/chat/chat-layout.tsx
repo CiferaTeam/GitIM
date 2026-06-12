@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, AtSign, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
+import { ArrowLeft, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChannelOperations } from "../../hooks/use-channel-operations";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
-import { formatDmDisplayName } from "../../lib/dm-display-name";
 import { buildMentionCandidates } from "../../lib/mention-candidates";
 import type { Message } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
@@ -17,6 +16,7 @@ import { MobileThreadOverlay } from "../mobile/mobile-thread-overlay";
 import { MobileActionSheet } from "../mobile/mobile-action-sheet";
 import { ChannelActiveRuns } from "../flows/channel-active-runs";
 import { ChatHeader } from "./header";
+import { DmLabel } from "./dm-label";
 import { InputArea } from "./input-area";
 import { MessageList } from "./message-list";
 import { ScrollToBottomButton } from "./scroll-to-bottom-button";
@@ -195,11 +195,7 @@ export function ChatLayout() {
   );
 
   const isDm = currentChannelData?.kind === "dm";
-  const mobileChannelLabel = currentChannel
-    ? isDm
-      ? formatDmDisplayName(currentChannel, currentUser)
-      : currentChannel
-    : "Select a channel";
+  const mobileChannelLabel = currentChannel ?? "Select a channel";
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -233,13 +229,15 @@ export function ChatLayout() {
                 </button>
               )}
               <div className="flex items-center gap-1.5 min-w-0">
-                {isDm ? (
-                  <AtSign className="size-4 text-primary shrink-0" />
-                ) : (
+                {currentChannel && !isDm && (
                   <Hash className="size-4 text-primary shrink-0" />
                 )}
                 <span className="font-semibold text-sm tracking-tight truncate">
-                  {mobileChannelLabel}
+                  {currentChannel && isDm ? (
+                    <DmLabel name={currentChannel} currentUser={currentUser} />
+                  ) : (
+                    mobileChannelLabel
+                  )}
                 </span>
               </div>
             </div>

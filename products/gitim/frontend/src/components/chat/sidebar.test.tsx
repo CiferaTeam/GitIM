@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Sidebar } from "./sidebar";
+import { DisplayNameDirectoryProvider } from "../../hooks/display-name-directory-provider";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
@@ -75,6 +76,17 @@ function channel(
     hasMention,
     members: ["lewis"],
     project: project ?? null,
+  };
+}
+
+function dmChannel(name: string, unreadCount = 0, hasMention = false): Channel {
+  return {
+    name,
+    kind: "dm",
+    unreadCount,
+    hasMention,
+    members: [],
+    project: null,
   };
 }
 
@@ -206,6 +218,31 @@ describe("Sidebar channel ordering", () => {
     expect(
       container.querySelector('[data-testid="sidebar-folded-channel-item"]'),
     ).toBeNull();
+  });
+
+  it("renders DM rows without a standalone at-sign icon", () => {
+    useChatStore.setState({
+      users: ["lewis", "alice"],
+      userInfos: [{ handler: "alice", display_name: "Alice Chen" }],
+      channels: [channel("general"), dmChannel("alice--lewis")],
+      currentChannel: "general",
+    });
+
+    act(() => {
+      root?.render(
+        <DisplayNameDirectoryProvider>
+          <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />
+        </DisplayNameDirectoryProvider>,
+      );
+    });
+
+    const dmItem = container.querySelector('[data-testid="sidebar-dm-item"]');
+    expect(dmItem?.textContent).toContain("Alice Chen");
+    expect(dmItem?.querySelector(".lucide-at-sign")).toBeNull();
+    const handle = Array.from(dmItem?.querySelectorAll("span") ?? []).find(
+      (el) => el.textContent === "@alice",
+    );
+    expect(handle?.className).toContain("font-mono");
   });
 
   it("indents channels rendered inside the Folded section", () => {
