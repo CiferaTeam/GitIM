@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { SetupShell } from "./setup-shell";
+import { DEFAULT_RUNTIME_PORT } from "@/lib/constants";
 
 interface ConnectFormProps {
   onBack?: () => void;
@@ -62,7 +63,7 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
         <>
           请先启动 Runtime：{" "}
           <code className="text-text-secondary bg-surface px-1.5 py-0.5 rounded">
-            gitim-runtime --port 16868 -d
+            {`gitim-runtime --port ${DEFAULT_RUNTIME_PORT} -d`}
           </code>
         </>
       }
@@ -82,7 +83,7 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
             inputMode="numeric"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="16868"
+            placeholder={String(DEFAULT_RUNTIME_PORT)}
             className="w-full h-10 px-3 rounded-lg border border-border bg-background text-sm font-mono placeholder:text-text-faint focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 transition-all"
             autoFocus
           />

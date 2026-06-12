@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { SetupShell } from "./setup-shell";
+import { DEFAULT_RUNTIME_PORT } from "@/lib/constants";
 
 const INSTALL_CMD =
   "curl -sSf https://raw.githubusercontent.com/CiferaTeam/GitIM/main/install.sh | sh";
-const RUN_CMD = "gitim-runtime --port 16868 -d";
+const RUN_CMD = `gitim-runtime --port ${DEFAULT_RUNTIME_PORT} -d`;
 const RELEASES_URL =
   "https://github.com/CiferaTeam/GitIM/releases/latest";
 
