@@ -476,7 +476,7 @@ async fn run_kimi_acp_model_catalog(bin: &str) -> Result<Vec<ModelOption>, Strin
 
     let mut child = tokio::process::Command::new(bin);
     child
-        .args(["--afk", "acp"])
+        .arg("acp")
         .current_dir(&temp_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
