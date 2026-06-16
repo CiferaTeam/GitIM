@@ -144,6 +144,35 @@ async fn set_session_model_failure_preserves_session_id() {
     );
 }
 
+/// Regression test: a successful ACP turn must stay `Completed` even if
+/// the `kimi acp` child exits non-zero after stdin is closed. Kimi Code
+/// CLI's stdio server may return a non-zero post-EOF status; that should
+/// not override a turn that already produced a final assistant response.
+#[tokio::test]
+async fn nonzero_exit_after_eof_does_not_fail_completed_turn() {
+    let provider = create(
+        "kimi",
+        fixture_config("mock_kimi_nonzero_exit_after_eof.sh"),
+    )
+    .unwrap();
+    let session = provider
+        .execute("say hi", ExecOptions::default())
+        .await
+        .unwrap();
+
+    // Drain the event stream so the driver task can progress to result.
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.expect("result channel closed early");
+    assert_eq!(
+        result.status,
+        ExecStatus::Completed,
+        "a Completed turn must not be flipped to Failed by the child exit code; got {result:?}"
+    );
+    assert_eq!(result.session_token.as_deref(), Some("ses_nonzero_exit"));
+}
+
 #[tokio::test]
 async fn executable_not_found_returns_error() {
     let config = ProviderConfig {

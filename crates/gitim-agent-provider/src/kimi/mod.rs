@@ -502,7 +502,11 @@ async fn drive_session(
     // Killing instantly would truncate the file before the usage flush, so
     // we close stdin first and give the process a short grace window to
     // shut down cleanly. If it lingers, we force-kill.
-    let mut killed_for_shutdown = false;
+    // Closing stdin is itself an intentional shutdown signal — we are done
+    // with this turn. Mark it as such so kimi's subsequent exit code is not
+    // allowed to flip a Completed turn to Failed (Kimi Code CLI may exit
+    // non-zero on EOF; we only care that we got the response we asked for).
+    let killed_for_shutdown = true;
     acp.close_stdin().await;
     if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
         .await
@@ -514,7 +518,6 @@ async fn drive_session(
             "kimi kept stdout open after stdin close; killing ACP server"
         );
         let _ = child.start_kill();
-        killed_for_shutdown = true;
         if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
             .await
             .is_err()
@@ -590,7 +593,6 @@ async fn drive_session(
 fn kimi_home_from_env(provider_env: &std::collections::HashMap<String, String>) -> Option<PathBuf> {
     // Explicit overrides take precedence, then new Kimi Code CLI defaults,
     // then the legacy Kimi CLI home for backward compatibility.
-    let mut candidates: Vec<PathBuf> = Vec::new();
     for key in ["KIMI_HOME", "KIMI_CODE_HOME"] {
         if let Some(dir) = provider_env
             .get(key)
@@ -598,22 +600,27 @@ fn kimi_home_from_env(provider_env: &std::collections::HashMap<String, String>) 
             .or_else(|| std::env::var(key).ok())
             .filter(|d| !d.is_empty())
         {
-            candidates.push(PathBuf::from(dir));
+            // Honor explicit overrides regardless of whether the directory
+            // currently exists — the user asked for this path.
+            return Some(PathBuf::from(dir));
         }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(&home).join(".kimi-code"));
-        candidates.push(PathBuf::from(home).join(".kimi"));
     }
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
+    let home = std::env::var("HOME").ok()?;
+    let new_default = PathBuf::from(&home).join(".kimi-code");
+    let legacy_default = PathBuf::from(home).join(".kimi");
+
+    // For implicit defaults, prefer whichever already exists.
+    if new_default.exists() {
+        return Some(new_default);
     }
+    if legacy_default.exists() {
+        return Some(legacy_default);
+    }
+
     // Fall back to the new default even if it doesn't exist yet, so callers
     // can attempt to read it without silently switching to legacy paths.
-    candidates.into_iter().next()
+    Some(new_default)
 }
 
 fn attach_kimi_local_usage(latest_usage: &mut Option<ProviderUsage>, local_usage: ProviderUsage) {
@@ -737,15 +744,14 @@ fn parse_kimi_code_usage_record(line: &str) -> Option<ProviderUsage> {
     {
         return None;
     }
-    let context_tokens = match (input_other, cache_read, output) {
-        (Some(i), Some(r), Some(o)) => Some(i.saturating_add(r).saturating_add(o)),
-        (Some(i), None, Some(o)) => Some(i.saturating_add(o)),
-        (None, Some(r), Some(o)) => Some(r.saturating_add(o)),
-        (Some(i), Some(r), None) => Some(i.saturating_add(r)),
-        (Some(i), None, None) => Some(i),
-        (None, Some(r), None) => Some(r),
-        (None, None, Some(o)) => Some(o),
-        (None, None, None) => None,
+    let input_sum = input_other
+        .unwrap_or(0)
+        .saturating_add(cache_read.unwrap_or(0))
+        .saturating_add(cache_creation.unwrap_or(0));
+    let context_tokens = if input_sum > 0 || output.is_some() {
+        Some(input_sum.saturating_add(output.unwrap_or(0)))
+    } else {
+        None
     };
     Some(ProviderUsage {
         input_tokens: input_other,
@@ -1009,6 +1015,20 @@ mod tests {
             usage.context_window_tokens,
             Some(KIMI_CONTEXT_WINDOW_TOKENS)
         );
+    }
+
+    #[test]
+    fn context_tokens_includes_cache_creation() {
+        // First turn often pays the cache-creation cost; those tokens are
+        // still part of the prompt context and must count toward occupancy.
+        let line = r#"{"type":"usage.record","usage":{"inputOther":500,"output":30,"inputCacheRead":1000,"inputCacheCreation":8000},"usageScope":"turn"}"#;
+        let usage = parse_kimi_code_usage_record(line).expect("usage");
+
+        assert_eq!(usage.input_tokens, Some(500));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.cache_read_tokens, Some(1_000));
+        assert_eq!(usage.cache_creation_tokens, Some(8_000));
+        assert_eq!(usage.context_tokens, Some(9_530));
     }
 
     #[test]
