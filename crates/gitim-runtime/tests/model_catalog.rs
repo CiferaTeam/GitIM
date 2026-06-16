@@ -316,10 +316,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"models":{{"availableModels":
     )
     .await;
 
-    assert_eq!(
-        std::fs::read_to_string(capture).unwrap().trim(),
-        "--afk acp"
-    );
+    assert_eq!(std::fs::read_to_string(capture).unwrap().trim(), "acp");
     assert_eq!(result.provider, "kimi");
     assert_eq!(result.source, "kimi_acp_models");
     assert!(result.supports_default);

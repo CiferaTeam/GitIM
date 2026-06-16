@@ -12,8 +12,74 @@
 //! the Go side.
 
 use std::collections::HashMap;
+use std::process::Command;
+use std::time::Duration;
 
-use gitim_agent_provider::{create, ExecOptions, ExecStatus, ProviderConfig};
+use gitim_agent_provider::{create, Event, ExecOptions, ExecStatus, ProviderConfig};
+
+/// Smoke test against the real `kimi` binary on the host machine.
+///
+/// This test is ignored by default because it requires a working Kimi
+/// Code CLI installation and consumes a small amount of API quota. Run
+/// it manually to verify that the current `kimi` provider still speaks
+/// the same ACP dialect as the installed CLI:
+///
+/// ```bash
+/// cargo test -p gitim-agent-provider --test kimi_integration_test -- --ignored
+/// ```
+///
+/// The test skips gracefully if `kimi` is not on PATH.
+#[tokio::test]
+#[ignore = "requires real kimi CLI and consumes API quota"]
+async fn real_kimi_hello_smoke_test() {
+    let bin = "kimi";
+    let version_ok = Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some();
+    if !version_ok {
+        return;
+    }
+
+    let provider = create("kimi", ProviderConfig::default()).unwrap();
+    let session = provider
+        .execute(
+            "Reply with exactly the word 'pong' and nothing else.",
+            ExecOptions {
+                timeout: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut events = session.events;
+    let mut saw_text = false;
+    while let Some(event) = events.recv().await {
+        if matches!(event, Event::Text { .. }) {
+            saw_text = true;
+        }
+    }
+
+    let result = session.result.await.expect("result channel closed early");
+    assert!(
+        saw_text,
+        "expected at least one Text event from real kimi; got status={:?}",
+        result.status
+    );
+    assert_eq!(
+        result.status,
+        ExecStatus::Completed,
+        "real kimi hello should complete; error={:?}",
+        result.error
+    );
+    assert!(
+        result.session_token.is_some(),
+        "real kimi should return a session_token"
+    );
+}
 
 fn fixture_config(script: &str) -> ProviderConfig {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -76,6 +142,35 @@ async fn set_session_model_failure_preserves_session_id() {
         err.contains("model not available"),
         "error must surface the upstream JSON-RPC message, got: {err}"
     );
+}
+
+/// Regression test: a successful ACP turn must stay `Completed` even if
+/// the `kimi acp` child exits non-zero after stdin is closed. Kimi Code
+/// CLI's stdio server may return a non-zero post-EOF status; that should
+/// not override a turn that already produced a final assistant response.
+#[tokio::test]
+async fn nonzero_exit_after_eof_does_not_fail_completed_turn() {
+    let provider = create(
+        "kimi",
+        fixture_config("mock_kimi_nonzero_exit_after_eof.sh"),
+    )
+    .unwrap();
+    let session = provider
+        .execute("say hi", ExecOptions::default())
+        .await
+        .unwrap();
+
+    // Drain the event stream so the driver task can progress to result.
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.expect("result channel closed early");
+    assert_eq!(
+        result.status,
+        ExecStatus::Completed,
+        "a Completed turn must not be flipped to Failed by the child exit code; got {result:?}"
+    );
+    assert_eq!(result.session_token.as_deref(), Some("ses_nonzero_exit"));
 }
 
 #[tokio::test]

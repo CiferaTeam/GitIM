@@ -1,13 +1,13 @@
 //! Kimi Code CLI provider — ACP transport via shared `acp::AcpClient`.
 //!
-//! Kimi (<https://github.com/MoonshotAI/kimi-cli>) speaks the same ACP
+//! Kimi Code CLI (<https://www.kimi.com/code>) speaks the same ACP
 //! JSON-RPC protocol as hermes via `kimi acp`. This provider is hermes
-//! with three swapped knobs:
+//! with a few swapped knobs:
 //!
-//! 1. The spawn target is `kimi --afk acp` and `HERMES_YOLO_MODE` is
-//!    **not** injected. The root `--afk` flag tells Kimi this is a
-//!    headless run; the daemon still handles explicit ACP permission
-//!    requests as a backstop.
+//! 1. The spawn target is `kimi acp` (no `--afk`; Kimi Code CLI >= 0.14
+//!    exposes ACP through the `acp` subcommand directly). Permission
+//!    requests that arrive mid-session are auto-approved by
+//!    `AcpClient::handle_agent_request`.
 //! 2. When `ExecOptions::model` is non-empty the driver calls
 //!    `session/set_model` after `session/new` / `session/resume` and
 //!    before the first `session/prompt`. Failure fails the task — we
@@ -21,10 +21,12 @@
 //! Reference: `multica/server/pkg/agent/kimi.go` (Go).
 //!
 //! Provider trait flags (and why they differ from `Provider`'s defaults):
-//! - `reports_usage()` stays `true` — Kimi Code 1.44 ACP prompt responses
+//! - `reports_usage()` stays `true` — Kimi Code CLI ACP prompt responses
 //!   omit standard usage, so the provider derives a local estimate from
-//!   `~/.kimi/sessions/*/<session_id>/context*.jsonl` `_usage.token_count`
-//!   entries. The estimate is recorded as cache-read style input plus
+//!   the CLI's local session files when available. The home directory is
+//!   discovered from `KIMI_HOME` / `KIMI_CODE_HOME` env vars, then
+//!   `~/.kimi-code` (new Kimi Code CLI) and finally `~/.kimi` (legacy
+//!   Kimi CLI). The estimate is recorded as cache-read style input plus
 //!   context-window occupancy.
 //! - `self_managed_context()` stays `false` (default written explicitly
 //!   here) — unlike hermes there is no in-loop compression, so the runtime
@@ -53,6 +55,7 @@ use crate::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const HANDSHAKE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
+const CLEAN_SHUTDOWN_GRACE: Duration = Duration::from_millis(1_500);
 const EVENT_CHANNEL_BUFFER: usize = 256;
 const KIMI_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const HOST_TURN_COMPLETION_NOTE: &str = "\
@@ -101,13 +104,11 @@ impl Provider for KimiProvider {
         let timeout = opts.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
         let mut cmd = Command::new(&exec_path);
-        // `--afk` is a root flag, so it must come before the `acp`
-        // subcommand. It puts Kimi in headless mode: AskUserQuestion is
-        // auto-dismissed and tool calls are treated as unattended. We still
-        // reply to `session/request_permission` inside the ACP client because
-        // Kimi 1.44 emits that request even in AFK mode.
-        cmd.arg("--afk")
-            .arg("acp")
+        // Kimi Code CLI (>= 0.14) exposes the ACP server through the `acp`
+        // subcommand directly. The legacy `--afk` root flag is no longer
+        // accepted, so we omit it. Permission requests that arrive mid-session
+        // are auto-approved by `AcpClient::handle_agent_request`.
+        cmd.arg("acp")
             .stdout(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -291,7 +292,7 @@ async fn drive_session(
     // (see hermes/mod.rs for the same pattern + reasoning).
     let reader_acp = Arc::clone(&acp);
     let reader_event_tx = event_tx.clone();
-    let reader_handle = tokio::spawn(async move {
+    let mut reader_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
             match reader.next_line().await {
@@ -495,14 +496,35 @@ async fn drive_session(
     // request. GitIM launches one provider process per agent turn, so the
     // correct cleanup is to stop this child explicitly instead of waiting
     // for a natural EOF exit.
+    //
+    // Kimi Code CLI writes the turn's usage record to
+    // `agents/main/wire.jsonl` asynchronously after the prompt response.
+    // Killing instantly would truncate the file before the usage flush, so
+    // we close stdin first and give the process a short grace window to
+    // shut down cleanly. If it lingers, we force-kill.
+    // Closing stdin is itself an intentional shutdown signal — we are done
+    // with this turn. Mark it as such so kimi's subsequent exit code is not
+    // allowed to flip a Completed turn to Failed (Kimi Code CLI may exit
+    // non-zero on EOF; we only care that we got the response we asked for).
     let killed_for_shutdown = true;
-    let _ = child.start_kill();
-
-    // Drain the reader so trailing notifications (if any) make it into
-    // the text accumulator before we sample the final output. After
-    // this await, no further `handle_line` calls happen and the
-    // accumulator is stable — a single read is sufficient.
-    let _ = reader_handle.await;
+    acp.close_stdin().await;
+    if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
+        .await
+        .is_err()
+    {
+        debug!(
+            pid,
+            ?CLEAN_SHUTDOWN_GRACE,
+            "kimi kept stdout open after stdin close; killing ACP server"
+        );
+        let _ = child.start_kill();
+        if tokio::time::timeout(CLEAN_SHUTDOWN_GRACE, &mut reader_handle)
+            .await
+            .is_err()
+        {
+            reader_handle.abort();
+        }
+    }
 
     let output = acp.collected_output().await;
 
@@ -569,25 +591,51 @@ async fn drive_session(
 }
 
 fn kimi_home_from_env(provider_env: &std::collections::HashMap<String, String>) -> Option<PathBuf> {
-    if let Some(dir) = provider_env.get("KIMI_HOME") {
-        if !dir.is_empty() {
+    // Explicit overrides take precedence, then new Kimi Code CLI defaults,
+    // then the legacy Kimi CLI home for backward compatibility.
+    for key in ["KIMI_HOME", "KIMI_CODE_HOME"] {
+        if let Some(dir) = provider_env
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+            .filter(|d| !d.is_empty())
+        {
+            // Honor explicit overrides regardless of whether the directory
+            // currently exists — the user asked for this path.
             return Some(PathBuf::from(dir));
         }
     }
-    if let Ok(dir) = std::env::var("KIMI_HOME") {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
+
+    let home = std::env::var("HOME").ok()?;
+    let new_default = PathBuf::from(&home).join(".kimi-code");
+    let legacy_default = PathBuf::from(home).join(".kimi");
+
+    // For implicit defaults, prefer whichever already exists.
+    if new_default.exists() {
+        return Some(new_default);
     }
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".kimi"))
+    if legacy_default.exists() {
+        return Some(legacy_default);
+    }
+
+    // Fall back to the new default even if it doesn't exist yet, so callers
+    // can attempt to read it without silently switching to legacy paths.
+    Some(new_default)
 }
 
 fn attach_kimi_local_usage(latest_usage: &mut Option<ProviderUsage>, local_usage: ProviderUsage) {
     let usage = latest_usage.get_or_insert_with(ProviderUsage::default);
+    if usage.input_tokens.is_none() {
+        usage.input_tokens = local_usage.input_tokens;
+    }
+    if usage.output_tokens.is_none() {
+        usage.output_tokens = local_usage.output_tokens;
+    }
     if usage.cache_read_tokens.is_none() {
         usage.cache_read_tokens = local_usage.cache_read_tokens;
+    }
+    if usage.cache_creation_tokens.is_none() {
+        usage.cache_creation_tokens = local_usage.cache_creation_tokens;
     }
     usage.context_tokens = local_usage.context_tokens;
     usage.context_window_tokens = local_usage.context_window_tokens;
@@ -599,6 +647,19 @@ fn read_kimi_local_context_usage(
 ) -> Option<ProviderUsage> {
     let kimi_home = kimi_home?;
     let session_dir = find_kimi_session_dir(&kimi_home.join("sessions"), session_id)?;
+
+    // New Kimi Code CLI (>= 0.14) writes per-turn usage into
+    // agents/main/wire.jsonl as `usage.record` events.
+    let wire_path = session_dir.join("agents/main/wire.jsonl");
+    if wire_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&wire_path) {
+            if let Some(usage) = scan_kimi_code_wire_usage(&content) {
+                return Some(usage);
+            }
+        }
+    }
+
+    // Legacy Kimi CLI stored usage in context*.jsonl files.
     let mut files = kimi_context_files(&session_dir);
     files.sort_by_key(|path| kimi_context_file_index(path).unwrap_or(0));
     for path in files.iter().rev() {
@@ -653,6 +714,54 @@ fn kimi_context_file_index(path: &Path) -> Option<u32> {
     }
     let rest = name.strip_prefix("context_")?.strip_suffix(".jsonl")?;
     rest.parse().ok()
+}
+
+fn scan_kimi_code_wire_usage(content: &str) -> Option<ProviderUsage> {
+    for line in content.lines().rev() {
+        if let Some(usage) = parse_kimi_code_usage_record(line) {
+            return Some(usage);
+        }
+    }
+    None
+}
+
+fn parse_kimi_code_usage_record(line: &str) -> Option<ProviderUsage> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "usage.record" {
+        return None;
+    }
+    // We only want per-turn records; session-scoped records would double-count
+    // accumulated usage when the runtime does its own delta math.
+    if v.get("usageScope").and_then(Value::as_str) != Some("turn") {
+        return None;
+    }
+    let usage = v.get("usage")?;
+    let input_other = usage.get("inputOther").and_then(Value::as_u64);
+    let output = usage.get("output").and_then(Value::as_u64);
+    let cache_read = usage.get("inputCacheRead").and_then(Value::as_u64);
+    let cache_creation = usage.get("inputCacheCreation").and_then(Value::as_u64);
+    if input_other.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none()
+    {
+        return None;
+    }
+    let input_sum = input_other
+        .unwrap_or(0)
+        .saturating_add(cache_read.unwrap_or(0))
+        .saturating_add(cache_creation.unwrap_or(0));
+    let context_tokens = if input_sum > 0 || output.is_some() {
+        Some(input_sum.saturating_add(output.unwrap_or(0)))
+    } else {
+        None
+    };
+    Some(ProviderUsage {
+        input_tokens: input_other,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+        context_tokens,
+        context_window_tokens: Some(KIMI_CONTEXT_WINDOW_TOKENS),
+        ..Default::default()
+    })
 }
 
 fn scan_kimi_context_usage(content: &str) -> Option<ProviderUsage> {
@@ -888,6 +997,109 @@ mod tests {
         let usage = read_kimi_local_context_usage(Some(&root), session_id).expect("usage");
         assert_eq!(usage.cache_read_tokens, Some(3_000));
         assert_eq!(usage.context_tokens, Some(3_000));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_kimi_code_wire_usage_record() {
+        let line = r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":1891,"output":36,"inputCacheRead":14336,"inputCacheCreation":0},"usageScope":"turn","time":1781322540934}"#;
+        let usage = parse_kimi_code_usage_record(line).expect("usage");
+
+        assert_eq!(usage.input_tokens, Some(1_891));
+        assert_eq!(usage.output_tokens, Some(36));
+        assert_eq!(usage.cache_read_tokens, Some(14_336));
+        assert_eq!(usage.cache_creation_tokens, Some(0));
+        assert_eq!(usage.context_tokens, Some(16_263));
+        assert_eq!(
+            usage.context_window_tokens,
+            Some(KIMI_CONTEXT_WINDOW_TOKENS)
+        );
+    }
+
+    #[test]
+    fn context_tokens_includes_cache_creation() {
+        // First turn often pays the cache-creation cost; those tokens are
+        // still part of the prompt context and must count toward occupancy.
+        let line = r#"{"type":"usage.record","usage":{"inputOther":500,"output":30,"inputCacheRead":1000,"inputCacheCreation":8000},"usageScope":"turn"}"#;
+        let usage = parse_kimi_code_usage_record(line).expect("usage");
+
+        assert_eq!(usage.input_tokens, Some(500));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.cache_read_tokens, Some(1_000));
+        assert_eq!(usage.cache_creation_tokens, Some(8_000));
+        assert_eq!(usage.context_tokens, Some(9_530));
+    }
+
+    #[test]
+    fn ignores_session_scoped_usage_record() {
+        let line = r#"{"type":"usage.record","usage":{"inputOther":1000,"output":20,"inputCacheRead":5000,"inputCacheCreation":0},"usageScope":"session"}"#;
+        assert!(parse_kimi_code_usage_record(line).is_none());
+    }
+
+    #[test]
+    fn reads_latest_turn_usage_from_wire_jsonl() {
+        let root = std::env::temp_dir().join(format!(
+            "gitim-kimi-code-wire-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_id = "session_a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let session_dir = root
+            .join("sessions")
+            .join("workspace-hash")
+            .join(session_id);
+        let agents_dir = session_dir.join("agents/main");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("wire.jsonl"),
+            r#"{"type":"usage.record","usage":{"inputOther":100,"output":5,"inputCacheRead":50,"inputCacheCreation":1},"usageScope":"turn"}
+{"type":"usage.record","usage":{"inputOther":200,"output":10,"inputCacheRead":100,"inputCacheCreation":2},"usageScope":"turn"}
+"#,
+        )
+        .unwrap();
+
+        let usage = read_kimi_local_context_usage(Some(&root), session_id).expect("usage");
+        assert_eq!(usage.input_tokens, Some(200));
+        assert_eq!(usage.output_tokens, Some(10));
+        assert_eq!(usage.cache_read_tokens, Some(100));
+        assert_eq!(usage.cache_creation_tokens, Some(2));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wire_jsonl_takes_precedence_over_legacy_context() {
+        let root = std::env::temp_dir().join(format!(
+            "gitim-kimi-code-prec-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_id = "session_11111111-2222-3333-4444-555555555555";
+        let session_dir = root
+            .join("sessions")
+            .join("workspace-hash")
+            .join(session_id);
+        let agents_dir = session_dir.join("agents/main");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("wire.jsonl"),
+            r#"{"type":"usage.record","usage":{"inputOther":123,"output":7,"inputCacheRead":89,"inputCacheCreation":3},"usageScope":"turn"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("context.jsonl"),
+            r#"{"role":"_usage","token_count":9999}"#,
+        )
+        .unwrap();
+
+        let usage = read_kimi_local_context_usage(Some(&root), session_id).expect("usage");
+        assert_eq!(usage.input_tokens, Some(123));
+        assert_eq!(usage.output_tokens, Some(7));
 
         std::fs::remove_dir_all(root).unwrap();
     }
