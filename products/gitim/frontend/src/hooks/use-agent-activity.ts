@@ -2,6 +2,10 @@ import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { mapBackendUsageSummary } from "../lib/client";
+import {
+  createLocalNetworkEventSource,
+  type LocalNetworkEventSource,
+} from "../lib/local-network-event-source";
 import type { Agent, AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
@@ -110,7 +114,7 @@ export function useAgentActivitySSE(slug: string | null) {
   const port = useConnectionStore((s) => s.port);
   const push = useAgentActivityStore((s) => s.push);
   const ensureSlug = useAgentActivityStore((s) => s.ensureSlug);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<LocalNetworkEventSource | null>(null);
   const refreshRef = useRef(false);
 
   useEffect(() => {
@@ -121,7 +125,7 @@ export function useAgentActivitySSE(slug: string | null) {
     ensureSlug(slug);
 
     const url = `http://127.0.0.1:${port}/workspaces/${encodeURIComponent(slug)}/agents/events`;
-    const es = new EventSource(url);
+    const es = createLocalNetworkEventSource(url);
     esRef.current = es;
 
     es.onmessage = (e) => {

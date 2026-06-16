@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { localNetworkFetch } from "./local-network-fetch";
 
 describe("localNetworkFetch", () => {
-  it("marks runtime requests as local network targets", async () => {
+  it("marks loopback runtime requests as loopback targets", async () => {
     const response = new Response("ok");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
@@ -20,6 +20,22 @@ describe("localNetworkFetch", () => {
       expect.objectContaining({
         cache: "no-store",
         signal,
+        targetAddressSpace: "loopback",
+      }),
+    );
+  });
+
+  it("marks private address requests as local network targets", async () => {
+    const response = new Response("ok");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(response);
+
+    await localNetworkFetch("http://192.168.1.10/health");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://192.168.1.10/health",
+      expect.objectContaining({
         targetAddressSpace: "local",
       }),
     );

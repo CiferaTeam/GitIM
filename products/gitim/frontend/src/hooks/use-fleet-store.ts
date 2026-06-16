@@ -1,6 +1,10 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { mapBackendUsageSummary } from "../lib/client";
+import {
+  createLocalNetworkEventSource,
+  type LocalNetworkEventSource,
+} from "../lib/local-network-event-source";
 import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import type {
   Agent,
@@ -136,13 +140,13 @@ export function fleetActivityKey(
 
 export function useFleetSSE(slug: string | null) {
   const port = useConnectionStore((s) => s.port);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<LocalNetworkEventSource | null>(null);
 
   useEffect(() => {
     if (!port || !slug) return;
 
     const url = `http://127.0.0.1:${port}/fleet/events`;
-    const es = new EventSource(url);
+    const es = createLocalNetworkEventSource(url);
     esRef.current = es;
 
     es.onmessage = (e) => {
