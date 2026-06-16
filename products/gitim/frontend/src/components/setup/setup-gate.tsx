@@ -5,6 +5,7 @@ import { InstallStep } from "./install-step";
 import { LocalSetup } from "./local-setup";
 import { ModeChoiceStep } from "./mode-choice-step";
 import { SetupShell } from "./setup-shell";
+import { localNetworkFetch } from "@/lib/local-network-fetch";
 
 interface SetupGateProps {
   children: ReactNode;
@@ -51,7 +52,7 @@ export function SetupGate({ children }: SetupGateProps) {
 
     async function tryConnect() {
       try {
-        const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        const res = await localNetworkFetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(3000),
         });
         const data = await res.json();

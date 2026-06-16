@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { SetupShell } from "./setup-shell";
 import { DEFAULT_RUNTIME_PORT } from "@/lib/constants";
+import { localNetworkFetch } from "@/lib/local-network-fetch";
 
 interface ConnectFormProps {
   onBack?: () => void;
@@ -31,7 +32,7 @@ export function ConnectForm({ onBack }: ConnectFormProps = {}) {
     setError(null);
 
     try {
-      const res = await fetch(`http://127.0.0.1:${p}/health`, {
+      const res = await localNetworkFetch(`http://127.0.0.1:${p}/health`, {
         signal: AbortSignal.timeout(3000),
       });
       const data = await res.json();

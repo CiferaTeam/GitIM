@@ -9,6 +9,7 @@ import {
   ChevronRight,
   KeyRound,
 } from "lucide-react";
+import { DEFAULT_RUNTIME_PORT } from "@/lib/constants";
 
 interface DocSection {
   id: string;
@@ -98,7 +99,7 @@ export function DocsPage() {
           <Step number={1} title="Connect to the daemon">
             <p>
               On first launch, you will see a setup screen asking for the daemon port.
-              The default is <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-border">localhost:7374</code>.
+              The default is <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-border">localhost:{DEFAULT_RUNTIME_PORT}</code>.
               Make sure the GitIM daemon is running locally before connecting.
             </p>
             <Tip>

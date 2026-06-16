@@ -6296,7 +6296,7 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
             state.clone(),
             activity_middleware,
         ))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive().allow_private_network(true))
         .with_state(state.clone());
 
     (router, state)
@@ -6720,6 +6720,34 @@ mod tests {
         assert_eq!(body["service"], "gitim-runtime");
         // epoch observability: empty array when no workspaces registered
         assert_eq!(body["workspace_epochs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_private_network_access() {
+        use axum::body::Body;
+        use axum::http::{header, HeaderValue, Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/health")
+                    .header(header::ORIGIN, "https://gitim.io")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header("access-control-request-private-network", "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("access-control-allow-private-network"),
+            Some(&HeaderValue::from_static("true")),
+        );
     }
 
     // -- introduction wire format coverage --

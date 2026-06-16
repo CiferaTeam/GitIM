@@ -69,6 +69,7 @@ import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useConnectionDiagnosticsStore } from "@/hooks/use-connection-diagnostics-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
+import { localNetworkFetch } from "./local-network-fetch";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -269,7 +270,7 @@ function wsBase(slug: string): string {
 // can move on if the old process is tearing down mid-fetch.
 export async function health(signal?: AbortSignal): Promise<ApiResponse> {
   if (isLocalMode()) return activeBackend.health();
-  const res = await fetch(`${baseUrl()}/health`, { cache: "no-store", signal });
+  const res = await localNetworkFetch(`${baseUrl()}/health`, { cache: "no-store", signal });
   if (!res.ok) return { ok: false, error: `health check failed: ${res.status}` };
   const data = await res.json();
   return { ok: true, data };
@@ -324,7 +325,7 @@ export async function updateAndRestart(): Promise<ApiResponse<UpdateAndRestartDa
     return { ok: false, error: "runtime update is unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${baseUrl()}/runtime/update-and-restart`, {
+    const res = await localNetworkFetch(`${baseUrl()}/runtime/update-and-restart`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
@@ -351,7 +352,7 @@ export async function listWorkspaces(): Promise<
     return { ok: true, data: { workspaces: listBrowserWorkspaceSummaries() } };
   }
   try {
-    const res = await fetch(`${baseUrl()}/workspaces`);
+    const res = await localNetworkFetch(`${baseUrl()}/workspaces`);
     const data = await res.json();
     if (!res.ok) {
       return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
@@ -392,7 +393,7 @@ export async function createWorkspace(
     };
   }
   try {
-    const res = await fetch(`${baseUrl()}/workspaces`, {
+    const res = await localNetworkFetch(`${baseUrl()}/workspaces`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
@@ -425,7 +426,7 @@ export async function getWorkspace(slug: string): Promise<ApiResponse> {
     };
   }
   try {
-    const res = await fetch(wsBase(slug));
+    const res = await localNetworkFetch(wsBase(slug));
     const data = await res.json();
     if (!res.ok) {
       return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
@@ -446,7 +447,7 @@ export async function deleteWorkspace(slug: string): Promise<ApiResponse> {
     return { ok: true, data: {} };
   }
   try {
-    const res = await fetch(wsBase(slug), { method: "DELETE" });
+    const res = await localNetworkFetch(wsBase(slug), { method: "DELETE" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return { ok: false, error: data.error ?? `HTTP ${res.status}`, error_code: data.error_code };
@@ -504,7 +505,7 @@ export async function me(slug: string): Promise<ApiResponse> {
     void slug;
     return activeBackend.me();
   }
-  const res = await fetch(`${wsBase(slug)}/im/me`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/me`);
   return await res.json();
 }
 
@@ -520,7 +521,7 @@ export async function poll(
       signal,
     ) as unknown as Promise<ApiResponse<PollResponse>>;
   }
-  const res = await fetch(`${wsBase(slug)}/im/poll`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/poll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ since }),
@@ -534,7 +535,7 @@ export async function channels(slug: string): Promise<ApiResponse> {
     void slug;
     return activeBackend.channels();
   }
-  const res = await fetch(`${wsBase(slug)}/im/channels`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/channels`);
   return await res.json();
 }
 
@@ -548,7 +549,7 @@ export async function send(
   if (isLocalMode()) {
     return activeBackend.send(channel, body, _author, replyTo);
   }
-  const res = await fetch(`${wsBase(slug)}/im/send`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, body, reply_to: replyTo }),
@@ -575,7 +576,7 @@ export async function createChannel(
   if (invitees && invitees.length > 0) {
     payload.invitees = invitees;
   }
-  const res = await fetch(`${wsBase(slug)}/im/create-channel`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/create-channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -597,7 +598,7 @@ export async function joinChannel(
   if (targets && targets.length > 0) {
     payload.targets = targets;
   }
-  const res = await fetch(`${wsBase(slug)}/im/join`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/join`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -615,7 +616,7 @@ export async function read(
     void slug;
     return activeBackend.read(channel, limit, since);
   }
-  const res = await fetch(`${wsBase(slug)}/im/read`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, limit, since }),
@@ -632,7 +633,7 @@ export async function thread(
     void slug;
     return activeBackend.thread(channel, line);
   }
-  const res = await fetch(`${wsBase(slug)}/im/thread`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/thread`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel, line }),
@@ -645,7 +646,7 @@ export async function users(slug: string): Promise<ApiResponse> {
     void slug;
     return activeBackend.users();
   }
-  const res = await fetch(`${wsBase(slug)}/im/users`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/users`);
   return await res.json();
 }
 
@@ -658,7 +659,7 @@ export async function listBoards(
     void slug;
     return localBoardBackend().listBoards();
   }
-  const res = await fetch(`${wsBase(slug)}/im/boards`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/boards`);
   return await res.json();
 }
 
@@ -670,7 +671,7 @@ export async function showBoard(
     void slug;
     return localBoardBackend().showBoard(handler);
   }
-  const res = await fetch(`${wsBase(slug)}/im/boards/${encodeURIComponent(handler)}`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/boards/${encodeURIComponent(handler)}`);
   return await res.json();
 }
 
@@ -681,7 +682,7 @@ export async function initBoard(
     void slug;
     return localBoardBackend().initBoard();
   }
-  const res = await fetch(`${wsBase(slug)}/im/board/init`, { method: "POST" });
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/board/init`, { method: "POST" });
   return await res.json();
 }
 
@@ -693,7 +694,7 @@ export async function publishBoard(
     void slug;
     return localBoardBackend().publishBoard(content);
   }
-  const res = await fetch(`${wsBase(slug)}/im/board/publish`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/board/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -710,7 +711,7 @@ export async function setBoard(
     void slug;
     return localBoardBackend().setBoard(field, value);
   }
-  const res = await fetch(`${wsBase(slug)}/im/board/field`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/board/field`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ field, value }),
@@ -727,7 +728,7 @@ export async function setBoardSection(
     void slug;
     return localBoardBackend().setBoardSection(section, value);
   }
-  const res = await fetch(`${wsBase(slug)}/im/board/section/set`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/board/section/set`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ section, value }),
@@ -744,7 +745,7 @@ export async function appendBoardSection(
     void slug;
     return localBoardBackend().appendBoardSection(section, value);
   }
-  const res = await fetch(`${wsBase(slug)}/im/board/section/append`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/board/section/append`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ section, value }),
@@ -785,7 +786,7 @@ async function cronRequest<T>(
 ): Promise<ApiResponse<T>> {
   let res: Response;
   try {
-    res = await fetch(url, signal ? { signal } : undefined);
+    res = await localNetworkFetch(url, signal ? { signal } : undefined);
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
     if (e instanceof Error && e.name === "AbortError") throw e;
@@ -927,7 +928,7 @@ export async function createCard(
   if (opts.labels && opts.labels.length > 0) payload.labels = opts.labels;
   if (opts.assignee) payload.assignee = opts.assignee;
   if (opts.status) payload.status = opts.status;
-  const res = await fetch(`${wsBase(slug)}/im/cards`, {
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/cards`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -959,7 +960,7 @@ export async function listCards(
   }
   const qs = params.toString();
   const url = qs ? `${wsBase(slug)}/im/cards?${qs}` : `${wsBase(slug)}/im/cards`;
-  const res = await fetch(url);
+  const res = await localNetworkFetch(url);
   return await res.json();
 }
 
@@ -986,7 +987,7 @@ export async function readCard(
   const qs = params.toString();
   const base = `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`;
   const url = qs ? `${base}?${qs}` : base;
-  const res = await fetch(url);
+  const res = await localNetworkFetch(url);
   return await res.json();
 }
 
@@ -1001,7 +1002,7 @@ export async function sendCardMessage(
     void slug;
     return localCardBackend().sendCardMessage(channel, cardId, body, replyTo);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/messages`,
     {
       method: "POST",
@@ -1028,7 +1029,7 @@ export async function updateCard(
     void slug;
     return localCardBackend().updateCard(channel, cardId, patch);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`,
     {
       method: "PATCH",
@@ -1050,7 +1051,7 @@ export async function archiveCard(
     void slug;
     return localCardBackend().archiveCard(channel, cardId);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/archive`,
     { method: "POST" },
   );
@@ -1066,7 +1067,7 @@ export async function unarchiveCard(
     void slug;
     return localCardBackend().unarchiveCard(channel, cardId);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}/unarchive`,
     { method: "POST" },
   );
@@ -1082,7 +1083,7 @@ export async function listArchivedCards(
     return localCardBackend().listArchivedCards(channel) as Promise<ApiResponse<{ cards: Card[] }>>;
   }
   const qs = channel ? `?channel=${encodeURIComponent(channel)}` : "";
-  const res = await fetch(`${wsBase(slug)}/im/cards/archived${qs}`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/cards/archived${qs}`);
   return await res.json();
 }
 
@@ -1094,7 +1095,7 @@ export async function archiveChannel(
     void slug;
     return localChannelArchiveBackend().archiveChannel(name);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/archive`,
     { method: "POST" },
   );
@@ -1109,7 +1110,7 @@ export async function unarchiveChannel(
     void slug;
     return localChannelArchiveBackend().unarchiveChannel(name);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/channels/${encodeURIComponent(name)}/unarchive`,
     { method: "POST" },
   );
@@ -1156,7 +1157,7 @@ export async function listArchivedChannels(
   if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
   if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  const res = await fetch(`${wsBase(slug)}/im/channels/archived${qs ? `?${qs}` : ""}`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/channels/archived${qs ? `?${qs}` : ""}`);
   return normalize(await res.json());
 }
 
@@ -1168,7 +1169,7 @@ export async function archiveDm(
     void slug;
     return localDmArchiveBackend().archiveDm(peer);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/dm/${encodeURIComponent(peer)}/archive`,
     { method: "POST" },
   );
@@ -1183,7 +1184,7 @@ export async function unarchiveDm(
     void slug;
     return localDmArchiveBackend().unarchiveDm(peer);
   }
-  const res = await fetch(
+  const res = await localNetworkFetch(
     `${wsBase(slug)}/im/dm/${encodeURIComponent(peer)}/unarchive`,
     { method: "POST" },
   );
@@ -1234,7 +1235,7 @@ export async function listArchivedDms(
   if (prefix) params.set("prefix", prefix);
   params.set("offset", String(offset));
   params.set("limit", String(limit));
-  const res = await fetch(`${wsBase(slug)}/im/dm/archived?${params}`);
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/dm/archived?${params}`);
   const json = (await res.json()) as ApiResponse<{
     dms: ArchivedDmEntry[];
     has_more: boolean;
@@ -1261,7 +1262,7 @@ export async function listProjects(workspaceSlug: string): Promise<Project[]> {
   if (isLocalMode()) {
     return [];
   }
-  const res = await fetch(`${wsBase(workspaceSlug)}/im/projects`);
+  const res = await localNetworkFetch(`${wsBase(workspaceSlug)}/im/projects`);
   const body = (await res.json()) as ApiResponse<{ projects: Project[] }>;
   if (!body.ok) return [];
   return body.data?.projects ?? [];
@@ -1277,7 +1278,7 @@ export async function createProject(
     return { ok: false, error: "project management is unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(workspaceSlug)}/im/projects`, {
+    const res = await localNetworkFetch(`${wsBase(workspaceSlug)}/im/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slug, display_name, introduction }),
@@ -1299,7 +1300,7 @@ export async function setChannelProject(
     return { ok: false, error: "project management is unavailable in browser mode" };
   }
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(workspaceSlug)}/im/channels/${encodeURIComponent(channel)}/project`,
       {
         method: "PATCH",
@@ -1330,7 +1331,7 @@ export async function preflightProvider(
     if (opts?.llmProvider) params.set("llm_provider", opts.llmProvider);
     if (opts?.llmModel) params.set("llm_model", opts.llmModel);
     const qs = params.size > 0 ? `?${params.toString()}` : "";
-    const res = await fetch(`${baseUrl()}/preflight/${provider}${qs}`);
+    const res = await localNetworkFetch(`${baseUrl()}/preflight/${provider}${qs}`);
     const data = await res.json();
     if (res.ok) {
       return { ok: true, data };
@@ -1359,7 +1360,7 @@ export async function listProviderModels(
     };
   }
   try {
-    const res = await fetch(`${baseUrl()}/providers/${provider}/models`);
+    const res = await localNetworkFetch(`${baseUrl()}/providers/${provider}/models`);
     const data = await res.json();
     if (res.ok) {
       return { ok: true, data };
@@ -1375,7 +1376,7 @@ export async function listHermesLlmProviders(): Promise<ApiResponse<{ providers:
     return { ok: true, data: { providers: [] } };
   }
   try {
-    const res = await fetch(`${baseUrl()}/hermes/llm/providers`);
+    const res = await localNetworkFetch(`${baseUrl()}/hermes/llm/providers`);
     const data = await res.json();
     if (res.ok) {
       return { ok: true, data };
@@ -1394,7 +1395,7 @@ export async function listHermesLlmModels(providerId: string): Promise<ApiRespon
     };
   }
   try {
-    const res = await fetch(`${baseUrl()}/hermes/llm/providers/${encodeURIComponent(providerId)}/models`);
+    const res = await localNetworkFetch(`${baseUrl()}/hermes/llm/providers/${encodeURIComponent(providerId)}/models`);
     const data = await res.json();
     // Backend always returns 200 for this endpoint; error field carries failure info
     return { ok: true, data };
@@ -1515,7 +1516,7 @@ async function fetchJsonOrNull(url: string, timeoutMs: number): Promise<unknown 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await localNetworkFetch(url, { signal: controller.signal });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -1657,7 +1658,7 @@ export async function listAgents(slug: string): Promise<ApiResponse> {
     return { ok: true, data: { agents: [] } };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents`);
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents`);
     const data = await res.json();
     if (!data.ok) return data;
     const agents = (data.agents ?? []).map(mapBackendAgent);
@@ -1672,7 +1673,7 @@ export async function listFleetAgents(): Promise<ApiResponse<{ agents: FleetAgen
     return { ok: true, data: { agents: [] } };
   }
   try {
-    const res = await fetch(`${baseUrl()}/fleet/agents`);
+    const res = await localNetworkFetch(`${baseUrl()}/fleet/agents`);
     if (!res.ok) {
       if (res.status === 404) return await listFleetAgentsViaNodes();
       return { ok: false, error: `fleet agents failed: ${res.status}` };
@@ -1693,7 +1694,7 @@ export async function listFleetStatus(): Promise<ApiResponse<{ nodes: FleetNodeS
     return { ok: true, data: { nodes: [] } };
   }
   try {
-    const res = await fetch(`${baseUrl()}/fleet/status`);
+    const res = await localNetworkFetch(`${baseUrl()}/fleet/status`);
     const data = await res.json();
     if (!data.ok) return data;
     const nodes = ((data.nodes ?? []) as Record<string, unknown>[]).map(
@@ -1712,7 +1713,7 @@ export async function getAgent(slug: string, id: string): Promise<ApiResponse> {
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/${id}`);
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/${id}`);
     const data = await res.json();
     if (!data.ok) return data;
     return { ok: true, data: { agent: mapBackendAgent(data.agent) } };
@@ -1750,7 +1751,7 @@ export async function addAgent(
   }
   try {
     const handler = toHandler(name);
-    const res = await fetch(`${wsBase(slug)}/agents/add`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1816,7 +1817,7 @@ export async function updateAgent(
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/${agentId}`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/${agentId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
@@ -1841,7 +1842,7 @@ export async function removeAgent(
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/remove`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, hard_delete: options.hardDelete === true }),
@@ -1875,7 +1876,7 @@ export async function agentsBurn(
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/burn`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/burn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -1907,7 +1908,7 @@ export async function listArchivedUsers(
     return { ok: true, data: { users: [] } };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/users/archived`);
+    const res = await localNetworkFetch(`${wsBase(slug)}/users/archived`);
     const data = await res.json();
     if (!data.ok) return data;
     // Daemon returns `{ users: [{handler, display_name?}, ...] }`.
@@ -1942,7 +1943,7 @@ export async function unarchiveUser(
     return { ok: false, error: "user archive is unavailable in browser mode" };
   }
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(slug)}/users/${encodeURIComponent(handler)}/unarchive`,
       { method: "POST" },
     );
@@ -1995,7 +1996,7 @@ export async function createFlow(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(`${wsBase(slug)}/im/flows`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/im/flows`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slug: flowSlug, name, description }),
@@ -2020,7 +2021,7 @@ export async function removeFlow(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}`,
       { method: "DELETE" },
     );
@@ -2056,7 +2057,7 @@ export async function updateFlowNodePrompt(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}/nodes/${encodeURIComponent(nodeId)}`,
       {
         method: "PATCH",
@@ -2089,7 +2090,7 @@ export async function replaceFlow(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(slug)}/im/flows/${encodeURIComponent(flowSlug)}`,
       {
         method: "PUT",
@@ -2118,7 +2119,7 @@ export async function startFlowRun(
 ): Promise<ApiResponse<{ run_id: string; flow_slug: string; channel: string; commit_id: string }>> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(workspaceSlug)}/im/flows/${encodeURIComponent(flowSlug)}/runs`,
       {
         method: "POST",
@@ -2171,7 +2172,7 @@ export async function updateFlowNode(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`,
       {
         method: "PATCH",
@@ -2199,7 +2200,7 @@ export async function cancelFlowRun(
 ): Promise<ApiResponse> {
   if (isLocalMode()) return FLOW_LOCAL_UNAVAILABLE;
   try {
-    const res = await fetch(
+    const res = await localNetworkFetch(
       `${wsBase(workspaceSlug)}/im/runs/${encodeURIComponent(runId)}`,
       { method: "DELETE" },
     );
@@ -2224,7 +2225,7 @@ export async function startAgent(slug: string, id: string): Promise<ApiResponse>
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/start`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -2244,7 +2245,7 @@ export async function stopAgent(slug: string, id: string): Promise<ApiResponse> 
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const res = await fetch(`${wsBase(slug)}/agents/stop`, {
+    const res = await localNetworkFetch(`${wsBase(slug)}/agents/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),

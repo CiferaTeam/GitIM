@@ -21,6 +21,7 @@ import {
   useConnectionDiagnosticsStore,
   type BrowserSyncStatus,
 } from "@/hooks/use-connection-diagnostics-store";
+import { localNetworkFetch } from "./local-network-fetch";
 
 interface LocalBackendConfig {
   workspaceId: string;
@@ -196,7 +197,7 @@ export class HttpBackend implements Backend {
   }
 
   async health(): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/health`);
+    const res = await localNetworkFetch(`${this.baseUrl()}/health`);
     if (!res.ok)
       return { ok: false, error: `health check failed: ${res.status}` };
     const data = await res.json();
@@ -204,12 +205,12 @@ export class HttpBackend implements Backend {
   }
 
   async me(): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/me`);
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/me`);
     return await res.json();
   }
 
   async poll(since?: string, signal?: AbortSignal): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/poll`, {
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/poll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ since }),
@@ -219,7 +220,7 @@ export class HttpBackend implements Backend {
   }
 
   async channels(): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/channels`);
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/channels`);
     return await res.json();
   }
 
@@ -228,7 +229,7 @@ export class HttpBackend implements Backend {
     limit?: number,
     since?: number,
   ): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/read`, {
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/read`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel, limit, since }),
@@ -242,7 +243,7 @@ export class HttpBackend implements Backend {
     _author?: string,
     replyTo?: number,
   ): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/send`, {
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel, body, reply_to: replyTo }),
@@ -251,7 +252,7 @@ export class HttpBackend implements Backend {
   }
 
   async thread(channel: string, line: number): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/thread`, {
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/thread`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel, line }),
@@ -260,12 +261,12 @@ export class HttpBackend implements Backend {
   }
 
   async users(): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/users`);
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/users`);
     return await res.json();
   }
 
   async joinChannel(channel: string): Promise<ApiResponse> {
-    const res = await fetch(`${this.baseUrl()}/im/join`, {
+    const res = await localNetworkFetch(`${this.baseUrl()}/im/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel }),
