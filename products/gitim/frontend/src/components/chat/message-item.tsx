@@ -207,14 +207,27 @@ export function MessageItem({
         </div>
       )}
 
-      <div className="flex gap-3">
-        {/* Avatar */}
+      <div className="flex gap-2.5">
         <div
-          className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-sm"
-          style={{ backgroundColor: avatarColor(message.author) }}
-          title={message.author}
+          data-message-avatar-column
+          className="shrink-0 w-10 flex flex-col items-center gap-1 pt-0.5"
         >
-          {initials(message.author)}
+          <div
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-sm"
+            style={{ backgroundColor: avatarColor(message.author) }}
+            title={message.author}
+          >
+            {initials(message.author)}
+          </div>
+          {message.line_number > 0 && (
+            <span
+              data-message-line-badge
+              className="select-none rounded-sm border border-border/70 bg-surface/50 px-1 py-0.5 font-mono text-[11px] font-medium leading-none text-text-secondary tabular-nums"
+              title={`Line ${message.line_number}`}
+            >
+              L{message.line_number}
+            </span>
+          )}
         </div>
 
         <div className="flex-1 min-w-0">
@@ -260,18 +273,11 @@ export function MessageItem({
 
           {/* Message body */}
           <div
+            data-message-body
             className="text-sm cursor-pointer select-text leading-relaxed text-foreground/95"
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
           >
-            {message.line_number > 0 && (
-              <span
-                className="text-[10px] font-mono text-text-muted/40 mr-2 select-none align-baseline tabular-nums"
-                title={`Line ${message.line_number}`}
-              >
-                L{message.line_number}
-              </span>
-            )}
             <MessageBody
               body={message.body}
               onMentionClick={onMentionClick}

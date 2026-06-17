@@ -247,6 +247,22 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(receipt?.textContent).not.toContain("@lewis");
     expect(receipt?.textContent).toContain("@flame4");
   });
+
+  it("renders the line number under the avatar instead of before the message text", async () => {
+    const rendered = await renderList({
+      messages: [msg(42, "first line\nsecond line")],
+    });
+    root = rendered.root;
+
+    const item = rendered.container.querySelector<HTMLElement>("[data-line='42']");
+    const avatarColumn = item?.querySelector("[data-message-avatar-column]");
+    const lineBadge = avatarColumn?.querySelector("[data-message-line-badge]");
+    const body = item?.querySelector("[data-message-body]");
+
+    expect(lineBadge?.textContent).toBe("L42");
+    expect(body?.textContent?.startsWith("L42")).toBe(false);
+    expect(body?.textContent).toContain("first line");
+  });
 });
 
 // ---------------------------------------------------------------------------
