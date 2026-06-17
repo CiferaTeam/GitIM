@@ -2,7 +2,7 @@
 //!
 //! Recipients = union of:
 //!   1. Channel owner (`ChannelMeta.created_by`)
-//!   2. Parent-chain ancestor authors (walk `point_to` upward)
+//!   2. Parent-chain participants: ancestor authors and mentions
 //!   3. Explicit @mentions in the message body
 //!
 //! Output is sorted (BTreeSet-derived) and deduped. Returned as
@@ -31,7 +31,7 @@ pub fn compute_recipients(
         recipients.insert(channel_meta.created_by.clone());
     }
 
-    // Rule 2: parent chain — walk point_to upward, collect ancestor authors.
+    // Rule 2: parent chain — walk point_to upward, collect ancestor participants.
     // `visited` guards against cycles in malformed input (well-formed thread
     // files have strictly decreasing point_to, but daemon must not panic on
     // adversarial or race-corrupted state).
@@ -41,6 +41,9 @@ pub fn compute_recipients(
         match all_messages.iter().find(|m| m.line_number == cursor) {
             Some(ancestor) => {
                 recipients.insert(ancestor.author.as_str().to_string());
+                for handler in &ancestor.mentions {
+                    recipients.insert(handler.as_str().to_string());
+                }
                 cursor = ancestor.point_to;
             }
             None => break,
@@ -152,6 +155,21 @@ mod tests {
         let new = msg(2, 1, "bob", vec!["alice"]);
         let r = compute_recipients(&new, &meta("owner"), &[root]);
         assert_eq!(r, vec!["alice".to_string(), "owner".to_string()]);
+    }
+
+    #[test]
+    fn reply_inherits_ancestor_mentions() {
+        let root = msg(1, 0, "alice", vec!["reviewer"]);
+        let new = msg(2, 1, "bob", vec![]);
+        let r = compute_recipients(&new, &meta("owner"), &[root]);
+        assert_eq!(
+            r,
+            vec![
+                "alice".to_string(),
+                "owner".to_string(),
+                "reviewer".to_string(),
+            ]
+        );
     }
 
     #[test]

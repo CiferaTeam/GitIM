@@ -641,7 +641,7 @@ fn enrich_card_thread_entries_with_recipients(
 /// Render thread entries to JSON, attaching a `recipients` field to
 /// Message entries based on the channel kind:
 ///   - kind == "channel" → 3-rule routing via `compute_recipients`
-///     (channel owner + parent-chain ancestors + explicit mentions)
+///     (channel owner + parent-chain participants + explicit mentions)
 ///   - kind == "dm"      → recipients = sorted [member_a, member_b]
 ///   - other kinds       → no recipients (broadcast fallback applies
 ///     on the runtime side for legacy chat-like changes; card_thread

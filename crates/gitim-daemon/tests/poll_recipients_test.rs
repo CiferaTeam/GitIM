@@ -3,7 +3,7 @@
 //! attaches to each message entry.
 //!
 //! Channel messages get `recipients` computed from `gitim_core::recipients`
-//! (channel owner + parent chain + explicit mentions). DM messages get
+//! (channel owner + parent-chain participants + explicit mentions). DM messages get
 //! `recipients = sorted member pair`. Event entries never carry recipients.
 
 mod common;
@@ -38,7 +38,7 @@ async fn setup_repo() -> (tempfile::TempDir, Arc<AppState>, String) {
 }
 
 /// Channel messages must carry `recipients` computed via the 3-rule
-/// routing policy (owner + parent chain + mentions, sorted-deduped).
+/// routing policy (owner + parent-chain participants + mentions, sorted-deduped).
 #[tokio::test]
 async fn poll_attaches_recipients_to_channel_message_entries() {
     let (_tmp, state, cursor) = setup_repo().await;
@@ -55,11 +55,11 @@ async fn poll_attaches_recipients_to_channel_message_entries() {
     )
     .unwrap();
 
-    // Two messages: alice root, bob reply with explicit @charlie mention.
+    // Two messages: alice root mentioning charlie, bob reply with no direct mention.
     std::fs::write(
         root.join("channels/general.thread"),
-        "[L000001][P000000][@alice][20260517T100000Z] hello\n\
-         [L000002][P000001][@bob][20260517T100100Z] hi <@charlie>\n",
+        "[L000001][P000000][@alice][20260517T100000Z] hello <@charlie>\n\
+         [L000002][P000001][@bob][20260517T100100Z] hi\n",
     )
     .unwrap();
 
@@ -86,17 +86,17 @@ async fn poll_attaches_recipients_to_channel_message_entries() {
     let entries = general["entries"].as_array().unwrap();
     assert!(entries.len() >= 2, "expected at least two entries");
 
-    // alice's root: rule 1 only → ["alice"]
+    // alice's root: rule 1 + rule 3 → ["alice", "charlie"]
     let r1: Vec<String> = entries[0]["recipients"]
         .as_array()
         .expect("recipients on root message")
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(r1, vec!["alice".to_string()]);
+    assert_eq!(r1, vec!["alice".to_string(), "charlie".to_string()]);
 
-    // bob's reply @charlie: rule 1 (alice) + rule 2 (alice from parent) +
-    // rule 3 (charlie) → ["alice", "charlie"] after dedup+sort
+    // bob's reply: rule 1 (alice) + rule 2 (alice and charlie from parent) →
+    // ["alice", "charlie"] after dedup+sort
     let r2: Vec<String> = entries[1]["recipients"]
         .as_array()
         .expect("recipients on reply message")
@@ -125,8 +125,8 @@ async fn read_attaches_recipients_to_channel_message_entries() {
     .unwrap();
     std::fs::write(
         root.join("channels/general.thread"),
-        "[L000001][P000000][@alice][20260517T100000Z] hello\n\
-         [L000002][P000001][@bob][20260517T100100Z] hi <@charlie>\n",
+        "[L000001][P000000][@alice][20260517T100000Z] hello <@charlie>\n\
+         [L000002][P000001][@bob][20260517T100100Z] hi\n",
     )
     .unwrap();
 
@@ -161,7 +161,7 @@ async fn read_attaches_recipients_to_channel_message_entries() {
     assert_eq!(
         recipients,
         vec![
-            vec!["alice".to_string()],
+            vec!["alice".to_string(), "charlie".to_string()],
             vec!["alice".to_string(), "charlie".to_string()],
         ]
     );
