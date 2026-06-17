@@ -66,7 +66,7 @@ describe("InputArea card recipient preview", () => {
           replyTo={null}
           onReplyToChange={() => {}}
           mentionCandidates={[]}
-          recipientCard={{ created_by: "leader1", assignee: "leader2" }}
+          routing={{ kind: "card", card: { created_by: "leader1", assignee: "leader2" } }}
           currentUser="lewis"
           onSend={noopSend}
         />,
@@ -99,7 +99,7 @@ describe("InputArea card recipient preview", () => {
           replyTo={null}
           onReplyToChange={() => {}}
           mentionCandidates={[]}
-          recipientCard={{ created_by: "leader1", assignee: "lewis" }}
+          routing={{ kind: "card", card: { created_by: "leader1", assignee: "lewis" } }}
           currentUser="lewis"
           onSend={noopSend}
         />,

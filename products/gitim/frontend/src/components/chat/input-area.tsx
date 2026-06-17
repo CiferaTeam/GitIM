@@ -18,6 +18,15 @@ import {
 } from "../ui/dialog";
 import { Button } from "../ui/button";
 
+/**
+ * Routing context for the draft-recipient preview. Required and discriminated
+ * so every InputArea call site MUST declare how its messages route. A missing
+ * or wrong-kind context is a compile error — not a silent "no one else".
+ */
+export type RecipientRouting =
+  | { kind: "channel"; channel: Channel | null }
+  | { kind: "card"; card: Pick<Card, "created_by" | "assignee"> | null };
+
 interface InputAreaProps {
   /** Workspace identity from workspaceIdentity(mode, activeWorkspace). */
   workspaceKey: string | null;
@@ -29,12 +38,10 @@ interface InputAreaProps {
   replyTo: Message | null;
   onReplyToChange: (msg: Message | null) => void;
   mentionCandidates: string[];
-  /** Channel-scoped routing: group-owner + reply parent chain + mentions. */
-  recipientChannel?: Channel | null;
-  /** Card-scoped routing: reporter + assignee + mentions. Mutually exclusive
-   *  with recipientChannel — when set, the preview mirrors the daemon's
-   *  card_thread routing instead of channel membership. */
-  recipientCard?: Pick<Card, "created_by" | "assignee"> | null;
+  /** How this input's messages route — drives the recipient preview.
+   *  channel: group-owner + reply parent chain + mentions.
+   *  card:    reporter + assignee + mentions (daemon's card_thread routing). */
+  routing: RecipientRouting;
   messages?: Message[];
   currentUser?: string | null;
   disabled?: boolean;
@@ -64,8 +71,7 @@ export function InputArea({
   replyTo,
   onReplyToChange,
   mentionCandidates,
-  recipientChannel,
-  recipientCard,
+  routing,
   messages = [],
   currentUser,
   disabled,
@@ -87,20 +93,20 @@ export function InputArea({
   const isMobile = useIsMobile();
   const draftRecipients = useMemo(
     () =>
-      recipientCard
+      routing.kind === "card"
         ? computeCardDraftRecipients({
             body: text,
-            card: recipientCard,
+            card: routing.card,
             excludeSelf: currentUser,
           })
         : computeDraftRecipients({
             body: text,
-            channel: recipientChannel,
+            channel: routing.channel,
             replyTo,
             messages,
             excludeSelf: currentUser,
           }),
-    [text, recipientCard, recipientChannel, replyTo, messages, currentUser],
+    [text, routing, replyTo, messages, currentUser],
   );
 
   // Restore draft when scope changes

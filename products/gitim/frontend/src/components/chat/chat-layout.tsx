@@ -359,7 +359,7 @@ export function ChatLayout() {
               replyTo={replyTo}
               onReplyToChange={setReplyTo}
               mentionCandidates={mentionCandidates}
-              recipientChannel={currentChannelData}
+              routing={{ kind: "channel", channel: currentChannelData }}
               messages={messages}
               currentUser={currentUser}
               disabled={isGuest}

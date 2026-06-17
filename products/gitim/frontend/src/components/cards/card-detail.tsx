@@ -412,7 +412,7 @@ export function CardDetail() {
           replyTo={replyTo}
           onReplyToChange={setReplyTo}
           mentionCandidates={mentionCandidates}
-          recipientCard={card}
+          routing={{ kind: "card", card }}
           currentUser={currentUser}
           onSend={handleSend}
           placeholder="Write a note (Enter to send, Shift+Enter for newline)"
