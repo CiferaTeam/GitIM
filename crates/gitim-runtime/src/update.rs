@@ -610,7 +610,7 @@ fn persist_workspace_snapshot_to(
 fn workspace_snapshot_entries(
     state: &SharedRuntimeState,
 ) -> Vec<crate::user_config::WorkspaceEntry> {
-    let s = state.lock().unwrap();
+    let s = crate::preconditions::arc_mutex_lock(state);
     s.workspaces
         .values()
         .filter(|ctx| {
