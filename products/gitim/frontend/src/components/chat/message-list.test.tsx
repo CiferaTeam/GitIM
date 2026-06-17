@@ -248,6 +248,26 @@ describe("MessageList scroll-to-top history trigger", () => {
     expect(receipt?.textContent).toContain("@flame4");
   });
 
+  it("filters the message author from acknowledgement recipients", async () => {
+    const rendered = await renderList({
+      currentUser: "lewis",
+      messages: [
+        {
+          ...msg(1, "卡片进展"),
+          author: "kimi-provider",
+          recipients: ["kimi-provider", "leader1", "leader2"],
+        },
+      ],
+    });
+    root = rendered.root;
+
+    const receipt = rendered.container.querySelector("[data-message-receipt]");
+    expect(receipt?.textContent).toContain("🫡");
+    expect(receipt?.textContent).not.toContain("@kimi-provider");
+    expect(receipt?.textContent).toContain("@leader1");
+    expect(receipt?.textContent).toContain("@leader2");
+  });
+
   it("renders the line number under the avatar instead of before the message text", async () => {
     const rendered = await renderList({
       messages: [msg(42, "first line\nsecond line")],

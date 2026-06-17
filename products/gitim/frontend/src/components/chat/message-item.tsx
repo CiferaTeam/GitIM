@@ -50,9 +50,10 @@ function deliveryRecipients(message: Message, currentUser?: string | null): stri
   const seen = new Set<string>();
   const recipients: string[] = [];
   const current = currentUser?.trim();
+  const author = message.author.trim();
   for (const recipient of message.recipients ?? []) {
     const handler = recipient.trim();
-    if (!handler || handler === current || seen.has(handler)) continue;
+    if (!handler || handler === current || handler === author || seen.has(handler)) continue;
     seen.add(handler);
     recipients.push(handler);
   }
