@@ -1,5 +1,5 @@
 import { expandAllMentions } from "./expand-all-mentions";
-import type { Channel, Message } from "./types";
+import type { Card, Channel, Message } from "./types";
 
 const PROTOCOL_MENTION_RE = /<@([a-z0-9]([a-z0-9-]*[a-z0-9])?)>/g;
 
@@ -71,6 +71,37 @@ export function computeDraftRecipients({
       }),
     );
   }
+
+  if (self) recipients.delete(self);
+  return [...recipients].sort();
+}
+
+/**
+ * Recipients for a draft message in a card discussion thread.
+ *
+ * Cards are task records, not chat threads: the daemon's
+ * `compute_card_thread_recipients` routes by task role (reporter +
+ * assignee) plus explicit `<@handler>` mentions — never the channel
+ * membership, and `@all` is not expanded. This mirrors that exactly so
+ * the preview matches what the daemon will actually wake.
+ */
+export function computeCardDraftRecipients({
+  body,
+  card,
+  excludeSelf,
+}: {
+  body: string;
+  card: Pick<Card, "created_by" | "assignee"> | null | undefined;
+  excludeSelf?: string | null;
+}): string[] {
+  if (!card || !body.trim()) return [];
+
+  const recipients = new Set<string>();
+  const self = excludeSelf?.trim() || undefined;
+
+  addRecipient(recipients, card.created_by);
+  addRecipient(recipients, card.assignee);
+  addMentionRecipients(recipients, body);
 
   if (self) recipients.delete(self);
   return [...recipients].sort();

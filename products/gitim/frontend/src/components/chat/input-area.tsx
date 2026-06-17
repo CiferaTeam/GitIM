@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { computeDraftRecipients } from "../../lib/recipient-preview";
-import type { ApiResponse, Channel, Message } from "../../lib/types";
+import {
+  computeCardDraftRecipients,
+  computeDraftRecipients,
+} from "../../lib/recipient-preview";
+import type { ApiResponse, Card, Channel, Message } from "../../lib/types";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
 import { HandlerName } from "./handler-name";
@@ -26,7 +29,12 @@ interface InputAreaProps {
   replyTo: Message | null;
   onReplyToChange: (msg: Message | null) => void;
   mentionCandidates: string[];
+  /** Channel-scoped routing: group-owner + reply parent chain + mentions. */
   recipientChannel?: Channel | null;
+  /** Card-scoped routing: reporter + assignee + mentions. Mutually exclusive
+   *  with recipientChannel — when set, the preview mirrors the daemon's
+   *  card_thread routing instead of channel membership. */
+  recipientCard?: Pick<Card, "created_by" | "assignee"> | null;
   messages?: Message[];
   currentUser?: string | null;
   disabled?: boolean;
@@ -57,6 +65,7 @@ export function InputArea({
   onReplyToChange,
   mentionCandidates,
   recipientChannel,
+  recipientCard,
   messages = [],
   currentUser,
   disabled,
@@ -78,14 +87,20 @@ export function InputArea({
   const isMobile = useIsMobile();
   const draftRecipients = useMemo(
     () =>
-      computeDraftRecipients({
-        body: text,
-        channel: recipientChannel,
-        replyTo,
-        messages,
-        excludeSelf: currentUser,
-      }),
-    [text, recipientChannel, replyTo, messages, currentUser],
+      recipientCard
+        ? computeCardDraftRecipients({
+            body: text,
+            card: recipientCard,
+            excludeSelf: currentUser,
+          })
+        : computeDraftRecipients({
+            body: text,
+            channel: recipientChannel,
+            replyTo,
+            messages,
+            excludeSelf: currentUser,
+          }),
+    [text, recipientCard, recipientChannel, replyTo, messages, currentUser],
   );
 
   // Restore draft when scope changes
