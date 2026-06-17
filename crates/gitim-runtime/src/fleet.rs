@@ -9,7 +9,12 @@ use crate::http::{AgentActivityEvent, AgentInfo, SharedRuntimeState};
 use crate::preconditions;
 use crate::user_config::{FleetNodeEntry, FleetWorkspaceMapping};
 
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+/// Initial reconnect delay for a fleet SSE subscription after the stream drops.
+const SSE_RECONNECT_INITIAL: Duration = Duration::from_secs(2);
+/// Upper bound on the SSE reconnect backoff. A temporarily unreachable node
+/// backs off to this instead of being hammered (and logged) every 2s; once it
+/// comes back the subscription recovers within a minute.
+const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
 
 /// How often the tunnel watcher probes a healthy tunnel.
 const TUNNEL_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -18,9 +23,9 @@ const TUNNEL_BACKOFF_INITIAL: Duration = Duration::from_secs(5);
 /// Upper bound on the fleet tunnel watcher's retry backoff.
 const TUNNEL_BACKOFF_MAX: Duration = Duration::from_secs(120);
 
-/// Double the current backoff, capped at [`TUNNEL_BACKOFF_MAX`].
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(TUNNEL_BACKOFF_MAX)
+/// Double the current backoff, capped at `max`.
+fn next_backoff(current: Duration, max: Duration) -> Duration {
+    (current * 2).min(max)
 }
 
 /// Build a tunnel [`LaunchConfig`](crate::cli::tunnel::LaunchConfig) for a node's
@@ -60,7 +65,7 @@ async fn tunnel_watcher_loop(launch: crate::cli::tunnel::LaunchConfig) {
                     "fleet tunnel watcher: ensure_running failed, retrying"
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = next_backoff(backoff);
+                backoff = next_backoff(backoff, TUNNEL_BACKOFF_MAX);
             }
         }
     }
@@ -527,8 +532,9 @@ async fn subscribe_workspace_loop(
     };
     let url = workspace_events_url(&entry.base_url, &subscription.remote_workspace_id);
 
+    let mut backoff = SSE_RECONNECT_INITIAL;
     loop {
-        match client.get(&url).send().await {
+        let connected = match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 mark_connected(&state, &entry, &subscription);
                 if let Err(err) = consume_sse_response(&state, &entry, &subscription, resp).await {
@@ -542,6 +548,7 @@ async fn subscribe_workspace_loop(
                         "SSE stream ended".to_string(),
                     );
                 }
+                true
             }
             Ok(resp) => {
                 let error = format!("remote returned {}", resp.status());
@@ -552,13 +559,24 @@ async fn subscribe_workspace_loop(
                     "fleet SSE request returned non-success status",
                 );
                 mark_down(&state, &entry, &subscription, error);
+                false
             }
             Err(err) => {
                 tracing::warn!(node_id = %entry.node_id, workspace = %subscription.remote_workspace_id, error = %err, "fleet SSE request failed");
                 mark_down(&state, &entry, &subscription, err.to_string());
+                false
             }
+        };
+        // A connection that established (even briefly) resets the backoff so a
+        // healthy node reconnects fast; a node that stays down backs off
+        // exponentially, capping log spam at one line per SSE_RECONNECT_MAX.
+        if connected {
+            backoff = SSE_RECONNECT_INITIAL;
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
+        tokio::time::sleep(backoff).await;
+        if !connected {
+            backoff = next_backoff(backoff, SSE_RECONNECT_MAX);
+        }
     }
 }
 
@@ -820,20 +838,29 @@ mod tests {
     #[test]
     fn next_backoff_doubles_and_caps() {
         assert_eq!(
-            next_backoff(Duration::from_secs(5)),
+            next_backoff(Duration::from_secs(5), TUNNEL_BACKOFF_MAX),
             Duration::from_secs(10)
         );
         assert_eq!(
-            next_backoff(Duration::from_secs(10)),
+            next_backoff(Duration::from_secs(10), TUNNEL_BACKOFF_MAX),
             Duration::from_secs(20)
         );
         assert_eq!(
-            next_backoff(Duration::from_secs(80)),
+            next_backoff(Duration::from_secs(80), TUNNEL_BACKOFF_MAX),
             Duration::from_secs(120)
         );
         assert_eq!(
-            next_backoff(Duration::from_secs(120)),
+            next_backoff(Duration::from_secs(120), TUNNEL_BACKOFF_MAX),
             Duration::from_secs(120)
+        );
+        // SSE backoff doubles against its own (lower) ceiling.
+        assert_eq!(
+            next_backoff(Duration::from_secs(40), SSE_RECONNECT_MAX),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_backoff(SSE_RECONNECT_MAX, SSE_RECONNECT_MAX),
+            SSE_RECONNECT_MAX
         );
     }
 
