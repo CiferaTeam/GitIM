@@ -1802,6 +1802,7 @@ export async function updateAgent(
   slug: string,
   agentId: string,
   patch: {
+    display_name?: string;
     system_prompt?: string | null;
     model?: string | null;
     effort?: string | null;

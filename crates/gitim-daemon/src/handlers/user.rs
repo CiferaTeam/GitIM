@@ -92,12 +92,13 @@ pub async fn handle_register_user(
     Response::json(payload)
 }
 
-/// Overwrite the `introduction` field of an existing user's meta.yaml.
+/// Patch profile fields on an existing user's meta.yaml.
 ///
 /// Pre-conditions:
 ///   - the user must already be registered (we don't auto-register here —
 ///     the WebUI add-agent flow does that via onboard before calling us)
-///   - `introduction` must be ≤ MAX_INTRODUCTION_LEN bytes
+///   - `display_name`, when provided, must be non-empty and ≤ 64 bytes
+///   - `introduction`, when provided, must be ≤ MAX_INTRODUCTION_LEN bytes
 ///
 /// On success: rewrite `users/<handler>.meta.yaml`, git add + commit + push
 /// using the same author identity as register_user. Empty introduction
@@ -106,17 +107,26 @@ pub async fn handle_register_user(
 pub async fn handle_update_user(
     state: SharedState,
     handler: String,
-    introduction: String,
+    display_name: Option<String>,
+    introduction: Option<String>,
 ) -> Response {
     if let Err(e) = Handler::new(&handler) {
         return Response::error(format!("invalid handler: {}", e));
     }
 
-    if introduction.len() > MAX_INTRODUCTION_LEN {
-        return Response::error(format!(
-            "introduction exceeds {} byte limit",
-            MAX_INTRODUCTION_LEN
-        ));
+    if let Some(name) = display_name.as_deref() {
+        if name.trim().is_empty() || name.len() > 64 {
+            return Response::error("display_name must be 1-64 bytes");
+        }
+    }
+
+    if let Some(intro) = introduction.as_deref() {
+        if intro.len() > MAX_INTRODUCTION_LEN {
+            return Response::error(format!(
+                "introduction exceeds {} byte limit",
+                MAX_INTRODUCTION_LEN
+            ));
+        }
     }
 
     let meta_path = state
@@ -136,9 +146,23 @@ pub async fn handle_update_user(
         Err(e) => return Response::error(format!("failed to parse user meta: {}", e)),
     };
 
-    // Idempotent no-op: same value → return success without rewriting or
-    // creating a noisy "no-change" git commit.
-    if meta.introduction == introduction {
+    let mut display_name_changed = false;
+    let mut introduction_changed = false;
+
+    if let Some(new_display_name) = display_name {
+        if meta.display_name != new_display_name {
+            meta.display_name = new_display_name;
+            display_name_changed = true;
+        }
+    }
+    if let Some(new_introduction) = introduction {
+        if meta.introduction != new_introduction {
+            meta.introduction = new_introduction;
+            introduction_changed = true;
+        }
+    }
+
+    if !display_name_changed && !introduction_changed {
         let payload = gitim_core::responses::RegisterUserResponse {
             handler,
             exists: true,
@@ -146,7 +170,6 @@ pub async fn handle_update_user(
         return Response::json(payload);
     }
 
-    meta.introduction = introduction;
     let meta_str = match Response::yaml_string(&meta, "user meta") {
         Ok(meta_str) => meta_str,
         Err(resp) => return resp,
@@ -156,9 +179,15 @@ pub async fn handle_update_user(
     }
 
     let (author_name, author_email) = state.author_for(&handler);
+    let commit_subject = match (display_name_changed, introduction_changed) {
+        (true, true) => format!("user: update profile @{}", handler),
+        (true, false) => format!("user: update display_name @{}", handler),
+        (false, true) => format!("user: update introduction @{}", handler),
+        (false, false) => unreachable!(),
+    };
     if let Err(e) = state.git_storage.add_and_commit_as(
         &[&format!("users/{}.meta.yaml", handler)],
-        &format!("user: update introduction @{}", handler),
+        &commit_subject,
         Some((&author_name, &author_email)),
     ) {
         return Response::error(format!("update_user commit failed: {}", e));
@@ -687,7 +716,8 @@ mod tests {
         let resp = handle_update_user(
             state.clone(),
             "alice".to_string(),
-            "AI assistant for code review".to_string(),
+            None,
+            Some("AI assistant for code review".to_string()),
         )
         .await;
         assert!(resp.ok, "update_user failed: {:?}", resp.error);
@@ -702,13 +732,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_user_overwrites_display_name_and_introduction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        let resp = handle_update_user(
+            state.clone(),
+            "alice".to_string(),
+            Some("Alice W".to_string()),
+            Some("Updated blurb".to_string()),
+        )
+        .await;
+        assert!(resp.ok, "update_user failed: {:?}", resp.error);
+
+        let meta_path = state.repo_root.join("users/alice.meta.yaml");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: UserMeta = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(meta.display_name, "Alice W");
+        assert_eq!(meta.introduction, "Updated blurb");
+        assert_eq!(meta.role, "member");
+    }
+
+    #[tokio::test]
+    async fn update_user_display_name_only_preserves_introduction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+
+        let resp = handle_update_user(
+            state.clone(),
+            "alice".to_string(),
+            Some("Alice W".to_string()),
+            None,
+        )
+        .await;
+        assert!(resp.ok, "update_user failed: {:?}", resp.error);
+
+        let meta_path = state.repo_root.join("users/alice.meta.yaml");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: UserMeta = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(meta.display_name, "Alice W");
+        assert_eq!(meta.introduction, "GitIM user");
+    }
+
+    #[tokio::test]
     async fn update_user_idempotent_no_extra_commit() {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_state(tmp.path());
         register(&state, "alice").await;
 
-        let resp =
-            handle_update_user(state.clone(), "alice".to_string(), "GitIM user".to_string()).await;
+        let resp = handle_update_user(
+            state.clone(),
+            "alice".to_string(),
+            None,
+            Some("GitIM user".to_string()),
+        )
+        .await;
         assert!(resp.ok);
 
         // No new commit beyond `init` + the registration: same-value short-
@@ -732,7 +812,8 @@ mod tests {
         register(&state, "alice").await;
 
         let too_long = "x".repeat(MAX_INTRODUCTION_LEN + 1);
-        let resp = handle_update_user(state.clone(), "alice".to_string(), too_long).await;
+        let resp =
+            handle_update_user(state.clone(), "alice".to_string(), None, Some(too_long)).await;
         assert!(!resp.ok);
         assert!(
             resp.error.unwrap_or_default().contains("byte limit"),
@@ -749,7 +830,8 @@ mod tests {
         let resp = handle_update_user(
             state.clone(),
             "ghost".to_string(),
-            "should fail".to_string(),
+            None,
+            Some("should fail".to_string()),
         )
         .await;
         assert!(!resp.ok);
@@ -767,7 +849,8 @@ mod tests {
         let resp = handle_update_user(
             state.clone(),
             "INVALID_UPPER".to_string(),
-            "blurb".to_string(),
+            None,
+            Some("blurb".to_string()),
         )
         .await;
         assert!(!resp.ok);
@@ -786,7 +869,8 @@ mod tests {
         let resp = handle_update_user(
             state.clone(),
             "alice".to_string(),
-            "Senior engineer".to_string(),
+            None,
+            Some("Senior engineer".to_string()),
         )
         .await;
         assert!(resp.ok);

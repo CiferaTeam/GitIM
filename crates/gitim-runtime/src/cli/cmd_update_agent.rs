@@ -39,6 +39,7 @@ use crate::http::AGENT_FILE_MAX_BYTES;
 pub struct Args {
     pub workspace: Option<String>,
     pub id: String,
+    pub display_name: Option<String>,
     pub system_prompt: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
     pub model: Option<String>,
@@ -82,6 +83,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     // succeed at the runtime (every field maps to None / no-op), but it's
     // never what the user intended. Fail loud at the CLI boundary.
     if system_prompt.is_none()
+        && args.display_name.is_none()
         && args.model.is_none()
         && args.effort.is_none()
         && args.introduction.is_none()
@@ -91,7 +93,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     {
         return Err(CliError::InvalidConfig(
             "no update fields specified; pass at least one of \
-             --system-prompt, --model, --effort, --introduction, --env, --dotenv-file, --clear-session"
+             --display-name, --system-prompt, --model, --effort, --introduction, --env, --dotenv-file, --clear-session"
                 .to_string(),
         ));
     }
@@ -100,6 +102,7 @@ pub async fn run(client: &Client, args: Args) -> Result<i32, CliError> {
     let slug = resolve_workspace(client, args.workspace.as_deref()).await?;
 
     let body = build_update_body(BuildArgs {
+        display_name: args.display_name.as_deref(),
         system_prompt: system_prompt.as_deref(),
         model: args.model.as_deref(),
         effort: args.effort.as_deref(),
@@ -198,6 +201,7 @@ fn parse_env_entries(entries: &[String]) -> Result<Option<HashMap<String, String
 /// Borrowed view of the patch fields. Pulled out as its own type so
 /// `build_update_body` stays a pure single-arg function.
 struct BuildArgs<'a> {
+    display_name: Option<&'a str>,
     system_prompt: Option<&'a str>,
     model: Option<&'a str>,
     effort: Option<&'a str>,
@@ -217,6 +221,9 @@ struct BuildArgs<'a> {
 /// actually wipe the field. See module doc for the rationale.
 fn build_update_body(args: BuildArgs<'_>) -> serde_json::Value {
     let mut body = serde_json::Map::new();
+    if let Some(name) = args.display_name {
+        body.insert("display_name".to_string(), json!(name));
+    }
     if let Some(sp) = args.system_prompt {
         body.insert("system_prompt".to_string(), json!(sp));
     }
@@ -254,6 +261,7 @@ mod tests {
     #[test]
     fn build_body_system_prompt_only() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: Some("new prompt"),
             model: None,
             effort: None,
@@ -273,11 +281,29 @@ mod tests {
         assert_eq!(obj.len(), 1, "exactly one key");
     }
 
+    #[test]
+    fn build_body_display_name_only() {
+        let body = build_update_body(BuildArgs {
+            display_name: Some("Alice W"),
+            system_prompt: None,
+            model: None,
+            effort: None,
+            introduction: None,
+            env: None,
+            dotenv: None,
+            clear_session: false,
+        });
+        let obj = body.as_object().expect("body is object");
+        assert_eq!(obj["display_name"], "Alice W");
+        assert_eq!(obj.len(), 1);
+    }
+
     /// Effort set forwards the level; an explicit empty string forwards `""`
     /// so the runtime's triple-option handler clears the field.
     #[test]
     fn build_body_effort_set_and_clear() {
         let set = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: Some("max"),
@@ -289,6 +315,7 @@ mod tests {
         assert_eq!(set["effort"], "max");
 
         let clear = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: Some(""),
@@ -307,6 +334,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("KEY".to_string(), "VAL".to_string());
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: Some("X"),
             model: Some("Y"),
             effort: Some("low"),
@@ -332,6 +360,7 @@ mod tests {
     #[test]
     fn build_body_all_none_emits_empty_object() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: None,
@@ -353,6 +382,7 @@ mod tests {
     fn build_body_empty_env_map_emits_empty_object_value() {
         let env = HashMap::new();
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: None,
@@ -369,6 +399,7 @@ mod tests {
     #[test]
     fn build_body_no_env_omits_key() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: Some("X"),
             model: None,
             effort: None,
@@ -389,6 +420,7 @@ mod tests {
         env.insert("DEBUG".to_string(), "1".to_string());
         env.insert("PORT".to_string(), "8080".to_string());
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: None,
@@ -504,6 +536,7 @@ mod tests {
     #[test]
     fn build_body_clear_session_true() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: None,
             effort: None,
@@ -523,6 +556,7 @@ mod tests {
     #[test]
     fn build_body_clear_session_false_omits_key() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: Some("X"),
             model: None,
             effort: None,
@@ -543,6 +577,7 @@ mod tests {
     #[test]
     fn build_body_clear_session_with_model() {
         let body = build_update_body(BuildArgs {
+            display_name: None,
             system_prompt: None,
             model: Some("claude-opus-4-7"),
             effort: None,

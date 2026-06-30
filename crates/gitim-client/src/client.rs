@@ -155,23 +155,25 @@ impl GitimClient {
         .await
     }
 
-    /// Overwrite an already-registered user's `introduction` blurb.
+    /// Patch an already-registered user's profile fields.
     /// The runtime calls this after `add_agent` (post-onboard) and on
     /// `PATCH /workspaces/{slug}/agents/{id}` when the WebUI submits
-    /// a new value. The 256-byte ceiling is enforced daemon-side too.
+    /// profile changes. Field validation is enforced daemon-side.
     pub async fn update_user(
         &self,
         handler: &str,
-        introduction: &str,
+        display_name: Option<&str>,
+        introduction: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
-            "update_user",
-            json!({
-                "handler": handler,
-                "introduction": introduction,
-            }),
-        )
-        .await
+        let mut body = serde_json::Map::new();
+        body.insert("handler".to_string(), json!(handler));
+        if let Some(name) = display_name {
+            body.insert("display_name".to_string(), json!(name));
+        }
+        if let Some(intro) = introduction {
+            body.insert("introduction".to_string(), json!(intro));
+        }
+        self.request("update_user", Value::Object(body)).await
     }
 
     pub async fn onboard(

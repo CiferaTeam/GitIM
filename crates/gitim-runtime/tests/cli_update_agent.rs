@@ -111,6 +111,7 @@ fn baseline_args(workspace: Option<String>, id: &str) -> cmd_update_agent::Args 
     cmd_update_agent::Args {
         workspace,
         id: id.to_string(),
+        display_name: None,
         system_prompt: None,
         system_prompt_file: None,
         model: None,

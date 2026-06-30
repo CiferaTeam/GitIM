@@ -272,8 +272,9 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         } => handle_register_user(state, handler, display_name, role, introduction).await,
         Request::UpdateUser {
             handler,
+            display_name,
             introduction,
-        } => handle_update_user(state, handler, introduction).await,
+        } => handle_update_user(state, handler, display_name, introduction).await,
         Request::Poll { since } => handle_poll(state, since).await,
         Request::Stop => handle_stop(state).await,
         Request::Onboard {

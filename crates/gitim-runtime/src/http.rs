@@ -3284,7 +3284,7 @@ async fn agents_add(
             if let Some(intro) = req.introduction.as_deref() {
                 if !intro.is_empty() {
                     let client = GitimClient::new(&handle.repo_root);
-                    match client.update_user(&req.handler, intro).await {
+                    match client.update_user(&req.handler, None, Some(intro)).await {
                         Ok(resp) if resp.ok => {}
                         Ok(resp) => {
                             tracing::warn!(
@@ -3882,6 +3882,8 @@ where
 #[derive(Deserialize, Default)]
 struct AgentUpdateRequest {
     #[serde(default, deserialize_with = "deser_triple_option")]
+    display_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deser_triple_option")]
     system_prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "deser_triple_option")]
     model: Option<Option<String>>,
@@ -3989,6 +3991,22 @@ async fn agents_patch(
                 .into_response();
         }
     };
+
+    let display_name_patch: Option<String> = match &req.display_name {
+        Some(Some(name)) if !name.trim().is_empty() && name.len() <= 64 => Some(name.clone()),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new("display_name must be 1-64 bytes")),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+
+    if let Some(name) = &display_name_patch {
+        me.display_name = Some(name.clone());
+    }
 
     // Three-state semantics for system_prompt:
     //   absent (None)       → no-op
@@ -4254,14 +4272,19 @@ async fn agents_patch(
         );
     }
 
-    // Introduction lives in the git-tracked `users/<handler>.meta.yaml`,
-    // not me.json — we route it through the daemon so the commit + push
-    // flow goes through the same lock/sync paths as register_user. The
-    // daemon stays alive even when the agent loop is offline (stop_agent
-    // only aborts the loop task), so the IPC connection is reliable.
-    if let Some(intro) = introduction_patch.as_deref() {
+    // User profile fields live in the git-tracked `users/<handler>.meta.yaml`.
+    // Route them through the daemon so commit + push uses the same lock/sync
+    // path as register_user.
+    if display_name_patch.is_some() || introduction_patch.is_some() {
         let client = GitimClient::new(&repo_root);
-        match client.update_user(&agent_id, intro).await {
+        match client
+            .update_user(
+                &agent_id,
+                display_name_patch.as_deref(),
+                introduction_patch.as_deref(),
+            )
+            .await
+        {
             Ok(resp) if resp.ok => {}
             Ok(resp) => {
                 return (
@@ -4316,6 +4339,9 @@ async fn agents_patch(
                 }
                 if let Some(env_map) = &req.env {
                     info.env = env_map.clone();
+                }
+                if let Some(name) = &display_name_patch {
+                    info.display_name = name.clone();
                 }
                 if introduction_patch.is_some() {
                     info.introduction = introduction_patch.clone();
@@ -6829,6 +6855,13 @@ mod tests {
         let body = serde_json::json!({ "introduction": "AI assistant" });
         let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
         assert_eq!(req.introduction, Some(Some("AI assistant".to_string())));
+    }
+
+    #[test]
+    fn agent_update_request_display_name_string_sets() {
+        let body = serde_json::json!({ "display_name": "Alice W" });
+        let req: AgentUpdateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.display_name, Some(Some("Alice W".to_string())));
     }
 
     // ─── Cron timeline coupling guard ────────────────────────────────────────

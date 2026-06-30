@@ -73,6 +73,7 @@ export function AgentDetail() {
   const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
   // Claude-only effort draft. "" = provider default.
   const [draftEffort, setDraftEffort] = useState("");
+  const [draftDisplayName, setDraftDisplayName] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
   const [draftIntroduction, setDraftIntroduction] = useState("");
   const [draftEnv, setDraftEnv] = useState<EnvVar[]>([]);
@@ -145,6 +146,7 @@ export function AgentDetail() {
   function enterEditMode() {
     if (!agent) return;
     const currentModel = agent.model ?? "";
+    setDraftDisplayName(agent.name ?? agent.id);
     applyDraftModelSelection(currentModel);
     setDraftPrompt(agent.systemPrompt ?? "");
     setDraftIntroduction(agent.introduction ?? "");
@@ -166,6 +168,7 @@ export function AgentDetail() {
       if (selectedDraftModel !== (agent.model ?? "")) return true;
       // Effort
       if (draftEffort !== (agent.effort ?? "")) return true;
+      if (draftDisplayName.trim() !== (agent.name ?? "").trim()) return true;
       // Prompt
       if (draftPrompt.trim() !== (agent.systemPrompt ?? "").trim()) return true;
       // Introduction
@@ -211,6 +214,7 @@ export function AgentDetail() {
       system_prompt?: string | null;
       model?: string | null;
       effort?: string | null;
+      display_name?: string;
       introduction?: string | null;
       env?: Record<string, string>;
     } = {};
@@ -234,6 +238,17 @@ export function AgentDetail() {
     const effortChanged = effortEditable && newEffort !== oldEffort;
     if (effortChanged) {
       patch.effort = newEffort === "" ? null : newEffort;
+    }
+
+    const newDisplayName = draftDisplayName.trim();
+    const oldDisplayName = (agent.name ?? "").trim();
+    const displayNameChanged = newDisplayName !== oldDisplayName;
+    if (displayNameChanged) {
+      if (newDisplayName === "") {
+        setEditError("Display name is required");
+        return;
+      }
+      patch.display_name = newDisplayName;
     }
 
     const newPrompt = draftPrompt.trim();
@@ -294,6 +309,9 @@ export function AgentDetail() {
       }
       if (effortChanged) {
         lines.push("Effort → applies on next start (session preserved)");
+      }
+      if (displayNameChanged) {
+        lines.push("Display name → committed to users meta and synced");
       }
       if (promptChanged) {
         lines.push(
@@ -407,6 +425,19 @@ export function AgentDetail() {
 
       {/* Info grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8 p-5 rounded-xl border border-border bg-card/50">
+        <Field label="Display Name">
+          {mode === "view" ? (
+            <span className="text-text-secondary">{agent.name}</span>
+          ) : (
+            <Input
+              value={draftDisplayName}
+              onChange={(e) => setDraftDisplayName(e.target.value.slice(0, 64))}
+              maxLength={64}
+              disabled={mode === "saving"}
+            />
+          )}
+        </Field>
+
         <Field label="Repo Path">
           <code className="text-sm font-mono text-text-secondary bg-background/60 px-2 py-1 rounded">
             {agent.repoPath}

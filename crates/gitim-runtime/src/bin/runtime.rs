@@ -167,6 +167,9 @@ enum Command {
         /// `PATCH /workspaces/{slug}/agents/{id}`.
         #[arg(long)]
         id: String,
+        /// Replacement display name.
+        #[arg(long = "display-name")]
+        display_name: Option<String>,
         /// Inline replacement system prompt. Mutually exclusive with
         /// `--system-prompt-file`.
         #[arg(long = "system-prompt", conflicts_with = "system_prompt_file")]
@@ -468,6 +471,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::UpdateAgent {
             workspace,
             id,
+            display_name,
             system_prompt,
             system_prompt_file,
             model,
@@ -480,6 +484,7 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
             let args = cmd_update_agent::Args {
                 workspace,
                 id,
+                display_name,
                 system_prompt,
                 system_prompt_file,
                 model,
@@ -1590,6 +1595,7 @@ mod argv_subcommand_tests {
             Some(Command::UpdateAgent {
                 workspace,
                 id,
+                display_name,
                 system_prompt,
                 system_prompt_file,
                 model,
@@ -1601,6 +1607,7 @@ mod argv_subcommand_tests {
             }) => {
                 assert!(workspace.is_none());
                 assert_eq!(id, "agent-1");
+                assert!(display_name.is_none());
                 assert!(system_prompt.is_none());
                 assert!(system_prompt_file.is_none());
                 assert!(model.is_none());
@@ -1649,6 +1656,28 @@ mod argv_subcommand_tests {
                 assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
                 assert_eq!(introduction.as_deref(), Some("new blurb"));
                 assert!(!clear_session);
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_with_display_name() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "agent-1",
+            "--display-name",
+            "Alice W",
+        ])
+        .expect("parse must succeed");
+        match args.command {
+            Some(Command::UpdateAgent {
+                id, display_name, ..
+            }) => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(display_name.as_deref(), Some("Alice W"));
             }
             other => panic!("expected UpdateAgent, got {other:?}"),
         }

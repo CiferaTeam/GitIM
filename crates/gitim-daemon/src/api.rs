@@ -188,7 +188,10 @@ pub enum Request {
     #[serde(rename = "update_user")]
     UpdateUser {
         handler: String,
-        introduction: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        introduction: Option<String>,
     },
     #[serde(rename = "onboard")]
     Onboard {

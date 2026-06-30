@@ -36,6 +36,7 @@ fn client_for(addr: SocketAddr) -> Client {
 }
 
 #[tokio::test]
+#[ignore = "runs a real claude hello probe; host auth/network latency can exceed the CLI client timeout"]
 async fn test_preflight_claude_returns_status() {
     // `/preflight/claude` shells out to the claude CLI's --version and a real
     // hello probe. Whether the binary exists or not on the test machine, the
