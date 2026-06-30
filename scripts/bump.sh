@@ -62,8 +62,8 @@ if [ -z "$COMMIT_LOG" ]; then
   COMMIT_LOG="(no changes)"
 fi
 
-if ! command -v claude &>/dev/null; then
-  echo "Warning: claude CLI not found, using raw commit log"
+if ! command -v codex &>/dev/null; then
+  echo "Warning: codex CLI not found, using raw commit log"
   {
     echo "# GitIM ${NEXT_TAG}"
     echo ""
@@ -72,7 +72,11 @@ if ! command -v claude &>/dev/null; then
     echo "$COMMIT_LOG" | sed 's/^/- /'
   } > "$NOTES_FILE"
 else
-  claude -p "你是一个 release notes 生成器。根据以下 git commit log，生成简洁的中文 release notes。
+  codex exec \
+    --skip-git-repo-check \
+    --sandbox read-only \
+    --output-last-message "$NOTES_FILE" \
+    "你是一个 release notes 生成器。根据以下 git commit log，生成简洁的中文 release notes。
 
 要求：
 - 标题：# GitIM ${NEXT_TAG}
@@ -83,7 +87,7 @@ else
 - 不要写开头寒暄，直接输出 markdown
 
 Commits:
-${COMMIT_LOG}" > "$NOTES_FILE"
+${COMMIT_LOG}" >/dev/null
 fi
 
 echo "==> Release notes:"
