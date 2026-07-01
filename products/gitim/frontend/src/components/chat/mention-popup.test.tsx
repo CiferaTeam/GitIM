@@ -18,6 +18,7 @@ async function renderPopup(filter: string): Promise<{
     userInfos: [
       { handler: "alice", display_name: "Alice Chen" },
       { handler: "bob", display_name: "Bob Smith" },
+      { handler: "spark", display_name: "火花" },
     ],
   });
 
@@ -28,7 +29,7 @@ async function renderPopup(filter: string): Promise<{
     root.render(
       <DisplayNameDirectoryProvider>
         <MentionPopup
-          users={["alice", "bob"]}
+          users={["alice", "bob", "spark"]}
           filter={filter}
           onSelect={() => {}}
           onClose={() => {}}
@@ -43,6 +44,7 @@ async function renderPopup(filter: string): Promise<{
 afterEach(() => {
   useAgentStore.setState({ agents: [] });
   useChatStore.setState({ userInfos: [] });
+  document.body.innerHTML = "";
 });
 
 describe("MentionPopup two-segment filter", () => {
@@ -66,8 +68,24 @@ describe("MentionPopup two-segment filter", () => {
   it("renders both segments for each candidate", async () => {
     const { container, root } = await renderPopup("");
     const buttons = container.querySelectorAll("button");
-    expect(buttons.length).toBe(2);
+    expect(buttons.length).toBe(3);
     expect(buttons[0].textContent).toBe("Alice Chen@alice");
+    act(() => root.unmount());
+  });
+
+  it("matches multi-word display names", async () => {
+    const { container, root } = await renderPopup("alice c");
+    const buttons = container.querySelectorAll("button");
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].textContent).toBe("Alice Chen@alice");
+    act(() => root.unmount());
+  });
+
+  it("matches non-ASCII display names", async () => {
+    const { container, root } = await renderPopup("火花");
+    const buttons = container.querySelectorAll("button");
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].textContent).toBe("火花@spark");
     act(() => root.unmount());
   });
 });

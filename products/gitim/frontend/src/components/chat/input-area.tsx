@@ -134,7 +134,9 @@ export function InputArea({
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
-    const match = textBeforeCursor.match(/@([\w-]*)$/);
+    // Allow Unicode display names and spaces (multi-word names) while stopping
+    // at protocol markers that cannot be part of a mention query.
+    const match = textBeforeCursor.match(/@([^@\n\r<>]*)$/);
     if (match) {
       setMentionFilter(match[1]);
       setMentionStart(match.index!);
