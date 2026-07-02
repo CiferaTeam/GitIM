@@ -3674,9 +3674,9 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     let mut agent_loop = AgentLoop::with_config(&repo_root, &loop_config)
         .map_err(|e| format!("failed to create agent loop: {e}"))?;
 
-    agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
+    agent_loop.set_activity_tx_with_workspace(activity_tx.clone(), slug.to_string());
     agent_loop.set_runtime_state(state.clone());
-    agent_loop.set_workspace_root(workspace_root);
+    agent_loop.set_workspace_root(workspace_root.clone());
 
     // Inject the same Arc<AtomicBool> stored on AgentInfo so the sampler
     // and the loop read/write the same flag without a lock.
@@ -3689,6 +3689,42 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     };
     if let Some(flag) = is_working {
         agent_loop.set_is_working(flag);
+    }
+
+    // Idempotently spawn one QuickSessionLoop per workspace.
+    // The loop polls for quick sessions assigned to local agents and
+    // executes turns through fresh provider instances.
+    {
+        let s = crate::preconditions::arc_mutex_lock(state);
+        if let Some(ctx) = s.workspaces.get(slug) {
+            if !ctx
+                .quick_session_loop_running
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let qs_repo_root = repo_root.clone();
+                let qs_workspace_root = workspace_root.clone();
+                let qs_state = state.clone();
+                let qs_slug = slug.to_string();
+                let qs_activity_tx = activity_tx.clone();
+                let qs_agent_locks = crate::quick_session_loop::new_agent_lock_map();
+                let qs_poll_interval = std::time::Duration::from_secs(5);
+
+                tokio::spawn(async move {
+                    crate::quick_session_loop::run_quick_session_loop(
+                        qs_repo_root,
+                        qs_workspace_root,
+                        qs_state,
+                        qs_slug,
+                        qs_activity_tx,
+                        qs_agent_locks,
+                        qs_poll_interval,
+                    )
+                    .await;
+                });
+
+                tracing::info!(workspace = %slug, "quick session loop spawned");
+            }
+        }
     }
 
     let owned_id = agent_id.to_string();

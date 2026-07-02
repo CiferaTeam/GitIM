@@ -18,6 +18,9 @@ pub struct WorkspaceContext {
     /// Flipped by sync_loop after 3 consecutive auth failures; per-workspace so
     /// one broken PAT doesn't mute sync for other workspaces.
     pub auth_failed: Arc<AtomicBool>,
+    /// Idempotency guard for QuickSessionLoop spawn — true prevents duplicate
+    /// loop instances when multiple agents start up in the same workspace.
+    pub quick_session_loop_running: Arc<AtomicBool>,
     pub git_config: Option<WorkspaceConfig>,
 }
 
@@ -33,6 +36,7 @@ impl WorkspaceContext {
             agents: HashMap::new(),
             activity_tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
+            quick_session_loop_running: Arc::new(AtomicBool::new(false)),
             git_config: None,
         }
     }

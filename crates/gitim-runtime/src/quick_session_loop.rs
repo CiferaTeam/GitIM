@@ -1,0 +1,428 @@
+/// QuickSessionLoop — background task that executes quick session turns.
+///
+/// Runs alongside AgentLoop to handle quick-session messages assigned to
+/// agents on this runtime. Key invariants:
+///
+/// - One QuickSessionLoop per workspace, not per agent.
+/// - Per-agent FIFO serialization via shared `AgentLockMap` so main
+///   AgentLoop and QuickSessionLoop never race on the same provider.
+/// - Fresh provider per turn: instantiate, execute, tear down.
+/// - Title gate enforced in the execution path before any turn.
+/// - Status `needs_title` → skip; `active`/`running` → eligible.
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gitim_agent_provider::{create, ExecOptions, ExecStatus};
+use gitim_client::GitimClient;
+use serde_json::{json, Value};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{debug, info, warn};
+
+use crate::agent_loop::build_provider_config;
+use crate::http::{AgentActivityEvent, AgentInfo, SharedRuntimeState};
+use crate::quick_session_runner::{check_title_gate, title_gate_prompt_instruction};
+use gitim_core::types::{QuickSessionMeta, QuickSessionStatus};
+
+/// Shared per-agent lock map to serialize main agent loop and quick session turns.
+pub type AgentLockMap = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
+
+pub fn new_agent_lock_map() -> AgentLockMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+async fn acquire_agent_lock(locks: &AgentLockMap, agent_id: &str) -> Arc<Mutex<()>> {
+    let mut map = locks.lock().await;
+    map.entry(agent_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Run the quick session loop indefinitely.
+///
+/// Periodic daemon poll for sessions → dispatch turns for local agents.
+/// Idempotent per workspace: if multiple agents share a workspace, only
+/// one loop instance should run. The caller guards against duplicate
+/// spawns via `WorkspaceContext::quick_session_loop_running`.
+pub async fn run_quick_session_loop(
+    repo_root: PathBuf,
+    _workspace_root: PathBuf,
+    state: SharedRuntimeState,
+    slug: String,
+    activity_tx: broadcast::Sender<AgentActivityEvent>,
+    agent_locks: AgentLockMap,
+    poll_interval: Duration,
+) {
+    info!(slug = %slug, "quick session loop started");
+
+    let client = GitimClient::new(&repo_root);
+
+    loop {
+        match poll_and_process_sessions(&client, &state, &slug, &activity_tx, &agent_locks).await {
+            Ok(n) if n > 0 => {
+                info!(processed = n, slug = %slug, "quick session loop: turn(s) executed");
+            }
+            Err(e) => {
+                warn!(error = %e, slug = %slug, "quick session loop: error");
+            }
+            _ => {}
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// One poll cycle: list sessions → for each eligible session, execute turn.
+async fn poll_and_process_sessions(
+    client: &GitimClient,
+    state: &SharedRuntimeState,
+    slug: &str,
+    activity_tx: &broadcast::Sender<AgentActivityEvent>,
+    agent_locks: &AgentLockMap,
+) -> Result<usize, String> {
+    let resp = client
+        .request("list_quick_sessions", json!({"include_archived": false}))
+        .await
+        .map_err(|e| format!("list_quick_sessions daemon call failed: {e}"))?;
+
+    // Parse list response — daemon returns JSON array of QuickSessionListItem
+    let data = resp
+        .data
+        .ok_or_else(|| "list_quick_sessions: missing data".to_string())?;
+
+    let sessions: &Vec<Value> = data
+        .as_array()
+        .ok_or_else(|| format!("list_quick_sessions: expected array, got {:?}", data))?;
+
+    let mut processed = 0;
+
+    for session in sessions {
+        let session_id = match session.get("id").and_then(|v: &Value| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+        let agent_id = match session.get("agent_id").and_then(|v: &Value| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+        let status = session
+            .get("status")
+            .and_then(|v: &Value| v.as_str())
+            .unwrap_or("");
+
+        // Only process active/running sessions
+        if status != "active" && status != "running" {
+            continue;
+        }
+
+        // Check if the agent is hosted on this runtime
+        let agent_info: Option<AgentInfo> = {
+            let s = crate::preconditions::arc_mutex_lock(state);
+            s.workspaces
+                .get(slug)
+                .and_then(|ctx| ctx.agents.get(agent_id))
+                .cloned()
+        };
+
+        let agent_info = match agent_info {
+            Some(info) => info,
+            None => {
+                debug!(agent_id = %agent_id, "agent not local, skipping quick session");
+                continue;
+            }
+        };
+
+        // Acquire per-agent lock to serialize with main AgentLoop
+        let lock = acquire_agent_lock(agent_locks, agent_id).await;
+        let _guard = lock.lock().await;
+
+        if let Err(e) =
+            execute_quick_session_turn(client, session_id, &agent_info, activity_tx, slug).await
+        {
+            warn!(
+                session_id = %session_id,
+                agent_id = %agent_id,
+                error = %e,
+                "quick session turn failed"
+            );
+            // Emit error event scoped to this session
+            let _ = activity_tx.send(AgentActivityEvent {
+                agent_id: agent_id.to_string(),
+                workspace_id: slug.to_string(),
+                event_type: "error".to_string(),
+                detail: format!("quick session turn failed: {}", e),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                scope: "quick_session".to_string(),
+                session_id: Some(session_id.to_string()),
+                ref_: None,
+            });
+        }
+
+        processed += 1;
+    }
+
+    Ok(processed)
+}
+
+/// Execute one turn for a quick session.
+///
+/// 1. Read session details (meta + thread)
+/// 2. Verify title gate (status must be active/running, not needs_title)
+/// 3. Check last message — if it's from the agent, already processed
+/// 4. Build a fresh provider from agent config
+/// 5. Execute one turn with thread context
+/// 6. Write assistant response to daemon
+/// 7. Teardown provider (on drop)
+async fn execute_quick_session_turn(
+    client: &GitimClient,
+    session_id: &str,
+    agent_info: &AgentInfo,
+    activity_tx: &broadcast::Sender<AgentActivityEvent>,
+    workspace_id: &str,
+) -> Result<(), String> {
+    // 1. Read session details
+    let detail_resp = client
+        .request("read_quick_session", json!({"session_id": session_id}))
+        .await
+        .map_err(|e| format!("read_quick_session daemon call failed: {e}"))?;
+
+    let detail_data = detail_resp
+        .data
+        .ok_or_else(|| "read_quick_session: missing data".to_string())?;
+
+    let meta_value = detail_data
+        .get("meta")
+        .ok_or_else(|| "read_quick_session: missing meta".to_string())?;
+
+    let meta: QuickSessionMeta =
+        serde_json::from_value(meta_value.clone()).map_err(|e| format!("parse meta: {e}"))?;
+
+    let thread_raw = detail_data
+        .get("thread")
+        .and_then(|v: &Value| v.as_str())
+        .unwrap_or("");
+
+    // 2. Title gate enforcement
+    if meta.status == QuickSessionStatus::NeedsTitle {
+        // Session is blocked on title — emit event and skip
+        let _ = activity_tx.send(AgentActivityEvent {
+            agent_id: agent_info.handler.clone(),
+            workspace_id: workspace_id.to_string(),
+            event_type: "quick_session_blocked".to_string(),
+            detail: "title required before assistant content".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            scope: "quick_session".to_string(),
+            session_id: Some(session_id.to_string()),
+            ref_: None,
+        });
+        return Ok(()); // Not an error — title not set yet
+    }
+
+    check_title_gate(&meta)?;
+
+    // 3. Check last message author — skip if already answered by agent
+    if let Some(last_line) = thread_raw.lines().last() {
+        if let Some(author) = parse_thread_author(last_line) {
+            if author == agent_info.handler {
+                debug!(
+                    session_id = %session_id,
+                    "last message is from agent; session already processed"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    if thread_raw.is_empty() {
+        return Err("empty thread — nothing to respond to".to_string());
+    }
+
+    // 4. Build a fresh provider from agent config
+    let provider_type = agent_info.provider.as_deref().unwrap_or("claude");
+    let handler = &agent_info.handler;
+    let provider_config = build_provider_config(provider_type, handler, agent_info.env.clone())
+        .map_err(|e| format!("build_provider_config: {e}"))?;
+
+    let provider =
+        create(provider_type, provider_config).map_err(|e| format!("create provider: {e}"))?;
+
+    // 5. Build system prompt: base + title gate instruction
+    let base_prompt = agent_info.system_prompt.as_deref().unwrap_or("");
+    let system_prompt = if base_prompt.is_empty() {
+        title_gate_prompt_instruction().to_string()
+    } else {
+        format!("{}\n\n{}", base_prompt, title_gate_prompt_instruction())
+    };
+
+    // Emit thinking event scoped to this session
+    let _ = activity_tx.send(AgentActivityEvent {
+        agent_id: handler.clone(),
+        workspace_id: workspace_id.to_string(),
+        event_type: "thinking".to_string(),
+        detail: format!("quick session turn: {}", session_id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        scope: "quick_session".to_string(),
+        session_id: Some(session_id.to_string()),
+        ref_: Some(meta.ref_string()),
+    });
+
+    // Feed the full thread as conversation context
+    let prompt = format_thread_for_prompt(thread_raw);
+
+    let cwd = PathBuf::from(&agent_info.repo_path);
+    let opts = ExecOptions {
+        cwd: Some(cwd),
+        model: agent_info.model.clone(),
+        effort: agent_info.effort.clone(),
+        system_prompt: Some(system_prompt),
+        max_turns: Some(1),
+        resume_token: None,
+        ..Default::default()
+    };
+
+    // 6. Execute turn
+    info!(
+        session_id = %session_id,
+        agent_id = %handler,
+        provider = %provider_type,
+        "quick session: executing turn"
+    );
+
+    let mut session = provider
+        .execute(&prompt, opts)
+        .await
+        .map_err(|e| format!("provider execute failed: {e}"))?;
+
+    // Drain events and collect assistant output
+    let mut assistant_output = String::new();
+    while let Some(event) = session.events.recv().await {
+        if let gitim_agent_provider::Event::Text { content } = &event {
+            assistant_output.push_str(content);
+        }
+    }
+
+    let exec_result = session
+        .result
+        .await
+        .map_err(|_| "result channel closed".to_string())?;
+
+    match exec_result.status {
+        ExecStatus::Completed | ExecStatus::Aborted => {
+            if assistant_output.is_empty() {
+                assistant_output = exec_result.output;
+            }
+        }
+        _ => {
+            return Err(format!(
+                "provider execution failed: {:?}",
+                exec_result.status
+            ));
+        }
+    }
+
+    if assistant_output.trim().is_empty() {
+        warn!(session_id = %session_id, "assistant output empty");
+        return Ok(());
+    }
+
+    // 7. Write assistant response via daemon
+    client
+        .request(
+            "send_quick_session_message",
+            json!({
+                "session_id": session_id,
+                "body": assistant_output.trim(),
+                "author": handler,
+            }),
+        )
+        .await
+        .map_err(|e| format!("send_quick_session_message failed: {e}"))?;
+
+    // Emit done event
+    let _ = activity_tx.send(AgentActivityEvent {
+        agent_id: handler.clone(),
+        workspace_id: workspace_id.to_string(),
+        event_type: "done".to_string(),
+        detail: format!("quick session turn complete: {}", session_id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        scope: "quick_session".to_string(),
+        session_id: Some(session_id.to_string()),
+        ref_: Some(meta.ref_string()),
+    });
+
+    info!(
+        session_id = %session_id,
+        output_len = assistant_output.trim().len(),
+        "quick session: turn complete"
+    );
+
+    // Provider is torn down on drop
+    Ok(())
+}
+
+/// Extract the author from a thread line.
+///
+/// Thread format: `L000001 20260702T141101Z author body text`
+fn parse_thread_author(line: &str) -> Option<&str> {
+    let parts: Vec<&str> = line.splitn(4, ' ').collect();
+    if parts.len() >= 3 {
+        Some(parts[2])
+    } else {
+        None
+    }
+}
+
+/// Format a raw thread into a clean conversation transcript for the provider.
+///
+/// Strips the `L000001 YYYYMMDDTHHMMSSZ ` prefix from each line, leaving
+/// `author body`. The provider sees this as conversation context.
+fn format_thread_for_prompt(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|line| {
+            // Expect "L000001 20260702T141101Z author body"
+            let after_prefix = line
+                .find(' ')
+                .and_then(|first_space| {
+                    line[first_space + 1..]
+                        .find(' ')
+                        .map(|s| first_space + 1 + s)
+                })
+                .map(|idx| &line[idx + 1..])
+                .unwrap_or(line);
+            if after_prefix.is_empty() {
+                None
+            } else {
+                Some(after_prefix.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_thread_author() {
+        assert_eq!(
+            parse_thread_author("L000001 20260702T141101Z flame4 Hello world"),
+            Some("flame4")
+        );
+        assert_eq!(
+            parse_thread_author("L000002 20260702T141201Z dev-qiangzai response"),
+            Some("dev-qiangzai")
+        );
+        assert_eq!(parse_thread_author("short"), None);
+    }
+
+    #[test]
+    fn test_format_thread_for_prompt() {
+        let raw = "L000001 20260702T141101Z flame4 Hello world\nL000002 20260702T141201Z dev-qiangzai response\n";
+        let formatted = format_thread_for_prompt(raw);
+        assert!(formatted.contains("flame4 Hello world"));
+        assert!(formatted.contains("dev-qiangzai response"));
+        assert!(!formatted.contains("L000001"));
+    }
+}

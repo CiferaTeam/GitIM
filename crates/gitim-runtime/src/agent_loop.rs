@@ -1872,7 +1872,7 @@ pub fn build_failure_recovery_preamble(attempt: u32, max_attempts: u32) -> Strin
 /// runs against its isolated profile (`~/.hermes/profiles/gitim-<handler>`).
 /// An explicit `HERMES_HOME` already in `extra_env` wins — callers can override
 /// the default via `me.json.env`.
-fn build_provider_config(
+pub(crate) fn build_provider_config(
     provider_type: &str,
     handler: &str,
     extra_env: HashMap<String, String>,

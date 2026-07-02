@@ -21,6 +21,7 @@ pub mod http;
 pub mod model_catalog;
 pub mod poller;
 pub mod preflight;
+pub mod quick_session_loop;
 pub mod quick_session_runner;
 pub mod quick_session_state;
 pub mod saturation_log;
