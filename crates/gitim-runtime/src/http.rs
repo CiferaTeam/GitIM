@@ -1425,6 +1425,113 @@ async fn im_dm_unarchive(
     api_response_to_json(client.unarchive_dm(&peer).await)
 }
 
+// ── Quick Session Cards ──
+
+async fn im_create_quick_session(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(client.request("create_quick_session", body).await)
+}
+
+#[derive(serde::Deserialize)]
+struct ListQuickSessionsQuery {
+    #[serde(default)]
+    archived: bool,
+}
+
+async fn im_list_quick_sessions(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(q): axum::extract::Query<ListQuickSessionsQuery>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .request(
+                "list_quick_sessions",
+                serde_json::json!({ "include_archived": q.archived }),
+            )
+            .await,
+    )
+}
+
+async fn im_read_quick_session(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .request(
+                "read_quick_session",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await,
+    )
+}
+
+async fn im_send_quick_session_message(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let mut params = body.clone();
+    params["session_id"] = serde_json::json!(session_id);
+    api_response_to_json(client.request("send_quick_session_message", params).await)
+}
+
+async fn im_set_quick_session_title(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    let mut params = body.clone();
+    params["session_id"] = serde_json::json!(session_id);
+    api_response_to_json(client.request("set_quick_session_title", params).await)
+}
+
+async fn im_archive_quick_session(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(c) => c,
+        Err(j) => return j,
+    };
+    api_response_to_json(
+        client
+            .request(
+                "archive_quick_session",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await,
+    )
+}
+
 /// Query params for `GET /im/dm/archived`. All optional; missing values
 /// resolve to `prefix=None`, `offset=0`, `limit=5` (page-size matches the
 /// WebUI default). `limit` is clamped to `[1,100]` before forwarding so the
@@ -6319,6 +6426,27 @@ fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
         .route("/im/projects", get(im_projects).post(im_projects_create))
         .route("/im/dm/archived", get(im_list_archived_dms))
         .route("/im/dm/{peer}/archive", post(im_dm_archive))
+        // Quick session cards
+        .route(
+            "/im/quick-sessions",
+            get(im_list_quick_sessions).post(im_create_quick_session),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}",
+            get(im_read_quick_session),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/messages",
+            post(im_send_quick_session_message),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/title",
+            post(im_set_quick_session_title),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/archive",
+            post(im_archive_quick_session),
+        )
         .route("/im/dm/{peer}/unarchive", post(im_dm_unarchive))
         .route("/users/archived", get(users_list_archived))
         .route("/users/{handler}/unarchive", post(users_unarchive))
