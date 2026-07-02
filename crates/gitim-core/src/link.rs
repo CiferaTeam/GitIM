@@ -1,4 +1,4 @@
-use crate::types::{Handler, Link, LinkKind};
+use crate::types::{validate_card_id, Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -8,6 +8,9 @@ static LINK_RE: LazyLock<Regex> =
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
+
+static CARD_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| crate::preconditions::regex_literal(r"^([^:]+):L(\d{6,})$"));
 
 /// 从消息 body 中提取所有协议级链接，按出现顺序返回，不去重。
 pub fn extract_links(body: &str) -> Vec<Link> {
@@ -30,7 +33,14 @@ pub fn extract_links(body: &str) -> Vec<Link> {
 }
 
 fn parse_channel_or_message(content: &str) -> Option<LinkKind> {
-    if let Some(caps) = MSG_LINK_RE.captures(content) {
+    let (target, label) = split_label(content);
+    if target.contains('/') {
+        return parse_card_link(target, label);
+    }
+    if label.is_some() {
+        return None;
+    }
+    if let Some(caps) = MSG_LINK_RE.captures(target) {
         let channel = &caps[1];
         let line_number: u64 = caps[2].parse().ok()?;
         validate_channel_name(channel).ok()?;
@@ -39,11 +49,43 @@ fn parse_channel_or_message(content: &str) -> Option<LinkKind> {
             line_number,
         })
     } else {
-        validate_channel_name(content).ok()?;
+        validate_channel_name(target).ok()?;
         Some(LinkKind::Channel {
-            name: content.to_string(),
+            name: target.to_string(),
         })
     }
+}
+
+fn split_label(content: &str) -> (&str, Option<String>) {
+    if let Some(pos) = content.find('|') {
+        (&content[..pos], Some(content[pos + 1..].to_string()))
+    } else {
+        (content, None)
+    }
+}
+
+fn parse_card_link(target: &str, label: Option<String>) -> Option<LinkKind> {
+    let (channel, card_target) = target.split_once('/')?;
+    if card_target.contains('/') {
+        return None;
+    }
+    validate_channel_name(channel).ok()?;
+
+    let (card_id, line_number) = if let Some(caps) = CARD_LINE_RE.captures(card_target) {
+        let card_id = caps[1].to_string();
+        let line_number: u64 = caps[2].parse().ok()?;
+        (card_id, Some(line_number))
+    } else {
+        (card_target.to_string(), None)
+    };
+    validate_card_id(&card_id).ok()?;
+
+    Some(LinkKind::Card {
+        channel: channel.to_string(),
+        card_id,
+        line_number,
+        label,
+    })
 }
 
 fn parse_user_profile(content: &str) -> Option<LinkKind> {
@@ -100,6 +142,58 @@ mod tests {
             }
         );
         assert_eq!(links[0].raw, "<#dev:L000042>");
+    }
+
+    #[test]
+    fn test_card_link() {
+        let links = extract_links("open <#general/20260520-035646-7cf>");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Card {
+                channel: "general".into(),
+                card_id: "20260520-035646-7cf".into(),
+                line_number: None,
+                label: None,
+            }
+        );
+        assert_eq!(links[0].raw, "<#general/20260520-035646-7cf>");
+    }
+
+    #[test]
+    fn test_card_discussion_line_link() {
+        let links = extract_links("see <#general/20260520-035646-7cf:L000004>");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Card {
+                channel: "general".into(),
+                card_id: "20260520-035646-7cf".into(),
+                line_number: Some(4),
+                label: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_card_link_with_label() {
+        let links = extract_links("see <#general/20260520-035646-7cf:L000004|Token rotation>");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].kind,
+            LinkKind::Card {
+                channel: "general".into(),
+                card_id: "20260520-035646-7cf".into(),
+                line_number: Some(4),
+                label: Some("Token rotation".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_invalid_card_id_ignored() {
+        let links = extract_links("<#general/not_a_card>");
+        assert!(links.is_empty());
     }
 
     #[test]

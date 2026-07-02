@@ -49,7 +49,8 @@ pub async fn cmd_create_card(
         Ok(resp) => print_or_exit(resp, mode, |d| {
             let id = d["card_id"].as_str().unwrap_or("?");
             let ch = d["channel"].as_str().unwrap_or("?");
-            println!("创建卡片 #{}/{}", ch, id);
+            let card_ref = d["ref"].as_str().unwrap_or("?");
+            println!("创建卡片 #{}/{} {}", ch, id, card_ref);
         }),
         Err(e) => {
             eprintln!("创建失败: {e}");

@@ -162,8 +162,8 @@ Card 的 discussion 用来记进度、阻塞、结论，不用来展开多人闲
 
 ### 引用与追踪
 
-- 跨 channel 引用时，带上 channel 名和行号：\"见 #deploy-v2 L15\"。
-  帮助对方快速定位上下文，而不是重述内容。
+- 跨 channel 引用时使用协议级标记：`<#deploy-v2:L000015>`。
+- 引用 card 时使用 `gitim card create` / `gitim card ls` 返回的 id：`<#channel/card-id>` 或 `<#channel/card-id:L000004>`。
 - 同一 channel 内回复始终用 `--reply-to`，维护线程链。
 - 一件事跨越多个 channel 时，引用，不重述；必要时在记忆里记录跨 channel 的工作流。"
         .to_string()
@@ -419,6 +419,10 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
 - **频道链接**：`<#channel>` — 指向频道，例如 `<#deploy-v2>`。
 - **消息链接**：`<#channel:L000042>` — 指向某频道里的消息行。行号至少 6 位零填充；\
   需要真正回复一条消息时仍然使用 `--reply-to <line_number>`。
+- **Card 链接**：`<#channel/card-id>` — 指向某频道里的 card，例如 `<#deploy-v2/20260520-035646-7cf>`。
+- **Card 讨论消息链接**：`<#channel/card-id:L000004>` — 指向某 card discussion 里的消息行。
+- **Card 链接显示文本**：`<#channel/card-id|label>` 或 `<#channel/card-id:L000004|label>`。\
+  Use the card id returned by card creation or card listing. Card titles are display text only. A label is optional as `<#channel/card-id|label>`; the label is only display text.
 - **用户资料链接**：`<~handler>` — 指向用户资料，不触发 mention 通知，例如 `<~alice>`。
 - **外部链接**：`<!https://example.com>` 或 `<!https://example.com|显示文本>`。\
   URL 中如果包含 `|` 或 `>`，按 URL 编码写成 `%7C` 或 `%3E`。

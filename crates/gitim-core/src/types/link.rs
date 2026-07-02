@@ -11,8 +11,24 @@ pub struct Link {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LinkKind {
-    Channel { name: String },
-    Message { channel: String, line_number: u64 },
-    UserProfile { handler: Handler },
-    Softlink { url: String, title: Option<String> },
+    Channel {
+        name: String,
+    },
+    Message {
+        channel: String,
+        line_number: u64,
+    },
+    Card {
+        channel: String,
+        card_id: String,
+        line_number: Option<u64>,
+        label: Option<String>,
+    },
+    UserProfile {
+        handler: Handler,
+    },
+    Softlink {
+        url: String,
+        title: Option<String>,
+    },
 }

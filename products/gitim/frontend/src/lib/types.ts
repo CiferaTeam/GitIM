@@ -345,6 +345,13 @@ export interface Card {
   archived_via?: ArchivedVia;
 }
 
+export interface CreateCardResponse {
+  channel: string;
+  card_id: string;
+  title: string;
+  ref: string;
+}
+
 export interface CardFilter {
   channel?: string | null;
   channels?: string[]; // for multi-select filter bar (client-side)

@@ -112,7 +112,9 @@ export function CardCreateDialog({
     };
     upsertCard(newCard);
     onOpenChange(false);
-    toast.success("Card created");
+    toast.success("Card created", {
+      description: res.data.ref,
+    });
     navigate(`/cards/${newCard.channel}/${newCard.card_id}`);
   }
 

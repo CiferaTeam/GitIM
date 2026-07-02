@@ -402,6 +402,8 @@ pub struct CreateCardResponse {
     pub channel: String,
     pub card_id: String,
     pub title: String,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
     /// Best-effort assignee recommendations: handlers whose
     /// `users/<h>.meta.yaml.labels` is a superset of `card.labels`.
     /// Empty when card has no labels, when no agent matches, or when
@@ -1240,13 +1242,18 @@ mod tests {
             channel: "general".to_string(),
             card_id: "card-1".to_string(),
             title: "Fix bug".to_string(),
+            r#ref: "<#general/card-1>".to_string(),
             suggested_assignees: vec![],
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        // 3 mandatory fields; suggested_assignees omitted when empty
+        // suggested_assignees is omitted when empty.
         // (skip_serializing_if = "Vec::is_empty")
-        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.len(), 4);
+        assert_eq!(
+            obj.get("ref").and_then(|v| v.as_str()),
+            Some("<#general/card-1>")
+        );
         assert!(obj.get("suggested_assignees").is_none());
     }
 
@@ -1256,11 +1263,12 @@ mod tests {
             channel: "general".to_string(),
             card_id: "card-1".to_string(),
             title: "Fix bug".to_string(),
+            r#ref: "<#general/card-1>".to_string(),
             suggested_assignees: vec!["alice".into(), "bob".into()],
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.len(), 5);
         let arr = obj
             .get("suggested_assignees")
             .and_then(|v| v.as_array())

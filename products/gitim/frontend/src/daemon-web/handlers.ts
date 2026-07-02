@@ -1436,7 +1436,13 @@ export async function createCard(
     );
 
     const sync = await syncAfterCommit();
-    return ok({ channel, card_id: cardId, title: card.title, ...sync });
+    return ok({
+      channel,
+      card_id: cardId,
+      title: card.title,
+      ref: `<#${channel}/${cardId}>`,
+      ...sync,
+    });
   } catch (e) {
     return err(String((e as Error).message ?? e));
   }

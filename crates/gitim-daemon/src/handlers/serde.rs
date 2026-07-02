@@ -16,6 +16,19 @@ pub(crate) fn link_to_json(link: &Link) -> serde_json::Value {
             "line_number": line_number,
             "raw": link.raw,
         }),
+        LinkKind::Card {
+            channel,
+            card_id,
+            line_number,
+            label,
+        } => serde_json::json!({
+            "kind": "card",
+            "channel": channel,
+            "card_id": card_id,
+            "line_number": line_number,
+            "label": label,
+            "raw": link.raw,
+        }),
         LinkKind::UserProfile { handler } => serde_json::json!({
             "kind": "user_profile",
             "handler": handler.as_str(),
@@ -55,5 +68,32 @@ pub(crate) fn entry_to_json(entry: &ThreadEntry) -> serde_json::Value {
             "timestamp": ev.timestamp,
             "meta": ev.meta,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_card_link() {
+        let link = Link {
+            raw: "<#general/20260520-035646-7cf:L000004>".to_string(),
+            kind: LinkKind::Card {
+                channel: "general".to_string(),
+                card_id: "20260520-035646-7cf".to_string(),
+                line_number: Some(4),
+                label: None,
+            },
+        };
+
+        let json = link_to_json(&link);
+
+        assert_eq!(json["kind"], "card");
+        assert_eq!(json["channel"], "general");
+        assert_eq!(json["card_id"], "20260520-035646-7cf");
+        assert_eq!(json["line_number"], 4);
+        assert_eq!(json["label"], serde_json::Value::Null);
+        assert_eq!(json["raw"], "<#general/20260520-035646-7cf:L000004>");
     }
 }

@@ -252,8 +252,9 @@ pub async fn handle_create_card(
 
     let payload = gitim_core::responses::CreateCardResponse {
         channel: ch_name.to_string(),
-        card_id,
+        card_id: card_id.clone(),
         title,
+        r#ref: format!("<#{}/{}>", ch_name, card_id),
         suggested_assignees,
     };
     Response::json(payload)
