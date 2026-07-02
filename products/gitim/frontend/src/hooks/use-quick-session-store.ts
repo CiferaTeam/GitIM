@@ -27,7 +27,7 @@ interface QuickSessionState {
   selectedId: string | null;
 
   /** Poll for active sessions. Returns true if data changed. */
-  refresh(workspaceSlug: string): Promise<boolean>;
+  refresh(workspaceSlug: string, includeArchived?: boolean): Promise<boolean>;
 
   /** Create a new quick session. */
   create(
@@ -68,10 +68,10 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
   error: undefined,
   selectedId: null,
 
-  refresh: async (workspaceSlug: string): Promise<boolean> => {
+  refresh: async (workspaceSlug: string, includeArchived?: boolean): Promise<boolean> => {
     set({ loading: true, error: undefined });
     try {
-      const res = await listQuickSessions(workspaceSlug, false);
+      const res = await listQuickSessions(workspaceSlug, includeArchived ?? false);
       if (!res.ok) {
         set({ loading: false, error: res.error ?? "Failed to list sessions" });
         return false;

@@ -92,12 +92,16 @@ export function ConversationHub() {
 
   const selectedSession = sessions.find((s) => s.item.id === selectedId) ?? visibleSessions[0] ?? null;
 
+  // Track showArchived in a ref so the poll interval can access current value
+  const showArchivedRef = useRef(showArchived);
+  showArchivedRef.current = showArchived;
+
   // Poll for sessions when component mounts and slug is available
   useEffect(() => {
     if (!slug) return;
-    refresh(slug);
+    refresh(slug, showArchivedRef.current);
     const interval = setInterval(() => {
-      if (slug) refresh(slug);
+      if (slug) refresh(slug, showArchivedRef.current);
     }, 8000);
     return () => clearInterval(interval);
   }, [slug, refresh]);
@@ -159,7 +163,13 @@ export function ConversationHub() {
       slug={slug}
       setTitle={setTitle}
       onSelect={select}
-      onToggleArchived={() => setShowArchived((v) => !v)}
+      onToggleArchived={() => {
+        setShowArchived((prev) => {
+          const next = !prev;
+          if (slug) refresh(slug, next);
+          return next;
+        });
+      }}
       onTogglePinned={() => {
         setPinned((v) => !v);
         setOpen(false);
