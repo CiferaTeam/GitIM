@@ -1,10 +1,13 @@
 import { useMemo, useState, useCallback } from "react";
-import { Copy, Check, LayoutGrid } from "lucide-react";
+import { Copy, Check } from "lucide-react";
 import { useNavigate } from "react-router";
 import { parseMessageBody, type Fragment } from "../../lib/message-parser";
 import { HandlerName } from "./handler-name";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { resolveDisplayName } from "../../lib/format-handler-display";
+import { CardReferenceLink, MessageReferenceLink } from "./reference-preview";
+import { selectCardById, useCardStore } from "@/hooks/use-card-store";
+import { useChatStore } from "@/hooks/use-chat-store";
 
 export interface MessageBodyProps {
   body: string;
@@ -90,21 +93,79 @@ function CodeBlock({ language, code }: { language?: string; code: string }) {
 interface FragmentRendererProps {
   fragment: Fragment;
   index: number;
+  fragments: Fragment[];
   onMentionClick?: (handler: string, event: React.MouseEvent) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
+function hasNearbyCardCue(fragments: Fragment[], index: number): boolean {
+  const before = fragments[index - 1];
+  const after = fragments[index + 1];
+  const nearby = [
+    before?.type === "text" ? before.content.slice(-24) : "",
+    after?.type === "text" ? after.content.slice(0, 24) : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  return /\bcard\b|卡片|卡/.test(nearby);
+}
+
+function CardLinkFragment({
+  fragment,
+}: {
+  fragment: Extract<Fragment, { type: "card-link" }>;
+}) {
+  const navigate = useNavigate();
+  return (
+    <CardReferenceLink
+      reference={{
+        channel: fragment.channel,
+        cardId: fragment.cardId,
+        ...(fragment.line !== undefined && { line: fragment.line }),
+        ...(fragment.label !== undefined && { label: fragment.label }),
+      }}
+      onOpen={() => {
+        const query = fragment.line ? `?line=${fragment.line}` : "";
+        navigate(`/cards/${fragment.channel}/${fragment.cardId}${query}`);
+      }}
+    />
+  );
+}
+
+function LegacyInlineCardLink({
+  channel,
+  cardId,
+}: {
+  channel: string;
+  cardId: string;
+}) {
+  const navigate = useNavigate();
+  return (
+    <CardReferenceLink
+      reference={{ channel, cardId }}
+      onOpen={() => navigate(`/cards/${channel}/${cardId}`)}
+    />
+  );
+}
+
 function FragmentRenderer({
   fragment,
   index,
+  fragments,
   onMentionClick,
   onChannelClick,
   onMessageLinkClick,
   onUserProfileClick,
 }: FragmentRendererProps) {
   const directory = useDirectory();
+  const currentChannel = useChatStore((s) => s.currentChannel);
+  const legacyInlineCard = useCardStore((s) =>
+    fragment.type === "inline-code" && currentChannel
+      ? selectCardById(s, currentChannel, fragment.code)
+      : undefined,
+  );
   switch (fragment.type) {
     case "text":
       return <span key={index}>{fragment.content}</span>;
@@ -139,35 +200,17 @@ function FragmentRenderer({
 
     case "message-link":
       return (
-        <span
+        <MessageReferenceLink
           key={index}
-          className="text-primary cursor-pointer hover:underline"
-          onClick={(e) => {
-            e.stopPropagation();
+          reference={{ channel: fragment.channel, line: fragment.line }}
+          onOpen={() => {
             onMessageLinkClick?.(fragment.channel, fragment.line);
           }}
-        >
-          #{fragment.channel}:L{String(fragment.line).padStart(6, "0")}
-        </span>
+        />
       );
 
-    case "card-link": {
-      const navigate = useNavigate();
-      return (
-        <span
-          key={index}
-          className="inline-flex items-center gap-1 text-primary cursor-pointer hover:underline"
-          onClick={(e) => {
-            e.stopPropagation();
-            navigate(`/cards/${fragment.channel}/${fragment.cardId}`);
-          }}
-          title={`Card in #${fragment.channel}`}
-        >
-          <LayoutGrid className="h-3 w-3" />
-          {fragment.title ?? fragment.cardId}
-        </span>
-      );
-    }
+    case "card-link":
+      return <CardLinkFragment key={index} fragment={fragment} />;
 
     case "user-profile":
       return (
@@ -213,6 +256,19 @@ function FragmentRenderer({
     }
 
     case "inline-code":
+      if (
+        currentChannel &&
+        legacyInlineCard &&
+        hasNearbyCardCue(fragments, index)
+      ) {
+        return (
+          <LegacyInlineCardLink
+            key={index}
+            channel={currentChannel}
+            cardId={fragment.code}
+          />
+        );
+      }
       return <InlineCode key={index} code={fragment.code} />;
 
     case "code-block":
@@ -261,6 +317,7 @@ export function MessageBody({
           key={index}
           fragment={fragment}
           index={index}
+          fragments={fragments}
           onMentionClick={onMentionClick}
           onChannelClick={onChannelClick}
           onMessageLinkClick={onMessageLinkClick}

@@ -3,7 +3,7 @@ export type Fragment =
   | { type: "mention"; handler: string }
   | { type: "channel-link"; channel: string }
   | { type: "message-link"; channel: string; line: number }
-  | { type: "card-link"; channel: string; cardId: string; title?: string }
+  | { type: "card-link"; channel: string; cardId: string; line?: number; label?: string }
   | { type: "user-profile"; handler: string }
   | { type: "external-link"; url: string; title?: string }
   | { type: "code-block"; language?: string; code: string }
@@ -15,6 +15,7 @@ export type Fragment =
 // Must not start/end with hyphen
 const HANDLER_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const CHANNEL_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const CARD_ID_RE = /^[0-9a-f-]{1,20}$/;
 
 function isValidHandler(s: string): boolean {
   return s.length >= 1 && s.length <= 39 && HANDLER_RE.test(s);
@@ -24,13 +25,17 @@ function isValidChannel(s: string): boolean {
   return CHANNEL_RE.test(s);
 }
 
+function isValidCardId(s: string): boolean {
+  return CARD_ID_RE.test(s);
+}
+
 // Combined inline pattern — ordered by priority:
 // 1. GitIM links: <[@#~!]content>
 // 2. Inline code: `code`
 // 3. Bold: **text**
 // 4. Italic: *text* (not part of **)
 const INLINE_RE =
-  /<([#~!@])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
 
 function parseGitimLink(prefix: string, content: string): Fragment | null {
   if (prefix === "@") {
@@ -54,18 +59,27 @@ function parseGitimLink(prefix: string, content: string): Fragment | null {
   }
 
   if (prefix === "#") {
-    // Check for card-link: channel/card-id or channel/card-id|title
+    // Check for card-link: channel/card-id, optional :Lnn, optional |label.
     const cardMatch = content.match(/^(.+)\/([^/]+)$/);
     if (cardMatch) {
       const channel = cardMatch[1];
       const rest = cardMatch[2];
       if (!isValidChannel(channel)) return null;
-      // rest may contain |title
+
       const pipeIdx = rest.indexOf("|");
-      const cardId = pipeIdx === -1 ? rest : rest.slice(0, pipeIdx);
-      const title = pipeIdx === -1 ? undefined : rest.slice(pipeIdx + 1);
-      if (!cardId) return null;
-      return { type: "card-link", channel, cardId, title };
+      const target = pipeIdx === -1 ? rest : rest.slice(0, pipeIdx);
+      const label = pipeIdx === -1 ? undefined : rest.slice(pipeIdx + 1);
+      const lineMatch = target.match(/^(.+):L(\d+)$/);
+      const cardId = lineMatch ? lineMatch[1] : target;
+      const line = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
+      if (!isValidCardId(cardId)) return null;
+      return {
+        type: "card-link",
+        channel,
+        cardId,
+        ...(line !== undefined && { line }),
+        ...(label !== undefined && { label }),
+      };
     }
     // Check for message-link suffix :LNNNNNN (6+ digits)
     const msgMatch = content.match(/^(.+):L(\d{6,})$/);
@@ -94,9 +108,30 @@ function parseInline(text: string): Fragment[] {
       fragments.push({ type: "text", content: text.slice(lastIndex, match.index) });
     }
 
-    const [full, gitimPrefix, gitimContent, inlineCode, boldContent, italicContent] = match;
+    const [
+      full,
+      legacyBoundary,
+      legacyChannel,
+      legacyCardId,
+      legacyLine,
+      gitimPrefix,
+      gitimContent,
+      inlineCode,
+      boldContent,
+      italicContent,
+    ] = match;
 
-    if (gitimPrefix !== undefined) {
+    if (legacyChannel !== undefined) {
+      if (legacyBoundary) {
+        fragments.push({ type: "text", content: legacyBoundary });
+      }
+      fragments.push({
+        type: "card-link",
+        channel: legacyChannel,
+        cardId: legacyCardId,
+        ...(legacyLine !== undefined && { line: parseInt(legacyLine, 10) }),
+      });
+    } else if (gitimPrefix !== undefined) {
       // GitIM link: <prefix content>
       const fragment = parseGitimLink(gitimPrefix, gitimContent);
       if (fragment) {

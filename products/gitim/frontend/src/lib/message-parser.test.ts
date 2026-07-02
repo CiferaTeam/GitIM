@@ -97,7 +97,7 @@ describe("parseMessageBody", () => {
         type: "card-link",
         channel: "general",
         cardId: "abc123",
-        title: "Token Rotation",
+        label: "Token Rotation",
       });
     });
 
@@ -108,7 +108,62 @@ describe("parseMessageBody", () => {
         type: "card-link",
         channel: "general",
         cardId: "abc123",
-        title: "",
+        label: "",
+      });
+    });
+
+    it("parses card discussion line link", () => {
+      const frags = parseMessageBody("see <#general/20260520-035646-7cf:L000004>");
+      const link = findFirst(frags, "card-link");
+      expect(link).toEqual({
+        type: "card-link",
+        channel: "general",
+        cardId: "20260520-035646-7cf",
+        line: 4,
+      });
+    });
+
+    it("parses legacy short card discussion line link", () => {
+      const frags = parseMessageBody("see <#general/20260520-035646-7cf:L22>");
+      const link = findFirst(frags, "card-link");
+      expect(link).toEqual({
+        type: "card-link",
+        channel: "general",
+        cardId: "20260520-035646-7cf",
+        line: 22,
+      });
+    });
+
+    it("parses card discussion line link with label", () => {
+      const frags = parseMessageBody("see <#general/20260520-035646-7cf:L000004|Token Rotation>");
+      const link = findFirst(frags, "card-link");
+      expect(link).toEqual({
+        type: "card-link",
+        channel: "general",
+        cardId: "20260520-035646-7cf",
+        line: 4,
+        label: "Token Rotation",
+      });
+    });
+
+    it("parses legacy bare card reference", () => {
+      const frags = parseMessageBody("see #general/20260520-035646-7cf");
+      const link = findFirst(frags, "card-link");
+      expect(link).toEqual({
+        type: "card-link",
+        channel: "general",
+        cardId: "20260520-035646-7cf",
+      });
+    });
+
+    it("parses legacy bare card reference with line", () => {
+      const frags = parseMessageBody("see #general/20260520-035646-7cf L4");
+      const link = findFirst(frags, "card-link");
+      expect(link).toEqual({
+        type: "card-link",
+        channel: "general",
+        cardId: "20260520-035646-7cf",
+        line: 4,
       });
     });
 

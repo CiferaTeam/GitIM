@@ -155,8 +155,8 @@ Card 的 discussion 用来记进度、阻塞、结论，不用来展开多人闲
 
 ### 引用与追踪
 
-- 跨 channel 引用时，带上 channel 名和行号：\"见 #deploy-v2 L15\"。
-  帮助对方快速定位上下文，而不是重述内容。
+- 跨 channel 引用时使用协议级标记：`<#deploy-v2:L000015>`。
+- 引用 card 时使用 `gitim card create` / `gitim card ls` 返回的 id：`<#channel/card-id>` 或 `<#channel/card-id:L000004>`。
 - 同一 channel 内回复始终用 `--reply-to`，维护线程链。"
         .to_string()
 }

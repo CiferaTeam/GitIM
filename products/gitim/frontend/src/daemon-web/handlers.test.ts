@@ -1266,7 +1266,9 @@ describe("daemon-web handlers", () => {
       channel: "general",
       card_id: "20260317-123456-abc",
       title: "New browser card",
+      ref: "<#general/20260317-123456-abc>",
       status: "pushed",
+      commit_id: undefined,
     });
     expect(files.get("/repo/channels/general/cards/20260317-123456-abc/card.meta.yaml"))
       .toContain("title: New browser card");

@@ -15,6 +15,7 @@ import type {
   Card,
   CardStatus,
   Channel,
+  CreateCardResponse,
   CreateWorkspaceRequest,
   CronDetail,
   CronRunBody,
@@ -937,11 +938,11 @@ export async function createCard(
   channel: string,
   title: string,
   opts: CreateCardOpts = {},
-): Promise<ApiResponse<{ channel: string; card_id: string; title: string }>> {
+): Promise<ApiResponse<CreateCardResponse>> {
   if (isLocalMode()) {
     void slug;
-    return localCardBackend().createCard(channel, title, opts) as Promise<
-      ApiResponse<{ channel: string; card_id: string; title: string }>
+    return localCardBackend().createCard(channel, title, opts) as unknown as Promise<
+      ApiResponse<CreateCardResponse>
     >;
   }
   const payload: Record<string, unknown> = { channel, title };

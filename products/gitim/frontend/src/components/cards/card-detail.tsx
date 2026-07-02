@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft } from "lucide-react";
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { InputArea } from "@/components/chat/input-area";
@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
 import type { ApiResponse, Card, CardStatus, Message } from "@/lib/types";
 import { nowTimestamp } from "@/lib/types";
+import { MESSAGES_PAGE_SIZE } from "@/components/chat/pagination";
 import {
   recordRemoteSyncPending,
   remoteSyncFailure,
@@ -28,6 +29,7 @@ import {
   type ChatViewportAnchor,
 } from "@/lib/chat-ui-state";
 import { workspaceIdentity } from "@/lib/workspace-key";
+import { toApiChannel } from "@/lib/scope-name";
 import { CardMetaBar } from "./card-meta-bar";
 
 type LoadStatus = "loading" | "ok" | "not_found" | "error";
@@ -38,15 +40,26 @@ const EMPTY_MESSAGES: Message[] = [];
 
 export function CardDetail() {
   const params = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const channel = params.channel ?? "";
   const cardId = params.card_id ?? "";
+  const routeLine = useMemo(() => {
+    const raw = searchParams.get("line");
+    if (!raw) return null;
+    const line = Number(raw);
+    return Number.isInteger(line) && line > 0 ? line : null;
+  }, [searchParams]);
 
   const mode = useConnectionStore((s) => s.mode);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const currentUser = useChatStore((s) => s.currentUser);
   const users = useChatStore((s) => s.users);
+  const selectChatChannel = useChatStore((s) => s.selectChannel);
+  const setChatMessages = useChatStore((s) => s.setMessages);
+  const setChatPendingScrollLine = useChatStore((s) => s.setPendingScrollLine);
+  const setChatThreadRoot = useChatStore((s) => s.setThreadRoot);
   const agents = useAgentStore((s) => s.agents);
 
   const activeCard = useCardStore((s) => selectCardById(s, channel, cardId));
@@ -157,12 +170,15 @@ export function CardDetail() {
         upsertCard(res.data.meta);
       }
       setCardMessages(pathKey, res.data.entries);
+      if (routeLine) {
+        setPendingScrollLine(routeLine);
+      }
       setLoadStatus("ok");
     })();
     return () => {
       aborted = true;
     };
-  }, [activeSlug, channel, cardId, pathKey, upsertCard, upsertArchivedCard, setCardMessages]);
+  }, [activeSlug, channel, cardId, pathKey, routeLine, upsertCard, upsertArchivedCard, setCardMessages]);
 
   const handleUpdate = useCallback(
     async (patch: {
@@ -295,13 +311,31 @@ export function CardDetail() {
     toast.success("Card restored");
   }, [activeSlug, archiveInFlight, channel, cardId, markUnarchived]);
 
-  function handleBack() {
-    if (window.history.length > 1) {
-      navigate(-1);
-    } else {
-      navigate(`/chat/${channel}`);
+  const handleOpenChannel = useCallback(async () => {
+    if (!channel) return;
+    selectChatChannel(channel);
+    setChatPendingScrollLine(null);
+    setChatThreadRoot(null);
+    setChatMessages([]);
+    navigate("/chat");
+    if (!activeSlug) return;
+    const res = await client.read(
+      activeSlug,
+      toApiChannel(channel),
+      MESSAGES_PAGE_SIZE,
+    );
+    if (res.ok && res.data) {
+      setChatMessages(res.data.entries as Message[]);
     }
-  }
+  }, [
+    activeSlug,
+    channel,
+    navigate,
+    selectChatChannel,
+    setChatMessages,
+    setChatPendingScrollLine,
+    setChatThreadRoot,
+  ]);
 
   if (loadStatus === "loading") {
     return (
@@ -341,7 +375,7 @@ export function CardDetail() {
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-2 border-b border-border text-xs">
         <button
-          onClick={handleBack}
+          onClick={handleOpenChannel}
           className="flex items-center gap-1 px-2 py-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3.5 w-3.5" />

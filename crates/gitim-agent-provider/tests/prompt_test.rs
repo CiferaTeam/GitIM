@@ -299,6 +299,10 @@ fn gitim_api_exposes_message_body_markers() {
     assert!(api.contains("裸写 `@handler`"));
     assert!(api.contains("<#channel>"));
     assert!(api.contains("<#channel:L000042>"));
+    assert!(api.contains("<#channel/card-id>"));
+    assert!(api.contains("<#channel/card-id:L000004>"));
+    assert!(api.contains("<#channel/card-id|label>"));
+    assert!(api.contains("Use the card id returned by card creation or card listing"));
     assert!(api.contains("<~handler>"));
     assert!(api.contains("<!https://example.com|显示文本>"));
 }
