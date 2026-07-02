@@ -17,7 +17,71 @@ The implementation spans:
 
 **Cross-node model:** Quick session persisted objects (`session.meta.yaml`, `discussion.thread`) are git-synced like cards/channels/DMs. Any node can create or read them. Execution runs on the node that owns the selected agent. Provider session state (tokens, compaction, streaming) remains local to the executing runtime.
 
-## Phase 0: Baseline And Demo Inventory
+## Phase X.0: Refined Plan — Cross-Node Dispatch, Session IDs, Ref Disambiguation
+
+Resolves three High P1 items from plan-review `20260702-143803-067` before production implementation starts.
+
+### P1-1: Cross-Node Dispatch
+
+**Detection:** Daemon poll (`handle_poll`) already diff-detects new files by path prefix. Add `quick-sessions/<id>/` path detection alongside existing `channels/`, `dm/`, `crons/` branches:
+- When `quick-sessions/<id>/session.meta.yaml` appears and `agent_id` matches a handler this daemon hosts → emit `kind: "quick_session_meta"` in poll response
+- When `quick-sessions/<id>/discussion.thread` changes → emit `kind: "quick_session_thread"` with parsed entries
+
+**Runtime dispatch:** Runtime receives poll changes from daemon. On `quick_session_meta`:
+- If `status == needs_title` and `agent_id` matches current agent → dispatch a turn through `quick_session_runner`
+- The turn executes on this node's runtime, writes responses to `discussion.thread`, commits
+
+**Poll frequency:** Uses existing poll cycle — client polls daemon (HTTP GET), daemon git-diffs since last cursor. No additional timer needed.
+
+**Stale/offline handling:**
+- If agent's node is offline: meta.yaml exists (git-synced) but runtime never picks it up → session stays `needs_title`
+- After node comes online → next poll detects the new session → dispatched
+- Optional: after session has been `needs_title` for > 30 min with no agent response, daemon on initiating node marks `status = error` with reason `"agent_unreachable"`
+
+**Retry/timeout:**
+- Per-agent work queue serializes turns; no explicit retry beyond agent_loop normal resume-on-poll
+- If provider call fails → standard error flow (error event, status update)
+
+### P1-2b/P1-5c: Session ID Generation
+
+**Algorithm:** ULID (Universally Unique Lexicographically Sortable Identifier)
+- 26 characters, Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`)
+- 128-bit: 48-bit timestamp (ms) + 80-bit random
+- Collision probability: ~2^-80 per pair, effectively zero
+- Sortable by creation time (lex order = chronological)
+- URL-safe, no special characters
+
+**Format:** `qs-<ulid>` (29 chars total), e.g., `qs-01ARZ3NDEKTSV4RRFFQ69G5FAV`
+
+**Validation regex:** `^qs-[0-9A-HJKMNP-TV-Z]{26}$` (Crockford base32 excludes I,L,O,U)
+
+**Uniqueness across nodes:** ULID's 80-bit random component provides cross-node uniqueness without coordination. No collision detection/retry needed.
+
+**Dependency:** Add `ulid` crate to `gitim-core` Cargo.toml, or implement a minimal ULID generator (~50 lines) to avoid dependency.
+
+### P1-5a: Ref Disambiguation
+
+**Syntax:** `session:<id>` is bare text (no `<` `>` markers), distinct from existing `<#...>` link syntax.
+
+**Parser:** Add `SESSION_REF_RE` to `link.rs`:
+```regex
+\bsession:(qs-[0-9A-HJKMNP-TV-Z]{26})(:L(\d{6,}))?\b
+```
+- Matches `session:qs-<ulid>` (bare) and `session:qs-<ulid>:L000001` (with line ref)
+- Word-boundary anchors prevent partial matches (e.g., `x-session:qs-xxx` not matched)
+- No conflict with existing `<#channel/card-id>` parser — different prefix entirely
+
+**LinkKind:** Add variant:
+```rust
+QuickSession {
+    session_id: String,
+    line_number: Option<u64>,
+}
+```
+
+**Line refs in v1:** Yes. The `session:<id>:L000001` format is supported to mirror `<#channel:L000042>` message links. Frontend reference preview resolves the referenced line.
+
+**No marker wrapping:** Quick session refs do not use `<` `>` markers. Unlike `<#channel>`, `<~user>`, `<!url>`, the `session:` prefix is self-delimiting and unambiguous. The word-boundary regex prevents false positives in prose.
 
 1. Record current test baseline before feature work:
    - `cargo test`
@@ -297,9 +361,10 @@ Verification:
 
 Before implementation starts, confirm:
 
-- `session:<id>` is the accepted quick session ref format.
+- `session:qs-<ulid>` (29 chars, ULID, Crockford base32) is the quick session ref format. Line refs (`:L000001`) supported.
 - Quick session files live under `quick-sessions/<id>/`.
 - The top hub is the canonical entry point for v1.
 - Per-agent queueing is acceptable for v1 latency.
 - Title is set by the agent via `set_quick_session_title` API gate before first assistant response.
+- Cross-node dispatch uses existing poll mechanism: daemon detects `quick-sessions/<id>/` paths in git diff, routes to runtime when `agent_id` matches.
 - Cross-node sessions use git-synced daemon objects; no provider state serialization across nodes.
