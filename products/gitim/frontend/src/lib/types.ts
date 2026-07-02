@@ -150,6 +150,8 @@ export interface Message {
   meta?: { targets?: string[] } & Record<string, unknown>;
   _status?: MessageStatus;
   _pendingId?: string;
+  /** Stable key for front-end-only ephemeral messages (e.g. card-change reminders). */
+  _ephemeralId?: string;
 }
 
 export interface Channel {

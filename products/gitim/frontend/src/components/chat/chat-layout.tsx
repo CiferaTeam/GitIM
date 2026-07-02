@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Hash, LayoutGrid, LogIn, Menu } from "lucide-react";
+import { useNavigate } from "react-router";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChannelOperations } from "../../hooks/use-channel-operations";
-import { useChatStore } from "../../hooks/use-chat-store";
+import { mergeCardChangeEvents, useChatStore } from "../../hooks/use-chat-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useIsMobile } from "../../hooks/use-media-query";
@@ -41,7 +42,8 @@ export function ChatLayout() {
   const currentUser = useChatStore((s) => s.currentUser);
   const isGuest = useChatStore((s) => s.isGuest);
   const users = useChatStore((s) => s.users);
-  const messages = useChatStore((s) => s.messages);
+  const rawMessages = useChatStore((s) => s.messages);
+  const cardChangeEvents = useChatStore((s) => s.cardChangeEvents);
   const replyTo = useChatStore((s) => s.replyTo);
   const highlightLine = useChatStore((s) => s.highlightLine);
   const pendingScrollLine = useChatStore((s) => s.pendingScrollLine);
@@ -87,6 +89,19 @@ export function ChatLayout() {
       includeAll: allMentionRecipients.length > 0,
     });
   }, [users, agents, allMentionRecipients]);
+
+  const navigate = useNavigate();
+  const messages = useMemo(() => {
+    const events = currentChannel ? cardChangeEvents[currentChannel] ?? [] : [];
+    return mergeCardChangeEvents(rawMessages, events);
+  }, [rawMessages, cardChangeEvents, currentChannel]);
+
+  const handleCardChangeClick = useCallback(
+    (channel: string, cardId: string) => {
+      navigate(`/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`);
+    },
+    [navigate],
+  );
 
   const activeWorkspace = activeSlug
     ? workspaces.find((workspace) => workspace.slug === activeSlug)
@@ -343,6 +358,7 @@ export function ChatLayout() {
           onChannelClick={handleChannelClick}
           onMessageLinkClick={handleMessageLinkClick}
           onUserProfileClick={handleUserProfileClick}
+          onCardChangeClick={handleCardChangeClick}
           onActionSheet={isMobile ? setActionSheetMessage : undefined}
           onLoadOlder={handleLoadOlder}
           scrollRef={messageScrollRef}

@@ -16,6 +16,10 @@ import {
   writeChatScopeViewAnchor,
 } from "../../lib/chat-ui-state";
 
+vi.mock("react-router", () => ({
+  useNavigate: () => vi.fn(),
+}));
+
 const mocks = vi.hoisted(() => ({
   client: {
     send: vi.fn(),

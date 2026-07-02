@@ -4,6 +4,23 @@ import type { ChatViewportAnchor } from "../lib/chat-ui-state";
 import type { Channel, Message, UserInfo } from "../lib/types";
 import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
+/** Ephemeral lifetime for in-channel card-change reminder pills. */
+const CARD_CHANGE_EVENT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Max reminders retained per channel to keep the merge cheap. */
+const CARD_CHANGE_EVENT_MAX_COUNT = 50;
+/** Merge successive updates to the same card at the same anchor within this window. */
+const CARD_CHANGE_EVENT_DEDUP_MS = 5 * 1000;
+
+export interface CardChangeEvent {
+  id: string;
+  cardId: string;
+  cardChannel: string;
+  anchorLine: number;
+  authors: string[];
+  count: number;
+  receivedAt: number;
+}
+
 interface NavEntry {
   channel: string;
   anchor: ChatViewportAnchor;
@@ -74,6 +91,9 @@ interface ChatState {
    *  Reset to true on channel switch — until the next fetch lands, we don't
    *  know whether there's more history to load. */
   hasMoreHistory: boolean;
+  /** Front-end-only card-thread change reminders per channel. Cleared on
+   *  workspace switch. */
+  cardChangeEvents: Record<string, CardChangeEvent[]>;
 
   setConnected: (v: boolean) => void;
   setCurrentUser: (u: string) => void;
@@ -123,6 +143,7 @@ interface ChatState {
   selectChannel: (name: string | null) => void;
   incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
+  addCardChangeEvent: (event: CardChangeEvent) => void;
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
   /** Insert older messages at the head of `messages`, deduping by line_number
@@ -221,6 +242,7 @@ export const useChatStore = create<ChatState>((set) => ({
   threadMessages: [],
   navHistory: [],
   hasMoreHistory: true,
+  cardChangeEvents: {},
 
   setConnected: (v) => set({ connected: v }),
   setCurrentUser: (u) => set({ currentUser: u }),
@@ -491,6 +513,44 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
     })),
 
+  addCardChangeEvent: (event) =>
+    set((state) => {
+      const now = Date.now();
+      const ttlCutoff = now - CARD_CHANGE_EVENT_TTL_MS;
+      const list = (state.cardChangeEvents[event.cardChannel] ?? []).filter(
+        (e) => e.receivedAt >= ttlCutoff,
+      );
+      const existingIndex = list.findIndex(
+        (e) =>
+          e.cardId === event.cardId &&
+          e.anchorLine === event.anchorLine &&
+          now - e.receivedAt <= CARD_CHANGE_EVENT_DEDUP_MS,
+      );
+      let next: CardChangeEvent[];
+      if (existingIndex >= 0) {
+        const existing = list[existingIndex];
+        const merged: CardChangeEvent = {
+          ...existing,
+          count: existing.count + event.count,
+          authors: Array.from(new Set([...existing.authors, ...event.authors])),
+          receivedAt: Math.max(existing.receivedAt, event.receivedAt),
+        };
+        next = list.slice();
+        next[existingIndex] = merged;
+      } else {
+        next = [...list, event];
+      }
+      if (next.length > CARD_CHANGE_EVENT_MAX_COUNT) {
+        next = next.slice(-CARD_CHANGE_EVENT_MAX_COUNT);
+      }
+      return {
+        cardChangeEvents: {
+          ...state.cardChangeEvents,
+          [event.cardChannel]: next,
+        },
+      };
+    }),
+
   // Dedup: keep pending messages that haven't been confirmed by the new batch.
   // When newMessages is empty (e.g. channel clear), don't carry over pending —
   // they belong to the previous channel context.
@@ -621,8 +681,79 @@ export const useChatStore = create<ChatState>((set) => ({
       threadMessages: [],
       navHistory: [],
       hasMoreHistory: true,
+      cardChangeEvents: {},
     }),
 }));
+
+function cardChangeEventToMessage(event: CardChangeEvent): Message {
+  return {
+    type: "event",
+    event_type: "card_change",
+    line_number: event.anchorLine,
+    point_to: 0,
+    author: "",
+    timestamp: new Date(event.receivedAt).toISOString(),
+    body: "",
+    meta: {
+      cardId: event.cardId,
+      cardChannel: event.cardChannel,
+      anchorLine: event.anchorLine,
+      authors: event.authors,
+      count: event.count,
+    },
+    _ephemeralId: event.id,
+  };
+}
+
+/** Merge front-end card-change reminders into a real message list.
+ *
+ *  Each event is rendered immediately after the message whose `line_number`
+ *  equals `anchorLine`. If that message isn't currently loaded, the event is
+ *  appended after the loaded real messages (and will automatically reposition
+ *  once the anchor line is fetched). Pending/optimistic messages are kept at
+ *  the very bottom.
+ */
+export function mergeCardChangeEvents(
+  messages: Message[],
+  events: CardChangeEvent[],
+): Message[] {
+  if (events.length === 0) return messages;
+
+  const real: Message[] = [];
+  const pending: Message[] = [];
+  for (const m of messages) {
+    if (m._pendingId || m.line_number <= 0) {
+      pending.push(m);
+    } else {
+      real.push(m);
+    }
+  }
+
+  const byAnchor = new Map<number, CardChangeEvent[]>();
+  for (const e of events) {
+    const anchor = e.anchorLine > 0 ? e.anchorLine : Number.MAX_SAFE_INTEGER;
+    const list = byAnchor.get(anchor) ?? [];
+    list.push(e);
+    byAnchor.set(anchor, list);
+  }
+
+  const merged: Message[] = [];
+  for (const m of real) {
+    merged.push(m);
+    const inserted = byAnchor.get(m.line_number);
+    if (inserted) {
+      merged.push(...inserted.map(cardChangeEventToMessage));
+      byAnchor.delete(m.line_number);
+    }
+  }
+
+  const remaining = Array.from(byAnchor.entries()).sort((a, b) => a[0] - b[0]);
+  for (const [, evs] of remaining) {
+    merged.push(...evs.map(cardChangeEventToMessage));
+  }
+  merged.push(...pending);
+  return merged;
+}
 
 onWorkspaceSwitch(() => {
   useChatStore.getState().resetForWorkspaceSwitch();
