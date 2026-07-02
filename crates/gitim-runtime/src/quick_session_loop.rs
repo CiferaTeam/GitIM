@@ -111,8 +111,10 @@ async fn poll_and_process_sessions(
             .and_then(|v: &Value| v.as_str())
             .unwrap_or("");
 
-        // Only process active/running sessions
-        if status != "active" && status != "running" {
+        // Process active, running, and needs_title sessions.
+        // needs_title sessions need dispatch so the agent can set title
+        // before responding (per required-title-api owner decision).
+        if status != "active" && status != "running" && status != "needs_title" {
             continue;
         }
 
@@ -165,6 +167,135 @@ async fn poll_and_process_sessions(
     Ok(processed)
 }
 
+/// Generate a title for a `needs_title` quick session and set it via daemon IPC.
+///
+/// Makes a dedicated provider call to generate a short title (max 80 chars)
+/// from the conversation thread, then calls `set_quick_session_title` to
+/// transition the session to `active`. Returns the updated meta on success,
+/// or an error if title generation or setting fails.
+async fn generate_and_set_title(
+    client: &GitimClient,
+    session_id: &str,
+    agent_info: &AgentInfo,
+    activity_tx: &broadcast::Sender<AgentActivityEvent>,
+    workspace_id: &str,
+    thread_raw: &str,
+) -> Result<QuickSessionMeta, String> {
+    let _ = activity_tx.send(AgentActivityEvent {
+        agent_id: agent_info.handler.clone(),
+        workspace_id: workspace_id.to_string(),
+        event_type: "generating_title".to_string(),
+        detail: format!("generating title for session {}", session_id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        scope: "quick_session".to_string(),
+        session_id: Some(session_id.to_string()),
+        ref_: None,
+    });
+
+    // Build a fresh provider for title generation
+    let provider_type = agent_info.provider.as_deref().unwrap_or("claude");
+    let handler = &agent_info.handler;
+    let provider_config = build_provider_config(provider_type, handler, agent_info.env.clone())
+        .map_err(|e| format!("build_provider_config for title: {e}"))?;
+
+    let provider = create(provider_type, provider_config)
+        .map_err(|e| format!("create provider for title: {e}"))?;
+
+    let base_prompt = agent_info.system_prompt.as_deref().unwrap_or("");
+    let title_prompt = format!(
+        "{}\n\nYou are generating a title for a quick session. Based on the conversation below, output ONLY a short title (max 80 characters) that summarizes the topic. Do not include quotes, markdown, or any other text — just the title.\n\nConversation:\n{}",
+        base_prompt, thread_raw
+    );
+
+    let cwd = PathBuf::from(&agent_info.repo_path);
+    let opts = ExecOptions {
+        cwd: Some(cwd),
+        model: agent_info.model.clone(),
+        effort: agent_info.effort.clone(),
+        system_prompt: Some(title_prompt),
+        max_turns: Some(1),
+        resume_token: None,
+        ..Default::default()
+    };
+
+    info!(
+        session_id = %session_id,
+        agent_id = %handler,
+        "quick session: generating title"
+    );
+
+    let mut session = provider
+        .execute("Generate a title", opts)
+        .await
+        .map_err(|e| format!("title provider execute failed: {e}"))?;
+
+    let mut title_output = String::new();
+    while let Some(event) = session.events.recv().await {
+        if let gitim_agent_provider::Event::Text { content } = &event {
+            title_output.push_str(content);
+        }
+    }
+
+    let exec_result = session
+        .result
+        .await
+        .map_err(|_| "title result channel closed".to_string())?;
+
+    let title = if matches!(
+        exec_result.status,
+        ExecStatus::Completed | ExecStatus::Aborted
+    ) && !title_output.is_empty()
+    {
+        title_output.trim().to_string()
+    } else if !exec_result.output.trim().is_empty() {
+        exec_result.output.trim().to_string()
+    } else {
+        return Err("title generation produced empty output".to_string());
+    };
+
+    // Truncate to 80 chars (daemon will also validate, but we do it here for safety)
+    let title = if title.len() > 80 {
+        title[..80].to_string()
+    } else {
+        title
+    };
+
+    // Set title via daemon IPC
+    client
+        .request(
+            "set_quick_session_title",
+            json!({"session_id": session_id, "title": title}),
+        )
+        .await
+        .map_err(|e| format!("set_quick_session_title daemon call failed: {e}"))?;
+
+    info!(
+        session_id = %session_id,
+        title = %title,
+        "quick session: title set"
+    );
+
+    // Re-read session meta to get updated status (should now be active)
+    let detail_resp = client
+        .request("read_quick_session", json!({"session_id": session_id}))
+        .await
+        .map_err(|e| format!("read_quick_session after title set failed: {e}"))?;
+
+    let detail_data = detail_resp
+        .data
+        .ok_or_else(|| "read_quick_session after title: missing data".to_string())?;
+
+    let updated_meta: QuickSessionMeta = serde_json::from_value(
+        detail_data
+            .get("meta")
+            .ok_or_else(|| "read_quick_session after title: missing meta".to_string())?
+            .clone(),
+    )
+    .map_err(|e| format!("parse meta after title: {e}"))?;
+
+    Ok(updated_meta)
+}
+
 /// Execute one turn for a quick session.
 ///
 /// 1. Read session details (meta + thread)
@@ -203,21 +334,20 @@ async fn execute_quick_session_turn(
         .and_then(|v: &Value| v.as_str())
         .unwrap_or("");
 
-    // 2. Title gate enforcement
-    if meta.status == QuickSessionStatus::NeedsTitle {
-        // Session is blocked on title — emit event and skip
-        let _ = activity_tx.send(AgentActivityEvent {
-            agent_id: agent_info.handler.clone(),
-            workspace_id: workspace_id.to_string(),
-            event_type: "quick_session_blocked".to_string(),
-            detail: "title required before assistant content".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            scope: "quick_session".to_string(),
-            session_id: Some(session_id.to_string()),
-            ref_: None,
-        });
-        return Ok(()); // Not an error — title not set yet
-    }
+    // 2. Title gate: generate and set title if session is needs_title
+    let meta = if meta.status == QuickSessionStatus::NeedsTitle {
+        generate_and_set_title(
+            client,
+            session_id,
+            agent_info,
+            activity_tx,
+            workspace_id,
+            thread_raw,
+        )
+        .await?
+    } else {
+        meta
+    };
 
     check_title_gate(&meta)?;
 

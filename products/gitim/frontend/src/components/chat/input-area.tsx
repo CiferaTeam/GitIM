@@ -126,6 +126,20 @@ export function InputArea({
     ta.style.height = `${Math.min(ta.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
 
+  // Listen for session-ref drop insertions from sidebar
+  useEffect(() => {
+    function handleInsertText(e: Event) {
+      const detail = (e as CustomEvent<string>).detail;
+      if (typeof detail === "string") {
+        setText((prev) => (prev ? `${prev}\n${detail}` : detail));
+        textareaRef.current?.focus();
+      }
+    }
+    window.addEventListener("gitim:insert-composer-text", handleInsertText);
+    return () =>
+      window.removeEventListener("gitim:insert-composer-text", handleInsertText);
+  }, [workspaceKey, scopeKey]);
+
   if (disabled || !workspaceKey || !scopeKey) return null;
   // After the guard above, workspaceKey and scopeKey are non-null for the rest of render.
   const activeWorkspaceKey: string = workspaceKey;

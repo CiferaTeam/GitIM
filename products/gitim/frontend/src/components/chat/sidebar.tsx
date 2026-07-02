@@ -55,13 +55,6 @@ const ARCHIVED_DMS_PREFIX_DEBOUNCE_MS = 300;
 const ARCHIVED_CHANNELS_PAGE_SIZE = 10;
 const ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS = 300;
 
-function compactTimestamp(): string {
-  return new Date()
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d{3}/, "");
-}
-
 interface PinnedConversations {
   channels: Set<string>;
   dms: Set<string>;
@@ -237,7 +230,6 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const agents = useAgentStore((s) => s.agents);
   const currentUser = useChatStore((s) => s.currentUser);
-  const addPendingMessage = useChatStore((s) => s.addPendingMessage);
   const projects = useProjectStore((s) => s.projects);
   const fetchProjects = useProjectStore((s) => s.fetch);
   const channels = useChatStore((s) => s.channels);
@@ -819,17 +811,14 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       description: `${payload.title} · @${payload.agent}`,
     });
     if (currentChannel !== channelName) {
-      return;
+      // If dropped on a different channel, navigate and insert ref
+      onChannelSelect(channelName);
     }
-    addPendingMessage({
-      line_number: -1,
-      point_to: 0,
-      author: currentUser || "you",
-      timestamp: compactTimestamp(),
-      body: `${payload.ref} ${payload.title}\nfrom @${payload.agent}`,
-      _status: "sent",
-      _pendingId: `session-ref-${payload.id}-${Date.now()}`,
-    });
+    // Insert the session ref text into the composer via custom event
+    const refText = `${payload.ref} ${payload.title}`;
+    window.dispatchEvent(
+      new CustomEvent("gitim:insert-composer-text", { detail: refText }),
+    );
   }
 
   async function handleArchiveDm(dmName: string) {

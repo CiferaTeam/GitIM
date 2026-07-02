@@ -2,8 +2,8 @@ use crate::api::Response;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::types::{
-    Handler, QuickSessionListItem, QuickSessionMeta, QuickSessionStatus, QuickSessionTitleSource,
-    QUICK_SESSION_ID_PREFIX,
+    validate_quick_session_id, Handler, QuickSessionListItem, QuickSessionMeta, QuickSessionStatus,
+    QuickSessionTitleSource, QUICK_SESSION_ID_PREFIX,
 };
 use gitim_sync::git::GitError;
 use tracing::warn;
@@ -123,7 +123,7 @@ pub async fn handle_create_quick_session(
         created_by: Handler::new(&author).unwrap_or_else(|_| Handler::new("system").unwrap()),
         status: QuickSessionStatus::NeedsTitle,
         created_at: ts.clone(),
-        updated_at: ts,
+        updated_at: ts.clone(),
         archived_at: None,
         summary: None,
         last_message_preview: None,
@@ -161,11 +161,14 @@ pub async fn handle_create_quick_session(
 
     let _ = push_with_retry(&state).await;
 
-    let resp = gitim_core::types::CreateQuickSessionResponse {
+    let resp = QuickSessionListItem {
         id: session_id.clone(),
-        ref_: format!("session:{}", session_id),
+        title: String::new(),
+        agent_id: agent_id.clone(),
         status: QuickSessionStatus::NeedsTitle,
-        meta,
+        updated_at: ts.clone(),
+        ref_: format!("session:{}", session_id),
+        last_message_preview: Some(first_message.chars().take(80).collect()),
     };
     Response::json(resp)
 }
@@ -212,6 +215,9 @@ pub async fn handle_list_quick_sessions(state: SharedState, include_archived: bo
 
 /// Read a quick session (metadata + transcript).
 pub async fn handle_read_quick_session(state: SharedState, session_id: String) -> Response {
+    if let Err(e) = validate_quick_session_id(&session_id) {
+        return Response::error(format!("invalid session_id: {:?}", e));
+    }
     let meta = match read_meta(&state, &session_id) {
         Ok(m) => m,
         Err(e) => return Response::error(e),
@@ -232,6 +238,9 @@ pub async fn handle_set_quick_session_title(
     session_id: String,
     title: String,
 ) -> Response {
+    if let Err(e) = validate_quick_session_id(&session_id) {
+        return Response::error(format!("invalid session_id: {:?}", e));
+    }
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Response::error("title cannot be empty");
@@ -266,13 +275,18 @@ pub async fn handle_set_quick_session_title(
     Response::json(&meta)
 }
 
-/// Append a user message to a quick session thread.
+/// Append a message to a quick session thread.  
+/// Enforces the title API gate: if status is `needs_title` and the author
+/// is not the session creator, the message is blocked until a title is set.
 pub async fn handle_send_quick_session_message(
     state: SharedState,
     session_id: String,
     body: String,
     author: String,
 ) -> Response {
+    if let Err(e) = validate_quick_session_id(&session_id) {
+        return Response::error(format!("invalid session_id: {:?}", e));
+    }
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
     }
@@ -284,6 +298,15 @@ pub async fn handle_send_quick_session_message(
 
     if meta.status == QuickSessionStatus::Archived {
         return Response::error("cannot send message to archived session");
+    }
+
+    // Title API gate: block assistant output until title is set.
+    // The session creator (human) is exempt so they can send the first message
+    // and any follow-up messages before the agent sets a title.
+    if meta.status == QuickSessionStatus::NeedsTitle && author != meta.created_by.as_str() {
+        return Response::error(
+            "QUICK_SESSION_TITLE_REQUIRED: agent must call set_quick_session_title before sending assistant content",
+        );
     }
 
     let tp = thread_path(&state, &session_id);
@@ -320,6 +343,9 @@ pub async fn handle_archive_quick_session(
     session_id: String,
     author: String,
 ) -> Response {
+    if let Err(e) = validate_quick_session_id(&session_id) {
+        return Response::error(format!("invalid session_id: {:?}", e));
+    }
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
     }

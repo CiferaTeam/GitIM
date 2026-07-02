@@ -2296,7 +2296,7 @@ export async function listQuickSessions(
     return { ok: true, data: [] };
   }
   const params = new URLSearchParams();
-  if (includeArchived) params.set("include_archived", "true");
+  if (includeArchived) params.set("archived", "true");
   const qs = params.size > 0 ? `?${params}` : "";
   const res = await localNetworkFetch(`${wsBase(slug)}/im/quick-sessions${qs}`);
   const json = await res.json();

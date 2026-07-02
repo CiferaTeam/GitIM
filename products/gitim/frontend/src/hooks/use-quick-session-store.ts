@@ -96,6 +96,12 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
         loading: false,
         selectedId: stillExists ? selectedId : (merged[0]?.item.id ?? null),
       });
+      // Refresh open detail if a session is currently selected
+      const newSelectedId = stillExists ? selectedId : merged[0]?.item.id;
+      if (newSelectedId) {
+        // Fire-and-forget: reload detail in background without blocking the list refresh
+        get().loadDetail(workspaceSlug, newSelectedId);
+      }
       return true;
     } catch (err) {
       set({ loading: false, error: String(err) });

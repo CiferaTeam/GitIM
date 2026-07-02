@@ -71,6 +71,7 @@ export function ConversationHub() {
     create,
     loadDetail,
     sendMessage,
+    setTitle,
     archive,
   } = store;
 
@@ -155,6 +156,8 @@ export function ConversationHub() {
       newAgent={newAgent}
       newMessage={newMessage}
       loading={loading}
+      slug={slug}
+      setTitle={setTitle}
       onSelect={select}
       onToggleArchived={() => setShowArchived((v) => !v)}
       onTogglePinned={() => {
@@ -228,6 +231,8 @@ interface ConversationHubPanelProps {
   newAgent: string;
   newMessage: string;
   loading: boolean;
+  slug: string | null;
+  setTitle: ReturnType<typeof useQuickSessionStore.getState>["setTitle"];
   onSelect(id: string | null): void;
   onToggleArchived(): void;
   onTogglePinned(): void;
@@ -250,6 +255,8 @@ function ConversationHubPanel({
   newAgent,
   newMessage,
   loading,
+  slug,
+  setTitle,
   onSelect,
   onToggleArchived,
   onTogglePinned,
@@ -268,6 +275,8 @@ function ConversationHubPanel({
 
   const meta = selectedSession?.item;
   const detailLoading = selectedSession?.detailLoading;
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
 
   return (
     <section className="grid h-[560px] max-h-[calc(100vh-80px)] grid-cols-[220px_minmax(0,1fr)] overflow-hidden bg-card text-foreground">
@@ -367,9 +376,54 @@ function ConversationHubPanel({
             <div className="flex items-start justify-between gap-3 border-b border-border px-3 py-2">
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
-                  <h2 className="truncate text-sm font-semibold">
-                    {meta.title || "Untitled"}
-                  </h2>
+                  {editingTitle ? (
+                    <input
+                      className="h-7 min-w-0 rounded border border-primary bg-card px-1.5 text-sm font-semibold outline-none"
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      onKeyDown={async (e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          const trimmed = draftTitle.trim();
+                          if (trimmed && slug && meta?.id) {
+                            await setTitle(slug, meta.id, trimmed);
+                            setEditingTitle(false);
+                          }
+                        } else if (e.key === "Escape") {
+                          setEditingTitle(false);
+                        }
+                      }}
+                      onBlur={async () => {
+                        const trimmed = draftTitle.trim();
+                        if (trimmed && slug && meta?.id) {
+                          await setTitle(slug, meta.id, trimmed);
+                        }
+                        setEditingTitle(false);
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <h2
+                      className={cn(
+                        "truncate text-sm font-semibold",
+                        meta.status !== "archived" &&
+                          "cursor-pointer hover:text-primary",
+                      )}
+                      onClick={() => {
+                        if (meta.status !== "archived") {
+                          setDraftTitle(meta.title || "");
+                          setEditingTitle(true);
+                        }
+                      }}
+                      title={
+                        meta.status !== "archived"
+                          ? "Click to edit title"
+                          : undefined
+                      }
+                    >
+                      {meta.title || "Untitled"}
+                    </h2>
+                  )}
                   <span className="shrink-0 rounded-md border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-text-muted">
                     {meta.ref_}
                   </span>
