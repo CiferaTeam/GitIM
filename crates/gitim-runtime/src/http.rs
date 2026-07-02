@@ -26,6 +26,7 @@ use crate::git_config::{
 use crate::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };
+use crate::slug::RESERVED;
 use crate::gitignore::ensure_defaults_gitignored;
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
@@ -5482,6 +5483,8 @@ struct WorkspacesCreateRequest {
     path: String,
     #[serde(default)]
     workspace_name: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
     git: WorkspacesCreateGit,
 }
 
@@ -5893,6 +5896,32 @@ async fn workspaces_create(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| basename_raw.clone());
 
+    // Validate an explicitly requested slug before touching state or fs.
+    let explicit_slug = req
+        .slug
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if let Some(ref s) = explicit_slug {
+        if let Err(e) = crate::slug::validate(s) {
+            let (error_code, error_msg) = match e {
+                crate::slug::SlugError::Reserved => (
+                    "reserved_slug".to_string(),
+                    format!("slug '{s}' is reserved")
+                ),
+                _ => (
+                    "invalid_slug".to_string(),
+                    format!("invalid slug: {e}")
+                ),
+            };
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(error_msg, error_code)),
+            )
+                .into_response();
+        }
+    }
+
     // TOCTOU-safe slug reservation: path-uniqueness check + slug derivation +
     // placeholder insertion all happen under the same lock. Without this, a
     // second POST for an already-registered path would allocate a fresh slug,
@@ -5920,9 +5949,29 @@ async fn workspaces_create(
                 .into_response();
         }
 
-        let candidate = crate::slug::normalize(&basename_raw);
+        let candidate = explicit_slug
+            .clone()
+            .unwrap_or_else(|| crate::slug::normalize(&basename_raw));
         let existing: std::collections::HashSet<String> = s.workspaces.keys().cloned().collect();
         let slug = crate::slug::resolve(&candidate, &existing);
+
+        // If the caller supplied a slug and it collides (including reserved
+        // keywords), fail deterministically rather than silently appending -2.
+        if explicit_slug.is_some() && slug != candidate {
+            let error_code = if RESERVED.contains(&candidate.as_str()) {
+                "reserved_slug"
+            } else {
+                "slug_conflict"
+            };
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorBody::with_code(
+                    format!("slug \"{candidate}\" is already in use"),
+                    error_code,
+                )),
+            )
+                .into_response();
+        }
 
         if s.workspaces.contains_key(&slug) {
             return (

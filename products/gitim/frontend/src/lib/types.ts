@@ -301,6 +301,7 @@ export type CreateWorkspaceGit =
 export interface CreateWorkspaceRequest {
   path: string;
   workspace_name?: string;
+  slug?: string;
   git: CreateWorkspaceGit;
 }
 
