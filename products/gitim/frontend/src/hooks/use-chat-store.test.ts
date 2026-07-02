@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ArchivedDmEntry } from "../lib/client";
 import type { Channel, Message } from "../lib/types";
-import { useChatStore } from "./use-chat-store";
+import { mergeCardChangeEvents, useChatStore } from "./use-chat-store";
+import type { CardChangeEvent } from "./use-chat-store";
 
 function dmEntry(stem: string, peer: string): ArchivedDmEntry {
   return { dm_pair_stem: stem, peer };
@@ -598,5 +599,130 @@ describe("useChatStore archivedDmsView", () => {
     });
     useChatStore.getState().resetForWorkspaceSwitch();
     expect(useChatStore.getState().archivedDmsView).toBeNull();
+  });
+});
+
+describe("useChatStore card change events", () => {
+  beforeEach(() => {
+    useChatStore.getState().resetForWorkspaceSwitch();
+  });
+
+  function makeEvent(
+    cardId: string,
+    channel: string,
+    anchorLine: number,
+    opts: Partial<CardChangeEvent> = {},
+  ): CardChangeEvent {
+    return {
+      id: `${channel}:${cardId}:${anchorLine}:${opts.receivedAt ?? 0}`,
+      cardId,
+      cardChannel: channel,
+      anchorLine,
+      authors: ["alice"],
+      count: 1,
+      receivedAt: 0,
+      ...opts,
+    };
+  }
+
+  it("stores events per channel", () => {
+    useChatStore.getState().addCardChangeEvent(makeEvent("c1", "general", 10));
+    useChatStore.getState().addCardChangeEvent(makeEvent("c2", "dev", 20));
+    expect(useChatStore.getState().cardChangeEvents.general).toHaveLength(1);
+    expect(useChatStore.getState().cardChangeEvents.dev).toHaveLength(1);
+  });
+
+  it("merges events for the same card at the same anchor within the dedup window", () => {
+    const now = Date.now();
+    useChatStore
+      .getState()
+      .addCardChangeEvent(makeEvent("c1", "general", 10, { receivedAt: now }));
+    useChatStore
+      .getState()
+      .addCardChangeEvent(
+        makeEvent("c1", "general", 10, {
+          receivedAt: now + 1000,
+          authors: ["bob"],
+          count: 2,
+        }),
+      );
+    const events = useChatStore.getState().cardChangeEvents.general;
+    expect(events).toHaveLength(1);
+    expect(events[0].count).toBe(3);
+    expect(events[0].authors).toEqual(["alice", "bob"]);
+  });
+
+  it("drops events older than the TTL", () => {
+    const now = Date.now();
+    useChatStore
+      .getState()
+      .addCardChangeEvent(
+        makeEvent("old", "general", 10, {
+          receivedAt: now - 25 * 60 * 60 * 1000,
+        }),
+      );
+    useChatStore
+      .getState()
+      .addCardChangeEvent(makeEvent("new", "general", 10, { receivedAt: now }));
+    const events = useChatStore.getState().cardChangeEvents.general;
+    expect(events).toHaveLength(1);
+    expect(events[0].cardId).toBe("new");
+  });
+
+  it("caps the per-channel list at 50 events", () => {
+    const now = Date.now();
+    for (let i = 0; i < 55; i++) {
+      useChatStore
+        .getState()
+        .addCardChangeEvent(
+          makeEvent(`c${i}`, "general", i, { receivedAt: now - (54 - i) * 1000 }),
+        );
+    }
+    const events = useChatStore.getState().cardChangeEvents.general;
+    expect(events).toHaveLength(50);
+    expect(events[0].cardId).toBe("c5");
+  });
+});
+
+describe("mergeCardChangeEvents", () => {
+  function makeEvent(cardId: string, anchorLine: number): CardChangeEvent {
+    return {
+      id: `${cardId}:${anchorLine}`,
+      cardId,
+      cardChannel: "general",
+      anchorLine,
+      authors: ["alice"],
+      count: 1,
+      receivedAt: 0,
+    };
+  }
+
+  it("inserts an event immediately after its anchor message", () => {
+    const messages = [msg(1, "a"), msg(2, "b"), msg(3, "c")];
+    const events = [makeEvent("c1", 2)];
+    const merged = mergeCardChangeEvents(messages, events);
+    expect(merged.map((m) => m.line_number)).toEqual([1, 2, 2, 3]);
+    expect(merged[2].type).toBe("event");
+    expect(merged[2]._ephemeralId).toBe("c1:2");
+  });
+
+  it("appends events whose anchor is beyond loaded messages before pending messages", () => {
+    const pending = msg(-1, "sending", { _pendingId: "p1" });
+    const messages = [msg(1, "a"), pending];
+    const events = [makeEvent("c1", 99)];
+    const merged = mergeCardChangeEvents(messages, events);
+    expect(merged.map((m) => m._ephemeralId ?? m.line_number)).toEqual([
+      1,
+      "c1:99",
+      -1,
+    ]);
+  });
+
+  it("keeps multiple events at the same anchor in receive order", () => {
+    const messages = [msg(1, "a")];
+    const events = [makeEvent("c1", 1), makeEvent("c2", 1)];
+    const merged = mergeCardChangeEvents(messages, events);
+    const eventPart = merged.filter((m) => m.type === "event");
+    expect(eventPart.map((e) => e.meta?.cardId)).toEqual(["c1", "c2"]);
   });
 });

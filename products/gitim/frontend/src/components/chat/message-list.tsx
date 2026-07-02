@@ -11,7 +11,7 @@ import type { Message } from "../../lib/types";
 import type { ChatViewportAnchor } from "../../lib/chat-ui-state";
 import { MessageItem } from "./message-item";
 import { HandlerName } from "./handler-name";
-import { MessageSquare, Hash } from "lucide-react";
+import { MessageSquare, Hash, LayoutGrid } from "lucide-react";
 import {
   SCROLL_BOTTOM_THRESHOLD_PX,
   decideTimelineScroll,
@@ -46,6 +46,7 @@ interface MessageListProps {
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
+  onCardChangeClick?: (channel: string, cardId: string) => void;
   onActionSheet?: (msg: Message) => void;
   /** Fired when the user scrolls within `SCROLL_TOP_THRESHOLD_PX` of the top.
    *  Caller is responsible for fetching older messages and prepending them
@@ -102,6 +103,7 @@ export function MessageList({
   onChannelClick,
   onMessageLinkClick,
   onUserProfileClick,
+  onCardChangeClick,
   onActionSheet,
   onLoadOlder,
   scrollRef: externalScrollRef,
@@ -313,7 +315,7 @@ export function MessageList({
       onTouchStart={handleUserScrollIntent}
     >
       {messages.map((msg) => {
-        const key = msg._pendingId ?? msg.line_number;
+        const key = msg._ephemeralId ?? msg._pendingId ?? msg.line_number;
 
         if (msg.type === "event") {
           const targets = msg.meta?.targets ?? [];
@@ -349,6 +351,29 @@ export function MessageList({
                   <HandlerName handler={msg.author} /> left the channel
                 </>
               );
+          } else if (msg.event_type === "card_change") {
+            const meta = msg.meta as {
+              cardId: string;
+              cardChannel: string;
+              count: number;
+            };
+            const shortId = meta.cardId.slice(0, 8);
+            return (
+              <div key={key} className="flex justify-center py-1">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onCardChangeClick?.(meta.cardChannel, meta.cardId)
+                  }
+                  className="inline-flex items-center gap-1.5 text-[11px] text-text-muted/80 bg-surface/50 hover:bg-surface px-2 py-0.5 rounded-full transition-colors"
+                >
+                  <LayoutGrid className="h-3 w-3" />
+                  <span>
+                    卡片 #{shortId} · {meta.count} 条新回复
+                  </span>
+                </button>
+              </div>
+            );
           } else {
             eventContent = msg.body ?? `${msg.author}: ${msg.event_type}`;
           }

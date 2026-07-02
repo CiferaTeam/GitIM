@@ -643,5 +643,61 @@ describe("MessageList scroll position on message mutations", () => {
 
     expect(scroll.scrollTop).toBe(700);
   });
+});
 
+function cardChangeEvent(cardId: string, count: number): Message {
+  return {
+    type: "event",
+    event_type: "card_change",
+    line_number: 2,
+    point_to: 0,
+    author: "",
+    timestamp: "20260511T120000Z",
+    body: "",
+    meta: {
+      cardId,
+      cardChannel: "general",
+      anchorLine: 2,
+      authors: ["bob"],
+      count,
+    },
+    _ephemeralId: `${cardId}:2`,
+  };
+}
+
+describe("MessageList card change events", () => {
+  let root: Root | null = null;
+
+  afterEach(() => {
+    if (root) {
+      root.unmount();
+      root = null;
+    }
+    document.body.innerHTML = "";
+  });
+
+  it("renders a small card-change pill and calls onCardChangeClick when clicked", async () => {
+    const onCardChangeClick = vi.fn();
+    const messages = [
+      msg(1, "a"),
+      msg(2, "b"),
+      cardChangeEvent("card-123", 3),
+      msg(3, "c"),
+    ];
+    const rendered = await renderList({ messages, onCardChangeClick });
+    root = rendered.root;
+
+    const buttons = Array.from(rendered.container.querySelectorAll("button"));
+    const button = buttons.find((b) => b.textContent?.includes("卡片"));
+    expect(button).not.toBeUndefined();
+    expect(button!.textContent).toContain("卡片 #card-123");
+    expect(button!.textContent).toContain("3 条新回复");
+
+    await act(async () => {
+      button!.click();
+      await Promise.resolve();
+    });
+
+    expect(onCardChangeClick).toHaveBeenCalledWith("general", "card-123");
+  });
 });

@@ -615,6 +615,25 @@ export function usePollLoop(): void {
                   },
                 },
               });
+
+              // Also append a persistent, front-end-only reminder inside the
+              // card's owning channel so the short toast isn't missed.
+              const anchorLine =
+                parsed.channel === currentChannelRef.current
+                  ? Math.max(
+                      0,
+                      ...chatActions.messages.map((m) => m.line_number),
+                    )
+                  : 0;
+              chatActions.addCardChangeEvent({
+                id: `${parsed.channel}:${parsed.cardId}:${anchorLine}:${Date.now()}`,
+                cardId: parsed.cardId,
+                cardChannel: parsed.channel,
+                anchorLine,
+                authors: Array.from(new Set(others.map((e) => e.author))),
+                count: others.length,
+                receivedAt: Date.now(),
+              });
             }
           }
           continue;
