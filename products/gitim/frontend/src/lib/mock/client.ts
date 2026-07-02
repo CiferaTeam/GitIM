@@ -228,18 +228,19 @@ export async function getAgent(id: string): Promise<ApiResponse> {
 }
 
 export async function addAgent(
-  name: string,
+  handler: string,
+  displayName: string,
   provider: ProviderId,
   systemPrompt: string,
   _llmProvider?: string,
   _llmModel?: string,
 ): Promise<ApiResponse> {
   await delay();
-  const id = name.toLowerCase().replace(/\s+/g, "-");
+  const id = handler;
   const agent: Agent = {
     id,
     handler: id,
-    name,
+    name: displayName,
     status: "offline",
     provider,
     systemPrompt,
