@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Hash, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
@@ -16,6 +16,11 @@ import { DmLabel } from "./dm-label";
 import { HandlerName } from "./handler-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
+import {
+  dataTransferHasSessionDemo,
+  readSessionDemoDragPayload,
+  type SessionDemoDragPayload,
+} from "../../lib/session-demo-dnd";
 import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -49,6 +54,13 @@ const ARCHIVED_DMS_PAGE_SIZE = 5;
 const ARCHIVED_DMS_PREFIX_DEBOUNCE_MS = 300;
 const ARCHIVED_CHANNELS_PAGE_SIZE = 10;
 const ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS = 300;
+
+function compactTimestamp(): string {
+  return new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}/, "");
+}
 
 interface PinnedConversations {
   channels: Set<string>;
@@ -225,6 +237,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const agents = useAgentStore((s) => s.agents);
   const currentUser = useChatStore((s) => s.currentUser);
+  const addPendingMessage = useChatStore((s) => s.addPendingMessage);
   const projects = useProjectStore((s) => s.projects);
   const fetchProjects = useProjectStore((s) => s.fetch);
   const channels = useChatStore((s) => s.channels);
@@ -798,6 +811,27 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     if (n > 0) toast.success(`Marked ${n} conversation${n === 1 ? "" : "s"} as read`);
   }
 
+  function handleSessionReferenceDrop(
+    channelName: string,
+    payload: SessionDemoDragPayload,
+  ) {
+    toast.success(`Referenced ${payload.ref} in #${channelName}`, {
+      description: `${payload.title} · @${payload.agent}`,
+    });
+    if (currentChannel !== channelName) {
+      return;
+    }
+    addPendingMessage({
+      line_number: -1,
+      point_to: 0,
+      author: currentUser || "you",
+      timestamp: compactTimestamp(),
+      body: `${payload.ref} ${payload.title}\nfrom @${payload.agent}`,
+      _status: "sent",
+      _pendingId: `session-ref-${payload.id}-${Date.now()}`,
+    });
+  }
+
   async function handleArchiveDm(dmName: string) {
     if (!activeSlug) return;
     const peer = peerFromDmName(dmName);
@@ -899,6 +933,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                   onClick={() => onChannelSelect(ch.name)}
                   onTogglePin={() => handleTogglePinnedConversation(ch)}
                   onToggleFold={() => handleToggleFoldedChannel(ch)}
+                  onSessionReferenceDrop={(payload) =>
+                    handleSessionReferenceDrop(ch.name, payload)
+                  }
                 />
               );
             }
@@ -927,6 +964,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 onToggleFoldChannel={handleToggleFoldedChannel}
                 pinnedChannels={pinnedConversations.channels}
                 foldedChannels={foldedChannels}
+                onSessionReferenceDrop={handleSessionReferenceDrop}
               />
             );
           })}
@@ -973,6 +1011,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                       onClick={() => onChannelSelect(ch.name)}
                       onTogglePin={() => handleTogglePinnedConversation(ch)}
                       onToggleFold={() => handleToggleFoldedChannel(ch)}
+                      onSessionReferenceDrop={(payload) =>
+                        handleSessionReferenceDrop(ch.name, payload)
+                      }
                     />
                   ))}
                 </div>
@@ -1508,6 +1549,7 @@ interface ChannelItemProps {
    *  has its own dedicated UI in the archived section. */
   archiveLabel?: string;
   onArchive?: () => void;
+  onSessionReferenceDrop?: (payload: SessionDemoDragPayload) => void;
 }
 
 function ChannelItem({
@@ -1529,17 +1571,55 @@ function ChannelItem({
   onToggleFold,
   archiveLabel,
   onArchive,
+  onSessionReferenceDrop,
 }: ChannelItemProps) {
   const pinButtonLabel = pinned ? unpinLabel : pinLabel;
   const foldButtonLabel = folded ? unfoldLabel : foldLabel;
+  const [isSessionDropTarget, setIsSessionDropTarget] = useState(false);
+
+  function handleSessionDragOver(event: DragEvent<HTMLLIElement>) {
+    if (!onSessionReferenceDrop || !dataTransferHasSessionDemo(event.dataTransfer.types)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsSessionDropTarget(true);
+  }
+
+  function handleSessionDragLeave(event: DragEvent<HTMLLIElement>) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    setIsSessionDropTarget(false);
+  }
+
+  function handleSessionDrop(event: DragEvent<HTMLLIElement>) {
+    if (!onSessionReferenceDrop) return;
+    const payload = readSessionDemoDragPayload(event.dataTransfer);
+    if (!payload) {
+      setIsSessionDropTarget(false);
+      return;
+    }
+    event.preventDefault();
+    setIsSessionDropTarget(false);
+    onSessionReferenceDrop(payload);
+  }
+
   return (
     <li
       data-testid={testId}
+      data-session-drop-target={isSessionDropTarget ? "true" : undefined}
+      onDragOver={handleSessionDragOver}
+      onDragEnter={handleSessionDragOver}
+      onDragLeave={handleSessionDragLeave}
+      onDrop={handleSessionDrop}
       className={[
         "group flex items-center rounded-md border-l-2 transition-all duration-150",
         active
           ? "bg-primary/15 text-primary font-medium border-primary"
           : "hover:bg-surface/60 text-text-secondary hover:text-foreground border-transparent",
+        isSessionDropTarget ? "bg-primary/15 text-primary border-primary" : "",
         unread > 0 && !active ? "text-foreground font-medium" : "",
       ].join(" ")}
     >
@@ -1633,6 +1713,7 @@ interface ProjectItemProps {
   onToggleFoldChannel(ch: Channel): void;
   pinnedChannels: Set<string>;
   foldedChannels: Set<string>;
+  onSessionReferenceDrop(channelName: string, payload: SessionDemoDragPayload): void;
 }
 
 function ProjectItem({
@@ -1648,6 +1729,7 @@ function ProjectItem({
   onToggleFoldChannel,
   pinnedChannels,
   foldedChannels,
+  onSessionReferenceDrop,
 }: ProjectItemProps) {
   const pinButtonLabel = pinned ? `Unpin project ${project.meta.display_name}` : `Pin project ${project.meta.display_name}`;
   return (
@@ -1718,6 +1800,9 @@ function ProjectItem({
               onClick={() => onChannelSelect(ch.name)}
               onTogglePin={() => onTogglePinnedChannel(ch)}
               onToggleFold={() => onToggleFoldChannel(ch)}
+              onSessionReferenceDrop={(payload) =>
+                onSessionReferenceDrop(ch.name, payload)
+              }
             />
           ))}
         </div>

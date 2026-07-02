@@ -26,8 +26,8 @@ use crate::git_config::{
 use crate::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };
-use crate::slug::RESERVED;
 use crate::gitignore::ensure_defaults_gitignored;
+use crate::slug::RESERVED;
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
@@ -5907,12 +5907,9 @@ async fn workspaces_create(
             let (error_code, error_msg) = match e {
                 crate::slug::SlugError::Reserved => (
                     "reserved_slug".to_string(),
-                    format!("slug '{s}' is reserved")
+                    format!("slug '{s}' is reserved"),
                 ),
-                _ => (
-                    "invalid_slug".to_string(),
-                    format!("invalid slug: {e}")
-                ),
+                _ => ("invalid_slug".to_string(), format!("invalid slug: {e}")),
             };
             return (
                 StatusCode::BAD_REQUEST,
