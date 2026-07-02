@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-const RESERVED: &[&str] = &["default", "system", "active", "current"];
+pub const RESERVED: &[&str] = &["default", "system", "active", "current"];
 const MAX_LEN: usize = 32;
 const FALLBACK: &str = "workspace";
 
@@ -12,6 +12,12 @@ pub enum SlugError {
     TooLong,
     #[error("slug contains invalid characters (allowed: a-z 0-9 -)")]
     InvalidChars,
+    #[error("slug starts or ends with hyphen")]
+    HyphenBoundary,
+    #[error("slug contains consecutive hyphens")]
+    ConsecutiveHyphens,
+    #[error("slug is reserved")]
+    Reserved,
 }
 
 /// Normalize a raw string (e.g. directory basename) into slug form.
@@ -81,6 +87,15 @@ pub fn validate(slug: &str) -> Result<(), SlugError> {
         .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase() || c == '-')
     {
         return Err(SlugError::InvalidChars);
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err(SlugError::HyphenBoundary);
+    }
+    if slug.contains("--") {
+        return Err(SlugError::ConsecutiveHyphens);
+    }
+    if RESERVED.contains(&slug) {
+        return Err(SlugError::Reserved);
     }
     Ok(())
 }
@@ -179,5 +194,34 @@ mod tests {
     #[test]
     fn validate_rejects_over_32() {
         assert!(validate(&"x".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_leading_hyphen() {
+        assert_eq!(validate("-foo"), Err(SlugError::HyphenBoundary));
+    }
+
+    #[test]
+    fn validate_rejects_trailing_hyphen() {
+        assert_eq!(validate("foo-"), Err(SlugError::HyphenBoundary));
+    }
+
+    #[test]
+    fn validate_rejects_consecutive_hyphens() {
+        assert_eq!(validate("foo--bar"), Err(SlugError::ConsecutiveHyphens));
+    }
+
+    #[test]
+    fn validate_rejects_reserved() {
+        assert_eq!(validate("default"), Err(SlugError::Reserved));
+        assert_eq!(validate("system"), Err(SlugError::Reserved));
+        assert_eq!(validate("active"), Err(SlugError::Reserved));
+        assert_eq!(validate("current"), Err(SlugError::Reserved));
+    }
+
+    #[test]
+    fn validate_accepts_non_reserved() {
+        assert!(validate("default-2").is_ok());
+        assert!(validate("my-system").is_ok());
     }
 }

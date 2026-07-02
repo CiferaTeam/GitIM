@@ -26,6 +26,7 @@ use crate::git_config::{
 use crate::github::{
     check_repo_access, fetch_user_email, parse_github_url, verify_token, GithubError,
 };
+use crate::slug::RESERVED;
 use crate::gitignore::ensure_defaults_gitignored;
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
@@ -5903,12 +5904,19 @@ async fn workspaces_create(
         .map(|s| s.to_string());
     if let Some(ref s) = explicit_slug {
         if let Err(e) = crate::slug::validate(s) {
+            let (error_code, error_msg) = match e {
+                crate::slug::SlugError::Reserved => (
+                    "reserved_slug".to_string(),
+                    format!("slug '{s}' is reserved")
+                ),
+                _ => (
+                    "invalid_slug".to_string(),
+                    format!("invalid slug: {e}")
+                ),
+            };
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorBody::with_code(
-                    format!("invalid slug: {e}"),
-                    "invalid_slug",
-                )),
+                Json(ErrorBody::with_code(error_msg, error_code)),
             )
                 .into_response();
         }
@@ -5950,11 +5958,16 @@ async fn workspaces_create(
         // If the caller supplied a slug and it collides (including reserved
         // keywords), fail deterministically rather than silently appending -2.
         if explicit_slug.is_some() && slug != candidate {
+            let error_code = if RESERVED.contains(&candidate.as_str()) {
+                "reserved_slug"
+            } else {
+                "slug_conflict"
+            };
             return (
                 StatusCode::CONFLICT,
                 Json(ErrorBody::with_code(
                     format!("slug \"{candidate}\" is already in use"),
-                    "slug_conflict",
+                    error_code,
                 )),
             )
                 .into_response();

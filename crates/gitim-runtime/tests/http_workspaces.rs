@@ -631,6 +631,147 @@ async fn create_workspace_rejects_invalid_explicit_slug() {
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
+async fn create_workspace_rejects_leading_hyphen_slug() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("leading-hyphen-test");
+    std::fs::create_dir(&ws_path).unwrap();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "slug": "-leading",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "invalid_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_trailing_hyphen_slug() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("trailing-hyphen-test");
+    std::fs::create_dir(&ws_path).unwrap();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "slug": "trailing-",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "invalid_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_consecutive_hyphens_slug() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("consecutive-hyphens-test");
+    std::fs::create_dir(&ws_path).unwrap();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "slug": "foo--bar",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "invalid_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_reserved_slug() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("reserved-slug-test");
+    std::fs::create_dir(&ws_path).unwrap();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "slug": "default",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "reserved_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_reserved_slug_conflict() {
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+
+    // Seed an existing workspace.
+    let parent = TempDir::new().unwrap();
+    let existing_path = parent.path().join("existing");
+    std::fs::create_dir(&existing_path).unwrap();
+    inject_workspace(
+        &state,
+        "default-2",
+        "Existing",
+        &existing_path,
+        GitProvider::Local,
+    );
+
+    // A POST with explicit slug "default" must fail with reserved_slug
+    // because "default" is reserved and would resolve to "default-2",
+    // which is already taken.
+    let other_parent = TempDir::new().unwrap();
+    let other_path = other_parent.path().join("other");
+    std::fs::create_dir(&other_path).unwrap();
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": other_path.to_string_lossy(),
+            "slug": "default",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    // validate() catches reserved slug before resolve(), so it's a 400
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "reserved_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
 async fn create_workspace_rejects_duplicate_explicit_slug() {
     let _home = HomeGuard::install();
     let (router, state) = create_router();
