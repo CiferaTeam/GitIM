@@ -3,6 +3,7 @@ export type Fragment =
   | { type: "mention"; handler: string }
   | { type: "channel-link"; channel: string }
   | { type: "message-link"; channel: string; line: number }
+  | { type: "card-link"; channel: string; cardId: string; title?: string }
   | { type: "user-profile"; handler: string }
   | { type: "external-link"; url: string; title?: string }
   | { type: "code-block"; language?: string; code: string }
@@ -53,6 +54,19 @@ function parseGitimLink(prefix: string, content: string): Fragment | null {
   }
 
   if (prefix === "#") {
+    // Check for card-link: channel/card-id or channel/card-id|title
+    const cardMatch = content.match(/^(.+)\/([^/]+)$/);
+    if (cardMatch) {
+      const channel = cardMatch[1];
+      const rest = cardMatch[2];
+      if (!isValidChannel(channel)) return null;
+      // rest may contain |title
+      const pipeIdx = rest.indexOf("|");
+      const cardId = pipeIdx === -1 ? rest : rest.slice(0, pipeIdx);
+      const title = pipeIdx === -1 ? undefined : rest.slice(pipeIdx + 1);
+      if (!cardId) return null;
+      return { type: "card-link", channel, cardId, title };
+    }
     // Check for message-link suffix :LNNNNNN (6+ digits)
     const msgMatch = content.match(/^(.+):L(\d{6,})$/);
     if (msgMatch) {

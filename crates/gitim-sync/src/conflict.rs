@@ -173,10 +173,8 @@ pub fn resolve_content(
         let abs_path = repo_root.join(rel_path);
         if abs_path.exists() {
             remote_contents.insert(rel_path.clone(), std::fs::read_to_string(&abs_path)?);
-        } else {
-            if let Some(parent) = abs_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+        } else if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
     }
 

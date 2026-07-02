@@ -1,5 +1,6 @@
 import { useMemo, useState, useCallback } from "react";
-import { Copy, Check } from "lucide-react";
+import { Copy, Check, LayoutGrid } from "lucide-react";
+import { useNavigate } from "react-router";
 import { parseMessageBody, type Fragment } from "../../lib/message-parser";
 import { HandlerName } from "./handler-name";
 import { useDirectory } from "../../hooks/use-display-name-directory";
@@ -149,6 +150,24 @@ function FragmentRenderer({
           #{fragment.channel}:L{String(fragment.line).padStart(6, "0")}
         </span>
       );
+
+    case "card-link": {
+      const navigate = useNavigate();
+      return (
+        <span
+          key={index}
+          className="inline-flex items-center gap-1 text-primary cursor-pointer hover:underline"
+          onClick={(e) => {
+            e.stopPropagation();
+            navigate(`/cards/${fragment.channel}/${fragment.cardId}`);
+          }}
+          title={`Card in #${fragment.channel}`}
+        >
+          <LayoutGrid className="h-3 w-3" />
+          {fragment.title ?? fragment.cardId}
+        </span>
+      );
+    }
 
     case "user-profile":
       return (

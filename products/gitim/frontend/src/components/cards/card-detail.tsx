@@ -299,7 +299,7 @@ export function CardDetail() {
     if (window.history.length > 1) {
       navigate(-1);
     } else {
-      navigate("/cards");
+      navigate(`/chat/${channel}`);
     }
   }
 
@@ -345,11 +345,11 @@ export function CardDetail() {
           className="flex items-center gap-1 px-2 py-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          <span>Back</span>
+          <span>#{channel}</span>
         </button>
-        <span className="text-muted-foreground">
-          #{channel} / <span className="font-mono">{cardId}</span>
-        </span>
+        <span className="text-muted-foreground">/</span>
+        <span className="font-medium truncate">{card.title}</span>
+        <span className="text-muted-foreground font-mono ml-1 opacity-60">{cardId}</span>
         <div className="ml-auto">
           {archived ? (
             <Button
