@@ -606,6 +606,74 @@ async fn workspace_scoped_route_unknown_slug_returns_404() {
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
+async fn create_workspace_rejects_invalid_explicit_slug() {
+    let _home = HomeGuard::install();
+    let (router, _state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let ws_path = parent.path().join("explicit-slug-test");
+    std::fs::create_dir(&ws_path).unwrap();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": ws_path.to_string_lossy(),
+            "slug": "Not Valid!",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "invalid_slug");
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_duplicate_explicit_slug() {
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+
+    // Seed an existing workspace.
+    let parent = TempDir::new().unwrap();
+    let existing_path = parent.path().join("existing");
+    std::fs::create_dir(&existing_path).unwrap();
+    inject_workspace(
+        &state,
+        "taken-slug",
+        "Existing",
+        &existing_path,
+        GitProvider::Local,
+    );
+
+    // A second POST with a different path but the same explicit slug must fail
+    // before provisioning, without mutating the existing workspace.
+    let other_parent = TempDir::new().unwrap();
+    let other_path = other_parent.path().join("other");
+    std::fs::create_dir(&other_path).unwrap();
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": other_path.to_string_lossy(),
+            "slug": "taken-slug",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], "slug_conflict");
+
+    let s = state.lock().unwrap();
+    assert_eq!(s.workspaces.len(), 1);
+    assert!(s.workspaces.contains_key("taken-slug"));
+}
+
+#[tokio::test]
+#[serial(http_workspaces_home)]
 async fn create_workspace_rejects_duplicate_path() {
     let _home = HomeGuard::install();
     let (router, state) = create_router();

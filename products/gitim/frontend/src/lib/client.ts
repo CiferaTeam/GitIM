@@ -904,6 +904,26 @@ export function validateChannelName(name: string): string | null {
   return null;
 }
 
+/** Sanitize a raw string into a valid workspace slug (a-z, 0-9, hyphens, ≤32). */
+export function toSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32);
+}
+
+/** Validate a workspace slug. Returns error message or null if valid. */
+export function validateSlug(slug: string): string | null {
+  if (!slug) return "Slug is required";
+  if (slug.length > 32) return "Slug must be 32 characters or less";
+  if (!/^[a-z0-9-]+$/.test(slug)) return "Only lowercase letters, numbers, and hyphens";
+  if (slug.startsWith("-") || slug.endsWith("-")) return "Cannot start or end with a hyphen";
+  if (slug.includes("--")) return "Cannot contain consecutive hyphens";
+  return null;
+}
+
 // --- Card API: real runtime HTTP (all scoped to a workspace) ---
 
 export interface CreateCardOpts {
@@ -1724,7 +1744,8 @@ export async function getAgent(slug: string, id: string): Promise<ApiResponse> {
 
 export async function addAgent(
   slug: string,
-  name: string,
+  handler: string,
+  displayName: string,
   provider: ProviderId,
   systemPrompt: string,
   model?: string,
@@ -1737,7 +1758,8 @@ export async function addAgent(
 ): Promise<ApiResponse> {
   if (isLocalMode()) {
     void slug;
-    void name;
+    void handler;
+    void displayName;
     void provider;
     void systemPrompt;
     void model;
@@ -1750,13 +1772,12 @@ export async function addAgent(
     return { ok: false, error: "agents are unavailable in browser mode" };
   }
   try {
-    const handler = toHandler(name);
     const res = await localNetworkFetch(`${wsBase(slug)}/agents/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         handler,
-        display_name: name,
+        display_name: displayName,
         provider,
         model: model || undefined,
         effort: effort || undefined,
@@ -1779,7 +1800,7 @@ export async function addAgent(
     const agent: Agent = {
       id: data.id ?? handler,
       handler: data.id ?? handler,
-      name,
+      name: displayName,
       status: "offline",
       provider,
       systemPrompt,
@@ -1794,7 +1815,7 @@ export async function addAgent(
     };
     return { ok: true, data: { agent } };
   } catch {
-    return mockClient.addAgent(name, provider, systemPrompt);
+    return mockClient.addAgent(handler, displayName, provider, systemPrompt);
   }
 }
 

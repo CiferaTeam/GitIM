@@ -38,7 +38,9 @@ export function AddAgentDialog() {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const addAgent = useAgentStore((s) => s.addAgent);
   const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [handler, setHandler] = useState("");
+  const [handlerManuallyEdited, setHandlerManuallyEdited] = useState(false);
   const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
   // Claude-only effort level. "" = provider default (no --effort flag).
@@ -74,8 +76,11 @@ export function AddAgentDialog() {
   const [providerModelsLoading, setProviderModelsLoading] = useState(false);
   const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
 
-  const handler = toHandler(name.trim());
-  const validationError = name.trim() ? validateHandler(name.trim()) : null;
+  const derivedHandler = handlerManuallyEdited
+    ? toHandler(handler.trim())
+    : toHandler(displayName.trim());
+  const handlerError = handler.trim() ? validateHandler(handler.trim()) : null;
+  const displayNameError = !displayName.trim() ? "Display name is required" : null;
   const providerInfo = provider ? PROVIDERS[provider as ProviderId] : null;
   const resolvedProviderModels = providerInfo
     ? resolveProviderModelCatalog(providerInfo, providerModelCatalog)
@@ -173,7 +178,9 @@ export function AddAgentDialog() {
   }, [llmProvider]);
 
   function resetForm() {
-    setName("");
+    setDisplayName("");
+    setHandler("");
+    setHandlerManuallyEdited(false);
     setProvider("");
     setModel("");
     setEffort("");
@@ -226,8 +233,9 @@ export function AddAgentDialog() {
       effectiveModel,
     );
     if (
-      !name.trim() ||
-      validationError ||
+      !displayName.trim() ||
+      !derivedHandler ||
+      handlerError ||
       submitting ||
       !provider ||
       (modelRequired && !selectedProviderModel) ||
@@ -250,7 +258,8 @@ export function AddAgentDialog() {
     try {
       const res = await client.addAgent(
         activeSlug,
-        name.trim(),
+        derivedHandler,
+        displayName.trim(),
         provider,
         systemPrompt.trim(),
         provider === "hermes" ? model : selectedProviderModel,
@@ -372,23 +381,52 @@ export function AddAgentDialog() {
               )}
 
               <div className="space-y-1.5">
-                <label className="text-sm font-medium" htmlFor="agent-name">
-                  Name
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="agent-display-name"
+                >
+                  Display Name
                 </label>
                 <Input
-                  id="agent-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  id="agent-display-name"
+                  value={displayName}
+                  onChange={(e) => {
+                    setDisplayName(e.target.value);
+                    if (!handlerManuallyEdited) {
+                      setHandler(toHandler(e.target.value));
+                    }
+                  }}
                   placeholder="e.g. Code Reviewer"
                   required
                 />
-                {handler && !validationError && (
-                  <p className="text-xs text-muted-foreground">
-                    Handler: <code>{handler}</code>
+                {displayNameError && (
+                  <p className="text-xs text-destructive">
+                    {displayNameError}
                   </p>
                 )}
-                {validationError && (
-                  <p className="text-xs text-destructive">{validationError}</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="agent-handler">
+                  Handle
+                </label>
+                <Input
+                  id="agent-handler"
+                  value={handler}
+                  onChange={(e) => {
+                    setHandler(e.target.value);
+                    setHandlerManuallyEdited(true);
+                  }}
+                  placeholder="code-reviewer"
+                  required
+                />
+                {derivedHandler && !handlerError && (
+                  <p className="text-xs text-muted-foreground">
+                    Will be registered as <code>@{derivedHandler}</code>
+                  </p>
+                )}
+                {handlerError && (
+                  <p className="text-xs text-destructive">{handlerError}</p>
                 )}
               </div>
 
@@ -673,8 +711,9 @@ export function AddAgentDialog() {
               <Button
                 type="submit"
                 disabled={
-                  !name.trim() ||
-                  !!validationError ||
+                  !displayName.trim() ||
+                  !derivedHandler ||
+                  !!handlerError ||
                   submitting ||
                   !provider ||
                   (modelRequired && !selectedProviderModel) ||

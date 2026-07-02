@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { toSlug, validateSlug } from "@/lib/client";
 import type {
   CreateWorkspaceRequest,
   WorkspaceProvider,
@@ -30,6 +31,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     "GitHub mode is not available in this runtime. (On Windows, this is not yet supported.)",
   workspace_path_exists:
     "A workspace at this path is already registered. Pick a different path, or switch to it from the workspace list.",
+  slug_conflict: "This slug is already in use. Choose another one.",
+  invalid_slug:
+    "Slug can only contain lowercase letters, numbers, and hyphens (no leading/trailing hyphen, max 32).",
   config_write_failed:
     "Could not write workspace config. Check permissions on the workspace folder.",
   onboard_failed:
@@ -62,6 +66,8 @@ export function CreateWorkspaceForm({
 
   const [path, setPath] = useState(initial?.path ?? "");
   const [name, setName] = useState(initial?.workspace_name ?? "");
+  const [slug, setSlug] = useState("");
+  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
   const [provider, setProvider] = useState<WorkspaceProvider>(
     initial?.provider ?? "local",
   );
@@ -85,6 +91,15 @@ export function CreateWorkspaceForm({
     if (!trimmedPath) {
       setLocalError("Please enter a workspace path.");
       return;
+    }
+
+    const trimmedSlug = slug.trim();
+    if (trimmedSlug) {
+      const slugErr = validateSlug(trimmedSlug);
+      if (slugErr) {
+        setLocalError(slugErr);
+        return;
+      }
     }
 
     let git: CreateWorkspaceRequest["git"];
@@ -113,6 +128,7 @@ export function CreateWorkspaceForm({
       git,
     };
     if (name.trim()) req.workspace_name = name.trim();
+    if (trimmedSlug) req.slug = toSlug(trimmedSlug);
 
     setSubmitting(true);
     const created = await create(req);
@@ -141,7 +157,14 @@ export function CreateWorkspaceForm({
           id="ws-path"
           data-testid="ws-path"
           value={path}
-          onChange={(e) => setPath(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setPath(next);
+            if (!slugManuallyEdited) {
+              const basename = next.split(/[\\/]/).pop() ?? "";
+              setSlug(toSlug(basename));
+            }
+          }}
           placeholder="/path/to/workspace"
           className="font-mono text-sm"
           disabled={submitting}
@@ -165,6 +188,37 @@ export function CreateWorkspaceForm({
           className="text-sm"
           disabled={submitting}
         />
+      </div>
+
+      <div className="space-y-1.5">
+        <label
+          htmlFor="ws-slug"
+          className="text-xs font-medium text-text-secondary"
+        >
+          Slug <span className="text-text-muted font-normal">(optional)</span>
+        </label>
+        <Input
+          id="ws-slug"
+          data-testid="ws-slug"
+          value={slug}
+          onChange={(e) => {
+            setSlug(e.target.value);
+            setSlugManuallyEdited(true);
+          }}
+          placeholder="team-alpha"
+          className="font-mono text-sm"
+          disabled={submitting}
+        />
+        {slug.trim() && !validateSlug(slug.trim()) && (
+          <p className="text-xs text-muted-foreground">
+            Workspace ID: <code>{toSlug(slug.trim())}</code>
+          </p>
+        )}
+        {slug.trim() && validateSlug(slug.trim()) && (
+          <p className="text-xs text-destructive">
+            {validateSlug(slug.trim())}
+          </p>
+        )}
       </div>
 
       <div className="space-y-1.5">
