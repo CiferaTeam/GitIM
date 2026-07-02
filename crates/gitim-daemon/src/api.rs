@@ -617,6 +617,37 @@ pub enum Request {
     /// Excludes departed handlers.
     #[serde(rename = "agents_with_labels")]
     AgentsWithLabels { labels: Vec<String> },
+
+    // ===== Quick Session Cards =====
+    #[serde(rename = "create_quick_session")]
+    CreateQuickSession {
+        agent_id: String,
+        first_message: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "list_quick_sessions")]
+    ListQuickSessions {
+        #[serde(default)]
+        include_archived: bool,
+    },
+    #[serde(rename = "read_quick_session")]
+    ReadQuickSession { session_id: String },
+    #[serde(rename = "set_quick_session_title")]
+    SetQuickSessionTitle { session_id: String, title: String },
+    #[serde(rename = "send_quick_session_message")]
+    SendQuickSessionMessage {
+        session_id: String,
+        body: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "archive_quick_session")]
+    ArchiveQuickSession {
+        session_id: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
 }
 
 fn default_limit() -> usize {

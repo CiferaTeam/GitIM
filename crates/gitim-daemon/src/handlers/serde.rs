@@ -45,6 +45,15 @@ pub(crate) fn link_to_json(link: &Link) -> serde_json::Value {
             }
             v
         }
+        LinkKind::QuickSession {
+            session_id,
+            line_number,
+        } => serde_json::json!({
+            "kind": "quick_session",
+            "session_id": session_id,
+            "line_number": line_number,
+            "raw": link.raw,
+        }),
     }
 }
 

@@ -31,4 +31,8 @@ pub enum LinkKind {
         url: String,
         title: Option<String>,
     },
+    QuickSession {
+        session_id: String,
+        line_number: Option<u64>,
+    },
 }

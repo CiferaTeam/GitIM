@@ -735,6 +735,64 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::LabelsList { target } => handle_labels_list(state, target).await,
         Request::AgentsWithLabels { labels } => handle_agents_with_labels(state, labels).await,
 
+        // ===== Quick Session Cards =====
+        Request::CreateQuickSession {
+            agent_id,
+            first_message,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::quick_session_handlers::handle_create_quick_session(
+                state,
+                agent_id,
+                first_message,
+                resolved_author,
+            )
+            .await
+        }
+        Request::ListQuickSessions { include_archived } => {
+            crate::quick_session_handlers::handle_list_quick_sessions(state, include_archived).await
+        }
+        Request::ReadQuickSession { session_id } => {
+            crate::quick_session_handlers::handle_read_quick_session(state, session_id).await
+        }
+        Request::SetQuickSessionTitle { session_id, title } => {
+            crate::quick_session_handlers::handle_set_quick_session_title(state, session_id, title)
+                .await
+        }
+        Request::SendQuickSessionMessage {
+            session_id,
+            body,
+            author,
+        } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::quick_session_handlers::handle_send_quick_session_message(
+                state,
+                session_id,
+                body,
+                resolved_author,
+            )
+            .await
+        }
+        Request::ArchiveQuickSession { session_id, author } => {
+            let resolved_author = match resolve_author(author, &state).await {
+                Ok(a) => a,
+                Err(r) => return r,
+            };
+            crate::quick_session_handlers::handle_archive_quick_session(
+                state,
+                session_id,
+                resolved_author,
+            )
+            .await
+        }
+
         // Channel-project — see docs/plans/channel-project/
         Request::ListProjects => project::handle_list_projects(state).await,
         Request::CreateProject {

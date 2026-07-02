@@ -1,10 +1,15 @@
-use crate::types::{validate_card_id, Handler, Link, LinkKind};
+use crate::types::{validate_card_id, validate_quick_session_id, Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
 use regex::Regex;
 use std::sync::LazyLock;
 
 static LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!])([^>\n]+)>"));
+
+/// Matches bare `session:qs-<ulid>` refs with optional line number.
+/// Syntax: `session:qs-<26-char-Crockford-base32>(:L<6+digits>)?`
+static SESSION_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsession:(qs-[0-9A-HJKMNP-TV-Z]{26})(:L(\d{6,}))?\b").unwrap());
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
@@ -28,6 +33,30 @@ pub fn extract_links(body: &str) -> Vec<Link> {
         if let Some(kind) = kind {
             result.push(Link { kind, raw });
         }
+    }
+    // Parse bare session:<id> refs (no <> markers)
+    for caps in SESSION_REF_RE.captures_iter(body) {
+        // Only match if preceded by start-of-string or non-alphanumeric char
+        let start = caps.get(0).unwrap().start();
+        if start > 0 {
+            let preceding = body.as_bytes()[start - 1];
+            if preceding.is_ascii_alphanumeric() || preceding == b'-' {
+                continue;
+            }
+        }
+        let session_id = caps[1].to_string();
+        if validate_quick_session_id(&session_id).is_err() {
+            continue;
+        }
+        let line_number = caps.get(3).and_then(|m| m.as_str().parse::<u64>().ok());
+        let raw = caps[0].to_string();
+        result.push(Link {
+            kind: LinkKind::QuickSession {
+                session_id,
+                line_number,
+            },
+            raw,
+        });
     }
     result
 }
@@ -395,5 +424,80 @@ mod tests {
             }
             _ => panic!("expected Softlink"),
         }
+    }
+
+    #[test]
+    fn test_quick_session_bare_ref() {
+        let links = extract_links("check session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(links.len(), 1);
+        match &links[0].kind {
+            LinkKind::QuickSession {
+                session_id,
+                line_number,
+            } => {
+                assert_eq!(session_id, "qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+                assert_eq!(*line_number, None);
+            }
+            _ => panic!("expected QuickSession"),
+        }
+        assert_eq!(links[0].raw, "session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    #[test]
+    fn test_quick_session_with_line_ref() {
+        let links = extract_links("see session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV:L000042");
+        assert_eq!(links.len(), 1);
+        match &links[0].kind {
+            LinkKind::QuickSession {
+                session_id,
+                line_number,
+            } => {
+                assert_eq!(session_id, "qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+                assert_eq!(*line_number, Some(42));
+            }
+            _ => panic!("expected QuickSession"),
+        }
+        assert_eq!(
+            links[0].raw,
+            "session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV:L000042"
+        );
+    }
+
+    #[test]
+    fn test_quick_session_mixed_with_channel_link() {
+        let links = extract_links("<#general> and session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(links.len(), 2);
+        match &links[0].kind {
+            LinkKind::Channel { name } => assert_eq!(name, "general"),
+            _ => panic!("expected Channel"),
+        }
+        match &links[1].kind {
+            LinkKind::QuickSession { session_id, .. } => {
+                assert_eq!(session_id, "qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+            }
+            _ => panic!("expected QuickSession"),
+        }
+    }
+
+    #[test]
+    fn test_quick_session_invalid_prefix_ignored() {
+        // "x-session:" with word boundary should not match
+        let links = extract_links("x-session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_quick_session_invalid_id_ignored() {
+        // Not a valid ULID (too short, contains I)
+        let links = extract_links("session:qs-abc");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_quick_sessions() {
+        let links = extract_links(
+            "session:qs-01ARZ3NDEKTSV4RRFFQ69G5FAV and session:qs-01ARZ3NDEKTSV4RRFFQ69G5FBW",
+        );
+        assert_eq!(links.len(), 2);
     }
 }
