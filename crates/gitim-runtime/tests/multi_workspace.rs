@@ -277,6 +277,9 @@ async fn sse_isolation_between_workspaces() {
         event_type: "tool_use".to_string(),
         detail: "leak-probe".to_string(),
         timestamp: "2026-04-18T00:00:00Z".to_string(),
+        scope: "agent_main".to_string(),
+        session_id: None,
+        ref_: None,
     });
 
     // 250ms is enough that a cross-channel leak would have landed but short
@@ -295,6 +298,9 @@ async fn sse_isolation_between_workspaces() {
         event_type: "tool_use".to_string(),
         detail: "own-event".to_string(),
         timestamp: "2026-04-18T00:00:01Z".to_string(),
+        scope: "agent_main".to_string(),
+        session_id: None,
+        ref_: None,
     });
 
     let frame = tokio::time::timeout(Duration::from_secs(1), body.next())

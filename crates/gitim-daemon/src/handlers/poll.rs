@@ -200,6 +200,65 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
             continue;
         }
 
+        // Match quick-session paths so cross-node dispatch works through
+        // the existing git-synced poll mechanism.
+        if let Some(rest) = path_str.strip_prefix("quick-sessions/") {
+            if let Some((session_id, file)) = rest.split_once('/') {
+                if file == "session.meta.yaml" {
+                    // Read meta to check if the agent is local (hosted by this daemon).
+                    let meta_path = state.repo_root.join(path_str.as_ref());
+                    if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                        if let Ok(meta) =
+                            serde_yaml::from_str::<gitim_core::types::QuickSessionMeta>(&content)
+                        {
+                            // Only emit for agents this daemon hosts.
+                            let users = state.users.read().await;
+                            if users.contains(&meta.agent_id) {
+                                changes.push(gitim_core::responses::PollChange {
+                                    channel: format!("quick_session:{}", session_id),
+                                    kind: "quick_session_meta".to_string(),
+                                    entries: vec![serde_json::json!({
+                                        "type": "quick_session_meta",
+                                        "session_id": session_id,
+                                        "agent_id": meta.agent_id,
+                                        "status": meta.status.as_str(),
+                                        "title": meta.title,
+                                        "ref": meta.ref_.unwrap_or_default(),
+                                    })],
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if file == "discussion.thread" {
+                    let parsed = match parse_thread(added_content) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(
+                                "poll: failed to parse quick session thread {}: {}",
+                                path_str, e
+                            );
+                            continue;
+                        }
+                    };
+                    if !parsed.entries.is_empty() {
+                        let entries: Vec<serde_json::Value> =
+                            parsed.entries.iter().map(entry_to_json).collect();
+                        changes.push(gitim_core::responses::PollChange {
+                            channel: format!("quick_session:{}", session_id),
+                            kind: "quick_session_thread".to_string(),
+                            entries,
+                        });
+                    }
+                    continue;
+                }
+                // Other files in quick-sessions/<id>/ ignored.
+                continue;
+            }
+            continue;
+        }
+
         // Match card paths first so they don't fall through to the channel_meta /
         // channel branches below (which would otherwise mangle the channel name).
         if let Some(rest) = path_str.strip_prefix("channels/") {

@@ -395,6 +395,9 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
                 event_type: "tool_use".to_string(),
                 detail: "remote event arrived".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
+                scope: "agent_main".to_string(),
+                session_id: None,
+                ref_: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -450,6 +453,9 @@ async fn fleet_status_tracks_connected_and_last_event() {
                 event_type: "tool_use".to_string(),
                 detail: "updates status".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
+                scope: "agent_main".to_string(),
+                session_id: None,
+                ref_: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

@@ -285,6 +285,9 @@ impl AgentLoop {
                 event_type: event_type.to_string(),
                 detail: detail.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                scope: "agent_main".to_string(),
+                session_id: None,
+                ref_: None,
             });
         }
     }
@@ -2023,6 +2026,9 @@ mod tests {
             event_type: "tool_use".to_string(),
             detail: "d".to_string(),
             timestamp: "t".to_string(),
+            scope: "agent_main".to_string(),
+            session_id: None,
+            ref_: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws1\""));

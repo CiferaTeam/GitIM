@@ -298,6 +298,24 @@ pub struct AgentActivityEvent {
     pub event_type: String, // "tool_use", "thinking", "done", "error", "usage", "burned"
     pub detail: String,
     pub timestamp: String, // ISO8601
+    /// Scope discriminator: `agent_main` (default) or `quick_session`.
+    /// Missing/None means `agent_main` for backward compatibility.
+    #[serde(default = "default_scope", skip_serializing_if = "is_main_scope")]
+    pub scope: String,
+    /// Quick session ID, present when `scope == "quick_session"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Stable ref for the quick session, e.g. `session:qs-<ulid>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_: Option<String>,
+}
+
+fn default_scope() -> String {
+    "agent_main".to_string()
+}
+
+fn is_main_scope(scope: &str) -> bool {
+    scope == "agent_main"
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4739,6 +4757,9 @@ pub(crate) async fn cleanup_agent_runtime_side(
         event_type: "burned".to_string(),
         detail: format!("agent @{agent_id} departed the workspace"),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        scope: "agent_main".to_string(),
+        session_id: None,
+        ref_: None,
     });
 
     Ok(())
@@ -5245,6 +5266,9 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 agent_id: handler.clone(),
                 workspace_id: slug.to_string(),
                 event_type: "error".to_string(),
+                scope: "agent_main".to_string(),
+                session_id: None,
+                ref_: None,
                 detail: msg.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
