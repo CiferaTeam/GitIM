@@ -10,10 +10,12 @@ Quick Session Cards introduce a lightweight top-level conversation layer that is
 The implementation spans:
 
 - `gitim-core`: shared quick session types and ref parsing.
-- `gitim-daemon`: durable object storage and validation.
+- `gitim-daemon`: durable object storage, validation, and cross-node git sync.
 - `gitim-client`: IPC wrappers.
-- `gitim-runtime`: provider execution, per-session state, queueing, scoped events, and HTTP endpoints.
+- `gitim-runtime`: provider execution, title API gate, per-session state, queueing, scoped events, and HTTP endpoints.
 - `products/gitim/frontend`: top hub UI, store, client methods, event routing, and ref drag/drop.
+
+**Cross-node model:** Quick session persisted objects (`session.meta.yaml`, `discussion.thread`) are git-synced like cards/channels/DMs. Any node can create or read them. Execution runs on the node that owns the selected agent. Provider session state (tokens, compaction, streaming) remains local to the executing runtime.
 
 ## Phase 0: Baseline And Demo Inventory
 
@@ -94,10 +96,13 @@ Work:
 1. Factor provider session state fields from `AgentState` into a reusable session-state shape.
 2. Store quick session runtime state at `.gitim-runtime/quick-sessions/<id>.state.json`.
 3. Build quick session provider config from the selected agent's provider/model/system prompt/env/profile.
-4. Run quick session turns through the same provider abstraction as the main agent loop.
-5. Serialize main-agent and quick-session turns per agent through `agent_work_queue`.
-6. Persist user and agent messages to the quick session thread through daemon/client APIs.
-7. Update quick session status during queued/running/error/idle transitions.
+4. Inject title API gate instruction into the agent's system prompt for quick session turns.
+5. Run quick session turns through the same provider abstraction as the main agent loop.
+6. Enforce title API gate: if the agent sends assistant content before calling `set_quick_session_title`, return a typed error and reject the turn.
+7. Serialize main-agent and quick-session turns per agent through `agent_work_queue`.
+8. Dispatch quick session turns for cross-node agents: detect new sessions via daemon poll, route to the local runtime that hosts the agent.
+9. Persist user and agent messages to the quick session thread through daemon/client APIs.
+10. Update quick session status during needs_title/queued/running/error/idle transitions.
 
 Verification:
 
@@ -130,28 +135,32 @@ Verification:
 - `cargo test -p gitim-runtime activity_event`
 - Frontend store unit tests for main event and quick session event routing.
 
-## Phase 5: Title Generation And Compression
+## Phase 5: Title API Gate And Compression
 
-Implement the two lifecycle behaviors that make quick sessions feel complete.
+Implement the title API gate (agent must set title before replying) and compression lifecycle.
 
 Files:
 
 - `crates/gitim-runtime/src/quick_session_runner.rs`
 - `crates/gitim-runtime/src/quick_session_state.rs`
 - `crates/gitim-daemon/src/quick_session_handlers.rs`
+- `crates/gitim-runtime/src/http.rs` (title endpoint)
 
 Work:
 
-1. Save a deterministic provisional title from the first message.
-2. Generate a short title after the first agent response when provider execution succeeds.
-3. Save `title_source = generated` after the generated title is accepted.
-4. Apply token estimate and usage tracking per quick session.
-5. On compaction/reset, write the quick session summary to metadata and clear only that quick session state.
-6. Restore future quick session turns from transcript plus summary.
+1. New sessions are created with `status = needs_title` and `title_source = none`.
+2. Expose `POST /workspaces/{slug}/quick-sessions/{id}/title` endpoint accepting `{ title: string }`.
+3. Runtime enforces: if agent attempts to send assistant content for a session where `status == needs_title`, return typed error `QUICK_SESSION_TITLE_REQUIRED`.
+4. On successful `set_quick_session_title` call, update `title`, `title_source = api_set`, `status = active`.
+5. Inject a prompt instruction for quick session turns: "Before your first reply, call `set_quick_session_title` with a short title (max 80 chars) that summarizes this session."
+6. Allow subsequent `set_quick_session_title` calls to update the title (e.g., agent refines mid-session).
+7. Apply token estimate and usage tracking per quick session.
+8. On compaction/reset, write the quick session summary to metadata and clear only that quick session state.
+9. Restore future quick session turns from transcript plus summary.
 
 Verification:
 
-- `cargo test -p gitim-runtime quick_session_title`
+- `cargo test -p gitim-runtime quick_session_title_gate`
 - `cargo test -p gitim-runtime quick_session_compaction`
 
 ## Phase 6: Runtime HTTP API
@@ -165,8 +174,8 @@ Files:
 
 Work:
 
-1. Add create/list/read/send/update/archive/unarchive HTTP endpoints.
-2. Return typed errors with stable `error_code` values.
+1. Add create/list/read/send/title/update/archive/unarchive HTTP endpoints.
+2. Return typed errors with stable `error_code` values including `QUICK_SESSION_TITLE_REQUIRED`.
 3. Include the stable `ref` in create/read/list responses.
 4. Return hub-list metadata directly from list responses.
 5. Keep endpoint auth and workspace slug behavior aligned with existing runtime workspace APIs.
@@ -261,11 +270,13 @@ Run focused and full checks after implementation.
 
 Work:
 
-1. Add an end-to-end test covering create, stream, archive, and drag-reference.
-2. Remove demo-only quick session mock files and imports.
-3. Check frontend at desktop and narrow widths for overlap and text fit.
-4. Check quick session state files are isolated from main agent state.
-5. Check two sessions on the same agent apply events only to their matching `session_id`.
+1. Add an end-to-end test covering create, title gate enforcement, stream, archive, and drag-reference.
+2. Add a cross-node E2E test: create session on node A targeting agent on node B; verify node B's runtime executes the turn and node A receives the response.
+3. Remove demo-only quick session mock files and imports.
+4. Check frontend at desktop and narrow widths for overlap and text fit.
+5. Check quick session state files are isolated from main agent state.
+6. Check two sessions on the same agent apply events only to their matching `session_id`.
+7. Check title gate: agent that sends assistant content before setting title receives typed error; agent that sets title first proceeds normally.
 
 Verification:
 
@@ -276,9 +287,11 @@ Verification:
 ## Key Risks
 
 1. Provider concurrency through one agent profile can corrupt hidden provider state. The per-agent work queue is required before runtime sends real quick session turns.
-2. Event routing can regress existing agent panels. Scoped events should be optional and backward-compatible.
-3. Compression can accidentally clear the main agent session if state factoring is too broad. Tests should assert main and quick session state files independently.
-4. Drag/drop can create surprising hidden side effects. The browser smoke test should verify that dragging only inserts a ref and the actual GitIM write occurs when the target message is sent.
+2. Title API gate can break if the agent ignores or fails to parse the `set_quick_session_title` prompt instruction. The typed error path must be user-visible so the human knows the session stalled due to missing title, not a provider error.
+3. Event routing can regress existing agent panels. Scoped events should be optional and backward-compatible.
+4. Compression can accidentally clear the main agent session if state factoring is too broad. Tests should assert main and quick session state files independently.
+5. Cross-node sessions risk stale state if the agent's node is offline when the session is created. The initiating node must handle the gap between creation and first response gracefully (status remains `needs_title` until the agent node processes the turn).
+6. Drag/drop can create surprising hidden side effects. The browser smoke test should verify that dragging only inserts a ref and the actual GitIM write occurs when the target message is sent.
 
 ## Review Checklist
 
@@ -288,4 +301,5 @@ Before implementation starts, confirm:
 - Quick session files live under `quick-sessions/<id>/`.
 - The top hub is the canonical entry point for v1.
 - Per-agent queueing is acceptable for v1 latency.
-- Generated titles can start with a deterministic first-message fallback.
+- Title is set by the agent via `set_quick_session_title` API gate before first assistant response.
+- Cross-node sessions use git-synced daemon objects; no provider state serialization across nodes.
