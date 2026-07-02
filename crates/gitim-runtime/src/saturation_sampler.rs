@@ -196,6 +196,7 @@ mod tests {
             activity_tx: tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
             quick_session_loop_running: Arc::new(AtomicBool::new(false)),
+            agent_locks: crate::quick_session_loop::new_agent_lock_map(),
             git_config: None,
         };
         let mut rs = RuntimeState::default();

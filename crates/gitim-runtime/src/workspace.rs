@@ -21,6 +21,11 @@ pub struct WorkspaceContext {
     /// Idempotency guard for QuickSessionLoop spawn — true prevents duplicate
     /// loop instances when multiple agents start up in the same workspace.
     pub quick_session_loop_running: Arc<AtomicBool>,
+    /// Shared per-agent lock map to serialize main AgentLoop and QuickSessionLoop
+    /// turns for the same agent. Prevents provider profile corruption from
+    /// concurrent execution (e.g., two provider processes racing on the same
+    /// HERMES_HOME or Claude CLI session token).
+    pub agent_locks: crate::quick_session_loop::AgentLockMap,
     pub git_config: Option<WorkspaceConfig>,
 }
 
@@ -37,6 +42,7 @@ impl WorkspaceContext {
             activity_tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
             quick_session_loop_running: Arc::new(AtomicBool::new(false)),
+            agent_locks: crate::quick_session_loop::new_agent_lock_map(),
             git_config: None,
         }
     }

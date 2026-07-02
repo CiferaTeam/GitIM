@@ -16,6 +16,7 @@ use crate::error::RuntimeError;
 use crate::hermes_profile;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
+use crate::quick_session_loop::AgentLockMap;
 use crate::state::{AgentState, LastSessionUsage, SessionUsageSnapshot, UsageSource};
 use crate::usage_log::{AgentUsageLog, UsageSummary};
 
@@ -140,6 +141,11 @@ pub struct AgentLoop {
     /// same truth without locking. `None` for legacy callers / tests; the
     /// production path injects via `set_is_working`.
     is_working: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Per-agent lock map shared with QuickSessionLoop. Acquired before
+    /// `provider.execute()` to prevent concurrent same-agent main +
+    /// quick-session turns from racing on provider profile/config/CLI state.
+    /// None in tests / standalone CLI; production injects via `set_agent_locks`.
+    agent_locks: Option<AgentLockMap>,
 }
 
 impl AgentLoop {
@@ -190,6 +196,7 @@ impl AgentLoop {
             runtime_state: None,
             workspace_root: None,
             is_working: None,
+            agent_locks: None,
         })
     }
 
@@ -230,6 +237,7 @@ impl AgentLoop {
             runtime_state: None,
             workspace_root: None,
             is_working: None,
+            agent_locks: None,
         })
     }
 
@@ -254,6 +262,14 @@ impl AgentLoop {
     /// spawns; tests that don't drive HTTP handlers can skip this entirely.
     pub fn set_is_working(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.is_working = Some(flag);
+    }
+
+    /// Inject the shared per-agent lock map so main agent turns are
+    /// serialized with QuickSessionLoop turns for the same agent.
+    /// Must be called before the loop spawns; tests that don't drive
+    /// HTTP handlers can skip this entirely.
+    pub fn set_agent_locks(&mut self, locks: AgentLockMap) {
+        self.agent_locks = Some(locks);
     }
 
     /// Test-only seam to swap the underlying provider after construction.
@@ -883,6 +899,27 @@ impl AgentLoop {
             }
         }
         state.save(&self.repo_root)?;
+
+        // Acquire the per-agent lock shared with QuickSessionLoop.
+        // This prevents concurrent main + quick-session turns for the same
+        // agent from racing on provider profile state (HERMES_HOME, CLI
+        // session tokens, etc.). Tests / standalone CLI skip this entirely.
+        let _agent_lock_arc: Option<std::sync::Arc<tokio::sync::Mutex<()>>>;
+        if let Some(locks) = &self.agent_locks {
+            let entry = {
+                let mut map = locks.lock().await;
+                map.entry(self.handler.clone())
+                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            };
+            _agent_lock_arc = Some(entry);
+        } else {
+            _agent_lock_arc = None;
+        }
+        let _agent_lock: Option<tokio::sync::MutexGuard<'_, ()>> = match &_agent_lock_arc {
+            Some(arc) => Some(arc.lock().await),
+            None => None,
+        };
 
         // RAII guard: is_working stays true until run_once returns,
         // covering the entire execute + streaming loop + accumulation.

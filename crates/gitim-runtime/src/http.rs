@@ -3637,6 +3637,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
         env,
         activity_tx,
         workspace_root,
+        agent_locks,
     ) = {
         let s = crate::preconditions::arc_mutex_lock(state);
         let ctx = s
@@ -3644,6 +3645,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
             .get(slug)
             .ok_or_else(|| format!("unknown workspace: {slug}"))?;
         let workspace_root = ctx.path.clone();
+        let agent_locks = ctx.agent_locks.clone();
         match ctx.agents.get(agent_id) {
             None => return Err(format!("agent not found: {agent_id}")),
             Some(info) if info.status == "running" => {
@@ -3659,6 +3661,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 info.env.clone(),
                 ctx.activity_tx.clone(),
                 workspace_root,
+                agent_locks,
             ),
         }
     };
@@ -3677,6 +3680,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
     agent_loop.set_activity_tx_with_workspace(activity_tx.clone(), slug.to_string());
     agent_loop.set_runtime_state(state.clone());
     agent_loop.set_workspace_root(workspace_root.clone());
+    agent_loop.set_agent_locks(agent_locks.clone());
 
     // Inject the same Arc<AtomicBool> stored on AgentInfo so the sampler
     // and the loop read/write the same flag without a lock.
@@ -3706,7 +3710,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 let qs_state = state.clone();
                 let qs_slug = slug.to_string();
                 let qs_activity_tx = activity_tx.clone();
-                let qs_agent_locks = crate::quick_session_loop::new_agent_lock_map();
+                let qs_agent_locks = agent_locks.clone();
                 let qs_poll_interval = std::time::Duration::from_secs(5);
 
                 tokio::spawn(async move {
