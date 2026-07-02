@@ -2280,3 +2280,106 @@ export async function stopAgent(slug: string, id: string): Promise<ApiResponse> 
     return mockClient.stopAgent(id);
   }
 }
+
+// --- Quick Sessions API ---
+
+import type {
+  QuickSessionListItem,
+  QuickSessionDetail,
+} from "./types";
+
+export async function listQuickSessions(
+  slug: string,
+  includeArchived = false,
+): Promise<ApiResponse<QuickSessionListItem[]>> {
+  if (isLocalMode()) {
+    return { ok: true, data: [] };
+  }
+  const params = new URLSearchParams();
+  if (includeArchived) params.set("include_archived", "true");
+  const qs = params.size > 0 ? `?${params}` : "";
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/quick-sessions${qs}`);
+  const json = await res.json();
+  return json as ApiResponse<QuickSessionListItem[]>;
+}
+
+export async function createQuickSession(
+  slug: string,
+  agentId: string,
+  firstMessage: string,
+): Promise<ApiResponse<QuickSessionListItem>> {
+  if (isLocalMode()) {
+    return { ok: false, error: "quick sessions are unavailable in browser mode" };
+  }
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/quick-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: agentId, first_message: firstMessage }),
+  });
+  return await res.json();
+}
+
+export async function readQuickSession(
+  slug: string,
+  sessionId: string,
+): Promise<ApiResponse<QuickSessionDetail>> {
+  if (isLocalMode()) {
+    return { ok: false, error: "quick sessions are unavailable in browser mode" };
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}`,
+  );
+  return await res.json();
+}
+
+export async function sendQuickSessionMessage(
+  slug: string,
+  sessionId: string,
+  body: string,
+): Promise<ApiResponse<{ line_number: number }>> {
+  if (isLocalMode()) {
+    return { ok: false, error: "quick sessions are unavailable in browser mode" };
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    },
+  );
+  return await res.json();
+}
+
+export async function setQuickSessionTitle(
+  slug: string,
+  sessionId: string,
+  title: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return { ok: false, error: "quick sessions are unavailable in browser mode" };
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/title`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  return await res.json();
+}
+
+export async function archiveQuickSession(
+  slug: string,
+  sessionId: string,
+): Promise<ApiResponse> {
+  if (isLocalMode()) {
+    return { ok: false, error: "quick sessions are unavailable in browser mode" };
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/archive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}

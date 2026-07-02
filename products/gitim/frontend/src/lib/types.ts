@@ -203,9 +203,16 @@ export interface AgentActivityEvent {
     | "burned"
     | "steering"
     | "steered"
-    | "retrying";
+    | "retrying"
+    | "quick_session_blocked";
   detail: string;
   timestamp: string; // ISO8601
+  /** Scope discriminator: "agent_main" (default) or "quick_session". */
+  scope?: string;
+  /** Quick session ID, present when scope == "quick_session". */
+  session_id?: string;
+  /** Stable ref string, e.g. "session:qs-<ulid>". */
+  ref_?: string;
 }
 
 export type FleetNodeConnectionStatus = "connecting" | "connected" | "down";
@@ -566,3 +573,61 @@ export interface FlowRunDetail {
   updated_at: string;
   nodes: FlowRunNodeSummary[];
 }
+
+// ---- Quick Sessions ----
+
+export type QuickSessionStatus =
+  | "needs_title"
+  | "active"
+  | "running"
+  | "error"
+  | "archived";
+
+export interface QuickSessionListItem {
+  id: string;
+  title: string;
+  agent_id: string;
+  status: QuickSessionStatus;
+  updated_at: string;
+  ref_: string;
+  last_message_preview?: string;
+}
+
+export interface QuickSessionMeta {
+  id: string;
+  title: string;
+  title_source: string;
+  agent_id: string;
+  created_by: { handler: string };
+  status: QuickSessionStatus;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string;
+  summary?: string;
+  last_message_preview?: string;
+  ref_?: string;
+}
+
+export interface QuickSessionDetail {
+  meta: QuickSessionMeta;
+  thread: string;
+}
+
+export interface QuickSessionThreadMessage {
+  author: string;
+  body: string;
+  time: string;
+  line: string;
+}
+
+/** Drag-and-drop payload for session references. */
+export interface SessionRefDragPayload {
+  id: string;
+  title: string;
+  agent: string;
+  ref: string;
+}
+
+/** Regex for `session:qs-<ulid>(:L<line>)?`. */
+export const SESSION_REF_RE =
+  /\bsession:(qs-[0-9A-HJKMNP-TV-Z]{26})(:L(\d{6,}))?\b/;

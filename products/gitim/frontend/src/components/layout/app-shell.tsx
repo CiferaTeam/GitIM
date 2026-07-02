@@ -11,7 +11,7 @@ import { UsageIndicator } from "../usage-indicator";
 import { TimezoneToggle } from "../timezone-toggle";
 import { DonateDialog } from "../donate-dialog";
 import { MobileTabBar } from "../mobile/mobile-tab-bar";
-import { ConversationHubDemo } from "../sessions/conversation-hub-demo";
+import { ConversationHub } from "../sessions/conversation-hub";
 import { NavTabs } from "./nav-tabs";
 import { ConnectionStatusButton } from "./connection-status-button";
 
@@ -44,7 +44,7 @@ export function AppShell({ children }: AppShellProps) {
         {/* Center: nav tabs — hidden on mobile */}
         <div className="hidden md:flex items-center gap-2">
           <NavTabs />
-          <ConversationHubDemo />
+          <ConversationHub />
         </div>
 
         {/* Right: theme toggle + twitter + update indicator + help + current user */}

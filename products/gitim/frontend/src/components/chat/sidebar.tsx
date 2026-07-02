@@ -17,10 +17,10 @@ import { HandlerName } from "./handler-name";
 import type { Channel } from "../../lib/types";
 import { workspaceIdentity } from "../../lib/workspace-key";
 import {
-  dataTransferHasSessionDemo,
-  readSessionDemoDragPayload,
-  type SessionDemoDragPayload,
-} from "../../lib/session-demo-dnd";
+  dataTransferHasSessionRef,
+  readSessionRefDragPayload,
+  type SessionRefDragPayload,
+} from "../../lib/session-ref-dnd";
 import { AgentStatusPanel } from "./agent-status-panel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -813,7 +813,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   function handleSessionReferenceDrop(
     channelName: string,
-    payload: SessionDemoDragPayload,
+    payload: SessionRefDragPayload,
   ) {
     toast.success(`Referenced ${payload.ref} in #${channelName}`, {
       description: `${payload.title} · @${payload.agent}`,
@@ -1549,7 +1549,7 @@ interface ChannelItemProps {
    *  has its own dedicated UI in the archived section. */
   archiveLabel?: string;
   onArchive?: () => void;
-  onSessionReferenceDrop?: (payload: SessionDemoDragPayload) => void;
+  onSessionReferenceDrop?: (payload: SessionRefDragPayload) => void;
 }
 
 function ChannelItem({
@@ -1578,7 +1578,7 @@ function ChannelItem({
   const [isSessionDropTarget, setIsSessionDropTarget] = useState(false);
 
   function handleSessionDragOver(event: DragEvent<HTMLLIElement>) {
-    if (!onSessionReferenceDrop || !dataTransferHasSessionDemo(event.dataTransfer.types)) {
+    if (!onSessionReferenceDrop || !dataTransferHasSessionRef(event.dataTransfer.types)) {
       return;
     }
     event.preventDefault();
@@ -1596,7 +1596,7 @@ function ChannelItem({
 
   function handleSessionDrop(event: DragEvent<HTMLLIElement>) {
     if (!onSessionReferenceDrop) return;
-    const payload = readSessionDemoDragPayload(event.dataTransfer);
+    const payload = readSessionRefDragPayload(event.dataTransfer);
     if (!payload) {
       setIsSessionDropTarget(false);
       return;
@@ -1713,7 +1713,7 @@ interface ProjectItemProps {
   onToggleFoldChannel(ch: Channel): void;
   pinnedChannels: Set<string>;
   foldedChannels: Set<string>;
-  onSessionReferenceDrop(channelName: string, payload: SessionDemoDragPayload): void;
+  onSessionReferenceDrop(channelName: string, payload: SessionRefDragPayload): void;
 }
 
 function ProjectItem({
