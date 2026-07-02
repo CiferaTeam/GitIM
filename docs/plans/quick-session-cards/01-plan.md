@@ -55,7 +55,9 @@ Resolves three High P1 items from plan-review `20260702-143803-067` before produ
 
 **Validation regex:** `^qs-[0-9A-HJKMNP-TV-Z]{26}$` (Crockford base32 excludes I,L,O,U)
 
-**Uniqueness across nodes:** ULID's 80-bit random component provides cross-node uniqueness without coordination. No collision detection/retry needed.
+**Uniqueness across nodes:** ULID's 80-bit random component provides cross-node uniqueness without coordination.
+
+**Collision handling:** For defense-in-depth, daemon's `create_quick_session` handler checks if `quick-sessions/<id>/` already exists (via `std::fs` or git tree). On collision, regenerate ULID up to 3 times. If all 3 attempts collide, return typed error `QUICK_SESSION_ID_COLLISION`. This keeps the invariant explicit without adding meaningful overhead.
 
 **Dependency:** Add `ulid` crate to `gitim-core` Cargo.toml, or implement a minimal ULID generator (~50 lines) to avoid dependency.
 
@@ -98,11 +100,11 @@ Add shared quick session protocol types in `gitim-core`.
 
 Files:
 
-- `crates/gitim-core/src/types.rs`
+- `crates/gitim-core/src/types/quick_session.rs` — new: types + `validate_quick_session_id()`
+- `crates/gitim-core/src/types/mod.rs` — re-export quick_session module
 - `crates/gitim-core/src/link.rs`
 - `crates/gitim-core/src/parser.rs`
 - `crates/gitim-core/src/formatter.rs`
-- `crates/gitim-core/src/validator.rs`
 
 Work:
 
