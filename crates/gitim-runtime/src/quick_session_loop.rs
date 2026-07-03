@@ -50,7 +50,11 @@ async fn acquire_agent_lock(locks: &AgentLockMap, agent_id: &str) -> Arc<Mutex<(
 /// one loop instance should run. The caller guards against duplicate
 /// spawns via `WorkspaceContext::quick_session_loop_running`.
 pub async fn run_quick_session_loop(
-    repo_root: PathBuf,
+    // Retained in signature for call-site compatibility; daemon client now
+    // binds to workspace_root (stable workspace-level path) instead of the
+    // first agent's repo_root, so QuickSessionLoop is independent of agent
+    // startup order.
+    _repo_root: PathBuf,
     workspace_root: PathBuf,
     state: SharedRuntimeState,
     slug: String,
@@ -60,7 +64,11 @@ pub async fn run_quick_session_loop(
 ) {
     info!(slug = %slug, "quick session loop started");
 
-    let client = GitimClient::new(&repo_root);
+    // Bind daemon client to workspace_root (workspace-level path) rather
+    // than the first-started agent's repo_root. This keeps QuickSessionLoop
+    // independent of agent startup order — any session operation routes
+    // through the workspace daemon, not an agent-specific clone.
+    let client = GitimClient::new(&workspace_root);
 
     loop {
         match poll_and_process_sessions(
