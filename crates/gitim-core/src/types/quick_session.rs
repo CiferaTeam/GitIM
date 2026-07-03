@@ -210,7 +210,7 @@ pub fn validate_quick_session_title(title: &str) -> Result<(), QuickSessionError
     if trimmed.is_empty() {
         return Err(QuickSessionError::EmptyTitle);
     }
-    if trimmed.len() > MAX_QUICK_SESSION_TITLE_LEN {
+    if trimmed.chars().count() > MAX_QUICK_SESSION_TITLE_LEN {
         return Err(QuickSessionError::TitleTooLong(MAX_QUICK_SESSION_TITLE_LEN));
     }
     Ok(())
@@ -257,6 +257,15 @@ mod tests {
     #[test]
     fn validate_title_too_long() {
         let long = "a".repeat(81);
+        assert!(validate_quick_session_title(&long).is_err());
+    }
+
+    #[test]
+    fn validate_title_counts_chars_not_bytes() {
+        let title = "短".repeat(80);
+        assert!(validate_quick_session_title(&title).is_ok());
+
+        let long = "短".repeat(81);
         assert!(validate_quick_session_title(&long).is_err());
     }
 

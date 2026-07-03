@@ -1,9 +1,11 @@
 use crate::api::Response;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
+use gitim_core::formatter::format_message;
+use gitim_core::parser::parse_thread;
 use gitim_core::types::{
-    validate_quick_session_id, Handler, QuickSessionListItem, QuickSessionMeta, QuickSessionStatus,
-    QuickSessionTitleSource, QUICK_SESSION_ID_PREFIX,
+    validate_quick_session_id, validate_quick_session_title, Handler, QuickSessionListItem,
+    QuickSessionMeta, QuickSessionStatus, QuickSessionTitleSource, QUICK_SESSION_ID_PREFIX,
 };
 use gitim_sync::git::GitError;
 use tracing::warn;
@@ -65,6 +67,10 @@ fn thread_path(state: &SharedState, session_id: &str) -> std::path::PathBuf {
     session_dir(state, session_id).join("discussion.thread")
 }
 
+fn message_preview(body: &str) -> String {
+    body.trim().chars().take(80).collect()
+}
+
 fn read_meta(state: &SharedState, session_id: &str) -> Result<QuickSessionMeta, String> {
     let path = meta_path(state, session_id);
     let content = std::fs::read_to_string(&path)
@@ -79,8 +85,10 @@ fn write_meta(
     meta: &QuickSessionMeta,
 ) -> Result<(), String> {
     let path = meta_path(state, session_id);
-    std::fs::create_dir_all(path.parent().unwrap())
-        .map_err(|e| format!("failed to create session dir: {}", e))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "session meta path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("failed to create session dir: {}", e))?;
     let yaml =
         serde_yaml::to_string(meta).map_err(|e| format!("failed to serialize meta: {}", e))?;
     std::fs::write(&path, yaml).map_err(|e| format!("failed to write meta: {}", e))
@@ -93,6 +101,14 @@ pub async fn handle_create_quick_session(
     first_message: String,
     author: String,
 ) -> Response {
+    let author_handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("invalid author: {}", e)),
+    };
+    if first_message.trim().is_empty() {
+        return Response::error("first_message cannot be empty");
+    }
+
     // Validate author
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
@@ -106,57 +122,53 @@ pub async fn handle_create_quick_session(
         }
     }
 
-    // Generate unique session ID
-    let session_id = match generate_unique_session_id(&state) {
-        Ok(id) => id,
-        Err(e) => return Response::error(e),
-    };
-
     let now = chrono::Utc::now();
     let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let preview = message_preview(&first_message);
 
-    let meta = QuickSessionMeta {
-        id: session_id.clone(),
-        title: String::new(),
-        title_source: QuickSessionTitleSource::None,
-        agent_id: agent_id.clone(),
-        created_by: Handler::new(&author).unwrap_or_else(|_| Handler::new("system").unwrap()),
-        status: QuickSessionStatus::NeedsTitle,
-        created_at: ts.clone(),
-        updated_at: ts.clone(),
-        archived_at: None,
-        summary: None,
-        last_message_preview: None,
-        ref_: Some(format!("session:{}", session_id)),
-    };
-
-    if let Err(e) = write_meta(&state, &session_id, &meta) {
-        return Response::error(e);
-    }
-
-    // Write first user message to discussion thread
-    let thread_line = format!(
-        "{} {} {} {}",
-        format_line_number(1),
-        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-        author,
-        first_message
-    );
-    let thread_path = thread_path(&state, &session_id);
-    if let Err(e) = std::fs::write(&thread_path, thread_line + "\n") {
-        return Response::error(format!("failed to write thread: {}", e));
-    }
-
-    // Git commit
-    let rel_meta = format!("quick-sessions/{}/session.meta.yaml", session_id);
-    let rel_thread = format!("quick-sessions/{}/discussion.thread", session_id);
-    let msg = format!("quick-session: create {}", session_id);
-
-    if let Err(e) = state
-        .git_storage
-        .add_and_commit(&[&rel_meta, &rel_thread], &msg)
+    let session_id;
     {
-        return Response::error(format!("git commit failed: {}", e));
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        session_id = match generate_unique_session_id(&state) {
+            Ok(id) => id,
+            Err(e) => return Response::error(e),
+        };
+
+        let meta = QuickSessionMeta {
+            id: session_id.clone(),
+            title: String::new(),
+            title_source: QuickSessionTitleSource::None,
+            agent_id: agent_id.clone(),
+            created_by: author_handler.clone(),
+            status: QuickSessionStatus::NeedsTitle,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
+            archived_at: None,
+            summary: None,
+            last_message_preview: Some(preview.clone()),
+            ref_: Some(format!("session:{}", session_id)),
+        };
+
+        if let Err(e) = write_meta(&state, &session_id, &meta) {
+            return Response::error(e);
+        }
+
+        let thread_line = format_message(1, 0, &author_handler, &ts, &first_message);
+        let thread_path = thread_path(&state, &session_id);
+        if let Err(e) = std::fs::write(&thread_path, thread_line) {
+            return Response::error(format!("failed to write thread: {}", e));
+        }
+
+        let rel_meta = format!("quick-sessions/{}/session.meta.yaml", session_id);
+        let rel_thread = format!("quick-sessions/{}/discussion.thread", session_id);
+        let msg = format!("quick-session: create {}", session_id);
+
+        if let Err(e) = state
+            .git_storage
+            .add_and_commit(&[&rel_meta, &rel_thread], &msg)
+        {
+            return Response::error(format!("git commit failed: {}", e));
+        }
     }
 
     let _ = push_with_retry(&state).await;
@@ -168,7 +180,7 @@ pub async fn handle_create_quick_session(
         status: QuickSessionStatus::NeedsTitle,
         updated_at: ts.clone(),
         ref_: format!("session:{}", session_id),
-        last_message_preview: Some(first_message.chars().take(80).collect()),
+        last_message_preview: Some(preview),
     };
     Response::json(resp)
 }
@@ -242,37 +254,42 @@ pub async fn handle_set_quick_session_title(
         return Response::error(format!("invalid session_id: {:?}", e));
     }
     let trimmed = title.trim();
-    if trimmed.is_empty() {
-        return Response::error("title cannot be empty");
-    }
-    if trimmed.len() > 80 {
-        return Response::error("title too long (max 80 chars)");
+    if let Err(e) = validate_quick_session_title(trimmed) {
+        return Response::error(e.to_string());
     }
 
-    let mut meta = match read_meta(&state, &session_id) {
-        Ok(m) => m,
-        Err(e) => return Response::error(e),
-    };
+    {
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-    meta.title = trimmed.to_string();
-    meta.title_source = QuickSessionTitleSource::ApiSet;
-    if meta.status == QuickSessionStatus::NeedsTitle {
-        meta.status = QuickSessionStatus::Active;
-    }
-    meta.updated_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let mut meta = match read_meta(&state, &session_id) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
 
-    if let Err(e) = write_meta(&state, &session_id, &meta) {
-        return Response::error(e);
+        meta.title = trimmed.to_string();
+        meta.title_source = QuickSessionTitleSource::ApiSet;
+        if meta.status == QuickSessionStatus::NeedsTitle {
+            meta.status = QuickSessionStatus::Active;
+        }
+        meta.updated_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+
+        if let Err(e) = write_meta(&state, &session_id, &meta) {
+            return Response::error(e);
+        }
+
+        let rel = format!("quick-sessions/{}/session.meta.yaml", session_id);
+        let msg = format!("quick-session: set title {}", session_id);
+        if let Err(e) = state.git_storage.add_and_commit(&[&rel], &msg) {
+            return Response::error(format!("git commit failed: {}", e));
+        }
     }
 
-    let rel = format!("quick-sessions/{}/session.meta.yaml", session_id);
-    let msg = format!("quick-session: set title {}", session_id);
-    if let Err(e) = state.git_storage.add_and_commit(&[&rel], &msg) {
-        return Response::error(format!("git commit failed: {}", e));
-    }
     let _ = push_with_retry(&state).await;
 
-    Response::json(&meta)
+    match read_meta(&state, &session_id) {
+        Ok(meta) => Response::json(&meta),
+        Err(e) => Response::error(e),
+    }
 }
 
 /// Append a message to a quick session thread.  
@@ -290,46 +307,64 @@ pub async fn handle_send_quick_session_message(
     if let Err(resp) = ensure_author_not_departed(&state, &author) {
         return resp;
     }
-
-    let meta = match read_meta(&state, &session_id) {
-        Ok(m) => m,
-        Err(e) => return Response::error(e),
+    let handler = match Handler::new(&author) {
+        Ok(h) => h,
+        Err(e) => return Response::error(format!("invalid author: {}", e)),
     };
-
-    if meta.status == QuickSessionStatus::Archived {
-        return Response::error("cannot send message to archived session");
+    if body.trim().is_empty() {
+        return Response::error("body cannot be empty");
     }
 
-    // Title API gate: block assistant output until title is set.
-    // The session creator (human) is exempt so they can send the first message
-    // and any follow-up messages before the agent sets a title.
-    if meta.status == QuickSessionStatus::NeedsTitle && author != meta.created_by.as_str() {
-        return Response::error(
-            "QUICK_SESSION_TITLE_REQUIRED: agent must call set_quick_session_title before sending assistant content",
-        );
+    let new_line_number;
+    {
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut meta = match read_meta(&state, &session_id) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
+
+        if meta.status == QuickSessionStatus::Archived {
+            return Response::error("cannot send message to archived session");
+        }
+
+        if meta.status == QuickSessionStatus::NeedsTitle && author != meta.created_by.as_str() {
+            return Response::error(
+                "QUICK_SESSION_TITLE_REQUIRED: agent must call set_quick_session_title before sending assistant content",
+            );
+        }
+
+        let tp = thread_path(&state, &session_id);
+        let existing = std::fs::read_to_string(&tp).unwrap_or_default();
+        let existing_file = match parse_thread(&existing) {
+            Ok(f) => f,
+            Err(e) => return Response::error(format!("failed to parse thread: {}", e)),
+        };
+        new_line_number = existing_file.last_line_number() + 1;
+
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let line = format_message(new_line_number, 0, &handler, &ts, &body);
+        if let Err(e) = std::fs::write(&tp, existing + &line) {
+            return Response::error(format!("failed to write thread: {}", e));
+        }
+
+        meta.updated_at = ts;
+        meta.last_message_preview = Some(message_preview(&body));
+        if let Err(e) = write_meta(&state, &session_id, &meta) {
+            return Response::error(e);
+        }
+
+        let rel = format!("quick-sessions/{}/discussion.thread", session_id);
+        let rel_meta = format!("quick-sessions/{}/session.meta.yaml", session_id);
+        let msg_text = format!("quick-session: message {}", session_id);
+        if let Err(e) = state
+            .git_storage
+            .add_and_commit(&[&rel, &rel_meta], &msg_text)
+        {
+            return Response::error(format!("git commit failed: {}", e));
+        }
     }
 
-    let tp = thread_path(&state, &session_id);
-    let existing = std::fs::read_to_string(&tp).unwrap_or_default();
-    let line_count = existing.lines().count();
-    let new_line_number = (line_count + 1) as u64;
-
-    let line = format!(
-        "{} {} {} {}",
-        format_line_number(new_line_number),
-        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-        author,
-        body
-    );
-    if let Err(e) = std::fs::write(&tp, existing + &line + "\n") {
-        return Response::error(format!("failed to write thread: {}", e));
-    }
-
-    let rel = format!("quick-sessions/{}/discussion.thread", session_id);
-    let msg_text = format!("quick-session: message {}", session_id);
-    if let Err(e) = state.git_storage.add_and_commit(&[&rel], &msg_text) {
-        return Response::error(format!("git commit failed: {}", e));
-    }
     let _ = push_with_retry(&state).await;
 
     Response::json(serde_json::json!({
@@ -350,31 +385,35 @@ pub async fn handle_archive_quick_session(
         return resp;
     }
 
-    let mut meta = match read_meta(&state, &session_id) {
-        Ok(m) => m,
-        Err(e) => return Response::error(e),
-    };
+    {
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-    meta.status = QuickSessionStatus::Archived;
-    meta.archived_at = Some(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
-    meta.updated_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let mut meta = match read_meta(&state, &session_id) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
 
-    if let Err(e) = write_meta(&state, &session_id, &meta) {
-        return Response::error(e);
+        meta.status = QuickSessionStatus::Archived;
+        meta.archived_at = Some(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
+        meta.updated_at = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+
+        if let Err(e) = write_meta(&state, &session_id, &meta) {
+            return Response::error(e);
+        }
+
+        let rel = format!("quick-sessions/{}/session.meta.yaml", session_id);
+        let msg = format!("quick-session: archive {}", session_id);
+        if let Err(e) = state.git_storage.add_and_commit(&[&rel], &msg) {
+            return Response::error(format!("git commit failed: {}", e));
+        }
     }
 
-    let rel = format!("quick-sessions/{}/session.meta.yaml", session_id);
-    let msg = format!("quick-session: archive {}", session_id);
-    if let Err(e) = state.git_storage.add_and_commit(&[&rel], &msg) {
-        return Response::error(format!("git commit failed: {}", e));
-    }
     let _ = push_with_retry(&state).await;
 
-    Response::json(&meta)
-}
-
-fn format_line_number(n: u64) -> String {
-    format!("L{:06}", n)
+    match read_meta(&state, &session_id) {
+        Ok(meta) => Response::json(&meta),
+        Err(e) => Response::error(e),
+    }
 }
 
 /// Push to remote with bounded retries on retryable errors.

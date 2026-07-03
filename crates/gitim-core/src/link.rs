@@ -8,8 +8,9 @@ static LINK_RE: LazyLock<Regex> =
 
 /// Matches bare `session:qs-<ulid>` refs with optional line number.
 /// Syntax: `session:qs-<26-char-Crockford-base32>(:L<6+digits>)?`
-static SESSION_REF_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bsession:(qs-[0-9A-HJKMNP-TV-Z]{26})(:L(\d{6,}))?\b").unwrap());
+static SESSION_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    crate::preconditions::regex_literal(r"\bsession:(qs-[0-9A-HJKMNP-TV-Z]{26})(:L(\d{6,}))?\b")
+});
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
@@ -37,7 +38,10 @@ pub fn extract_links(body: &str) -> Vec<Link> {
     // Parse bare session:<id> refs (no <> markers)
     for caps in SESSION_REF_RE.captures_iter(body) {
         // Only match if preceded by start-of-string or non-alphanumeric char
-        let start = caps.get(0).unwrap().start();
+        let Some(matched) = caps.get(0) else {
+            continue;
+        };
+        let start = matched.start();
         if start > 0 {
             let preceding = body.as_bytes()[start - 1];
             if preceding.is_ascii_alphanumeric() || preceding == b'-' {
@@ -49,7 +53,7 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             continue;
         }
         let line_number = caps.get(3).and_then(|m| m.as_str().parse::<u64>().ok());
-        let raw = caps[0].to_string();
+        let raw = matched.as_str().to_string();
         result.push(Link {
             kind: LinkKind::QuickSession {
                 session_id,

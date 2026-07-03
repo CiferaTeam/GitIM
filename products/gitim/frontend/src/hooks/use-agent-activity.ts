@@ -10,6 +10,7 @@ import type { Agent, AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
 import { useWorkspaceStore } from "./use-workspace-store";
+import { useQuickSessionStore } from "./use-quick-session-store";
 
 const MAX_EVENTS_PER_AGENT = 20;
 
@@ -75,6 +76,8 @@ export const useAgentActivityStore = create<AgentActivityState>()(
 );
 
 export function applyUsageActivityEvent(event: AgentActivityEvent) {
+  if (event.scope === "quick_session") return;
+
   if (event.detail.trim() === "") {
     useAgentStore.getState().updateAgent(event.agent_id, {
       sessionUsage: undefined,
@@ -105,6 +108,22 @@ export function applyUsageActivityEvent(event: AgentActivityEvent) {
   }
 }
 
+export function applyQuickSessionActivityEvent(event: AgentActivityEvent) {
+  if (event.scope !== "quick_session" || !event.session_id) return;
+
+  if (event.event_type === "error") {
+    useQuickSessionStore.getState().updateStatus(event.session_id, "error");
+    return;
+  }
+  if (event.event_type === "done") {
+    useQuickSessionStore.getState().updateStatus(event.session_id, "active");
+    return;
+  }
+  if (event.event_type === "thinking" || event.event_type === "generating_title") {
+    useQuickSessionStore.getState().updateStatus(event.session_id, "running");
+  }
+}
+
 /**
  * Connects to the SSE endpoint for agent activity events for the given
  * workspace. Closes and re-opens when `slug` changes so events from the
@@ -131,6 +150,10 @@ export function useAgentActivitySSE(slug: string | null) {
     es.onmessage = (e) => {
       try {
         const event: AgentActivityEvent = JSON.parse(e.data);
+        if (event.scope === "quick_session") {
+          applyQuickSessionActivityEvent(event);
+          return;
+        }
         if (event.event_type === "usage") {
           applyUsageActivityEvent(event);
           return; // do NOT push usage events to the activity log

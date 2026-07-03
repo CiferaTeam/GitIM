@@ -23,7 +23,11 @@ use tracing::{debug, info, warn};
 use crate::agent_loop::build_provider_config;
 use crate::http::{AgentActivityEvent, AgentInfo, SharedRuntimeState};
 use crate::quick_session_runner::{check_title_gate, title_gate_prompt_instruction};
-use gitim_core::types::{QuickSessionMeta, QuickSessionStatus};
+use crate::quick_session_state;
+use gitim_core::parser::parse_thread;
+use gitim_core::types::{
+    QuickSessionMeta, QuickSessionStatus, ThreadEntry, MAX_QUICK_SESSION_TITLE_LEN,
+};
 
 /// Shared per-agent lock map to serialize main agent loop and quick session turns.
 pub type AgentLockMap = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
@@ -202,9 +206,11 @@ async fn generate_and_set_title(
         .map_err(|e| format!("create provider for title: {e}"))?;
 
     let base_prompt = agent_info.system_prompt.as_deref().unwrap_or("");
+    let conversation =
+        format_thread_for_prompt(thread_raw).unwrap_or_else(|_| thread_raw.to_string());
     let title_prompt = format!(
         "{}\n\nYou are generating a title for a quick session. Based on the conversation below, output ONLY a short title (max 80 characters) that summarizes the topic. Do not include quotes, markdown, or any other text — just the title.\n\nConversation:\n{}",
-        base_prompt, thread_raw
+        base_prompt, conversation
     );
 
     let cwd = PathBuf::from(&agent_info.repo_path);
@@ -253,9 +259,8 @@ async fn generate_and_set_title(
         return Err("title generation produced empty output".to_string());
     };
 
-    // Truncate to 80 chars (daemon will also validate, but we do it here for safety)
-    let title = if title.len() > 80 {
-        title[..80].to_string()
+    let title = if title.chars().count() > MAX_QUICK_SESSION_TITLE_LEN {
+        title.chars().take(MAX_QUICK_SESSION_TITLE_LEN).collect()
     } else {
         title
     };
@@ -352,19 +357,18 @@ async fn execute_quick_session_turn(
     check_title_gate(&meta)?;
 
     // 3. Check last message author — skip if already answered by agent
-    if let Some(last_line) = thread_raw.lines().last() {
-        if let Some(author) = parse_thread_author(last_line) {
-            if author == agent_info.handler {
-                debug!(
-                    session_id = %session_id,
-                    "last message is from agent; session already processed"
-                );
-                return Ok(());
-            }
+    if let Some(author) = last_thread_author(thread_raw)? {
+        if author == agent_info.handler {
+            debug!(
+                session_id = %session_id,
+                "last message is from agent; session already processed"
+            );
+            return Ok(());
         }
     }
 
-    if thread_raw.is_empty() {
+    let prompt = format_thread_for_prompt(thread_raw)?;
+    if prompt.trim().is_empty() {
         return Err("empty thread — nothing to respond to".to_string());
     }
 
@@ -397,17 +401,19 @@ async fn execute_quick_session_turn(
         ref_: Some(meta.ref_string()),
     });
 
-    // Feed the full thread as conversation context
-    let prompt = format_thread_for_prompt(thread_raw);
-
     let cwd = PathBuf::from(&agent_info.repo_path);
+
+    // Read runtime state for resume token (per-agent session continuity)
+    let runtime_state = quick_session_state::read_state(&cwd, session_id);
+    let resume_token = runtime_state.as_ref().and_then(|s| s.session_token.clone());
+
     let opts = ExecOptions {
-        cwd: Some(cwd),
+        cwd: Some(cwd.clone()),
         model: agent_info.model.clone(),
         effort: agent_info.effort.clone(),
         system_prompt: Some(system_prompt),
         max_turns: Some(1),
-        resume_token: None,
+        resume_token,
         ..Default::default()
     };
 
@@ -436,6 +442,10 @@ async fn execute_quick_session_turn(
         .result
         .await
         .map_err(|_| "result channel closed".to_string())?;
+
+    // Extract fields before match (partial move safety)
+    let session_token = exec_result.session_token.clone();
+    let usage = exec_result.usage.clone();
 
     match exec_result.status {
         ExecStatus::Completed | ExecStatus::Aborted => {
@@ -469,6 +479,18 @@ async fn execute_quick_session_turn(
         .await
         .map_err(|e| format!("send_quick_session_message failed: {e}"))?;
 
+    // Persist runtime state for provider session continuity (resume token)
+    if session_token.is_some() || runtime_state.is_some() {
+        let mut new_state = runtime_state.unwrap_or_default();
+        if let Some(token) = session_token {
+            new_state.session_token = Some(token);
+        }
+        if let Some(u) = usage {
+            new_state.session_usage = Some(serde_json::to_value(&u).unwrap_or_default());
+        }
+        let _ = quick_session_state::write_state(&cwd, session_id, &new_state);
+    }
+
     // Emit done event
     let _ = activity_tx.send(AgentActivityEvent {
         agent_id: handler.clone(),
@@ -491,43 +513,28 @@ async fn execute_quick_session_turn(
     Ok(())
 }
 
-/// Extract the author from a thread line.
-///
-/// Thread format: `L000001 20260702T141101Z author body text`
-fn parse_thread_author(line: &str) -> Option<&str> {
-    let parts: Vec<&str> = line.splitn(4, ' ').collect();
-    if parts.len() >= 3 {
-        Some(parts[2])
-    } else {
-        None
-    }
+fn last_thread_author(raw: &str) -> Result<Option<String>, String> {
+    let file = parse_thread(raw).map_err(|e| format!("parse quick session thread: {e}"))?;
+    Ok(file
+        .entries
+        .last()
+        .map(|entry| entry.author().as_str().to_string()))
 }
 
 /// Format a raw thread into a clean conversation transcript for the provider.
-///
-/// Strips the `L000001 YYYYMMDDTHHMMSSZ ` prefix from each line, leaving
-/// `author body`. The provider sees this as conversation context.
-fn format_thread_for_prompt(raw: &str) -> String {
-    raw.lines()
-        .filter_map(|line| {
-            // Expect "L000001 20260702T141101Z author body"
-            let after_prefix = line
-                .find(' ')
-                .and_then(|first_space| {
-                    line[first_space + 1..]
-                        .find(' ')
-                        .map(|s| first_space + 1 + s)
-                })
-                .map(|idx| &line[idx + 1..])
-                .unwrap_or(line);
-            if after_prefix.is_empty() {
-                None
-            } else {
-                Some(after_prefix.to_string())
+fn format_thread_for_prompt(raw: &str) -> Result<String, String> {
+    let file = parse_thread(raw).map_err(|e| format!("parse quick session thread: {e}"))?;
+    Ok(file
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ThreadEntry::Message(message) => {
+                Some(format!("@{}: {}", message.author.as_str(), message.body))
             }
+            ThreadEntry::Event(_) => None,
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 #[cfg(test)]
@@ -535,24 +542,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_thread_author() {
+    fn test_last_thread_author() {
         assert_eq!(
-            parse_thread_author("L000001 20260702T141101Z flame4 Hello world"),
-            Some("flame4")
+            last_thread_author("[L000001][P000000][@flame4][20260702T141101Z] Hello world\n")
+                .unwrap(),
+            Some("flame4".to_string())
         );
         assert_eq!(
-            parse_thread_author("L000002 20260702T141201Z dev-qiangzai response"),
-            Some("dev-qiangzai")
+            last_thread_author(
+                "[L000001][P000000][@flame4][20260702T141101Z] Hello world\n[L000002][P000000][@dev-qiangzai][20260702T141201Z] response\n"
+            )
+            .unwrap(),
+            Some("dev-qiangzai".to_string())
         );
-        assert_eq!(parse_thread_author("short"), None);
+        assert!(last_thread_author("short").is_err());
     }
 
     #[test]
     fn test_format_thread_for_prompt() {
-        let raw = "L000001 20260702T141101Z flame4 Hello world\nL000002 20260702T141201Z dev-qiangzai response\n";
-        let formatted = format_thread_for_prompt(raw);
-        assert!(formatted.contains("flame4 Hello world"));
-        assert!(formatted.contains("dev-qiangzai response"));
+        let raw = "[L000001][P000000][@flame4][20260702T141101Z] Hello world\n[L000002][P000000][@dev-qiangzai][20260702T141201Z] response\n";
+        let formatted = format_thread_for_prompt(raw).unwrap();
+        assert!(formatted.contains("@flame4: Hello world"));
+        assert!(formatted.contains("@dev-qiangzai: response"));
         assert!(!formatted.contains("L000001"));
     }
 }

@@ -52,8 +52,22 @@ interface InputAreaProps {
 const MAX_HEIGHT = 200;
 const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
 
+interface InsertComposerTextEventDetail {
+  text: string;
+  workspaceKey?: string | null;
+  scopeKey?: string | null;
+}
+
 function draftKey(workspaceKey: string, scopeKey: string) {
   return `gitim:draft:${workspaceKey}:${scopeKey}`;
+}
+
+function appendDraftText(workspaceKey: string, scopeKey: string, text: string) {
+  const key = draftKey(workspaceKey, scopeKey);
+  const prev = localStorage.getItem(key) ?? "";
+  const next = prev ? `${prev}\n${text}` : text;
+  localStorage.setItem(key, next);
+  return next;
 }
 
 function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean) {
@@ -129,11 +143,28 @@ export function InputArea({
   // Listen for session-ref drop insertions from sidebar
   useEffect(() => {
     function handleInsertText(e: Event) {
-      const detail = (e as CustomEvent<string>).detail;
-      if (typeof detail === "string") {
-        setText((prev) => (prev ? `${prev}\n${detail}` : detail));
-        textareaRef.current?.focus();
+      const detail = (e as CustomEvent<string | InsertComposerTextEventDetail>).detail;
+      const textToInsert = typeof detail === "string" ? detail : detail?.text;
+      if (!textToInsert) return;
+
+      const targetWorkspaceKey =
+        typeof detail === "string" ? activeScopeRef.current.workspaceKey : detail.workspaceKey;
+      const targetScopeKey =
+        typeof detail === "string" ? activeScopeRef.current.scopeKey : detail.scopeKey;
+
+      if (!targetWorkspaceKey || !targetScopeKey) return;
+
+      const isCurrentScope =
+        activeScopeRef.current.workspaceKey === targetWorkspaceKey &&
+        activeScopeRef.current.scopeKey === targetScopeKey;
+
+      if (!isCurrentScope) {
+        appendDraftText(targetWorkspaceKey, targetScopeKey, textToInsert);
+        return;
       }
+
+      setText(() => appendDraftText(targetWorkspaceKey, targetScopeKey, textToInsert));
+      textareaRef.current?.focus();
     }
     window.addEventListener("gitim:insert-composer-text", handleInsertText);
     return () =>

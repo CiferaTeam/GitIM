@@ -204,6 +204,7 @@ export interface AgentActivityEvent {
     | "steering"
     | "steered"
     | "retrying"
+    | "generating_title"
     | "quick_session_blocked";
   detail: string;
   timestamp: string; // ISO8601
@@ -598,7 +599,7 @@ export interface QuickSessionMeta {
   title: string;
   title_source: string;
   agent_id: string;
-  created_by: { handler: string };
+  created_by: string;
   status: QuickSessionStatus;
   created_at: string;
   updated_at: string;

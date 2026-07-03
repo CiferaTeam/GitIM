@@ -28,8 +28,10 @@ pub fn write_state(
     state: &QuickSessionRuntimeState,
 ) -> Result<(), String> {
     let path = quick_session_state_path(workspace_root, session_id);
-    std::fs::create_dir_all(path.parent().unwrap())
-        .map_err(|e| format!("failed to create state dir: {}", e))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "quick session state path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("failed to create state dir: {}", e))?;
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| format!("failed to serialize state: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("failed to write state: {}", e))

@@ -247,15 +247,39 @@ export interface ThreadMessage {
   line: string;
 }
 
+const THREAD_MESSAGE_RE =
+  /^\[L(\d{6,})\]\[P(\d{6,})\]\[@([a-z0-9-]+)\]\[(\d{8}T\d{6}Z)\](?:\[E:([a-z][a-z0-9_-]*)\])? (.*)$/;
+
 export function parseThread(raw: string): ThreadMessage[] {
-  return raw
-    .split("\n")
-    .filter((line) => line.trim())
-    .map((line) => {
-      const parts = line.split(" ");
-      const lineNum = parts[0]; // L000001
-      const author = parts[2] ?? "unknown";
-      const body = parts.slice(3).join(" ");
-      return { author, body, line: lineNum };
-    });
+  const messages: ThreadMessage[] = [];
+  let current: ThreadMessage | null = null;
+
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line === "") {
+      if (index === lines.length - 1) continue;
+      if (current) current.body += "\n";
+      continue;
+    }
+    const match = line.match(THREAD_MESSAGE_RE);
+    if (match) {
+      if (current) messages.push(current);
+      const eventType = match[5];
+      current = eventType
+        ? null
+        : {
+            line: `L${match[1]}`,
+            author: match[3],
+            body: match[6],
+          };
+      continue;
+    }
+    if (current) {
+      current.body += `\n${line.startsWith(" [L") ? line.slice(1) : line}`;
+    }
+  }
+
+  if (current) messages.push(current);
+  return messages;
 }

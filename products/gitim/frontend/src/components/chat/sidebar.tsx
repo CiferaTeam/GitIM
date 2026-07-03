@@ -807,18 +807,23 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     channelName: string,
     payload: SessionRefDragPayload,
   ) {
+    if (!activeWorkspaceKey) return;
     toast.success(`Referenced ${payload.ref} in #${channelName}`, {
       description: `${payload.title} · @${payload.agent}`,
     });
-    if (currentChannel !== channelName) {
-      // If dropped on a different channel, navigate and insert ref
-      onChannelSelect(channelName);
-    }
-    // Insert the session ref text into the composer via custom event
     const refText = `${payload.ref} ${payload.title}`;
     window.dispatchEvent(
-      new CustomEvent("gitim:insert-composer-text", { detail: refText }),
+      new CustomEvent("gitim:insert-composer-text", {
+        detail: {
+          text: refText,
+          workspaceKey: activeWorkspaceKey,
+          scopeKey: chatScopeKeyForChannel({ name: channelName, kind: "channel" }),
+        },
+      }),
     );
+    if (currentChannel !== channelName) {
+      onChannelSelect(channelName);
+    }
   }
 
   async function handleArchiveDm(dmName: string) {

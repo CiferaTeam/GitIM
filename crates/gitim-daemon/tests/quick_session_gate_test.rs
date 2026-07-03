@@ -12,6 +12,8 @@ mod common;
 
 use std::sync::Arc;
 
+use gitim_core::parser::parse_thread;
+use gitim_core::types::ThreadEntry;
 use gitim_daemon::api::{Request, Response};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::AppState;
@@ -42,6 +44,40 @@ async fn create_session_status_is_needs_title() {
     // Verify returned data has needs_title status
     let data = resp.data.unwrap();
     assert_eq!(data["status"], "needs_title");
+}
+
+#[tokio::test]
+async fn created_thread_uses_standard_gitim_format() {
+    let (tmp, state) = setup().await;
+    let req: Request = serde_json::from_value(serde_json::json!({
+        "method": "create_quick_session",
+        "agent_id": "test-agent",
+        "first_message": "hello\nwith continuation",
+        "author": "alice",
+    }))
+    .unwrap();
+    let resp = call(state.clone(), req).await;
+    assert!(resp.ok, "create_quick_session failed: {:?}", resp.error);
+    let session_id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    let thread_path = tmp
+        .path()
+        .join("quick-sessions")
+        .join(&session_id)
+        .join("discussion.thread");
+    let raw = std::fs::read_to_string(thread_path).unwrap();
+    let parsed = parse_thread(&raw).expect("quick session thread should parse");
+
+    assert_eq!(parsed.entries.len(), 1);
+    match &parsed.entries[0] {
+        ThreadEntry::Message(message) => {
+            assert_eq!(message.line_number, 1);
+            assert_eq!(message.point_to, 0);
+            assert_eq!(message.author.as_str(), "alice");
+            assert_eq!(message.body, "hello\nwith continuation");
+        }
+        _ => panic!("expected message"),
+    }
 }
 
 #[tokio::test]
