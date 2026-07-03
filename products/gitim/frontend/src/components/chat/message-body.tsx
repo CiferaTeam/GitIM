@@ -112,6 +112,25 @@ function hasNearbyCardCue(fragments: Fragment[], index: number): boolean {
   return /\bcard\b|卡片|卡/.test(nearby);
 }
 
+const LEGACY_LINE_PREFIX_RE =
+  /^\s*[Ll](\d{1,6})(?=$|[\s).,\]}，。；;、:：])/;
+
+function leadingLegacyLine(content: string): number | undefined {
+  const match = content.match(LEGACY_LINE_PREFIX_RE);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
+function stripLeadingLegacyLine(content: string): string {
+  const match = content.match(LEGACY_LINE_PREFIX_RE);
+  return match ? content.slice(match[0].length) : content;
+}
+
+function legacyLineAfterInlineCard(fragments: Fragment[], index: number): number | undefined {
+  const next = fragments[index + 1];
+  if (next?.type !== "text") return undefined;
+  return leadingLegacyLine(next.content);
+}
+
 function CardLinkFragment({
   fragment,
 }: {
@@ -137,15 +156,20 @@ function CardLinkFragment({
 function LegacyInlineCardLink({
   channel,
   cardId,
+  line,
 }: {
   channel: string;
   cardId: string;
+  line?: number;
 }) {
   const navigate = useNavigate();
   return (
     <CardReferenceLink
-      reference={{ channel, cardId }}
-      onOpen={() => navigate(`/cards/${channel}/${cardId}`)}
+      reference={{ channel, cardId, ...(line !== undefined && { line }) }}
+      onOpen={() => {
+        const query = line !== undefined ? `?line=${line}` : "";
+        navigate(`/cards/${channel}/${cardId}${query}`);
+      }}
     />
   );
 }
@@ -166,9 +190,23 @@ function FragmentRenderer({
       ? selectCardById(s, currentChannel, fragment.code)
       : undefined,
   );
+  const previousLegacyInlineCard = useCardStore((s) => {
+    const previous = fragments[index - 1];
+    if (fragment.type !== "text" || previous?.type !== "inline-code" || !currentChannel) {
+      return undefined;
+    }
+    return selectCardById(s, currentChannel, previous.code);
+  });
   switch (fragment.type) {
-    case "text":
-      return <span key={index}>{fragment.content}</span>;
+    case "text": {
+      const shouldStripLine =
+        previousLegacyInlineCard && hasNearbyCardCue(fragments, index - 1);
+      return (
+        <span key={index}>
+          {shouldStripLine ? stripLeadingLegacyLine(fragment.content) : fragment.content}
+        </span>
+      );
+    }
 
     case "mention":
       return (
@@ -266,6 +304,7 @@ function FragmentRenderer({
             key={index}
             channel={currentChannel}
             cardId={fragment.code}
+            line={legacyLineAfterInlineCard(fragments, index)}
           />
         );
       }

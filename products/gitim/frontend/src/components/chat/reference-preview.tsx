@@ -19,6 +19,10 @@ import * as client from "@/lib/client";
 import { formatTimestamp, type Card, type Message } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { toApiChannel } from "@/lib/scope-name";
+import {
+  getCardPreviewReadQuery,
+  selectCardPreviewMessages,
+} from "./reference-preview-utils";
 
 type LoadStatus = "idle" | "loading" | "ok" | "error";
 
@@ -124,7 +128,7 @@ export function CardReferenceLink({
   const display = card?.title ?? reference.label ?? shortCardId(reference.cardId);
   const messages = loadedMessages.length > 0 ? loadedMessages : cachedMessages;
   const visibleMessages = useMemo(
-    () => windowAround(messages, reference.line),
+    () => selectCardPreviewMessages(messages, reference.line),
     [messages, reference.line],
   );
 
@@ -134,11 +138,9 @@ export function CardReferenceLink({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus("loading");
     setError(null);
-    const since =
-      reference.line && reference.line > 6 ? reference.line - 6 : undefined;
-    const limit = reference.line ? 11 : 8;
+    const query = getCardPreviewReadQuery(reference.line);
     void client
-      .readCard(activeSlug, reference.channel, reference.cardId, { since, limit })
+      .readCard(activeSlug, reference.channel, reference.cardId, query)
       .then((res) => {
         if (cancelled) return;
         if (!res.ok || !res.data) {
@@ -225,12 +227,12 @@ export function CardReferenceLink({
           )}
 
           <div className="mt-3 border-t border-border pt-3">
-            {status === "loading" && messages.length === 0 ? (
+            {status === "loading" && visibleMessages.length === 0 ? (
               <div className="flex items-center gap-2 py-3 text-xs text-text-muted">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Loading preview...
               </div>
-            ) : status === "error" && messages.length === 0 ? (
+            ) : status === "error" && visibleMessages.length === 0 ? (
               <div className="py-3 text-xs text-destructive">{error}</div>
             ) : (
               <MessageRows messages={visibleMessages} targetLine={reference.line} />
