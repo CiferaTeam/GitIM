@@ -725,4 +725,28 @@ describe("mergeCardChangeEvents", () => {
     const eventPart = merged.filter((m) => m.type === "event");
     expect(eventPart.map((e) => e.meta?.cardId)).toEqual(["c1", "c2"]);
   });
+
+  it("keeps sent pending messages with real line numbers in timeline order", () => {
+    const sentPending = msg(81, "confirmed outbound", {
+      _pendingId: "p1",
+      _status: "sent",
+    });
+    const messages = [
+      msg(80, "before"),
+      sentPending,
+      msg(84, "remote update"),
+      msg(85, "remote follow-up"),
+    ];
+    const events = [makeEvent("c1", 81)];
+
+    const merged = mergeCardChangeEvents(messages, events);
+
+    expect(merged.map((m) => m._ephemeralId ?? m.line_number)).toEqual([
+      80,
+      81,
+      "c1:81",
+      84,
+      85,
+    ]);
+  });
 });

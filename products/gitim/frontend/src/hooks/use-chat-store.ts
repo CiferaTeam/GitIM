@@ -722,7 +722,7 @@ export function mergeCardChangeEvents(
   const real: Message[] = [];
   const pending: Message[] = [];
   for (const m of messages) {
-    if (m._pendingId || m.line_number <= 0) {
+    if (m.line_number <= 0 || (m._pendingId && m._status !== "sent")) {
       pending.push(m);
     } else {
       real.push(m);
