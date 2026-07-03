@@ -160,7 +160,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 function LocationProbe({ onPath }: { onPath: (path: string) => void }) {
   const location = useLocation();
-  onPath(location.pathname);
+  onPath(`${location.pathname}${location.search}`);
   return null;
 }
 
@@ -354,7 +354,7 @@ describe("App card thread toasts", () => {
     });
 
     expect(mocks.toast.info).toHaveBeenCalledWith(
-      "Card #card-123: new message from @alice",
+      "Card Follow up: new message from @alice",
       expect.objectContaining({
         action: expect.objectContaining({
           label: "Open card",
@@ -369,7 +369,7 @@ describe("App card thread toasts", () => {
       await flushPromises();
     });
 
-    expect(currentPath).toBe("/cards/general/card-123456789");
+    expect(currentPath).toBe("/cards/general/card-123456789?line=1");
   });
 
   it("shows success when poll confirms a queued local message reached remote", async () => {

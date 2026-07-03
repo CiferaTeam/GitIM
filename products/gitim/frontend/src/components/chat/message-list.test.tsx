@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Message } from "../../lib/types";
+import type { Card, Message } from "../../lib/types";
+import { useCardStore } from "../../hooks/use-card-store";
 import { MessageList } from "./message-list";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -645,7 +646,7 @@ describe("MessageList scroll position on message mutations", () => {
   });
 });
 
-function cardChangeEvent(cardId: string, count: number): Message {
+function cardChangeEvent(cardId: string, count: number, targetLine = 7): Message {
   return {
     type: "event",
     event_type: "card_change",
@@ -658,6 +659,7 @@ function cardChangeEvent(cardId: string, count: number): Message {
       cardId,
       cardChannel: "general",
       anchorLine: 2,
+      targetLine,
       authors: ["bob"],
       count,
     },
@@ -668,6 +670,10 @@ function cardChangeEvent(cardId: string, count: number): Message {
 describe("MessageList card change events", () => {
   let root: Root | null = null;
 
+  beforeEach(() => {
+    useCardStore.getState().resetForWorkspaceSwitch();
+  });
+
   afterEach(() => {
     if (root) {
       root.unmount();
@@ -676,8 +682,20 @@ describe("MessageList card change events", () => {
     document.body.innerHTML = "";
   });
 
-  it("renders a small card-change pill and calls onCardChangeClick when clicked", async () => {
+  it("renders the card title and opens the changed discussion line", async () => {
     const onCardChangeClick = vi.fn();
+    const card: Card = {
+      card_id: "card-123",
+      channel: "general",
+      title: "Recovery review",
+      status: "todo",
+      labels: [],
+      assignee: null,
+      created_by: "alice",
+      created_at: "20260511T120000Z",
+      updated_at: "20260511T120000Z",
+    };
+    useCardStore.getState().upsertCard(card);
     const messages = [
       msg(1, "a"),
       msg(2, "b"),
@@ -690,14 +708,15 @@ describe("MessageList card change events", () => {
     const buttons = Array.from(rendered.container.querySelectorAll("button"));
     const button = buttons.find((b) => b.textContent?.includes("卡片"));
     expect(button).not.toBeUndefined();
-    expect(button!.textContent).toContain("卡片 #card-123");
+    expect(button!.textContent).toContain("卡片 Recovery review");
     expect(button!.textContent).toContain("3 条新回复");
+    expect(button!.textContent).not.toContain("#card-123");
 
     await act(async () => {
       button!.click();
       await Promise.resolve();
     });
 
-    expect(onCardChangeClick).toHaveBeenCalledWith("general", "card-123");
+    expect(onCardChangeClick).toHaveBeenCalledWith("general", "card-123", 7);
   });
 });

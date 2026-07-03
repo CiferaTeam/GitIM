@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ExternalLink, LayoutGrid, Loader2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -100,9 +100,13 @@ function MessageRows({
 export function CardReferenceLink({
   reference,
   onOpen,
+  children,
+  className,
 }: {
   reference: CardReference;
   onOpen: () => void;
+  children?: ReactNode;
+  className?: string;
 }) {
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const cachedCard = useCardStore((s) => selectCardById(s, reference.channel, reference.cardId));
@@ -184,16 +188,23 @@ export function CardReferenceLink({
       <HoverCardTrigger asChild>
         <button
           type="button"
-          className="inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-primary hover:bg-primary/10 hover:underline"
+          className={cn(
+            "inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-primary hover:bg-primary/10 hover:underline",
+            className,
+          )}
           onClick={handleOpen}
           title={`#${reference.channel}/${reference.cardId}`}
         >
-          <LayoutGrid className="h-3 w-3 shrink-0" />
-          <span className="truncate">{display}</span>
-          {reference.line && (
-            <span className="font-mono text-[11px] text-primary/70">
-              L{String(reference.line).padStart(6, "0")}
-            </span>
+          {children ?? (
+            <>
+              <LayoutGrid className="h-3 w-3 shrink-0" />
+              <span className="truncate">{display}</span>
+              {reference.line && (
+                <span className="font-mono text-[11px] text-primary/70">
+                  L{String(reference.line).padStart(6, "0")}
+                </span>
+              )}
+            </>
           )}
         </button>
       </HoverCardTrigger>

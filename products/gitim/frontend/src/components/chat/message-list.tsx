@@ -9,9 +9,11 @@ import {
 } from "react";
 import type { Message } from "../../lib/types";
 import type { ChatViewportAnchor } from "../../lib/chat-ui-state";
+import { selectCardById, useCardStore } from "../../hooks/use-card-store";
 import { MessageItem } from "./message-item";
 import { HandlerName } from "./handler-name";
 import { MessageSquare, Hash, LayoutGrid } from "lucide-react";
+import { CardReferenceLink } from "./reference-preview";
 import {
   SCROLL_BOTTOM_THRESHOLD_PX,
   decideTimelineScroll,
@@ -46,7 +48,7 @@ interface MessageListProps {
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
   onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
-  onCardChangeClick?: (channel: string, cardId: string) => void;
+  onCardChangeClick?: (channel: string, cardId: string, line?: number) => void;
   onActionSheet?: (msg: Message) => void;
   /** Fired when the user scrolls within `SCROLL_TOP_THRESHOLD_PX` of the top.
    *  Caller is responsible for fetching older messages and prepending them
@@ -58,6 +60,55 @@ interface MessageListProps {
 /** How close to the top counts as "the user is asking for more history."
  *  Anything beyond this is regarded as still browsing the current page. */
 const SCROLL_TOP_THRESHOLD_PX = 50;
+
+type CardChangeMeta = {
+  cardId: string;
+  cardChannel: string;
+  count: number;
+  targetLine?: number;
+  cardTitle?: string;
+};
+
+function CardChangeEventPill({
+  meta,
+  onCardChangeClick,
+}: {
+  meta: CardChangeMeta;
+  onCardChangeClick?: (channel: string, cardId: string, line?: number) => void;
+}) {
+  const activeCard = useCardStore((s) =>
+    selectCardById(s, meta.cardChannel, meta.cardId),
+  );
+  const archivedCard = useCardStore((s) =>
+    s.archivedCards.find(
+      (c) => c.channel === meta.cardChannel && c.card_id === meta.cardId,
+    ),
+  );
+  const title = activeCard?.title ?? archivedCard?.title ?? meta.cardTitle ?? meta.cardId;
+  const targetLine = meta.targetLine && meta.targetLine > 0 ? meta.targetLine : undefined;
+
+  return (
+    <div className="flex justify-center py-1">
+      <CardReferenceLink
+        reference={{
+          channel: meta.cardChannel,
+          cardId: meta.cardId,
+          ...(targetLine !== undefined && { line: targetLine }),
+          label: title,
+        }}
+        onOpen={() =>
+          onCardChangeClick?.(meta.cardChannel, meta.cardId, targetLine)
+        }
+        className="max-w-[min(520px,80vw)] rounded-full bg-surface/50 px-2 py-0.5 text-[11px] text-text-muted/80 transition-colors hover:bg-surface hover:text-text-muted hover:no-underline"
+      >
+        <LayoutGrid className="h-3 w-3 shrink-0" />
+        <span className="truncate">
+          卡片 {title} · {meta.count} 条新回复
+        </span>
+      </CardReferenceLink>
+    </div>
+  );
+}
 
 function viewportAnchorFromElement(
   scrollEl: HTMLDivElement,
@@ -352,27 +403,12 @@ export function MessageList({
                 </>
               );
           } else if (msg.event_type === "card_change") {
-            const meta = msg.meta as {
-              cardId: string;
-              cardChannel: string;
-              count: number;
-            };
-            const shortId = meta.cardId.slice(0, 8);
             return (
-              <div key={key} className="flex justify-center py-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    onCardChangeClick?.(meta.cardChannel, meta.cardId)
-                  }
-                  className="inline-flex items-center gap-1.5 text-[11px] text-text-muted/80 bg-surface/50 hover:bg-surface px-2 py-0.5 rounded-full transition-colors"
-                >
-                  <LayoutGrid className="h-3 w-3" />
-                  <span>
-                    卡片 #{shortId} · {meta.count} 条新回复
-                  </span>
-                </button>
-              </div>
+              <CardChangeEventPill
+                key={key}
+                meta={msg.meta as CardChangeMeta}
+                onCardChangeClick={onCardChangeClick}
+              />
             );
           } else {
             eventContent = msg.body ?? `${msg.author}: ${msg.event_type}`;

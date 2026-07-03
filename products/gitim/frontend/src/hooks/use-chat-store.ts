@@ -16,6 +16,8 @@ export interface CardChangeEvent {
   cardId: string;
   cardChannel: string;
   anchorLine: number;
+  targetLine?: number;
+  cardTitle?: string;
   authors: string[];
   count: number;
   receivedAt: number;
@@ -534,6 +536,8 @@ export const useChatStore = create<ChatState>((set) => ({
           count: existing.count + event.count,
           authors: Array.from(new Set([...existing.authors, ...event.authors])),
           receivedAt: Math.max(existing.receivedAt, event.receivedAt),
+          targetLine: event.targetLine ?? existing.targetLine,
+          cardTitle: event.cardTitle ?? existing.cardTitle,
         };
         next = list.slice();
         next[existingIndex] = merged;
@@ -698,6 +702,8 @@ function cardChangeEventToMessage(event: CardChangeEvent): Message {
       cardId: event.cardId,
       cardChannel: event.cardChannel,
       anchorLine: event.anchorLine,
+      targetLine: event.targetLine,
+      cardTitle: event.cardTitle,
       authors: event.authors,
       count: event.count,
     },

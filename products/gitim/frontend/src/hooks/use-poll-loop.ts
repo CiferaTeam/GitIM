@@ -38,7 +38,7 @@ import { workspaceIdentity } from "../lib/workspace-key";
 import { emitWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import { useAgentStore } from "./use-agent-store";
 import { useBoardStore } from "./use-board-store";
-import { cardPathKey, parseCardScope, useCardStore } from "./use-card-store";
+import { cardPathKey, parseCardScope, selectCardById, useCardStore } from "./use-card-store";
 import { useChatStore } from "./use-chat-store";
 import { useConnectionDiagnosticsStore } from "./use-connection-diagnostics-store";
 import { useConnectionStore } from "./use-connection-store";
@@ -597,7 +597,13 @@ export function usePollLoop(): void {
               (e) => e.author !== me,
             );
             if (others.length > 0 && parsed) {
-              const shortId = parsed.cardId.slice(0, 8);
+              const cardState = useCardStore.getState();
+              const cardTitle =
+                selectCardById(cardState, parsed.channel, parsed.cardId)?.title ??
+                cardState.archivedCards.find(
+                  (c) => c.channel === parsed.channel && c.card_id === parsed.cardId,
+                )?.title;
+              const cardLabel = cardTitle ?? `#${parsed.cardId.slice(0, 8)}`;
               const authors = Array.from(
                 new Set(others.map((e) => `@${e.author}`)),
               ).join(", ");
@@ -605,12 +611,15 @@ export function usePollLoop(): void {
                 others.length === 1
                   ? "new message"
                   : `${others.length} new messages`;
-              toast.info(`Card #${shortId}: ${noun} from ${authors}`, {
+              const targetLine = others[others.length - 1]?.line_number;
+              toast.info(`Card ${cardLabel}: ${noun} from ${authors}`, {
                 action: {
                   label: "Open card",
                   onClick: () => {
+                    const query =
+                      targetLine && targetLine > 0 ? `?line=${targetLine}` : "";
                     navigateRef.current(
-                      `/cards/${encodeURIComponent(parsed.channel)}/${encodeURIComponent(parsed.cardId)}`,
+                      `/cards/${encodeURIComponent(parsed.channel)}/${encodeURIComponent(parsed.cardId)}${query}`,
                     );
                   },
                 },
@@ -630,6 +639,8 @@ export function usePollLoop(): void {
                 cardId: parsed.cardId,
                 cardChannel: parsed.channel,
                 anchorLine,
+                ...(targetLine !== undefined && { targetLine }),
+                ...(cardTitle !== undefined && { cardTitle }),
                 authors: Array.from(new Set(others.map((e) => e.author))),
                 count: others.length,
                 receivedAt: Date.now(),

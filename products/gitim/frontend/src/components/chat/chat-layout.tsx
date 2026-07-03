@@ -97,8 +97,9 @@ export function ChatLayout() {
   }, [rawMessages, cardChangeEvents, currentChannel]);
 
   const handleCardChangeClick = useCallback(
-    (channel: string, cardId: string) => {
-      navigate(`/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}`);
+    (channel: string, cardId: string, line?: number) => {
+      const query = line && line > 0 ? `?line=${line}` : "";
+      navigate(`/cards/${encodeURIComponent(channel)}/${encodeURIComponent(cardId)}${query}`);
     },
     [navigate],
   );
