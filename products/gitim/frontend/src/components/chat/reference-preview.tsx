@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/hover-card";
 import {
   cardPathKey,
+  selectCardMessagesByPath,
   selectCardById,
   useCardStore,
 } from "@/hooks/use-card-store";
@@ -108,8 +109,9 @@ export function CardReferenceLink({
   );
   const upsertCard = useCardStore((s) => s.upsertCard);
   const upsertArchivedCard = useCardStore((s) => s.upsertArchivedCard);
+  const messagePathKey = cardPathKey(reference.channel, reference.cardId);
   const cachedMessages = useCardStore(
-    (s) => s.cardMessagesByPath[cardPathKey(reference.channel, reference.cardId)] ?? [],
+    (s) => selectCardMessagesByPath(s, messagePathKey),
   );
 
   const [open, setOpen] = useState(false);
