@@ -24,6 +24,9 @@ export function parseCardScope(channelStr: string): {
   return { channel: rest.slice(0, idx), cardId: rest.slice(idx + 1) };
 }
 
+// Selector fallback must stay referentially stable for useSyncExternalStore.
+const EMPTY_CARD_MESSAGES: Message[] = [];
+
 interface CardState {
   cards: Card[];
   /** Archived cards — flat list across channels; selectors can filter per-channel. */
@@ -346,6 +349,13 @@ export function selectCardById(
   return state.cards.find(
     (c) => c.channel === channel && c.card_id === cardId,
   );
+}
+
+export function selectCardMessagesByPath(
+  state: CardState,
+  pathKey: string,
+): Message[] {
+  return state.cardMessagesByPath[pathKey] ?? EMPTY_CARD_MESSAGES;
 }
 
 /** Sort cards by updated_at DESC (YYYYMMDDTHHMMSSZ format sorts lexicographically). */

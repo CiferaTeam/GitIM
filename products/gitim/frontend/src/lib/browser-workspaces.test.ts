@@ -215,9 +215,10 @@ describe("browser workspaces", () => {
     const wipe = wipeBrowserWorkspaceCache(ws.slug).then(() => {
       resolved = true;
     });
-    await Promise.resolve();
 
-    expect(wipedFsNames).toEqual([ws.storage.fsName]);
+    await vi.waitFor(() => {
+      expect(wipedFsNames).toEqual([ws.storage.fsName]);
+    });
     expect(wipeControls.pending.map((pending) => pending.name)).toEqual([
       ws.storage.fsName,
     ]);

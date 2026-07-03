@@ -11,6 +11,7 @@ import {
   cardPathKey,
   cardScopeKey,
   selectCardById,
+  selectCardMessagesByPath,
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -33,10 +34,6 @@ import { toApiChannel } from "@/lib/scope-name";
 import { CardMetaBar } from "./card-meta-bar";
 
 type LoadStatus = "loading" | "ok" | "not_found" | "error";
-
-// Stable empty-array reference: zustand compares selector output by Object.is,
-// so `?? []` would return a fresh array every call and loop useSyncExternalStore.
-const EMPTY_MESSAGES: Message[] = [];
 
 export function CardDetail() {
   const params = useParams();
@@ -91,7 +88,7 @@ export function CardDetail() {
     : null;
 
   const messages = useCardStore(
-    (s) => s.cardMessagesByPath[pathKey] ?? EMPTY_MESSAGES,
+    (s) => selectCardMessagesByPath(s, pathKey),
   );
 
   const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
