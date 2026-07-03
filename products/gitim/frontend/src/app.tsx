@@ -1,16 +1,7 @@
+import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 import { Loader2 } from "lucide-react";
-import { BoardsView } from "./components/boards/boards-view";
-import { FlowsView } from "./components/flows/flows-view";
-import { RunDetail } from "./components/flows/run-detail";
-import { CardDetail } from "./components/cards/card-detail";
-import { CardKanban } from "./components/cards/card-kanban";
-import { ChatLayout } from "./components/chat/chat-layout";
-import { CronCalendar } from "./components/crons/cron-calendar";
 import { AppShell } from "./components/layout/app-shell";
-import { AgentDetail } from "./components/management/agent-detail";
-import { AgentList } from "./components/management/agent-list";
-import { DocsPage } from "./components/docs/docs-page";
 import { useAgentActivitySSE } from "./hooks/use-agent-activity";
 import { DisplayNameDirectoryProvider } from "./hooks/display-name-directory-provider";
 import { useConnectionStore } from "./hooks/use-connection-store";
@@ -22,12 +13,84 @@ import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
 import { Toaster } from "sonner";
 
+const AgentDetail = lazy(() =>
+  import("./components/management/agent-detail").then((m) => ({
+    default: m.AgentDetail,
+  })),
+);
+const AgentList = lazy(() =>
+  import("./components/management/agent-list").then((m) => ({
+    default: m.AgentList,
+  })),
+);
+const BoardsView = lazy(() =>
+  import("./components/boards/boards-view").then((m) => ({
+    default: m.BoardsView,
+  })),
+);
+const CardDetail = lazy(() =>
+  import("./components/cards/card-detail").then((m) => ({
+    default: m.CardDetail,
+  })),
+);
+const CardKanban = lazy(() =>
+  import("./components/cards/card-kanban").then((m) => ({
+    default: m.CardKanban,
+  })),
+);
+const ChatLayout = lazy(() =>
+  import("./components/chat/chat-layout").then((m) => ({
+    default: m.ChatLayout,
+  })),
+);
+const CronCalendar = lazy(() =>
+  import("./components/crons/cron-calendar").then((m) => ({
+    default: m.CronCalendar,
+  })),
+);
+const DocsPage = lazy(() =>
+  import("./components/docs/docs-page").then((m) => ({
+    default: m.DocsPage,
+  })),
+);
+const FlowsView = lazy(() =>
+  import("./components/flows/flows-view").then((m) => ({
+    default: m.FlowsView,
+  })),
+);
+const RunDetail = lazy(() =>
+  import("./components/flows/run-detail").then((m) => ({
+    default: m.RunDetail,
+  })),
+);
+
+function PageLoading() {
+  return (
+    <div className="flex h-full min-h-[12rem] items-center justify-center gap-2 text-sm text-text-muted">
+      <Loader2 className="size-4 animate-spin" />
+      Loading...
+    </div>
+  );
+}
+
+function PageSuspense({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<PageLoading />}>{children}</Suspense>;
+}
+
 function ManagementPage() {
-  return <AgentList />;
+  return (
+    <PageSuspense>
+      <AgentList />
+    </PageSuspense>
+  );
 }
 
 function ChatPage() {
-  return <ChatLayout />;
+  return (
+    <PageSuspense>
+      <ChatLayout />
+    </PageSuspense>
+  );
 }
 
 function FirstRunScreen() {
@@ -95,9 +158,13 @@ export default function App() {
   const isDocsRoute = location.pathname.startsWith("/docs");
 
   // Render-time gate: until we have a workspace selected, bypass the chat UI.
-  let gated: React.ReactNode;
+  let gated: ReactNode;
   if (isDocsRoute) {
-    gated = <DocsPage />;
+    gated = (
+      <PageSuspense>
+        <DocsPage />
+      </PageSuspense>
+    );
   } else if (mode === "local" && workspaces.length === 0) {
     gated = <WorkspaceLoading />;
   } else if (workspacesLoading && workspaces.length === 0) {
@@ -135,25 +202,80 @@ export default function App() {
                 <Route
                   path="/management/:agentId"
                   element={
-                    isMobile ? <Navigate to="/chat" replace /> : <AgentDetail />
+                    isMobile ? (
+                      <Navigate to="/chat" replace />
+                    ) : (
+                      <PageSuspense>
+                        <AgentDetail />
+                      </PageSuspense>
+                    )
                   }
                 />
               </>
             )}
-            <Route path="/cards" element={<CardKanban />} />
-            <Route path="/cards/:channel/:card_id" element={<CardDetail />} />
-            <Route path="/boards" element={<BoardsView />} />
+            <Route
+              path="/cards"
+              element={
+                <PageSuspense>
+                  <CardKanban />
+                </PageSuspense>
+              }
+            />
+            <Route
+              path="/cards/:channel/:card_id"
+              element={
+                <PageSuspense>
+                  <CardDetail />
+                </PageSuspense>
+              }
+            />
+            <Route
+              path="/boards"
+              element={
+                <PageSuspense>
+                  <BoardsView />
+                </PageSuspense>
+              }
+            />
             <Route path="/chat" element={<ChatPage />} />
             {mode === "remote" && (
-              <Route path="/crons" element={<CronCalendar />} />
+              <Route
+                path="/crons"
+                element={
+                  <PageSuspense>
+                    <CronCalendar />
+                  </PageSuspense>
+                }
+              />
             )}
             {mode === "remote" && (
-              <Route path="/flows" element={<FlowsView />} />
+              <Route
+                path="/flows"
+                element={
+                  <PageSuspense>
+                    <FlowsView />
+                  </PageSuspense>
+                }
+              />
             )}
             {mode === "remote" && (
-              <Route path="/runs/:runId" element={<RunDetail />} />
+              <Route
+                path="/runs/:runId"
+                element={
+                  <PageSuspense>
+                    <RunDetail />
+                  </PageSuspense>
+                }
+              />
             )}
-            <Route path="/docs" element={<DocsPage />} />
+            <Route
+              path="/docs"
+              element={
+                <PageSuspense>
+                  <DocsPage />
+                </PageSuspense>
+              }
+            />
             {mode === "local" && (
               <Route path="*" element={<Navigate to="/chat" replace />} />
             )}

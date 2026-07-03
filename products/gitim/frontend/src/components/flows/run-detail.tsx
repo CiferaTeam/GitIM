@@ -1,8 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import {
   cancelFlowRun as apiCancelFlowRun,
+  getFlow as apiGetFlow,
   getFlowRun as apiGetFlowRun,
 } from "@/lib/client";
 import { useTimezoneStore } from "@/hooks/use-timezone";
@@ -11,28 +13,30 @@ import { useFlowRunStore } from "@/hooks/use-flow-run-store";
 import { Button } from "@/components/ui/button";
 import { formatDateTime } from "@/lib/timezone";
 import { cn } from "@/lib/utils";
-import type { NodeStatus, RunStatus } from "@/lib/types";
+import type { FlowDocument, NodeStatus, RunStatus } from "@/lib/types";
 
 const FlowDAG = lazy(() =>
   import("./flow-dag").then((m) => ({ default: m.FlowDAG })),
 );
 
-const STATUS_COLORS: Record<NodeStatus, string> = {
+const STATUS_TEXT: Record<NodeStatus, string> = {
   pending: "text-muted-foreground",
-  in_progress: "text-yellow-600",
-  done: "text-green-600",
-  failed: "text-red-600",
+  in_progress: "text-warning",
+  done: "text-success",
+  failed: "text-destructive",
   skipped: "text-gray-400 line-through",
 };
 
-const STATUS_BG: Record<NodeStatus | RunStatus, string> = {
-  pending: "bg-muted",
-  in_progress: "bg-yellow-100 dark:bg-yellow-950",
-  done: "bg-green-100 dark:bg-green-950",
-  failed: "bg-red-100 dark:bg-red-950",
-  skipped: "bg-muted opacity-60",
-  cancelled: "bg-muted opacity-60",
+const STATUS_SURFACE: Record<NodeStatus | RunStatus, string> = {
+  pending: "border-border bg-muted/50 text-foreground",
+  in_progress: "border-warning/30 bg-warning/10 text-foreground",
+  done: "border-success/30 bg-success/10 text-foreground",
+  failed: "border-destructive/30 bg-destructive/10 text-foreground",
+  skipped: "border-border bg-muted/40 text-muted-foreground opacity-75",
+  cancelled: "border-border bg-muted/40 text-muted-foreground opacity-75",
 };
+
+const RUN_STEPS_PAGE_SIZE = 6;
 
 export function RunDetail() {
   const { runId } = useParams<{ runId: string }>();
@@ -43,15 +47,22 @@ export function RunDetail() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flowTemplate, setFlowTemplate] = useState<FlowDocument | null>(null);
+  const [stepsPage, setStepsPage] = useState(0);
 
   const loadRun = useCallback(
     async (slug: string, id: string) => {
       setLoading(true);
       setError(null);
+      setFlowTemplate(null);
       try {
         const res = await apiGetFlowRun(slug, id);
         if (res.ok && res.data) {
           setSelectedRun(res.data);
+          const flowRes = await apiGetFlow(slug, res.data.flow_slug);
+          if (flowRes.ok && flowRes.data) {
+            setFlowTemplate(flowRes.data);
+          }
         } else {
           setError(res.error ?? "Failed to load run");
         }
@@ -70,8 +81,13 @@ export function RunDetail() {
     }
     return () => {
       setSelectedRun(null);
+      setFlowTemplate(null);
     };
   }, [activeSlug, runId, loadRun, setSelectedRun]);
+
+  useEffect(() => {
+    setStepsPage(0);
+  }, [selectedRun?.run_id]);
 
   const handleCancel = useCallback(async () => {
     if (!activeSlug || !selectedRun) return;
@@ -98,88 +114,148 @@ export function RunDetail() {
     return <div className="p-6 text-muted-foreground">Run not found.</div>;
   }
 
-  // Build flat DAG nodes — edges not available from run state.yaml,
-  // so the diagram renders nodes-only (no arrows). FlowDAG handles empty needs[].
+  const flowNodeById = new Map(
+    (flowTemplate?.nodes ?? []).map((node) => [node.id, node]),
+  );
   const dagNodes = selectedRun.nodes.map((n) => ({
     id: n.id,
-    type: "agent_mention" as const,
-    owner: n.actor,
-    needs: [] as string[],
-    prompt: "",
+    type: flowNodeById.get(n.id)?.type ?? ("agent_mention" as const),
+    owner: n.actor ?? flowNodeById.get(n.id)?.owner,
+    participants: flowNodeById.get(n.id)?.participants,
+    signal: flowNodeById.get(n.id)?.signal,
+    needs: flowNodeById.get(n.id)?.needs ?? [],
+    exits: flowNodeById.get(n.id)?.exits,
+    required_labels: flowNodeById.get(n.id)?.required_labels,
+    prompt: flowNodeById.get(n.id)?.prompt ?? "",
   }));
 
-  const runStatusBg = STATUS_BG[selectedRun.status] ?? STATUS_BG.pending;
+  const runStatusClass =
+    STATUS_SURFACE[selectedRun.status] ?? STATUS_SURFACE.pending;
+  const stepCount = selectedRun.nodes.length;
+  const stepPageCount = Math.max(1, Math.ceil(stepCount / RUN_STEPS_PAGE_SIZE));
+  const boundedStepsPage = Math.min(stepsPage, stepPageCount - 1);
+  const stepStart = boundedStepsPage * RUN_STEPS_PAGE_SIZE;
+  const visibleSteps = selectedRun.nodes.slice(
+    stepStart,
+    stepStart + RUN_STEPS_PAGE_SIZE,
+  );
+  const stepEnd = Math.min(stepStart + visibleSteps.length, stepCount);
 
   return (
-    <div className="p-6 space-y-6 max-w-4xl mx-auto">
-      <header>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold font-mono">{selectedRun.run_id}</h1>
-            <p className="text-sm text-muted-foreground">
-              flow {selectedRun.flow_slug} · channel #{selectedRun.channel} · by
-              @{selectedRun.started_by}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              started {formatDateTime(selectedRun.started_at, timezone)} · updated{" "}
-              {formatDateTime(selectedRun.updated_at, timezone)}
-            </p>
-          </div>
-          <div className="flex gap-2 items-center">
-            <span
-              className={cn(
-                "px-2 py-1 rounded text-xs font-medium",
-                runStatusBg,
-              )}
-            >
-              {selectedRun.status}
-            </span>
-            {selectedRun.status === "in_progress" && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="text-destructive"
-                onClick={handleCancel}
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto flex max-w-4xl flex-col gap-5 px-4 py-4 md:px-6">
+        <header>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold font-mono">
+                {selectedRun.run_id}
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                flow {selectedRun.flow_slug} · channel #{selectedRun.channel} ·
+                by @{selectedRun.started_by}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                started {formatDateTime(selectedRun.started_at, timezone)} ·
+                updated {formatDateTime(selectedRun.updated_at, timezone)}
+              </p>
+            </div>
+            <div className="flex gap-2 items-center">
+              <span
+                className={cn(
+                  "rounded border px-2 py-1 text-xs font-medium",
+                  runStatusClass,
+                )}
               >
-                Cancel run
-              </Button>
+                {selectedRun.status}
+              </span>
+              {selectedRun.status === "in_progress" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-destructive"
+                  onClick={handleCancel}
+                >
+                  Cancel run
+                </Button>
+              )}
+            </div>
+          </div>
+        </header>
+
+        <section data-testid="run-steps">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Steps</h2>
+            {stepCount > RUN_STEPS_PAGE_SIZE && (
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-muted-foreground">
+                  {stepStart + 1}-{stepEnd} of {stepCount}
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Previous step page"
+                    title="Previous"
+                    disabled={boundedStepsPage === 0}
+                    onClick={() =>
+                      setStepsPage(Math.max(0, boundedStepsPage - 1))
+                    }
+                  >
+                    <ChevronLeft className="size-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Next step page"
+                    title="Next"
+                    disabled={boundedStepsPage >= stepPageCount - 1}
+                    onClick={() =>
+                      setStepsPage(
+                        Math.min(stepPageCount - 1, boundedStepsPage + 1),
+                      )
+                    }
+                  >
+                    <ChevronRight className="size-3.5" />
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
-        </div>
-      </header>
-
-      <section>
-        <h2 className="text-lg font-semibold mb-2">DAG</h2>
-        <div className="border rounded p-4 bg-card overflow-x-auto">
-          <Suspense fallback={<div>Loading diagram...</div>}>
-            <FlowDAG nodes={dagNodes} />
-          </Suspense>
-        </div>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold mb-2">Nodes</h2>
-        <div className="space-y-2">
-          {selectedRun.nodes.map((n) => (
-            <div
-              key={n.id}
-              className={cn(
-                "border rounded px-3 py-2 flex items-center justify-between",
-                STATUS_BG[n.status] ?? STATUS_BG.pending,
-              )}
-            >
-              <div className="font-mono">{n.id}</div>
-              <div className="text-xs flex gap-2 items-center">
-                <span className={STATUS_COLORS[n.status]}>{n.status}</span>
-                {n.actor && <span>@{n.actor}</span>}
-                {n.completed_at && (
-                  <span className="text-muted-foreground">{n.completed_at}</span>
+          <div className="space-y-2">
+            {visibleSteps.map((n) => (
+              <div
+                key={n.id}
+                className={cn(
+                  "flex items-center justify-between rounded border px-3 py-2",
+                  STATUS_SURFACE[n.status] ?? STATUS_SURFACE.pending,
                 )}
+              >
+                <div className="font-mono">{n.id}</div>
+                <div className="text-xs flex gap-2 items-center">
+                  <span className={STATUS_TEXT[n.status]}>{n.status}</span>
+                  {n.actor && <span>@{n.actor}</span>}
+                  {n.completed_at && (
+                    <span className="text-muted-foreground">
+                      {n.completed_at}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+
+        <section data-testid="run-dag">
+          <h2 className="text-lg font-semibold mb-2">DAG</h2>
+          <div className="max-h-[65vh] overflow-auto rounded-md border border-border bg-card p-4">
+            <Suspense fallback={<div>Loading diagram...</div>}>
+              <FlowDAG nodes={dagNodes} />
+            </Suspense>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

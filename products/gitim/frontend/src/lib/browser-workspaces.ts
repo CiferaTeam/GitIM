@@ -1,5 +1,4 @@
 import type { WorkspaceSummary } from "./types";
-import { wipeFs } from "@/daemon-web/storage";
 
 export const BROWSER_REGISTRY_KEY = "gitim-browser-workspaces-v2";
 export const LEGACY_LOCAL_CONFIG_KEY = "gitim-local-config";
@@ -8,6 +7,11 @@ export const REPO_DIR = "/repo";
 
 const REGISTRY_VERSION = 2;
 const TOKEN_KEY_PREFIX = "gitim-browser-token:";
+
+async function wipeBrowserFs(fsName: string): Promise<void> {
+  const { wipeFs } = await import("@/daemon-web/storage");
+  await wipeFs(fsName);
+}
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -35,7 +39,10 @@ function createMemoryStorage(): Storage {
 }
 
 function ensureStorage(name: "localStorage" | "sessionStorage"): void {
-  if (typeof globalThis[name]?.clear === "function") {
+  if (
+    typeof window !== "undefined" &&
+    typeof window[name]?.clear === "function"
+  ) {
     return;
   }
 
@@ -287,7 +294,7 @@ export async function wipeBrowserWorkspaceCache(idOrSlug: string): Promise<void>
     return;
   }
 
-  await wipeFs(workspace.storage.fsName);
+  await wipeBrowserFs(workspace.storage.fsName);
 }
 
 export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
@@ -297,6 +304,6 @@ export async function wipeAllBrowserWorkspaceCaches(): Promise<void> {
   ]);
 
   for (const fsName of fsNames) {
-    await wipeFs(fsName);
+    await wipeBrowserFs(fsName);
   }
 }
