@@ -3705,7 +3705,17 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 .quick_session_loop_running
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
             {
-                let qs_repo_root = repo_root.clone();
+                let qs_human_repo = ctx.human_repo.clone().or_else(|| {
+                    // Fallback: persistent human repo under workspace_root.
+                    let human_dir = ctx.path.join(".gitim-runtime").join("human");
+                    if human_dir.join(".git").is_dir()
+                        && human_dir.join(".gitim").join("me.json").is_file()
+                    {
+                        Some(human_dir)
+                    } else {
+                        None
+                    }
+                });
                 let qs_workspace_root = workspace_root.clone();
                 let qs_state = state.clone();
                 let qs_slug = slug.to_string();
@@ -3715,7 +3725,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
 
                 tokio::spawn(async move {
                     crate::quick_session_loop::run_quick_session_loop(
-                        qs_repo_root,
+                        qs_human_repo,
                         qs_workspace_root,
                         qs_state,
                         qs_slug,

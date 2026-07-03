@@ -50,11 +50,11 @@ async fn acquire_agent_lock(locks: &AgentLockMap, agent_id: &str) -> Arc<Mutex<(
 /// one loop instance should run. The caller guards against duplicate
 /// spawns via `WorkspaceContext::quick_session_loop_running`.
 pub async fn run_quick_session_loop(
-    // Retained in signature for call-site compatibility; daemon client now
-    // binds to workspace_root (stable workspace-level path) instead of the
-    // first agent's repo_root, so QuickSessionLoop is independent of agent
-    // startup order.
-    _repo_root: PathBuf,
+    // Daemon IPC root — the human repo where the daemon socket lives.
+    // Resolved at spawn time from WorkspaceContext::human_repo with
+    // persistent-human-repo fallback (same logic as http::human_repo_path).
+    human_repo: Option<PathBuf>,
+    // State root for .gitim-runtime/quick-sessions/ state files.
     workspace_root: PathBuf,
     state: SharedRuntimeState,
     slug: String,
@@ -64,11 +64,12 @@ pub async fn run_quick_session_loop(
 ) {
     info!(slug = %slug, "quick session loop started");
 
-    // Bind daemon client to workspace_root (workspace-level path) rather
-    // than the first-started agent's repo_root. This keeps QuickSessionLoop
-    // independent of agent startup order — any session operation routes
-    // through the workspace daemon, not an agent-specific clone.
-    let client = GitimClient::new(&workspace_root);
+    // Bind daemon client to the human repo (where the daemon socket lives).
+    // This is the same path used by HTTP quick-session handlers (human_client).
+    // Falls back to workspace_root if human repo not yet initialized, though
+    // in practice the quick session loop only spawns after human repo setup.
+    let daemon_root = human_repo.as_ref().unwrap_or(&workspace_root);
+    let client = GitimClient::new(daemon_root);
 
     loop {
         match poll_and_process_sessions(
