@@ -10,7 +10,7 @@
 /// - Title gate enforced in the execution path before any turn.
 /// - Status `needs_title` → skip; `active`/`running` → eligible.
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +51,8 @@ async fn acquire_agent_lock(locks: &AgentLockMap, agent_id: &str) -> Arc<Mutex<(
 /// spawns via `WorkspaceContext::quick_session_loop_running`.
 pub async fn run_quick_session_loop(
     repo_root: PathBuf,
+    // workspace_root is kept in signature for future use (e.g., compaction,
+    // output-dir), but state files are stored under repo_root now.
     _workspace_root: PathBuf,
     state: SharedRuntimeState,
     slug: String,
@@ -63,7 +65,16 @@ pub async fn run_quick_session_loop(
     let client = GitimClient::new(&repo_root);
 
     loop {
-        match poll_and_process_sessions(&client, &state, &slug, &activity_tx, &agent_locks).await {
+        match poll_and_process_sessions(
+            &client,
+            &state,
+            &slug,
+            &activity_tx,
+            &agent_locks,
+            &repo_root,
+        )
+        .await
+        {
             Ok(n) if n > 0 => {
                 info!(processed = n, slug = %slug, "quick session loop: turn(s) executed");
             }
@@ -84,6 +95,7 @@ async fn poll_and_process_sessions(
     slug: &str,
     activity_tx: &broadcast::Sender<AgentActivityEvent>,
     agent_locks: &AgentLockMap,
+    repo_root: &Path,
 ) -> Result<usize, String> {
     let resp = client
         .request("list_quick_sessions", json!({"include_archived": false}))
@@ -143,8 +155,15 @@ async fn poll_and_process_sessions(
         let lock = acquire_agent_lock(agent_locks, agent_id).await;
         let _guard = lock.lock().await;
 
-        if let Err(e) =
-            execute_quick_session_turn(client, session_id, &agent_info, activity_tx, slug).await
+        if let Err(e) = execute_quick_session_turn(
+            client,
+            session_id,
+            &agent_info,
+            activity_tx,
+            slug,
+            repo_root,
+        )
+        .await
         {
             warn!(
                 session_id = %session_id,
@@ -316,6 +335,7 @@ async fn execute_quick_session_turn(
     agent_info: &AgentInfo,
     activity_tx: &broadcast::Sender<AgentActivityEvent>,
     workspace_id: &str,
+    repo_root: &Path,
 ) -> Result<(), String> {
     // 1. Read session details
     let detail_resp = client
@@ -403,8 +423,10 @@ async fn execute_quick_session_turn(
 
     let cwd = PathBuf::from(&agent_info.repo_path);
 
-    // Read runtime state for resume token (per-agent session continuity)
-    let runtime_state = quick_session_state::read_state(&cwd, session_id);
+    // Read runtime state for resume token (per-agent session continuity).
+    // State is stored under repo_root (gitim repo), not the agent clone,
+    // to avoid untracked .gitim-runtime/ pollution in agent repos.
+    let runtime_state = quick_session_state::read_state(repo_root, session_id);
     let resume_token = runtime_state.as_ref().and_then(|s| s.session_token.clone());
 
     let opts = ExecOptions {
@@ -488,7 +510,7 @@ async fn execute_quick_session_turn(
         if let Some(u) = usage {
             new_state.session_usage = Some(serde_json::to_value(&u).unwrap_or_default());
         }
-        let _ = quick_session_state::write_state(&cwd, session_id, &new_state);
+        let _ = quick_session_state::write_state(repo_root, session_id, &new_state);
     }
 
     // Emit done event

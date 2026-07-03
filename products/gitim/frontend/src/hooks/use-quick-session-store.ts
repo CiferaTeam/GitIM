@@ -196,7 +196,22 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
   ): Promise<boolean> => {
     try {
       const res = await setQuickSessionTitle(workspaceSlug, sessionId, title);
-      return res.ok;
+      if (!res.ok) return false;
+      // Patch local state so UI reflects the new title immediately without
+      // waiting for the next poll/refresh cycle.
+      set((s) => ({
+        sessions: s.sessions.map((entry) => {
+          if (entry.item.id !== sessionId) return entry;
+          return {
+            ...entry,
+            item: { ...entry.item, title },
+            detail: entry.detail
+              ? { ...entry.detail, meta: { ...entry.detail.meta, title } }
+              : entry.detail,
+          };
+        }),
+      }));
+      return true;
     } catch {
       return false;
     }
