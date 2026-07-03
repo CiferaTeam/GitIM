@@ -51,9 +51,7 @@ async fn acquire_agent_lock(locks: &AgentLockMap, agent_id: &str) -> Arc<Mutex<(
 /// spawns via `WorkspaceContext::quick_session_loop_running`.
 pub async fn run_quick_session_loop(
     repo_root: PathBuf,
-    // workspace_root is kept in signature for future use (e.g., compaction,
-    // output-dir), but state files are stored under repo_root now.
-    _workspace_root: PathBuf,
+    workspace_root: PathBuf,
     state: SharedRuntimeState,
     slug: String,
     activity_tx: broadcast::Sender<AgentActivityEvent>,
@@ -71,7 +69,7 @@ pub async fn run_quick_session_loop(
             &slug,
             &activity_tx,
             &agent_locks,
-            &repo_root,
+            &workspace_root,
         )
         .await
         {
@@ -95,7 +93,7 @@ async fn poll_and_process_sessions(
     slug: &str,
     activity_tx: &broadcast::Sender<AgentActivityEvent>,
     agent_locks: &AgentLockMap,
-    repo_root: &Path,
+    workspace_root: &Path,
 ) -> Result<usize, String> {
     let resp = client
         .request("list_quick_sessions", json!({"include_archived": false}))
@@ -161,7 +159,7 @@ async fn poll_and_process_sessions(
             &agent_info,
             activity_tx,
             slug,
-            repo_root,
+            workspace_root,
         )
         .await
         {
@@ -335,7 +333,7 @@ async fn execute_quick_session_turn(
     agent_info: &AgentInfo,
     activity_tx: &broadcast::Sender<AgentActivityEvent>,
     workspace_id: &str,
-    repo_root: &Path,
+    workspace_root: &Path,
 ) -> Result<(), String> {
     // 1. Read session details
     let detail_resp = client
@@ -424,9 +422,9 @@ async fn execute_quick_session_turn(
     let cwd = PathBuf::from(&agent_info.repo_path);
 
     // Read runtime state for resume token (per-agent session continuity).
-    // State is stored under repo_root (gitim repo), not the agent clone,
+    // State is stored under workspace_root, not the agent clone,
     // to avoid untracked .gitim-runtime/ pollution in agent repos.
-    let runtime_state = quick_session_state::read_state(repo_root, session_id);
+    let runtime_state = quick_session_state::read_state(workspace_root, session_id);
     let resume_token = runtime_state.as_ref().and_then(|s| s.session_token.clone());
 
     let opts = ExecOptions {
@@ -510,7 +508,7 @@ async fn execute_quick_session_turn(
         if let Some(u) = usage {
             new_state.session_usage = Some(serde_json::to_value(&u).unwrap_or_default());
         }
-        let _ = quick_session_state::write_state(repo_root, session_id, &new_state);
+        let _ = quick_session_state::write_state(workspace_root, session_id, &new_state);
     }
 
     // Emit done event
