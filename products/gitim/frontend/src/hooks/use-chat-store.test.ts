@@ -1,8 +1,46 @@
+// @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ArchivedDmEntry } from "../lib/client";
 import type { Channel, Message } from "../lib/types";
-import { mergeCardChangeEvents, useChatStore } from "./use-chat-store";
+import {
+  appendStoredCardChangeEvent,
+  mergeCardChangeEvents,
+  readStoredCardChangeEvents,
+  useChatStore,
+  writeStoredCardChangeEvents,
+} from "./use-chat-store";
 import type { CardChangeEvent } from "./use-chat-store";
+
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key: string) {
+      return values.get(key) ?? null;
+    },
+    key(index: number) {
+      return Array.from(values.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      values.delete(key);
+    },
+    setItem(key: string, value: string) {
+      values.set(key, value);
+    },
+  };
+}
+
+function resetStorage(): void {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
+}
 
 function dmEntry(stem: string, peer: string): ArchivedDmEntry {
   return { dm_pair_stem: stem, peer };
@@ -604,6 +642,7 @@ describe("useChatStore archivedDmsView", () => {
 
 describe("useChatStore card change events", () => {
   beforeEach(() => {
+    resetStorage();
     useChatStore.getState().resetForWorkspaceSwitch();
   });
 
@@ -681,6 +720,54 @@ describe("useChatStore card change events", () => {
     const events = useChatStore.getState().cardChangeEvents.general;
     expect(events).toHaveLength(50);
     expect(events[0].cardId).toBe("c5");
+  });
+
+  it("restores persisted card change events after store reset", () => {
+    const event = makeEvent("c1", "general", 10, {
+      targetLine: 7,
+      cardTitle: "Recovery review",
+      receivedAt: Date.now(),
+    });
+
+    writeStoredCardChangeEvents("runtime:room", { general: [event] });
+    useChatStore.getState().resetForWorkspaceSwitch();
+    useChatStore.getState().setCardChangeEvents(
+      readStoredCardChangeEvents("runtime:room"),
+    );
+
+    expect(useChatStore.getState().cardChangeEvents.general).toEqual([event]);
+  });
+
+  it("appends persisted card change events with the store merge semantics", () => {
+    const now = Date.now();
+    appendStoredCardChangeEvent(
+      "runtime:room",
+      makeEvent("c1", "general", 10, {
+        count: 1,
+        authors: ["alice"],
+        receivedAt: now,
+      }),
+    );
+    appendStoredCardChangeEvent(
+      "runtime:room",
+      makeEvent("c1", "general", 10, {
+        count: 2,
+        authors: ["bob"],
+        targetLine: 12,
+        cardTitle: "Recovery review",
+        receivedAt: now + 1000,
+      }),
+    );
+
+    expect(readStoredCardChangeEvents("runtime:room").general).toMatchObject([
+      {
+        cardId: "c1",
+        count: 3,
+        authors: ["alice", "bob"],
+        targetLine: 12,
+        cardTitle: "Recovery review",
+      },
+    ]);
   });
 });
 

@@ -10,6 +10,7 @@ const CARD_CHANGE_EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const CARD_CHANGE_EVENT_MAX_COUNT = 50;
 /** Merge successive updates to the same card at the same anchor within this window. */
 const CARD_CHANGE_EVENT_DEDUP_MS = 5 * 1000;
+const CARD_CHANGE_EVENTS_STORAGE_PREFIX = "gitim:card-change-events:v1:";
 
 export interface CardChangeEvent {
   id: string;
@@ -21,6 +22,164 @@ export interface CardChangeEvent {
   authors: string[];
   count: number;
   receivedAt: number;
+}
+
+function cardChangeEventsStorageKey(workspaceKey: string): string {
+  return `${CARD_CHANGE_EVENTS_STORAGE_PREFIX}${encodeURIComponent(workspaceKey)}`;
+}
+
+function getLocalStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseStoredCardChangeEvent(raw: unknown, now: number): CardChangeEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const id = typeof obj.id === "string" ? obj.id : "";
+  const cardId = typeof obj.cardId === "string" ? obj.cardId : "";
+  const cardChannel = typeof obj.cardChannel === "string" ? obj.cardChannel : "";
+  const anchorLine = finiteNumber(obj.anchorLine);
+  const count = finiteNumber(obj.count);
+  const receivedAt = finiteNumber(obj.receivedAt);
+  if (
+    id.length === 0 ||
+    cardId.length === 0 ||
+    cardChannel.length === 0 ||
+    anchorLine === null ||
+    anchorLine < 0 ||
+    count === null ||
+    count < 1 ||
+    receivedAt === null ||
+    receivedAt < now - CARD_CHANGE_EVENT_TTL_MS
+  ) {
+    return null;
+  }
+
+  const authors = Array.isArray(obj.authors)
+    ? Array.from(new Set(obj.authors.filter((a): a is string => typeof a === "string")))
+    : [];
+  const targetLine = finiteNumber(obj.targetLine);
+  const cardTitle = typeof obj.cardTitle === "string" ? obj.cardTitle : undefined;
+
+  return {
+    id,
+    cardId,
+    cardChannel,
+    anchorLine: Math.floor(anchorLine),
+    ...(targetLine !== null && targetLine > 0 && { targetLine: Math.floor(targetLine) }),
+    ...(cardTitle !== undefined && { cardTitle }),
+    authors,
+    count: Math.floor(count),
+    receivedAt,
+  };
+}
+
+function sanitizeStoredCardChangeEvents(
+  raw: unknown,
+  now = Date.now(),
+): Record<string, CardChangeEvent[]> {
+  if (!raw || typeof raw !== "object") return {};
+  const next: Record<string, CardChangeEvent[]> = {};
+  for (const [channel, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof channel !== "string" || !Array.isArray(value)) continue;
+    const events = value
+      .map((entry) => parseStoredCardChangeEvent(entry, now))
+      .filter((entry): entry is CardChangeEvent => entry !== null)
+      .filter((entry) => entry.cardChannel === channel)
+      .slice(-CARD_CHANGE_EVENT_MAX_COUNT);
+    if (events.length > 0) {
+      next[channel] = events;
+    }
+  }
+  return next;
+}
+
+function mergeCardChangeEventMap(
+  current: Record<string, CardChangeEvent[]>,
+  event: CardChangeEvent,
+  now = Date.now(),
+): Record<string, CardChangeEvent[]> {
+  const ttlCutoff = now - CARD_CHANGE_EVENT_TTL_MS;
+  const list = (current[event.cardChannel] ?? []).filter(
+    (e) => e.receivedAt >= ttlCutoff,
+  );
+  const existingIndex = list.findIndex(
+    (e) =>
+      e.cardId === event.cardId &&
+      e.anchorLine === event.anchorLine &&
+      now - e.receivedAt <= CARD_CHANGE_EVENT_DEDUP_MS,
+  );
+
+  let next: CardChangeEvent[];
+  if (existingIndex >= 0) {
+    const existing = list[existingIndex];
+    const merged: CardChangeEvent = {
+      ...existing,
+      count: existing.count + event.count,
+      authors: Array.from(new Set([...existing.authors, ...event.authors])),
+      receivedAt: Math.max(existing.receivedAt, event.receivedAt),
+      targetLine: event.targetLine ?? existing.targetLine,
+      cardTitle: event.cardTitle ?? existing.cardTitle,
+    };
+    next = list.slice();
+    next[existingIndex] = merged;
+  } else {
+    next = [...list, event];
+  }
+
+  if (next.length > CARD_CHANGE_EVENT_MAX_COUNT) {
+    next = next.slice(-CARD_CHANGE_EVENT_MAX_COUNT);
+  }
+
+  return {
+    ...current,
+    [event.cardChannel]: next,
+  };
+}
+
+export function readStoredCardChangeEvents(
+  workspaceKey: string | null,
+): Record<string, CardChangeEvent[]> {
+  const storage = getLocalStorage();
+  if (!workspaceKey || !storage) return {};
+  try {
+    const raw = storage.getItem(cardChangeEventsStorageKey(workspaceKey));
+    if (!raw) return {};
+    return sanitizeStoredCardChangeEvents(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+export function writeStoredCardChangeEvents(
+  workspaceKey: string | null,
+  events: Record<string, CardChangeEvent[]>,
+): void {
+  const storage = getLocalStorage();
+  if (!workspaceKey || !storage) return;
+  storage.setItem(
+    cardChangeEventsStorageKey(workspaceKey),
+    JSON.stringify(sanitizeStoredCardChangeEvents(events)),
+  );
+}
+
+export function appendStoredCardChangeEvent(
+  workspaceKey: string | null,
+  event: CardChangeEvent,
+): void {
+  if (!workspaceKey) return;
+  writeStoredCardChangeEvents(
+    workspaceKey,
+    mergeCardChangeEventMap(readStoredCardChangeEvents(workspaceKey), event),
+  );
 }
 
 interface NavEntry {
@@ -93,8 +252,8 @@ interface ChatState {
    *  Reset to true on channel switch — until the next fetch lands, we don't
    *  know whether there's more history to load. */
   hasMoreHistory: boolean;
-  /** Front-end-only card-thread change reminders per channel. Cleared on
-   *  workspace switch. */
+  /** Front-end-only card-thread change reminders per channel. Reset on
+   *  workspace switch and hydrated from workspace-scoped localStorage. */
   cardChangeEvents: Record<string, CardChangeEvent[]>;
 
   setConnected: (v: boolean) => void;
@@ -146,6 +305,7 @@ interface ChatState {
   incrementUnread: (channel: string, mentioned?: boolean) => void;
   clearUnread: (channel: string) => void;
   addCardChangeEvent: (event: CardChangeEvent) => void;
+  setCardChangeEvents: (events: Record<string, CardChangeEvent[]>) => void;
   setMessages: (m: Message[]) => void;
   addMessages: (m: Message[]) => void;
   /** Insert older messages at the head of `messages`, deduping by line_number
@@ -516,44 +676,12 @@ export const useChatStore = create<ChatState>((set) => ({
     })),
 
   addCardChangeEvent: (event) =>
-    set((state) => {
-      const now = Date.now();
-      const ttlCutoff = now - CARD_CHANGE_EVENT_TTL_MS;
-      const list = (state.cardChangeEvents[event.cardChannel] ?? []).filter(
-        (e) => e.receivedAt >= ttlCutoff,
-      );
-      const existingIndex = list.findIndex(
-        (e) =>
-          e.cardId === event.cardId &&
-          e.anchorLine === event.anchorLine &&
-          now - e.receivedAt <= CARD_CHANGE_EVENT_DEDUP_MS,
-      );
-      let next: CardChangeEvent[];
-      if (existingIndex >= 0) {
-        const existing = list[existingIndex];
-        const merged: CardChangeEvent = {
-          ...existing,
-          count: existing.count + event.count,
-          authors: Array.from(new Set([...existing.authors, ...event.authors])),
-          receivedAt: Math.max(existing.receivedAt, event.receivedAt),
-          targetLine: event.targetLine ?? existing.targetLine,
-          cardTitle: event.cardTitle ?? existing.cardTitle,
-        };
-        next = list.slice();
-        next[existingIndex] = merged;
-      } else {
-        next = [...list, event];
-      }
-      if (next.length > CARD_CHANGE_EVENT_MAX_COUNT) {
-        next = next.slice(-CARD_CHANGE_EVENT_MAX_COUNT);
-      }
-      return {
-        cardChangeEvents: {
-          ...state.cardChangeEvents,
-          [event.cardChannel]: next,
-        },
-      };
-    }),
+    set((state) => ({
+      cardChangeEvents: mergeCardChangeEventMap(state.cardChangeEvents, event),
+    })),
+
+  setCardChangeEvents: (events) =>
+    set({ cardChangeEvents: sanitizeStoredCardChangeEvents(events) }),
 
   // Dedup: keep pending messages that haven't been confirmed by the new batch.
   // When newMessages is empty (e.g. channel clear), don't carry over pending —

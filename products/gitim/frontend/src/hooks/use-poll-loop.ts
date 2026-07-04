@@ -39,7 +39,11 @@ import { emitWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import { useAgentStore } from "./use-agent-store";
 import { useBoardStore } from "./use-board-store";
 import { cardPathKey, parseCardScope, selectCardById, useCardStore } from "./use-card-store";
-import { useChatStore } from "./use-chat-store";
+import {
+  appendStoredCardChangeEvent,
+  readStoredCardChangeEvents,
+  useChatStore,
+} from "./use-chat-store";
 import { useConnectionDiagnosticsStore } from "./use-connection-diagnostics-store";
 import { useConnectionStore } from "./use-connection-store";
 import { useFleetStore } from "./use-fleet-store";
@@ -634,8 +638,9 @@ export function usePollLoop(): void {
                       ...chatActions.messages.map((m) => m.line_number),
                     )
                   : 0;
-              chatActions.addCardChangeEvent({
-                id: `${parsed.channel}:${parsed.cardId}:${anchorLine}:${Date.now()}`,
+              const receivedAt = Date.now();
+              const event = {
+                id: `${parsed.channel}:${parsed.cardId}:${anchorLine}:${receivedAt}`,
                 cardId: parsed.cardId,
                 cardChannel: parsed.channel,
                 anchorLine,
@@ -643,8 +648,10 @@ export function usePollLoop(): void {
                 ...(cardTitle !== undefined && { cardTitle }),
                 authors: Array.from(new Set(others.map((e) => e.author))),
                 count: others.length,
-                receivedAt: Date.now(),
-              });
+                receivedAt,
+              };
+              chatActions.addCardChangeEvent(event);
+              appendStoredCardChangeEvent(requestWorkspaceKey, event);
             }
           }
           continue;
@@ -846,6 +853,9 @@ export function usePollLoop(): void {
     // new workspace-scoped store can't forget to wire its reset — the wiring
     // lives next to the store. We just fire the event here.
     emitWorkspaceSwitch();
+    useChatStore
+      .getState()
+      .setCardChangeEvents(readStoredCardChangeEvents(workspaceKey));
     sinceRef.current = undefined;
     workspaceRef.current = undefined;
     consecutiveTransportFailuresRef.current = 0;
