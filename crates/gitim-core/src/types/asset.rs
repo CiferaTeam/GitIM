@@ -102,9 +102,6 @@ pub struct AssetRef {
 
 impl AssetRef {
     pub fn validate(&self) -> Result<(), AssetRefError> {
-        if self.to_string().len() > MAX_ASSET_REF_BYTES {
-            return Err(AssetRefError::ReferenceTooLong);
-        }
         if self.version != ASSET_REF_VERSION {
             return Err(AssetRefError::UnsupportedVersion);
         }
@@ -130,6 +127,9 @@ impl AssetRef {
             (Some(_), Some(_)) => return Err(AssetRefError::InvalidDimensions),
             _ => return Err(AssetRefError::IncompleteDimensions),
         }
+        if self.to_string().len() > MAX_ASSET_REF_BYTES {
+            return Err(AssetRefError::ReferenceTooLong);
+        }
         Ok(())
     }
 }
@@ -138,6 +138,9 @@ impl FromStr for AssetRef {
     type Err = AssetRefError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        if raw.len() > MAX_ASSET_REF_BYTES {
+            return Err(AssetRefError::ReferenceTooLong);
+        }
         let inner = raw
             .strip_prefix("<^v")
             .and_then(|value| value.strip_suffix('>'))

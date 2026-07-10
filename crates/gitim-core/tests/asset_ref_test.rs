@@ -45,6 +45,44 @@ fn valid_asset() -> AssetRef {
     }
 }
 
+fn valid_asset_with_rendered_len(target: usize) -> Option<AssetRef> {
+    let mut base = valid_asset();
+    base.name.clear();
+    base.media_type = "a/".to_string();
+    let fixed_len = base.to_string().len();
+    let max_subtype_bytes = MAX_ASSET_MEDIA_TYPE_BYTES - 2;
+
+    for escaped_filename_bytes in 0..=MAX_ASSET_FILENAME_BYTES {
+        let plain_filename_bytes = MAX_ASSET_FILENAME_BYTES - escaped_filename_bytes;
+        let rendered_filename_len = plain_filename_bytes + escaped_filename_bytes * 3;
+
+        for escaped_subtype_bytes in 0..=max_subtype_bytes {
+            let occupied = fixed_len + rendered_filename_len + escaped_subtype_bytes * 3;
+            let Some(plain_subtype_bytes) = target.checked_sub(occupied) else {
+                continue;
+            };
+            let subtype_bytes = escaped_subtype_bytes + plain_subtype_bytes;
+            if subtype_bytes == 0 || subtype_bytes > max_subtype_bytes {
+                continue;
+            }
+
+            let mut asset = valid_asset();
+            asset.name = format!(
+                "{}{}",
+                " ".repeat(escaped_filename_bytes),
+                "a".repeat(plain_filename_bytes)
+            );
+            asset.media_type = format!(
+                "a/{}{}",
+                "!".repeat(escaped_subtype_bytes),
+                "a".repeat(plain_subtype_bytes)
+            );
+            return Some(asset);
+        }
+    }
+    None
+}
+
 #[test]
 fn shared_fixture_round_trips_canonical_refs() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture()?;
@@ -70,10 +108,40 @@ fn shared_fixture_round_trips_canonical_refs() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn encoded_reference_limit_is_authoritative() {
-    let mut asset = valid_asset();
-    asset.name = "界".repeat(100);
+    let at_limit = valid_asset_with_rendered_len(MAX_ASSET_REF_BYTES);
+    assert!(
+        at_limit.is_some(),
+        "1024-byte reference must be representable"
+    );
+    let at_limit = at_limit.unwrap_or_else(valid_asset);
+    assert_eq!(at_limit.name.len(), MAX_ASSET_FILENAME_BYTES);
+    assert!(at_limit.media_type.len() <= MAX_ASSET_MEDIA_TYPE_BYTES);
+    assert_eq!(at_limit.to_string().len(), MAX_ASSET_REF_BYTES);
+    assert_eq!(at_limit.validate(), Ok(()));
 
-    assert_eq!(asset.validate(), Err(AssetRefError::ReferenceTooLong));
+    let over_limit = valid_asset_with_rendered_len(MAX_ASSET_REF_BYTES + 1);
+    assert!(
+        over_limit.is_some(),
+        "1025-byte reference must be representable"
+    );
+    let over_limit = over_limit.unwrap_or_else(valid_asset);
+    assert_eq!(over_limit.name.len(), MAX_ASSET_FILENAME_BYTES);
+    assert!(over_limit.media_type.len() <= MAX_ASSET_MEDIA_TYPE_BYTES);
+    assert_eq!(over_limit.to_string().len(), MAX_ASSET_REF_BYTES + 1);
+    assert_eq!(over_limit.validate(), Err(AssetRefError::ReferenceTooLong));
+}
+
+#[test]
+fn parser_rejects_oversized_input_before_parsing() {
+    let raw = format!(
+        "<^v1/{ORIGIN}/sha256:{SHA256}?name={}&type=text%2Fplain&size=not-a-number>",
+        "a".repeat(MAX_ASSET_REF_BYTES)
+    );
+    assert!(raw.len() > MAX_ASSET_REF_BYTES);
+    assert_eq!(
+        AssetRef::from_str(&raw),
+        Err(AssetRefError::ReferenceTooLong)
+    );
 }
 
 #[test]
