@@ -1,10 +1,11 @@
 use crate::types::{validate_card_id, AssetRef, Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
 use regex::Regex;
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!^])([^>\n]+)>"));
+    LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!])([^>\n]+)>|<\^([^<>\n]+)>"));
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
@@ -16,18 +17,26 @@ static CARD_LINE_RE: LazyLock<Regex> =
 pub fn extract_links(body: &str) -> Vec<Link> {
     let mut result = Vec::new();
     for caps in LINK_RE.captures_iter(body) {
-        let prefix = &caps[1];
-        let content = &caps[2];
-        let raw = caps[0].to_string();
-        let kind = match prefix {
-            "#" => parse_channel_or_message(content),
-            "~" => parse_user_profile(content),
-            "!" => parse_softlink(content),
-            "^" => parse_asset(content),
-            _ => None,
+        let Some(raw) = caps.get(0) else {
+            continue;
+        };
+        let kind = if let (Some(prefix), Some(content)) = (caps.get(1), caps.get(2)) {
+            match prefix.as_str() {
+                "#" => parse_channel_or_message(content.as_str()),
+                "~" => parse_user_profile(content.as_str()),
+                "!" => parse_softlink(content.as_str()),
+                _ => None,
+            }
+        } else if caps.get(3).is_some() {
+            parse_asset(raw.as_str())
+        } else {
+            None
         };
         if let Some(kind) = kind {
-            result.push(Link { kind, raw });
+            result.push(Link {
+                kind,
+                raw: raw.as_str().to_string(),
+            });
         }
     }
     result
@@ -114,8 +123,8 @@ fn parse_softlink(content: &str) -> Option<LinkKind> {
     }
 }
 
-fn parse_asset(content: &str) -> Option<LinkKind> {
-    let asset = format!("<^{content}>").parse::<AssetRef>().ok()?;
+fn parse_asset(raw: &str) -> Option<LinkKind> {
+    let asset = AssetRef::from_str(raw).ok()?;
     Some(LinkKind::Asset { asset })
 }
 

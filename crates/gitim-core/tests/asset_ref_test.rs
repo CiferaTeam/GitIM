@@ -372,3 +372,69 @@ fn asset_links_coexist_with_existing_links_in_occurrence_order() -> Result<(), s
     );
     Ok(())
 }
+
+#[test]
+fn malformed_asset_opener_does_not_swallow_channel_link() -> Result<(), serde_json::Error> {
+    let links = gitim_core::link::extract_links("<^not-an-asset <#general>>");
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&links[0])?,
+        serde_json::json!({
+            "kind": { "kind": "channel", "name": "general" },
+            "raw": "<#general>"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_asset_opener_does_not_swallow_user_link() -> Result<(), serde_json::Error> {
+    let links = gitim_core::link::extract_links("<^not-an-asset <~alice>>");
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&links[0])?,
+        serde_json::json!({
+            "kind": { "kind": "user_profile", "handler": "alice" },
+            "raw": "<~alice>"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_asset_opener_does_not_swallow_softlink() -> Result<(), serde_json::Error> {
+    let links = gitim_core::link::extract_links("<^not-an-asset <!https://example.com>>");
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&links[0])?,
+        serde_json::json!({
+            "kind": {
+                "kind": "softlink",
+                "url": "https://example.com",
+                "title": null
+            },
+            "raw": "<!https://example.com>"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn oversized_asset_candidate_is_ignored_without_swallowing_a_legacy_link(
+) -> Result<(), serde_json::Error> {
+    let body = format!("<^{} <#general>>", "a".repeat(MAX_ASSET_REF_BYTES + 1));
+    let links = gitim_core::link::extract_links(&body);
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&links[0])?,
+        serde_json::json!({
+            "kind": { "kind": "channel", "name": "general" },
+            "raw": "<#general>"
+        })
+    );
+    Ok(())
+}
