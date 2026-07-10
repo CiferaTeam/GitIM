@@ -45,6 +45,11 @@ pub(crate) fn link_to_json(link: &Link) -> serde_json::Value {
             }
             v
         }
+        LinkKind::Asset { asset } => serde_json::json!({
+            "kind": "asset",
+            "asset": asset,
+            "raw": link.raw,
+        }),
     }
 }
 
@@ -95,5 +100,37 @@ mod tests {
         assert_eq!(json["line_number"], 4);
         assert_eq!(json["label"], serde_json::Value::Null);
         assert_eq!(json["raw"], "<#general/20260520-035646-7cf:L000004>");
+    }
+
+    #[test]
+    fn serializes_asset_link() -> Result<(), gitim_core::types::AssetRefError> {
+        let raw = "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=asset.txt&type=text%2Fplain&size=42&width=640&height=480>";
+        let link = Link {
+            raw: raw.to_string(),
+            kind: LinkKind::Asset {
+                asset: raw.parse()?,
+            },
+        };
+
+        let json = link_to_json(&link);
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "asset",
+                "asset": {
+                    "version": 1,
+                    "origin_runtime_id": "3c6a295e-744a-41dc-ba60-5c21bb94e5a2",
+                    "sha256": "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88",
+                    "name": "asset.txt",
+                    "media_type": "text/plain",
+                    "size": 42,
+                    "width": 640,
+                    "height": 480
+                },
+                "raw": raw
+            })
+        );
+        Ok(())
     }
 }

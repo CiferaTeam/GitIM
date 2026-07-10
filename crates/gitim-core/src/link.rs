@@ -1,10 +1,10 @@
-use crate::types::{validate_card_id, Handler, Link, LinkKind};
+use crate::types::{validate_card_id, AssetRef, Handler, Link, LinkKind};
 use crate::validator::validate_channel_name;
 use regex::Regex;
 use std::sync::LazyLock;
 
 static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!])([^>\n]+)>"));
+    LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!^])([^>\n]+)>"));
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
@@ -23,6 +23,7 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             "#" => parse_channel_or_message(content),
             "~" => parse_user_profile(content),
             "!" => parse_softlink(content),
+            "^" => parse_asset(content),
             _ => None,
         };
         if let Some(kind) = kind {
@@ -111,6 +112,11 @@ fn parse_softlink(content: &str) -> Option<LinkKind> {
             title: None,
         })
     }
+}
+
+fn parse_asset(content: &str) -> Option<LinkKind> {
+    let asset = format!("<^{content}>").parse::<AssetRef>().ok()?;
+    Some(LinkKind::Asset { asset })
 }
 
 #[cfg(test)]

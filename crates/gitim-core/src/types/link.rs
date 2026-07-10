@@ -1,3 +1,4 @@
+use crate::types::asset::AssetRef;
 use crate::types::handler::Handler;
 use serde::Serialize;
 
@@ -30,5 +31,8 @@ pub enum LinkKind {
     Softlink {
         url: String,
         title: Option<String>,
+    },
+    Asset {
+        asset: AssetRef,
     },
 }

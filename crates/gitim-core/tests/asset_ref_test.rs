@@ -308,3 +308,67 @@ fn serialization_omits_absent_dimensions() -> Result<(), serde_json::Error> {
     assert!(value.get("height").is_none());
     Ok(())
 }
+
+#[test]
+fn asset_link_serializes_additively() -> Result<(), serde_json::Error> {
+    let raw = valid_asset().to_string();
+    let links = gitim_core::link::extract_links(&raw);
+
+    assert_eq!(links.len(), 1);
+    let value = serde_json::to_value(&links[0])?;
+    assert_eq!(value["kind"]["kind"], "asset");
+    assert_eq!(value["kind"]["asset"]["sha256"], SHA256);
+    assert_eq!(value["raw"], raw);
+    Ok(())
+}
+
+#[test]
+fn invalid_asset_syntax_is_not_a_typed_link() {
+    assert!(gitim_core::link::extract_links("<^v1/bad>").is_empty());
+}
+
+#[test]
+fn asset_links_coexist_with_existing_links_in_occurrence_order() -> Result<(), serde_json::Error> {
+    let raw = valid_asset().to_string();
+    let body = format!("<#general> {raw} <~alice> <!https://example.com|Example>");
+    let links = gitim_core::link::extract_links(&body);
+
+    assert_eq!(links.len(), 4);
+    let value = serde_json::to_value(links)?;
+    assert_eq!(
+        value,
+        serde_json::json!([
+            {
+                "kind": { "kind": "channel", "name": "general" },
+                "raw": "<#general>"
+            },
+            {
+                "kind": {
+                    "kind": "asset",
+                    "asset": {
+                        "version": ASSET_REF_VERSION,
+                        "origin_runtime_id": ORIGIN,
+                        "sha256": SHA256,
+                        "name": "asset.txt",
+                        "media_type": "text/plain",
+                        "size": 42
+                    }
+                },
+                "raw": raw
+            },
+            {
+                "kind": { "kind": "user_profile", "handler": "alice" },
+                "raw": "<~alice>"
+            },
+            {
+                "kind": {
+                    "kind": "softlink",
+                    "url": "https://example.com",
+                    "title": "Example"
+                },
+                "raw": "<!https://example.com|Example>"
+            }
+        ])
+    );
+    Ok(())
+}
