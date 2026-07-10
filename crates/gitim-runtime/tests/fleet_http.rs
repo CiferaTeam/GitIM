@@ -332,6 +332,19 @@ fn fleet_node(
     }
 }
 
+fn bare_fleet_node(node_id: &str, base_url: &str, runtime_id: Option<&str>) -> FleetNodeEntry {
+    FleetNodeEntry {
+        node_id: node_id.to_string(),
+        runtime_id: runtime_id.map(str::to_string),
+        base_url: base_url.to_string(),
+        node_ip: None,
+        node_name: None,
+        workspaces: Vec::new(),
+        workspace_mappings: Vec::new(),
+        ssh_tunnel: None,
+    }
+}
+
 fn fleet_events_request() -> Request<Body> {
     Request::builder()
         .uri("/fleet/events")
@@ -924,4 +937,277 @@ async fn peer_snapshot_includes_mapped_and_legacy_workspace_nodes() {
     assert_eq!(peers[1].node_id, "mapped");
     assert_eq!(peers[1].runtime_id.as_deref(), Some(REMOTE_RUNTIME_ID));
     assert_eq!(peers[1].remote_workspace_id, "remote-room");
+}
+
+#[test]
+#[serial(home_env)]
+fn fleet_transition_serializes_same_alias_disk_and_live_updates() {
+    let home_guard = HomeGuard::install();
+    let (_router, state) = create_router();
+    let first_entry = bare_fleet_node(
+        "studio",
+        "http://127.0.0.1:18001",
+        Some("11111111-1111-4111-8111-111111111111"),
+    );
+    let second_entry = bare_fleet_node(
+        "studio",
+        "http://127.0.0.1:18002",
+        Some("22222222-2222-4222-8222-222222222222"),
+    );
+    let transition_lock = state.lock().unwrap().fleet_transition_lock.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let first_state = state.clone();
+        let first_persist = first_entry.clone();
+        let first_live = first_entry.clone();
+        let first = scope.spawn(move || {
+            fleet::apply_fleet_transition(
+                &first_state,
+                move |config, _| config.upsert_fleet_node(first_persist),
+                move |state, &()| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    fleet::activate_node(state.clone(), first_live);
+                },
+            )
+            .unwrap();
+        });
+        entered_rx.recv().unwrap();
+        assert!(matches!(
+            transition_lock.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let second_state = state.clone();
+        let second_persist = second_entry.clone();
+        let second_live = second_entry.clone();
+        let second = scope.spawn(move || {
+            fleet::apply_fleet_transition(
+                &second_state,
+                move |config, _| config.upsert_fleet_node(second_persist),
+                move |state, &()| fleet::activate_node(state.clone(), second_live),
+            )
+            .unwrap();
+        });
+
+        release_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+    });
+
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let disk = user_config::read_from(Some(&runtime_path));
+    let live = state.lock().unwrap();
+    assert_eq!(disk.fleet_nodes.len(), 1);
+    assert_eq!(disk.fleet_nodes[0].base_url, second_entry.base_url);
+    assert_eq!(
+        live.fleet_nodes["studio"].entry.base_url,
+        second_entry.base_url
+    );
+}
+
+#[test]
+#[serial(home_env)]
+fn fleet_transition_serializes_upsert_delete_disk_and_live_order() {
+    let home_guard = HomeGuard::install();
+    let (_router, state) = create_router();
+    let entry = bare_fleet_node(
+        "studio",
+        "http://127.0.0.1:18001",
+        Some("11111111-1111-4111-8111-111111111111"),
+    );
+    let transition_lock = state.lock().unwrap().fleet_transition_lock.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let upsert_state = state.clone();
+        let persist_entry = entry.clone();
+        let live_entry = entry.clone();
+        let upsert = scope.spawn(move || {
+            fleet::apply_fleet_transition(
+                &upsert_state,
+                move |config, _| config.upsert_fleet_node(persist_entry),
+                move |state, &()| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    fleet::activate_node(state.clone(), live_entry);
+                },
+            )
+            .unwrap();
+        });
+        entered_rx.recv().unwrap();
+        assert!(matches!(
+            transition_lock.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let delete_state = state.clone();
+        let delete = scope.spawn(move || {
+            fleet::apply_fleet_transition(
+                &delete_state,
+                |config, _| config.remove_fleet_node("studio"),
+                |state, _| {
+                    fleet::remove_node(state, "studio");
+                },
+            )
+            .unwrap();
+        });
+
+        release_tx.send(()).unwrap();
+        upsert.join().unwrap();
+        delete.join().unwrap();
+    });
+
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let disk = user_config::read_from(Some(&runtime_path));
+    let live = state.lock().unwrap();
+    assert!(disk.fleet_nodes.is_empty());
+    assert!(!live.fleet_nodes.contains_key("studio"));
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_add_rejects_canonical_runtime_id_duplicate_from_legacy_config() {
+    let home_guard = HomeGuard::install();
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(bare_fleet_node(
+        "existing-alias",
+        "http://127.0.0.1:17001",
+        Some(REMOTE_RUNTIME_ID_UPPERCASE),
+    ));
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (remote_url, remote_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+    }))
+    .await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+
+    let response = router
+        .oneshot(post_fleet_node_as("new-alias", &remote_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "duplicate_runtime_id"
+    );
+    assert_eq!(
+        user_config::read_from(Some(&runtime_path))
+            .fleet_nodes
+            .len(),
+        1
+    );
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn legacy_backfill_matches_trailing_slash_base_url() {
+    let home_guard = HomeGuard::install();
+    let (remote_url, remote_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+    }))
+    .await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let stored = bare_fleet_node("legacy", &format!("{remote_url}/"), None);
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(stored.clone());
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), fleet::normalize_node(stored));
+
+    let discovered = fleet::discover_legacy_runtime_id_once(&state, "legacy")
+        .await
+        .unwrap();
+
+    assert_eq!(discovered.as_deref(), Some(REMOTE_RUNTIME_ID));
+    assert_eq!(
+        user_config::read_from(Some(&runtime_path)).fleet_nodes[0]
+            .runtime_id
+            .as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    remote_server.abort();
+}
+
+#[test]
+#[serial(home_env)]
+fn recovery_uses_first_valid_alias_and_runtime_id_occurrence() {
+    let home_guard = HomeGuard::install();
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let first = bare_fleet_node("alpha", "http://127.0.0.1:17001", Some(REMOTE_RUNTIME_ID));
+    let duplicate_alias = bare_fleet_node(
+        " alpha ",
+        "http://127.0.0.1:17002",
+        Some("22222222-2222-4222-8222-222222222222"),
+    );
+    let duplicate_runtime = bare_fleet_node(
+        "beta",
+        "http://127.0.0.1:17003",
+        Some(REMOTE_RUNTIME_ID_UPPERCASE),
+    );
+    let unique = bare_fleet_node(
+        "gamma",
+        "http://127.0.0.1:17004",
+        Some("33333333-3333-4333-8333-333333333333"),
+    );
+    let config = UserConfig {
+        fleet_nodes: vec![first.clone(), duplicate_alias, duplicate_runtime, unique],
+        ..UserConfig::default()
+    };
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+
+    fleet::recover_from_config(state.clone());
+
+    let live = state.lock().unwrap();
+    assert_eq!(live.fleet_nodes.len(), 2);
+    assert_eq!(live.fleet_nodes["alpha"].entry.base_url, first.base_url);
+    assert!(live.fleet_nodes.contains_key("gamma"));
+    assert!(!live.fleet_nodes.contains_key("beta"));
+}
+
+#[tokio::test]
+async fn peer_snapshot_deduplicates_identical_workspace_mappings() {
+    let (_router, state) = create_router();
+    let mut entry = fleet_node(
+        "mapped",
+        "http://127.0.0.1:9",
+        Some(REMOTE_RUNTIME_ID),
+        "room",
+        "remote-room",
+    );
+    entry
+        .workspace_mappings
+        .push(entry.workspace_mappings[0].clone());
+    fleet::activate_node(state.clone(), entry);
+
+    let peers = fleet::snapshot_workspace_peers(&state, "room");
+
+    assert_eq!(peers.len(), 1);
+}
+
+#[tokio::test]
+async fn remote_health_rejects_body_larger_than_64_kib() {
+    let (remote_url, remote_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+        "padding": "x".repeat(70 * 1024),
+    }))
+    .await;
+
+    let error = fleet::fetch_remote_runtime_id(&remote_url)
+        .await
+        .expect_err("oversized health response must be rejected");
+
+    assert!(error.contains("64 KiB"), "{error}");
+    remote_server.abort();
 }

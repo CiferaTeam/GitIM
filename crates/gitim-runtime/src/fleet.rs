@@ -227,14 +227,143 @@ pub fn remove_node(state: &SharedRuntimeState, node_id: &str) -> bool {
     s.fleet_nodes.remove(node_id).is_some()
 }
 
+fn normalized_node_id(node_id: &str) -> String {
+    node_id.trim().to_string()
+}
+
+fn normalized_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn canonical_runtime_id(runtime_id: Option<&str>) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(runtime_id?.trim()).ok()
+}
+
+fn has_runtime_id_on_other_alias<'a>(
+    entries: impl IntoIterator<Item = &'a FleetNodeEntry>,
+    node_id: &str,
+    runtime_id: uuid::Uuid,
+) -> bool {
+    let node_id = normalized_node_id(node_id);
+    entries.into_iter().any(|entry| {
+        normalized_node_id(&entry.node_id) != node_id
+            && canonical_runtime_id(entry.runtime_id.as_deref()) == Some(runtime_id)
+    })
+}
+
+fn fleet_transition_lock(state: &SharedRuntimeState) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let runtime_state = preconditions::mutex_lock(state);
+    runtime_state.fleet_transition_lock.clone()
+}
+
+pub fn apply_fleet_transition<T>(
+    state: &SharedRuntimeState,
+    persist: impl FnOnce(&mut crate::user_config::UserConfig, &[FleetNodeEntry]) -> T,
+    apply_live: impl FnOnce(&SharedRuntimeState, &T),
+) -> std::io::Result<T> {
+    let transition_lock = fleet_transition_lock(state);
+    let _transition = preconditions::mutex_lock(&transition_lock);
+    let live_nodes: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| runtime.entry.clone())
+            .collect()
+    };
+    let output = crate::user_config::mutate(|config| persist(config, &live_nodes))?;
+    apply_live(state, &output);
+    Ok(output)
+}
+
+pub fn persist_node_transition(
+    state: &SharedRuntimeState,
+    entry: FleetNodeEntry,
+) -> std::io::Result<bool> {
+    let persisted_entry = entry.clone();
+    apply_fleet_transition(
+        state,
+        move |config, live_nodes| {
+            if let Some(runtime_id) = canonical_runtime_id(persisted_entry.runtime_id.as_deref()) {
+                let duplicate_in_config = has_runtime_id_on_other_alias(
+                    &config.fleet_nodes,
+                    &persisted_entry.node_id,
+                    runtime_id,
+                );
+                let duplicate_live =
+                    has_runtime_id_on_other_alias(live_nodes, &persisted_entry.node_id, runtime_id);
+                if duplicate_in_config || duplicate_live {
+                    return false;
+                }
+            }
+
+            let alias = normalized_node_id(&persisted_entry.node_id);
+            if let Some(existing) = config
+                .fleet_nodes
+                .iter_mut()
+                .find(|existing| normalized_node_id(&existing.node_id) == alias)
+            {
+                *existing = persisted_entry;
+            } else {
+                config.fleet_nodes.push(persisted_entry);
+            }
+            true
+        },
+        move |state, persisted| {
+            if *persisted {
+                activate_node(state.clone(), entry);
+            }
+        },
+    )
+}
+
+pub fn remove_node_transition(state: &SharedRuntimeState, node_id: &str) -> std::io::Result<bool> {
+    let node_id = normalized_node_id(node_id);
+    let persisted_node_id = node_id.clone();
+    apply_fleet_transition(
+        state,
+        move |config, live_nodes| {
+            let before = config.fleet_nodes.len();
+            config
+                .fleet_nodes
+                .retain(|entry| normalized_node_id(&entry.node_id) != persisted_node_id);
+            let config_existed = before != config.fleet_nodes.len();
+            let live_existed = live_nodes
+                .iter()
+                .any(|entry| normalized_node_id(&entry.node_id) == persisted_node_id);
+            config_existed || live_existed
+        },
+        move |state, existed| {
+            if *existed {
+                remove_node(state, &node_id);
+            }
+        },
+    )
+}
+
 pub fn recover_from_config(state: SharedRuntimeState) {
     let cfg = crate::user_config::read();
+    let mut seen_aliases = std::collections::HashSet::new();
+    let mut seen_runtime_ids = std::collections::HashSet::new();
     for entry in cfg.fleet_nodes {
+        let entry = normalize_node(entry);
         if let Err(err) = validate_node(&entry) {
             tracing::warn!(node_id = %entry.node_id, error = %err, "skipping invalid fleet node");
             continue;
         }
-        let entry = normalize_node(entry);
+        if seen_aliases.contains(&entry.node_id) {
+            tracing::warn!(node_id = %entry.node_id, "suppressing duplicate fleet node alias");
+            continue;
+        }
+        let runtime_id = canonical_runtime_id(entry.runtime_id.as_deref());
+        if runtime_id.is_some_and(|runtime_id| seen_runtime_ids.contains(&runtime_id)) {
+            tracing::warn!(node_id = %entry.node_id, "suppressing duplicate fleet runtime_id");
+            continue;
+        }
+        seen_aliases.insert(entry.node_id.clone());
+        if let Some(runtime_id) = runtime_id {
+            seen_runtime_ids.insert(runtime_id);
+        }
         let legacy_node_id = entry.runtime_id.is_none().then(|| entry.node_id.clone());
         activate_node(state.clone(), entry);
         if let Some(node_id) = legacy_node_id {
@@ -360,8 +489,10 @@ struct RemoteHealth {
 }
 
 pub async fn fetch_remote_runtime_id(base_url: &str) -> Result<String, String> {
+    const MAX_HEALTH_BYTES: usize = 64 * 1024;
+
     let url = format!("{}/health", base_url.trim_end_matches('/'));
-    let health = reqwest::Client::builder()
+    let response = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(8))
         .build()
@@ -371,9 +502,28 @@ pub async fn fetch_remote_runtime_id(base_url: &str) -> Result<String, String> {
         .await
         .map_err(|error| format!("failed to fetch remote health: {error}"))?
         .error_for_status()
-        .map_err(|error| format!("remote health returned error: {error}"))?
-        .json::<RemoteHealth>()
-        .await
+        .map_err(|error| format!("remote health returned error: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HEALTH_BYTES as u64)
+    {
+        return Err("remote health response exceeds 64 KiB".to_string());
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_HEALTH_BYTES as u64) as usize,
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read remote health: {error}"))?;
+        if chunk.len() > MAX_HEALTH_BYTES.saturating_sub(body.len()) {
+            return Err("remote health response exceeds 64 KiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let health: RemoteHealth = serde_json::from_slice(&body)
         .map_err(|error| format!("failed to parse remote health: {error}"))?;
     if health.service != "gitim-runtime" {
         return Err(format!(
@@ -390,60 +540,70 @@ pub async fn discover_legacy_runtime_id_once(
     state: &SharedRuntimeState,
     node_id: &str,
 ) -> Result<Option<String>, String> {
+    let requested_alias = normalized_node_id(node_id);
     let snapshot = {
         let runtime = preconditions::mutex_lock(state)
             .fleet_nodes
-            .get(node_id)
+            .values()
+            .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
             .map(|runtime| runtime.entry.clone());
         runtime.ok_or_else(|| format!("fleet node {node_id} not found"))?
     };
-    if snapshot.runtime_id.is_some() {
-        return Ok(snapshot.runtime_id);
+    if let Some(runtime_id) = snapshot.runtime_id.as_deref() {
+        return canonical_runtime_id(Some(runtime_id))
+            .map(|runtime_id| Some(runtime_id.to_string()))
+            .ok_or_else(|| format!("fleet node {node_id} has invalid runtime_id"));
     }
 
     let runtime_id = fetch_remote_runtime_id(&snapshot.base_url).await?;
-    let mut runtime_state = preconditions::mutex_lock(state);
-    let current_matches = runtime_state
-        .fleet_nodes
-        .get(node_id)
-        .is_some_and(|runtime| {
-            runtime.entry.base_url == snapshot.base_url
-                && runtime
-                    .entry
-                    .runtime_id
-                    .as_deref()
-                    .is_none_or(|id| id == runtime_id)
-        });
-    if !current_matches {
+    let canonical_id = canonical_runtime_id(Some(&runtime_id))
+        .ok_or_else(|| "remote health returned invalid runtime_id".to_string())?;
+    let transition_lock = fleet_transition_lock(state);
+    let _transition = preconditions::mutex_lock(&transition_lock);
+
+    let current_snapshot = {
+        let runtime_state = preconditions::mutex_lock(state);
+        let current = runtime_state
+            .fleet_nodes
+            .values()
+            .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
+            .map(|runtime| runtime.entry.clone());
+        let duplicate_live = has_runtime_id_on_other_alias(
+            runtime_state
+                .fleet_nodes
+                .values()
+                .map(|runtime| &runtime.entry),
+            &requested_alias,
+            canonical_id,
+        );
+        current.filter(|entry| {
+            normalized_base_url(&entry.base_url) == normalized_base_url(&snapshot.base_url)
+                && canonical_runtime_id(entry.runtime_id.as_deref())
+                    .is_none_or(|existing| existing == canonical_id)
+                && !duplicate_live
+        })
+    };
+    let Some(current_snapshot) = current_snapshot else {
         return Ok(None);
-    }
-    let duplicate_live = runtime_state.fleet_nodes.values().any(|runtime| {
-        runtime.entry.node_id != node_id
-            && runtime.entry.runtime_id.as_deref() == Some(runtime_id.as_str())
-    });
-    if duplicate_live {
-        return Ok(None);
-    }
+    };
 
     let persisted = crate::user_config::mutate(|config| {
-        if config.fleet_nodes.iter().any(|entry| {
-            entry.node_id != node_id && entry.runtime_id.as_deref() == Some(runtime_id.as_str())
-        }) {
+        if has_runtime_id_on_other_alias(&config.fleet_nodes, &requested_alias, canonical_id) {
             return false;
         }
-        let Some(entry) = config
-            .fleet_nodes
-            .iter_mut()
-            .find(|entry| entry.node_id == node_id && entry.base_url == snapshot.base_url)
-        else {
+        let Some(entry) = config.fleet_nodes.iter_mut().find(|entry| {
+            normalized_node_id(&entry.node_id) == requested_alias
+                && normalized_base_url(&entry.base_url)
+                    == normalized_base_url(&current_snapshot.base_url)
+        }) else {
             return false;
         };
-        match entry.runtime_id.as_deref() {
+        match canonical_runtime_id(entry.runtime_id.as_deref()) {
             None => {
                 entry.runtime_id = Some(runtime_id.clone());
                 true
             }
-            Some(existing) => existing == runtime_id,
+            Some(existing) => existing == canonical_id,
         }
     })
     .map_err(|error| format!("failed to persist legacy fleet runtime_id: {error}"))?;
@@ -451,12 +611,31 @@ pub async fn discover_legacy_runtime_id_once(
         return Ok(None);
     }
 
-    let Some(runtime) = runtime_state.fleet_nodes.get_mut(node_id) else {
-        return Ok(None);
-    };
-    if runtime.entry.base_url != snapshot.base_url {
+    let mut runtime_state = preconditions::mutex_lock(state);
+    if has_runtime_id_on_other_alias(
+        runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| &runtime.entry),
+        &requested_alias,
+        canonical_id,
+    ) {
         return Ok(None);
     }
+    let target_key = runtime_state.fleet_nodes.iter().find_map(|(key, runtime)| {
+        (normalized_node_id(&runtime.entry.node_id) == requested_alias
+            && normalized_base_url(&runtime.entry.base_url)
+                == normalized_base_url(&current_snapshot.base_url)
+            && canonical_runtime_id(runtime.entry.runtime_id.as_deref())
+                .is_none_or(|existing| existing == canonical_id))
+        .then(|| key.clone())
+    });
+    let Some(target_key) = target_key else {
+        return Ok(None);
+    };
+    let Some(runtime) = runtime_state.fleet_nodes.get_mut(&target_key) else {
+        return Ok(None);
+    };
     runtime.entry.runtime_id = Some(runtime_id.clone());
     Ok(Some(runtime_id))
 }
@@ -488,7 +667,10 @@ pub fn snapshot_workspace_peers(
         a.node_id
             .cmp(&b.node_id)
             .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+            .then_with(|| a.base_url.cmp(&b.base_url))
+            .then_with(|| a.runtime_id.cmp(&b.runtime_id))
     });
+    peers.dedup();
     peers
 }
 

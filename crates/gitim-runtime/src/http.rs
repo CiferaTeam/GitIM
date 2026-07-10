@@ -377,6 +377,9 @@ pub struct RuntimeState {
     pub fleet_tx: tokio::sync::broadcast::Sender<crate::fleet::FleetEventEnvelope>,
     pub fleet_nodes: HashMap<String, crate::fleet::FleetNodeRuntime>,
     pub fleet_status: HashMap<String, crate::fleet::FleetNodeStatus>,
+    /// Serializes Fleet config persistence with the corresponding short live
+    /// state transition so concurrent aliases cannot reorder disk and memory.
+    pub fleet_transition_lock: Arc<Mutex<()>>,
     /// Canonicalized path to the runtime binary captured at startup. The
     /// update endpoint (self-replace) uses this to (a) validate the install
     /// dir in strict mode, and (b) fork-exec a new runtime after the binary
@@ -457,6 +460,7 @@ impl Default for RuntimeState {
             fleet_tx,
             fleet_nodes: HashMap::new(),
             fleet_status: HashMap::new(),
+            fleet_transition_lock: Arc::new(Mutex::new(())),
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
@@ -4989,29 +4993,7 @@ async fn fleet_nodes_upsert(
         }
     };
 
-    let live_nodes: Vec<_> = {
-        let runtime_state = crate::preconditions::arc_mutex_lock(&state);
-        runtime_state
-            .fleet_nodes
-            .values()
-            .map(|runtime| runtime.entry.clone())
-            .collect()
-    };
-    let runtime_id = entry.runtime_id.as_deref().unwrap_or_default();
-    match crate::user_config::mutate(|config| {
-        let duplicate_in_config = config.fleet_nodes.iter().any(|existing| {
-            existing.node_id != entry.node_id && existing.runtime_id.as_deref() == Some(runtime_id)
-        });
-        let duplicate_live = live_nodes.iter().any(|existing| {
-            existing.node_id != entry.node_id && existing.runtime_id.as_deref() == Some(runtime_id)
-        });
-        if duplicate_in_config || duplicate_live {
-            false
-        } else {
-            config.upsert_fleet_node(entry.clone());
-            true
-        }
-    }) {
+    match crate::fleet::persist_node_transition(&state, entry.clone()) {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -5035,7 +5017,6 @@ async fn fleet_nodes_upsert(
         }
     }
 
-    crate::fleet::activate_node(state, entry.clone());
     Json(FleetNodeUpsertResponse {
         ok: true,
         node: entry,
@@ -5050,25 +5031,20 @@ async fn fleet_nodes_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let runtime_existed = {
-        let s = crate::preconditions::arc_mutex_lock(&state);
-        s.fleet_nodes.contains_key(&node_id)
+    let existed = match crate::fleet::remove_node_transition(&state, &node_id) {
+        Ok(existed) => existed,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("failed to persist fleet node removal: {err}"),
+                    "fleet_config_write_failed",
+                )),
+            )
+                .into_response()
+        }
     };
-    let config_existed =
-        match crate::user_config::mutate(|config| config.remove_fleet_node(&node_id)) {
-            Ok(existed) => existed,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorBody::with_code(
-                        format!("failed to persist fleet node removal: {err}"),
-                        "fleet_config_write_failed",
-                    )),
-                )
-                    .into_response()
-            }
-        };
-    if !config_existed && !runtime_existed {
+    if !existed {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorBody::with_code("fleet node not found", "not_found")),
@@ -5076,7 +5052,6 @@ async fn fleet_nodes_delete(
             .into_response();
     }
 
-    crate::fleet::remove_node(&state, &node_id);
     Json(OkAckResponse { ok: true }).into_response()
 }
 

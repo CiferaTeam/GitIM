@@ -136,7 +136,25 @@ fn write_to_atomic(cfg: &UserConfig, path: &Path) -> io::Result<()> {
     temp.flush()?;
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(
+            path = %parent.display(),
+            error = %error,
+            "runtime config committed but parent directory sync failed"
+        );
+    }
     Ok(())
+}
+
+fn finish_mutation<T>(result: io::Result<T>, unlock_result: io::Result<()>) -> io::Result<T> {
+    if let Err(error) = unlock_result {
+        tracing::warn!(
+            error = %error,
+            "runtime config lock unlock failed; descriptor drop will release it"
+        );
+    }
+    result
 }
 
 pub fn mutate<T>(mutation: impl FnOnce(&mut UserConfig) -> T) -> io::Result<T> {
@@ -170,12 +188,7 @@ pub fn mutate_at<T>(path: &Path, mutation: impl FnOnce(&mut UserConfig) -> T) ->
         write_to_atomic(&config, path)?;
         Ok(output)
     })();
-    let unlock_result = FileExt::unlock(&lock_file);
-    match (result, unlock_result) {
-        (Ok(output), Ok(())) => Ok(output),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), _) => Err(error),
-    }
+    finish_mutation(result, FileExt::unlock(&lock_file))
 }
 
 /// Best-effort persistence of the bound listen port. Reads the existing
@@ -596,6 +609,28 @@ mod tests {
         assert_eq!(cfg.fleet_nodes.len(), 1);
         assert_eq!(cfg.fleet_nodes[0].node_id, "node-b");
         assert!(!cfg.remove_fleet_node("node-a"));
+    }
+
+    #[test]
+    fn committed_mutation_ignores_unlock_failure() {
+        let result = finish_mutation(
+            Ok("committed"),
+            Err(io::Error::other("simulated unlock failure")),
+        );
+
+        assert_eq!(result.unwrap(), "committed");
+    }
+
+    #[test]
+    fn failed_mutation_preserves_original_error_when_unlock_also_fails() {
+        let result = finish_mutation::<()>(
+            Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt config")),
+            Err(io::Error::other("simulated unlock failure")),
+        );
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "corrupt config");
     }
 
     #[test]
