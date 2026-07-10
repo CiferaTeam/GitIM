@@ -1,3 +1,4 @@
+pub mod asset;
 pub mod board;
 pub mod card;
 pub mod channel;
@@ -10,6 +11,11 @@ pub mod message;
 pub mod meta;
 pub mod project;
 
+pub use asset::{
+    AssetRef, AssetRefError, ASSET_REF_VERSION, MAX_ASSETS_PER_MESSAGE, MAX_ASSET_BYTES,
+    MAX_ASSET_FILENAME_BYTES, MAX_ASSET_MEDIA_TYPE_BYTES, MAX_ASSET_REF_BYTES,
+    MAX_ASSET_REQUEST_BYTES,
+};
 pub use board::{
     append_board_section, board_path, default_board, parse_board_markdown, set_board_field,
     set_board_section, stringify_board_markdown, validate_board_document,
