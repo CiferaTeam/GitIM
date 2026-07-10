@@ -4967,6 +4967,17 @@ async fn fleet_nodes_upsert(
         )
             .into_response();
     }
+    let mut entry = entry;
+    entry.runtime_id = match crate::fleet::fetch_remote_runtime_id(&entry.base_url).await {
+        Ok(runtime_id) => Some(runtime_id),
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(err, "invalid_fleet_node")),
+            )
+                .into_response()
+        }
+    };
     let entry = match crate::fleet::resolve_workspace_mappings(&state, entry).await {
         Ok(entry) => entry,
         Err(err) => {
@@ -4978,17 +4989,50 @@ async fn fleet_nodes_upsert(
         }
     };
 
-    let mut cfg = crate::user_config::read();
-    cfg.upsert_fleet_node(entry.clone());
-    if let Err(err) = crate::user_config::write(&cfg) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody::with_code(
-                format!("failed to persist fleet node: {err}"),
-                "fleet_config_write_failed",
-            )),
-        )
-            .into_response();
+    let live_nodes: Vec<_> = {
+        let runtime_state = crate::preconditions::arc_mutex_lock(&state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| runtime.entry.clone())
+            .collect()
+    };
+    let runtime_id = entry.runtime_id.as_deref().unwrap_or_default();
+    match crate::user_config::mutate(|config| {
+        let duplicate_in_config = config.fleet_nodes.iter().any(|existing| {
+            existing.node_id != entry.node_id && existing.runtime_id.as_deref() == Some(runtime_id)
+        });
+        let duplicate_live = live_nodes.iter().any(|existing| {
+            existing.node_id != entry.node_id && existing.runtime_id.as_deref() == Some(runtime_id)
+        });
+        if duplicate_in_config || duplicate_live {
+            false
+        } else {
+            config.upsert_fleet_node(entry.clone());
+            true
+        }
+    }) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "runtime_id is already registered under another fleet node alias",
+                    "duplicate_runtime_id",
+                )),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("failed to persist fleet node: {err}"),
+                    "fleet_config_write_failed",
+                )),
+            )
+                .into_response()
+        }
     }
 
     crate::fleet::activate_node(state, entry.clone());
@@ -5006,27 +5050,28 @@ async fn fleet_nodes_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let mut cfg = crate::user_config::read();
-    let config_existed = cfg.remove_fleet_node(&node_id);
     let runtime_existed = {
         let s = crate::preconditions::arc_mutex_lock(&state);
         s.fleet_nodes.contains_key(&node_id)
     };
+    let config_existed =
+        match crate::user_config::mutate(|config| config.remove_fleet_node(&node_id)) {
+            Ok(existed) => existed,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!("failed to persist fleet node removal: {err}"),
+                        "fleet_config_write_failed",
+                    )),
+                )
+                    .into_response()
+            }
+        };
     if !config_existed && !runtime_existed {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorBody::with_code("fleet node not found", "not_found")),
-        )
-            .into_response();
-    }
-
-    if let Err(err) = crate::user_config::write(&cfg) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody::with_code(
-                format!("failed to persist fleet node removal: {err}"),
-                "fleet_config_write_failed",
-            )),
         )
             .into_response();
     }
@@ -5603,21 +5648,18 @@ async fn workspaces_delete(
 
     crate::workspace::kill_daemons(&removed).await;
 
-    let mut cfg = crate::user_config::read();
-    if cfg.remove(&slug) {
-        if let Err(e) = crate::user_config::write(&cfg) {
-            tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody::with_code(
-                    format!(
-                        "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
-                    ),
-                    "config_write_failed",
-                )),
-            )
-                .into_response();
-        }
+    if let Err(e) = crate::user_config::mutate(|config| config.remove(&slug)) {
+        tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::with_code(
+                format!(
+                    "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
+                ),
+                "config_write_failed",
+            )),
+        )
+            .into_response();
     }
 
     Json(OkAckResponse { ok: true }).into_response()
@@ -6092,13 +6134,12 @@ async fn workspaces_create(
         provider_for_response = config.git.provider;
     }
 
-    let mut user_cfg = crate::user_config::read();
-    user_cfg.upsert(crate::user_config::WorkspaceEntry {
+    let workspace_entry = crate::user_config::WorkspaceEntry {
         slug: slug.clone(),
         workspace_name: workspace_name.clone(),
         path: workspace.to_string_lossy().into_owned(),
-    });
-    if let Err(e) = crate::user_config::write(&user_cfg) {
+    };
+    if let Err(e) = crate::user_config::mutate(|config| config.upsert(workspace_entry)) {
         tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
         crate::preconditions::arc_mutex_lock(&state)
             .workspaces

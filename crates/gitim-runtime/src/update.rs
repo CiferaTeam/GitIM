@@ -599,11 +599,11 @@ fn persist_workspace_snapshot_to(
     path: &Path,
 ) -> std::io::Result<usize> {
     let count = entries.len();
-    let mut cfg = crate::user_config::read_from(Some(path));
-    for entry in entries {
-        cfg.upsert(entry);
-    }
-    crate::user_config::write_to(&cfg, path)?;
+    crate::user_config::mutate_at(path, |config| {
+        for entry in entries {
+            config.upsert(entry);
+        }
+    })?;
     Ok(count)
 }
 
@@ -766,9 +766,18 @@ mod tests {
         ctx.human_repo = Some(ws.join(".gitim-runtime/human"));
 
         let stale = crate::user_config::UserConfig {
-            runtime_id: String::new(),
-            listen_port: None,
-            fleet_nodes: Vec::new(),
+            runtime_id: "44444444-4444-4444-8444-444444444444".to_string(),
+            listen_port: Some(19090),
+            fleet_nodes: vec![crate::user_config::FleetNodeEntry {
+                node_id: "studio".to_string(),
+                runtime_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+                base_url: "http://127.0.0.1:16868".to_string(),
+                node_ip: None,
+                node_name: None,
+                workspaces: vec!["room".to_string()],
+                workspace_mappings: Vec::new(),
+                ssh_tunnel: None,
+            }],
             workspaces: vec![crate::user_config::WorkspaceEntry {
                 slug: "ws".to_string(),
                 workspace_name: "ws".to_string(),
@@ -787,6 +796,10 @@ mod tests {
 
         assert_eq!(count, 1);
         let loaded = crate::user_config::read_from(Some(&config_path));
+        assert_eq!(loaded.runtime_id, "44444444-4444-4444-8444-444444444444");
+        assert_eq!(loaded.listen_port, Some(19090));
+        assert_eq!(loaded.fleet_nodes.len(), 1);
+        assert_eq!(loaded.fleet_nodes[0].node_id, "studio");
         assert_eq!(loaded.workspaces.len(), 2);
         assert!(loaded.workspaces.iter().any(|entry| entry.slug == "ws"));
         let valley = loaded

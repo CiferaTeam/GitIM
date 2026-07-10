@@ -956,6 +956,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fs2",
  "futures",
  "gitim-agent-provider",
  "gitim-client",

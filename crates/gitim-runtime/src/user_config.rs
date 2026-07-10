@@ -1,4 +1,6 @@
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,7 +33,11 @@ fn default_tunnel_remote_host() -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetNodeEntry {
+    /// Operator-selected alias used to manage this Fleet entry.
     pub node_id: String,
+    /// Canonical UUID reported by the remote Runtime's `/health` endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_ip: Option<String>,
@@ -96,11 +102,80 @@ pub fn write(cfg: &UserConfig) -> std::io::Result<()> {
 }
 
 pub fn write_to(cfg: &UserConfig, path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    write_to_atomic(cfg, path)
+}
+
+fn read_existing_for_mutation(path: &Path) -> io::Result<UserConfig> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {error}", path.display()),
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(UserConfig::default()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_to_atomic(cfg: &UserConfig, path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     let json = crate::preconditions::json_to_string_pretty(cfg);
-    std::fs::write(path, json)
+    temp.write_all(json.as_bytes())?;
+    temp.flush()?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+pub fn mutate<T>(mutation: impl FnOnce(&mut UserConfig) -> T) -> io::Result<T> {
+    match config_path() {
+        Some(path) => mutate_at(&path, mutation),
+        None => {
+            let mut config = UserConfig::default();
+            Ok(mutation(&mut config))
+        }
+    }
+}
+
+pub fn mutate_at<T>(path: &Path, mutation: impl FnOnce(&mut UserConfig) -> T) -> io::Result<T> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let lock_path = path.with_extension("json.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock_file.lock_exclusive()?;
+
+    let result = (|| {
+        let mut config = read_existing_for_mutation(path)?;
+        let output = mutation(&mut config);
+        write_to_atomic(&config, path)?;
+        Ok(output)
+    })();
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (result, unlock_result) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+    }
 }
 
 /// Best-effort persistence of the bound listen port. Reads the existing
@@ -116,9 +191,7 @@ pub fn write_listen_port(port: u16) -> std::io::Result<()> {
 }
 
 pub fn write_listen_port_at(port: u16, path: &Path) -> std::io::Result<()> {
-    let mut cfg = read_from(Some(path));
-    cfg.listen_port = Some(port);
-    write_to(&cfg, path)
+    mutate_at(path, |config| config.listen_port = Some(port))
 }
 
 /// Read or generate the device-bound runtime ID.
@@ -135,20 +208,25 @@ pub fn write_listen_port_at(port: u16, path: &Path) -> std::io::Result<()> {
 /// See docs/plans/runtime-id/00-design.md for the full design and
 /// non-goals (no platform-native device ID, no git sync, no agent injection).
 pub fn ensure_runtime_id_at(path: &Path) -> String {
-    let mut cfg = read_from(Some(path));
-    if uuid::Uuid::parse_str(&cfg.runtime_id).is_ok() {
-        return cfg.runtime_id;
-    }
-    let new_id = uuid::Uuid::new_v4().to_string();
-    cfg.runtime_id = new_id.clone();
-    if let Err(e) = write_to(&cfg, path) {
+    let candidate = uuid::Uuid::new_v4().to_string();
+    let mut selected = candidate.clone();
+    let result = mutate_at(path, |config| {
+        if uuid::Uuid::parse_str(&config.runtime_id).is_ok() {
+            selected = config.runtime_id.clone();
+        } else {
+            config.runtime_id = candidate;
+            selected = config.runtime_id.clone();
+        }
+        selected.clone()
+    });
+    if let Err(e) = result {
         tracing::warn!(
             error = %e,
             path = %path.display(),
             "failed to persist runtime_id; will retry on next startup"
         );
     }
-    new_id
+    selected
 }
 
 /// Production entry point: resolves `~/.gitim/runtime.json` and delegates to
@@ -436,6 +514,7 @@ mod tests {
     ) -> FleetNodeEntry {
         FleetNodeEntry {
             node_id: node_id.to_string(),
+            runtime_id: None,
             base_url: base_url.to_string(),
             node_ip: Some("100.64.0.10".to_string()),
             node_name: Some("mac-mini".to_string()),

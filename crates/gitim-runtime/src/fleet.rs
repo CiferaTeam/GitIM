@@ -110,6 +110,14 @@ pub struct FleetAgentSnapshot {
     pub agent: AgentInfo,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetPeerSnapshot {
+    pub node_id: String,
+    pub runtime_id: Option<String>,
+    pub base_url: String,
+    pub remote_workspace_id: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct FleetNodeStatus {
     pub node_id: String,
@@ -226,7 +234,21 @@ pub fn recover_from_config(state: SharedRuntimeState) {
             tracing::warn!(node_id = %entry.node_id, error = %err, "skipping invalid fleet node");
             continue;
         }
-        activate_node(state.clone(), normalize_node(entry));
+        let entry = normalize_node(entry);
+        let legacy_node_id = entry.runtime_id.is_none().then(|| entry.node_id.clone());
+        activate_node(state.clone(), entry);
+        if let Some(node_id) = legacy_node_id {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(error) = discover_legacy_runtime_id_once(&state, &node_id).await {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        error = %error,
+                        "fleet legacy runtime identity discovery failed"
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -236,6 +258,10 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
     }
     if entry.workspaces.iter().any(|w| w.trim().is_empty()) {
         return Err("workspace names must not be empty".to_string());
+    }
+    if let Some(runtime_id) = &entry.runtime_id {
+        uuid::Uuid::parse_str(runtime_id)
+            .map_err(|error| format!("runtime_id must be a UUID: {error}"))?;
     }
     for mapping in &entry.workspace_mappings {
         if mapping.remote_workspace_id.trim().is_empty()
@@ -270,6 +296,18 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
 
 pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
     entry.node_id = entry.node_id.trim().to_string();
+    entry.runtime_id = entry.runtime_id.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(
+                uuid::Uuid::parse_str(trimmed)
+                    .map(|runtime_id| runtime_id.to_string())
+                    .unwrap_or_else(|_| trimmed.to_string()),
+            )
+        }
+    });
     entry.base_url = entry.base_url.trim().trim_end_matches('/').to_string();
     entry.node_ip = entry.node_ip.and_then(|v| {
         let trimmed = v.trim();
@@ -313,6 +351,145 @@ pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
         }
     });
     entry
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHealth {
+    service: String,
+    runtime_id: String,
+}
+
+pub async fn fetch_remote_runtime_id(base_url: &str) -> Result<String, String> {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let health = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("failed to build fleet health client: {error}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch remote health: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("remote health returned error: {error}"))?
+        .json::<RemoteHealth>()
+        .await
+        .map_err(|error| format!("failed to parse remote health: {error}"))?;
+    if health.service != "gitim-runtime" {
+        return Err(format!(
+            "remote health service must be gitim-runtime, got {}",
+            health.service
+        ));
+    }
+    uuid::Uuid::parse_str(&health.runtime_id)
+        .map(|runtime_id| runtime_id.to_string())
+        .map_err(|error| format!("remote health runtime_id must be a UUID: {error}"))
+}
+
+pub async fn discover_legacy_runtime_id_once(
+    state: &SharedRuntimeState,
+    node_id: &str,
+) -> Result<Option<String>, String> {
+    let snapshot = {
+        let runtime = preconditions::mutex_lock(state)
+            .fleet_nodes
+            .get(node_id)
+            .map(|runtime| runtime.entry.clone());
+        runtime.ok_or_else(|| format!("fleet node {node_id} not found"))?
+    };
+    if snapshot.runtime_id.is_some() {
+        return Ok(snapshot.runtime_id);
+    }
+
+    let runtime_id = fetch_remote_runtime_id(&snapshot.base_url).await?;
+    let mut runtime_state = preconditions::mutex_lock(state);
+    let current_matches = runtime_state
+        .fleet_nodes
+        .get(node_id)
+        .is_some_and(|runtime| {
+            runtime.entry.base_url == snapshot.base_url
+                && runtime
+                    .entry
+                    .runtime_id
+                    .as_deref()
+                    .is_none_or(|id| id == runtime_id)
+        });
+    if !current_matches {
+        return Ok(None);
+    }
+    let duplicate_live = runtime_state.fleet_nodes.values().any(|runtime| {
+        runtime.entry.node_id != node_id
+            && runtime.entry.runtime_id.as_deref() == Some(runtime_id.as_str())
+    });
+    if duplicate_live {
+        return Ok(None);
+    }
+
+    let persisted = crate::user_config::mutate(|config| {
+        if config.fleet_nodes.iter().any(|entry| {
+            entry.node_id != node_id && entry.runtime_id.as_deref() == Some(runtime_id.as_str())
+        }) {
+            return false;
+        }
+        let Some(entry) = config
+            .fleet_nodes
+            .iter_mut()
+            .find(|entry| entry.node_id == node_id && entry.base_url == snapshot.base_url)
+        else {
+            return false;
+        };
+        match entry.runtime_id.as_deref() {
+            None => {
+                entry.runtime_id = Some(runtime_id.clone());
+                true
+            }
+            Some(existing) => existing == runtime_id,
+        }
+    })
+    .map_err(|error| format!("failed to persist legacy fleet runtime_id: {error}"))?;
+    if !persisted {
+        return Ok(None);
+    }
+
+    let Some(runtime) = runtime_state.fleet_nodes.get_mut(node_id) else {
+        return Ok(None);
+    };
+    if runtime.entry.base_url != snapshot.base_url {
+        return Ok(None);
+    }
+    runtime.entry.runtime_id = Some(runtime_id.clone());
+    Ok(Some(runtime_id))
+}
+
+pub fn snapshot_workspace_peers(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+) -> Vec<FleetPeerSnapshot> {
+    let mut peers: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .flat_map(|runtime| {
+                workspace_subscriptions(&runtime.entry)
+                    .into_iter()
+                    .filter(|subscription| subscription.local_workspace_id == local_workspace_id)
+                    .map(|subscription| FleetPeerSnapshot {
+                        node_id: runtime.entry.node_id.clone(),
+                        runtime_id: runtime.entry.runtime_id.clone(),
+                        base_url: runtime.entry.base_url.clone(),
+                        remote_workspace_id: subscription.remote_workspace_id,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    peers.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+    });
+    peers
 }
 
 pub async fn resolve_workspace_mappings(
@@ -816,6 +993,7 @@ mod tests {
     fn validate_node_rejects_incomplete_ssh_tunnel() {
         let entry = FleetNodeEntry {
             node_id: "node-a".to_string(),
+            runtime_id: None,
             base_url: "http://127.0.0.1:18068".to_string(),
             node_ip: None,
             node_name: None,
@@ -867,6 +1045,7 @@ mod tests {
     fn entry_with_tunnel(local_port: Option<u16>) -> FleetNodeEntry {
         FleetNodeEntry {
             node_id: "mac-mini".to_string(),
+            runtime_id: None,
             base_url: "http://127.0.0.1:18068".to_string(),
             node_ip: None,
             node_name: None,

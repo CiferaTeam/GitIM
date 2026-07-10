@@ -18,16 +18,20 @@ use futures::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::json;
 use serial_test::serial;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tower::ServiceExt;
 
+use gitim_runtime::fleet;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, AgentActivityEvent};
-use gitim_runtime::user_config;
+use gitim_runtime::user_config::{self, FleetNodeEntry, FleetWorkspaceMapping, UserConfig};
 use gitim_runtime::workspace::WorkspaceContext;
 
 mod common;
 use common::HomeGuard;
+
+const REMOTE_RUNTIME_ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
+const REMOTE_RUNTIME_ID_UPPERCASE: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
 
 async fn remote_agent_events(
     State(tx): State<broadcast::Sender<AgentActivityEvent>>,
@@ -64,6 +68,13 @@ async fn remote_workspaces() -> axum::Json<serde_json::Value> {
                 "initialized": true,
             }
         ]
+    }))
+}
+
+async fn remote_health() -> axum::Json<serde_json::Value> {
+    axum::Json(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID_UPPERCASE,
     }))
 }
 
@@ -124,6 +135,7 @@ async fn spawn_remote_runtime() -> (
 ) {
     let (tx, _) = broadcast::channel(16);
     let app = Router::new()
+        .route("/health", get(remote_health))
         .route("/workspaces", get(remote_workspaces))
         .route("/workspaces/{slug}/agents", get(remote_agents))
         .route("/workspaces/{slug}/agents/events", get(remote_agent_events))
@@ -138,12 +150,102 @@ async fn spawn_remote_runtime() -> (
     (format!("http://{addr}"), tx, handle)
 }
 
+async fn spawn_remote_runtime_without_health() -> (
+    String,
+    broadcast::Sender<AgentActivityEvent>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, _) = broadcast::channel(16);
+    let app = Router::new()
+        .route("/workspaces", get(remote_workspaces))
+        .route("/workspaces/{slug}/agents", get(remote_agents))
+        .route("/workspaces/{slug}/agents/events", get(remote_agent_events))
+        .with_state(tx.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind legacy remote test runtime");
+    let addr = listener.local_addr().expect("legacy remote addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("legacy remote server");
+    });
+    (format!("http://{addr}"), tx, handle)
+}
+
+async fn spawn_remote_runtime_with_health(
+    health: serde_json::Value,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new()
+        .route(
+            "/health",
+            get({
+                let health = health.clone();
+                move || {
+                    let health = health.clone();
+                    async move { axum::Json(health) }
+                }
+            }),
+        )
+        .route("/workspaces", get(remote_workspaces));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind remote health test runtime");
+    let addr = listener.local_addr().expect("remote health addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("remote health server");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[derive(Clone)]
+struct DelayedHealth {
+    entered: std::sync::Arc<Notify>,
+    release: std::sync::Arc<Notify>,
+}
+
+async fn delayed_health(State(state): State<DelayedHealth>) -> axum::Json<serde_json::Value> {
+    state.entered.notify_one();
+    state.release.notified().await;
+    remote_health().await
+}
+
+async fn spawn_delayed_health_runtime() -> (
+    String,
+    std::sync::Arc<Notify>,
+    std::sync::Arc<Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let entered = std::sync::Arc::new(Notify::new());
+    let release = std::sync::Arc::new(Notify::new());
+    let state = DelayedHealth {
+        entered: entered.clone(),
+        release: release.clone(),
+    };
+    let app = Router::new()
+        .route("/health", get(delayed_health))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind delayed health runtime");
+    let addr = listener.local_addr().expect("delayed health addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("delayed health server");
+    });
+    (format!("http://{addr}"), entered, release, handle)
+}
+
 async fn remote_agent_events_unavailable() -> StatusCode {
     StatusCode::SERVICE_UNAVAILABLE
 }
 
 async fn spawn_remote_runtime_unavailable() -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
+        .route("/health", get(remote_health))
         .route("/workspaces", get(remote_workspaces))
         .route(
             "/workspaces/{slug}/agents/events",
@@ -186,9 +288,9 @@ fn inject_github_workspace(
         .insert(slug.to_string(), ctx);
 }
 
-fn post_fleet_node(base_url: &str) -> Request<Body> {
+fn post_fleet_node_as(node_id: &str, base_url: &str) -> Request<Body> {
     let body = json!({
-        "node_id": "remote-runtime-a",
+        "node_id": node_id,
         "base_url": base_url,
         "node_ip": "100.64.0.10",
         "node_name": "mac-mini",
@@ -201,6 +303,33 @@ fn post_fleet_node(base_url: &str) -> Request<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+fn post_fleet_node(base_url: &str) -> Request<Body> {
+    post_fleet_node_as("remote-runtime-a", base_url)
+}
+
+fn fleet_node(
+    node_id: &str,
+    base_url: &str,
+    runtime_id: Option<&str>,
+    local_workspace_id: &str,
+    remote_workspace_id: &str,
+) -> FleetNodeEntry {
+    FleetNodeEntry {
+        node_id: node_id.to_string(),
+        runtime_id: runtime_id.map(str::to_string),
+        base_url: base_url.to_string(),
+        node_ip: None,
+        node_name: None,
+        workspaces: vec![remote_workspace_id.to_string()],
+        workspace_mappings: vec![FleetWorkspaceMapping {
+            remote_workspace_id: remote_workspace_id.to_string(),
+            local_workspace_id: local_workspace_id.to_string(),
+            workspace_identity: "github.com/org/repo".to_string(),
+        }],
+        ssh_tunnel: None,
+    }
 }
 
 fn fleet_events_request() -> Request<Body> {
@@ -366,10 +495,16 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
         .await
         .expect("add fleet node response");
     assert_eq!(add_resp.status(), StatusCode::OK);
+    let add_body = response_json(add_resp).await;
+    assert_eq!(add_body["node"]["runtime_id"], REMOTE_RUNTIME_ID);
 
     let cfg = user_config::read_from(Some(&home_guard.path().join(".gitim/runtime.json")));
     assert_eq!(cfg.fleet_nodes.len(), 1);
     assert_eq!(cfg.fleet_nodes[0].node_id, "remote-runtime-a");
+    assert_eq!(
+        cfg.fleet_nodes[0].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
     let cfg_json: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(home_guard.path().join(".gitim/runtime.json")).unwrap(),
     )
@@ -523,4 +658,270 @@ async fn fleet_add_rejects_when_no_remote_identity_matches_local_workspaces() {
     assert_eq!(body["error_code"], "no_matching_fleet_workspace");
 
     remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_add_rejects_invalid_health_service_and_runtime_id() {
+    let _home_guard = HomeGuard::install();
+
+    for health in [
+        json!({
+            "service": "another-service",
+            "runtime_id": REMOTE_RUNTIME_ID,
+        }),
+        json!({
+            "service": "gitim-runtime",
+            "runtime_id": "not-a-uuid",
+        }),
+    ] {
+        let (remote_base_url, remote_server) = spawn_remote_runtime_with_health(health).await;
+        let (router, state) = create_router();
+        inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+
+        let response = router
+            .oneshot(post_fleet_node(&remote_base_url))
+            .await
+            .expect("invalid fleet node response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error_code"], "invalid_fleet_node");
+
+        remote_server.abort();
+    }
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_runtime_id_is_unique_across_aliases_but_same_alias_can_update() {
+    let _home_guard = HomeGuard::install();
+    let (first_url, first_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID_UPPERCASE,
+    }))
+    .await;
+    let (second_url, second_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+    }))
+    .await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+
+    let first = router
+        .clone()
+        .oneshot(post_fleet_node_as("studio", &first_url))
+        .await
+        .expect("first fleet node response");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let update = router
+        .clone()
+        .oneshot(post_fleet_node_as("studio", &second_url))
+        .await
+        .expect("same-alias update response");
+    assert_eq!(update.status(), StatusCode::OK);
+    let update_body = response_json(update).await;
+    assert_eq!(update_body["node"]["runtime_id"], REMOTE_RUNTIME_ID);
+    assert_eq!(update_body["node"]["base_url"], second_url);
+
+    let duplicate = router
+        .oneshot(post_fleet_node_as("studio-copy", &first_url))
+        .await
+        .expect("duplicate fleet runtime response");
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    let duplicate_body = response_json(duplicate).await;
+    assert_eq!(duplicate_body["error_code"], "duplicate_runtime_id");
+
+    first_server.abort();
+    second_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn legacy_fleet_node_activates_sse_when_health_is_unavailable() {
+    let home_guard = HomeGuard::install();
+    let (remote_url, remote_tx, remote_server) = spawn_remote_runtime_without_health().await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(fleet_node(
+        "legacy-studio",
+        &remote_url,
+        None,
+        "room",
+        "remote-room",
+    ));
+    user_config::write_to(&config, &runtime_path).unwrap();
+
+    let (router, state) = create_router();
+    let events_response = router
+        .clone()
+        .oneshot(fleet_events_request())
+        .await
+        .expect("fleet events response");
+    let mut events_body = events_response.into_body().into_data_stream();
+
+    fleet::recover_from_config(state.clone());
+    assert_eq!(
+        state.lock().unwrap().fleet_nodes["legacy-studio"]
+            .entry
+            .runtime_id,
+        None
+    );
+
+    let sender = tokio::spawn(async move {
+        for _ in 0..20 {
+            let _ = remote_tx.send(AgentActivityEvent {
+                agent_id: "cfo".to_string(),
+                workspace_id: "remote-room".to_string(),
+                event_type: "tool_use".to_string(),
+                detail: "legacy node stayed live".to_string(),
+                timestamp: "2026-05-15T00:00:00Z".to_string(),
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let frame = wait_for_frame_containing(&mut events_body, "legacy node stayed live").await;
+    assert!(frame.contains("\"node_id\":\"legacy-studio\""), "{frame}");
+
+    sender.abort();
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn legacy_runtime_id_backfill_updates_live_node_and_config() {
+    let home_guard = HomeGuard::install();
+    let (remote_url, remote_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID_UPPERCASE,
+    }))
+    .await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let entry = fleet_node("legacy-studio", &remote_url, None, "room", "remote-room");
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(entry.clone());
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), entry);
+
+    let discovered = fleet::discover_legacy_runtime_id_once(&state, "legacy-studio")
+        .await
+        .expect("legacy identity discovery");
+
+    assert_eq!(discovered.as_deref(), Some(REMOTE_RUNTIME_ID));
+    assert_eq!(
+        state.lock().unwrap().fleet_nodes["legacy-studio"]
+            .entry
+            .runtime_id
+            .as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    assert_eq!(
+        user_config::read_from(Some(&runtime_path)).fleet_nodes[0]
+            .runtime_id
+            .as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn stale_legacy_backfill_does_not_overwrite_replaced_alias() {
+    let home_guard = HomeGuard::install();
+    let (remote_url, entered, release, remote_server) = spawn_delayed_health_runtime().await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let original = fleet_node("legacy-studio", &remote_url, None, "room", "remote-room");
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(original.clone());
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), original);
+
+    let discovery_state = state.clone();
+    let discovery = tokio::spawn(async move {
+        fleet::discover_legacy_runtime_id_once(&discovery_state, "legacy-studio").await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("health discovery should start");
+
+    let replacement_runtime_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let replacement = fleet_node(
+        "legacy-studio",
+        "http://127.0.0.1:9",
+        Some(replacement_runtime_id),
+        "room",
+        "remote-room",
+    );
+    user_config::mutate_at(&runtime_path, |cfg| {
+        cfg.upsert_fleet_node(replacement.clone())
+    })
+    .unwrap();
+    fleet::activate_node(state.clone(), replacement.clone());
+    release.notify_one();
+
+    assert_eq!(discovery.await.unwrap().unwrap(), None);
+    let live = &state.lock().unwrap().fleet_nodes["legacy-studio"].entry;
+    assert_eq!(live.base_url, replacement.base_url);
+    assert_eq!(live.runtime_id.as_deref(), Some(replacement_runtime_id));
+    let disk = user_config::read_from(Some(&runtime_path));
+    assert_eq!(disk.fleet_nodes[0].base_url, replacement.base_url);
+    assert_eq!(
+        disk.fleet_nodes[0].runtime_id.as_deref(),
+        Some(replacement_runtime_id)
+    );
+
+    remote_server.abort();
+}
+
+#[tokio::test]
+async fn peer_snapshot_includes_mapped_and_legacy_workspace_nodes() {
+    let (_router, state) = create_router();
+    fleet::activate_node(
+        state.clone(),
+        fleet_node(
+            "mapped",
+            "http://127.0.0.1:9",
+            Some(REMOTE_RUNTIME_ID),
+            "room",
+            "remote-room",
+        ),
+    );
+    fleet::activate_node(
+        state.clone(),
+        FleetNodeEntry {
+            node_id: "legacy".to_string(),
+            runtime_id: None,
+            base_url: "http://127.0.0.1:10".to_string(),
+            node_ip: None,
+            node_name: None,
+            workspaces: vec!["room".to_string()],
+            workspace_mappings: Vec::new(),
+            ssh_tunnel: None,
+        },
+    );
+    fleet::activate_node(
+        state.clone(),
+        fleet_node(
+            "other-workspace",
+            "http://127.0.0.1:11",
+            Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "other",
+            "remote-other",
+        ),
+    );
+
+    let peers = fleet::snapshot_workspace_peers(&state, "room");
+    assert_eq!(peers.len(), 2);
+    assert_eq!(peers[0].node_id, "legacy");
+    assert_eq!(peers[0].runtime_id, None);
+    assert_eq!(peers[0].base_url, "http://127.0.0.1:10");
+    assert_eq!(peers[0].remote_workspace_id, "room");
+    assert_eq!(peers[1].node_id, "mapped");
+    assert_eq!(peers[1].runtime_id.as_deref(), Some(REMOTE_RUNTIME_ID));
+    assert_eq!(peers[1].remote_workspace_id, "remote-room");
 }

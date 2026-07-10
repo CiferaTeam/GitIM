@@ -4,7 +4,163 @@ use gitim_runtime::git_config::{
     validate_workspace_path, ConfigError, GitConfig, GitProvider, WorkspaceConfig,
     WorkspacePathError,
 };
-use std::path::PathBuf;
+use gitim_runtime::user_config::{self, UserConfig};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+const MUTATION_CHILD_PATH: &str = "GITIM_CONFIG_MUTATION_CHILD_PATH";
+const MUTATION_CHILD_FIELD: &str = "GITIM_CONFIG_MUTATION_CHILD_FIELD";
+const MUTATION_CHILD_MARKER: &str = "GITIM_CONFIG_MUTATION_CHILD_MARKER";
+
+#[test]
+fn runtime_config_mutation_child() {
+    let Ok(path) = std::env::var(MUTATION_CHILD_PATH) else {
+        return;
+    };
+    let field = std::env::var(MUTATION_CHILD_FIELD).expect("child mutation field");
+    let marker = std::env::var(MUTATION_CHILD_MARKER).expect("child marker path");
+
+    user_config::mutate_at(Path::new(&path), |cfg| match field.as_str() {
+        "runtime_id" => {
+            cfg.runtime_id = "11111111-1111-4111-8111-111111111111".to_string();
+            std::fs::write(marker, b"ready").expect("write child marker");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        "listen_port" => cfg.listen_port = Some(19090),
+        other => panic!("unknown child mutation field: {other}"),
+    })
+    .expect("child config mutation");
+}
+
+#[test]
+fn legacy_fleet_node_without_runtime_id_roundtrips_omitted() {
+    let legacy = r#"{
+        "fleet_nodes": [{
+            "node_id": "studio",
+            "base_url": "http://127.0.0.1:16868",
+            "workspaces": ["room"]
+        }]
+    }"#;
+
+    let config: UserConfig = serde_json::from_str(legacy).expect("legacy config");
+    assert_eq!(config.fleet_nodes[0].runtime_id, None);
+
+    let roundtrip = serde_json::to_value(config).expect("serialize config");
+    assert!(roundtrip["fleet_nodes"][0].get("runtime_id").is_none());
+}
+
+#[test]
+fn concurrent_thread_mutations_preserve_both_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.json");
+    user_config::write_to(&UserConfig::default(), &path).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let first_path = path.clone();
+        let first = scope.spawn(move || {
+            user_config::mutate_at(&first_path, |cfg| {
+                cfg.runtime_id = "22222222-2222-4222-8222-222222222222".to_string();
+                entered_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(250));
+            })
+            .unwrap();
+        });
+        entered_rx.recv().unwrap();
+        let second_path = path.clone();
+        let second = scope.spawn(move || {
+            user_config::mutate_at(&second_path, |cfg| cfg.listen_port = Some(18080)).unwrap();
+        });
+        first.join().unwrap();
+        second.join().unwrap();
+    });
+
+    let config = user_config::read_from(Some(&path));
+    assert_eq!(config.runtime_id, "22222222-2222-4222-8222-222222222222");
+    assert_eq!(config.listen_port, Some(18080));
+}
+
+#[test]
+fn concurrent_process_mutations_preserve_both_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.json");
+    let marker = dir.path().join("first-entered");
+    user_config::write_to(&UserConfig::default(), &path).unwrap();
+    let current_test = std::env::current_exe().expect("current test binary");
+
+    let mut first = Command::new(&current_test)
+        .args(["--exact", "runtime_config_mutation_child", "--nocapture"])
+        .env(MUTATION_CHILD_PATH, &path)
+        .env(MUTATION_CHILD_FIELD, "runtime_id")
+        .env(MUTATION_CHILD_MARKER, &marker)
+        .spawn()
+        .expect("spawn first mutation child");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "first mutation child did not enter closure"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let second = Command::new(&current_test)
+        .args(["--exact", "runtime_config_mutation_child", "--nocapture"])
+        .env(MUTATION_CHILD_PATH, &path)
+        .env(MUTATION_CHILD_FIELD, "listen_port")
+        .env(MUTATION_CHILD_MARKER, dir.path().join("unused"))
+        .status()
+        .expect("run second mutation child");
+    assert!(second.success(), "second mutation child failed: {second}");
+
+    let first_status = first.wait().expect("wait for first mutation child");
+    assert!(
+        first_status.success(),
+        "first mutation child failed: {first_status}"
+    );
+
+    let config = user_config::read_from(Some(&path));
+    assert_eq!(config.runtime_id, "11111111-1111-4111-8111-111111111111");
+    assert_eq!(config.listen_port, Some(19090));
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_runtime_config_write_keeps_valid_json_and_0600_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.json");
+    user_config::mutate_at(&path, |cfg| {
+        cfg.runtime_id = "33333333-3333-4333-8333-333333333333".to_string();
+        cfg.listen_port = Some(16868);
+    })
+    .unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let parsed: UserConfig = serde_json::from_slice(&bytes).expect("valid runtime config JSON");
+    assert_eq!(parsed.listen_port, Some(16868));
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn mutation_rejects_corrupt_existing_config_without_replacing_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.json");
+    let corrupt = b"{ token-bearing config is truncated";
+    std::fs::write(&path, corrupt).unwrap();
+
+    let error = user_config::mutate_at(&path, |cfg| cfg.listen_port = Some(16868))
+        .expect_err("corrupt config must reject mutation");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+}
 
 #[test]
 fn local_mode_roundtrip() {
