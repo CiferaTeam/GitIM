@@ -420,6 +420,7 @@ pub struct RuntimeState {
     /// `AgentSaturationLog::save` returns an error from the sampler tick.
     /// Surfaced on `/runtime/health`. Best-effort observability.
     pub saturation_save_failures: std::sync::atomic::AtomicU64,
+    pub assets: Arc<crate::assets::AssetService>,
 }
 
 impl RuntimeState {
@@ -468,6 +469,7 @@ impl Default for RuntimeState {
             runtime_id: String::new(),
             usage_save_failures: std::sync::atomic::AtomicU64::new(0),
             saturation_save_failures: std::sync::atomic::AtomicU64::new(0),
+            assets: Arc::new(crate::assets::AssetService::default()),
         }
     }
 }
