@@ -200,6 +200,31 @@ async fn spawn_remote_runtime_with_health(
     (format!("http://{addr}"), handle)
 }
 
+async fn chunked_oversized_health() -> axum::response::Response {
+    let chunks = futures::stream::iter([
+        Ok::<_, Infallible>(axum::body::Bytes::from(vec![b'x'; 40 * 1024])),
+        Ok::<_, Infallible>(axum::body::Bytes::from(vec![b'y'; 40 * 1024])),
+    ]);
+    axum::response::Response::builder()
+        .header("content-type", "application/json")
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+async fn spawn_chunked_oversized_health_runtime() -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route("/health", get(chunked_oversized_health));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind chunked health runtime");
+    let addr = listener.local_addr().expect("chunked health addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("chunked health server");
+    });
+    (format!("http://{addr}"), handle)
+}
+
 #[derive(Clone)]
 struct DelayedHealth {
     entered: std::sync::Arc<Notify>,
@@ -1207,6 +1232,180 @@ async fn remote_health_rejects_body_larger_than_64_kib() {
     let error = fleet::fetch_remote_runtime_id(&remote_url)
         .await
         .expect_err("oversized health response must be rejected");
+
+    assert!(error.contains("64 KiB"), "{error}");
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn new_alias_waits_for_legacy_identity_then_rejects_canonical_duplicate() {
+    let home_guard = HomeGuard::install();
+    let (legacy_url, entered, release, legacy_server) = spawn_delayed_health_runtime().await;
+    let (new_url, _new_tx, new_server) = spawn_remote_runtime().await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let legacy = fleet_node("legacy-a", &legacy_url, None, "room", "remote-room");
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(legacy.clone());
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+    fleet::activate_node(state.clone(), legacy);
+
+    let post = tokio::spawn(async move {
+        router
+            .oneshot(post_fleet_node_as("new-b", &new_url))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("new alias upsert must discover unresolved legacy identities");
+
+    assert!(
+        !post.is_finished(),
+        "upsert committed while legacy identity was unresolved"
+    );
+    assert_eq!(
+        user_config::read_from(Some(&runtime_path))
+            .fleet_nodes
+            .len(),
+        1
+    );
+    assert_eq!(state.lock().unwrap().fleet_nodes.len(), 1);
+    release.notify_one();
+
+    let response = post.await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "duplicate_runtime_id"
+    );
+    let disk = user_config::read_from(Some(&runtime_path));
+    assert_eq!(disk.fleet_nodes.len(), 1);
+    assert_eq!(disk.fleet_nodes[0].node_id, "legacy-a");
+    assert_eq!(
+        disk.fleet_nodes[0].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    let live = state.lock().unwrap();
+    assert_eq!(live.fleet_nodes.len(), 1);
+    assert!(live.fleet_nodes.contains_key("legacy-a"));
+
+    legacy_server.abort();
+    new_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn new_alias_returns_conflict_while_legacy_identity_stays_unresolved() {
+    let home_guard = HomeGuard::install();
+    let (new_url, _new_tx, new_server) = spawn_remote_runtime().await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let legacy = fleet_node(
+        "offline-legacy",
+        "http://127.0.0.1:9",
+        None,
+        "room",
+        "remote-room",
+    );
+    let mut config = UserConfig::default();
+    config.upsert_fleet_node(legacy.clone());
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+    fleet::activate_node(state.clone(), legacy);
+
+    let response = router
+        .oneshot(post_fleet_node_as("new-b", &new_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response_json(response).await;
+    assert_eq!(body["error_code"], "fleet_identity_unresolved");
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("offline-legacy"));
+    assert_eq!(
+        user_config::read_from(Some(&runtime_path))
+            .fleet_nodes
+            .len(),
+        1
+    );
+    assert_eq!(state.lock().unwrap().fleet_nodes.len(), 1);
+    new_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn duplicate_legacy_backfills_converge_to_earliest_config_entry() {
+    let home_guard = HomeGuard::install();
+    let (first_url, first_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID_UPPERCASE,
+    }))
+    .await;
+    let (second_url, second_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+    }))
+    .await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let first = fleet_node("first", &first_url, None, "room", "remote-room");
+    let second = fleet_node("second", &second_url, None, "room", "remote-room");
+    let config = UserConfig {
+        fleet_nodes: vec![first.clone(), second.clone()],
+        ..UserConfig::default()
+    };
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), first);
+    fleet::activate_node(state.clone(), second);
+
+    assert_eq!(
+        fleet::discover_legacy_runtime_id_once(&state, "second")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    assert_eq!(
+        fleet::discover_legacy_runtime_id_once(&state, "first")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+
+    let disk = user_config::read_from(Some(&runtime_path));
+    assert_eq!(disk.fleet_nodes.len(), 2);
+    assert_eq!(
+        disk.fleet_nodes[0].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    assert_eq!(
+        disk.fleet_nodes[1].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    let live = state.lock().unwrap();
+    assert_eq!(live.fleet_nodes.len(), 1);
+    assert!(live.fleet_nodes.contains_key("first"));
+    drop(live);
+    assert_eq!(fleet::snapshot_workspace_peers(&state, "room").len(), 1);
+
+    first_server.abort();
+    second_server.abort();
+}
+
+#[tokio::test]
+async fn remote_health_rejects_chunked_body_larger_than_64_kib() {
+    let (remote_url, remote_server) = spawn_chunked_oversized_health_runtime().await;
+
+    let error = fleet::fetch_remote_runtime_id(&remote_url)
+        .await
+        .expect_err("chunked oversized health response must be rejected");
 
     assert!(error.contains("64 KiB"), "{error}");
     remote_server.abort();

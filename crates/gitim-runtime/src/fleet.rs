@@ -536,6 +536,18 @@ pub async fn fetch_remote_runtime_id(base_url: &str) -> Result<String, String> {
         .map_err(|error| format!("remote health runtime_id must be a UUID: {error}"))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyIdentityNode {
+    alias: String,
+    base_url: String,
+}
+
+#[derive(Debug)]
+struct LegacyBackfillDecision {
+    winner: LegacyIdentityNode,
+    losers: Vec<LegacyIdentityNode>,
+}
+
 pub async fn discover_legacy_runtime_id_once(
     state: &SharedRuntimeState,
     node_id: &str,
@@ -568,76 +580,160 @@ pub async fn discover_legacy_runtime_id_once(
             .values()
             .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
             .map(|runtime| runtime.entry.clone());
-        let duplicate_live = has_runtime_id_on_other_alias(
-            runtime_state
-                .fleet_nodes
-                .values()
-                .map(|runtime| &runtime.entry),
-            &requested_alias,
-            canonical_id,
-        );
         current.filter(|entry| {
             normalized_base_url(&entry.base_url) == normalized_base_url(&snapshot.base_url)
                 && canonical_runtime_id(entry.runtime_id.as_deref())
                     .is_none_or(|existing| existing == canonical_id)
-                && !duplicate_live
         })
     };
     let Some(current_snapshot) = current_snapshot else {
         return Ok(None);
     };
 
-    let persisted = crate::user_config::mutate(|config| {
-        if has_runtime_id_on_other_alias(&config.fleet_nodes, &requested_alias, canonical_id) {
-            return false;
-        }
-        let Some(entry) = config.fleet_nodes.iter_mut().find(|entry| {
+    let decision = crate::user_config::mutate(|config| {
+        let target_index = config.fleet_nodes.iter().position(|entry| {
             normalized_node_id(&entry.node_id) == requested_alias
                 && normalized_base_url(&entry.base_url)
                     == normalized_base_url(&current_snapshot.base_url)
-        }) else {
-            return false;
-        };
-        match canonical_runtime_id(entry.runtime_id.as_deref()) {
-            None => {
-                entry.runtime_id = Some(runtime_id.clone());
-                true
-            }
-            Some(existing) => existing == canonical_id,
+        })?;
+        if canonical_runtime_id(config.fleet_nodes[target_index].runtime_id.as_deref())
+            .is_some_and(|existing| existing != canonical_id)
+        {
+            return None;
         }
+        config.fleet_nodes[target_index].runtime_id = Some(runtime_id.clone());
+
+        let matching_indices: Vec<_> = config
+            .fleet_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (canonical_runtime_id(entry.runtime_id.as_deref()) == Some(canonical_id))
+                    .then_some(index)
+            })
+            .collect();
+        let winner_index = *matching_indices.first()?;
+        for index in &matching_indices {
+            config.fleet_nodes[*index].runtime_id = Some(runtime_id.clone());
+        }
+        let winner = LegacyIdentityNode {
+            alias: normalized_node_id(&config.fleet_nodes[winner_index].node_id),
+            base_url: normalized_base_url(&config.fleet_nodes[winner_index].base_url),
+        };
+        let mut losers = Vec::new();
+        for index in matching_indices
+            .into_iter()
+            .filter(|index| *index != winner_index)
+        {
+            let loser = LegacyIdentityNode {
+                alias: normalized_node_id(&config.fleet_nodes[index].node_id),
+                base_url: normalized_base_url(&config.fleet_nodes[index].base_url),
+            };
+            if loser.alias != winner.alias && !losers.contains(&loser) {
+                losers.push(loser);
+            }
+        }
+        Some(LegacyBackfillDecision { winner, losers })
     })
     .map_err(|error| format!("failed to persist legacy fleet runtime_id: {error}"))?;
-    if !persisted {
+    let Some(decision) = decision else {
         return Ok(None);
-    }
+    };
 
     let mut runtime_state = preconditions::mutex_lock(state);
-    if has_runtime_id_on_other_alias(
-        runtime_state
-            .fleet_nodes
-            .values()
-            .map(|runtime| &runtime.entry),
-        &requested_alias,
-        canonical_id,
-    ) {
-        return Ok(None);
-    }
-    let target_key = runtime_state.fleet_nodes.iter().find_map(|(key, runtime)| {
-        (normalized_node_id(&runtime.entry.node_id) == requested_alias
-            && normalized_base_url(&runtime.entry.base_url)
-                == normalized_base_url(&current_snapshot.base_url)
+    let winner_key = runtime_state.fleet_nodes.iter().find_map(|(key, runtime)| {
+        (normalized_node_id(&runtime.entry.node_id) == decision.winner.alias
+            && normalized_base_url(&runtime.entry.base_url) == decision.winner.base_url
             && canonical_runtime_id(runtime.entry.runtime_id.as_deref())
                 .is_none_or(|existing| existing == canonical_id))
         .then(|| key.clone())
     });
-    let Some(target_key) = target_key else {
-        return Ok(None);
-    };
-    let Some(runtime) = runtime_state.fleet_nodes.get_mut(&target_key) else {
-        return Ok(None);
-    };
-    runtime.entry.runtime_id = Some(runtime_id.clone());
+    if let Some(winner_key) = winner_key {
+        if let Some(runtime) = runtime_state.fleet_nodes.get_mut(&winner_key) {
+            runtime.entry.runtime_id = Some(runtime_id.clone());
+        }
+    }
+
+    let loser_keys: Vec<_> = runtime_state
+        .fleet_nodes
+        .iter()
+        .filter(|(_, runtime)| {
+            decision.losers.iter().any(|loser| {
+                normalized_node_id(&runtime.entry.node_id) == loser.alias
+                    && normalized_base_url(&runtime.entry.base_url) == loser.base_url
+            })
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let removed_aliases: std::collections::HashSet<_> = loser_keys
+        .iter()
+        .filter_map(|key| runtime_state.fleet_nodes.get(key))
+        .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+        .collect();
+    for key in loser_keys {
+        runtime_state.fleet_nodes.remove(&key);
+    }
+    runtime_state
+        .fleet_status
+        .retain(|_, status| !removed_aliases.contains(&normalized_node_id(&status.node_id)));
     Ok(Some(runtime_id))
+}
+
+pub async fn resolve_active_legacy_identities(
+    state: &SharedRuntimeState,
+    updating_node_id: &str,
+) -> Result<(), Vec<String>> {
+    let updating_node_id = normalized_node_id(updating_node_id);
+    let mut unresolved: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && normalized_node_id(&runtime.entry.node_id) != updating_node_id
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    unresolved.sort();
+    unresolved.dedup();
+
+    let attempts = unresolved
+        .iter()
+        .map(|node_id| discover_legacy_runtime_id_once(state, node_id));
+    for (node_id, result) in unresolved
+        .iter()
+        .zip(futures::future::join_all(attempts).await)
+    {
+        if let Err(error) = result {
+            tracing::warn!(
+                node_id = %node_id,
+                error = %error,
+                "fleet identity gate could not resolve legacy node"
+            );
+        }
+    }
+
+    let mut remaining: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && normalized_node_id(&runtime.entry.node_id) != updating_node_id
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    remaining.sort();
+    remaining.dedup();
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(remaining)
+    }
 }
 
 pub fn snapshot_workspace_peers(

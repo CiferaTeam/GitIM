@@ -4992,6 +4992,21 @@ async fn fleet_nodes_upsert(
                 .into_response()
         }
     };
+    if let Err(unresolved) =
+        crate::fleet::resolve_active_legacy_identities(&state, &entry.node_id).await
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorBody::with_code(
+                format!(
+                    "fleet node identity is unresolved for: {}. Ensure those runtimes are reachable or remove them before adding a new alias",
+                    unresolved.join(", ")
+                ),
+                "fleet_identity_unresolved",
+            )),
+        )
+            .into_response();
+    }
 
     match crate::fleet::persist_node_transition(&state, entry.clone()) {
         Ok(true) => {}
