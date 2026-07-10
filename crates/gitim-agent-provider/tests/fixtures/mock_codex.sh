@@ -19,7 +19,7 @@ MODE="exec"
 THREAD_ID="mock-codex-thread"
 PROMPT=""
 SAW_CD_FLAG="false"
-SAW_MAX_EFFORT="false"
+SAW_EFFORT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,8 +37,9 @@ while [[ $# -gt 0 ]]; do
                 SAW_CD_FLAG="true"
             fi
             if [[ "$1" == "-c" || "$1" == "--config" ]]; then
-                if [[ "${2:-}" == 'model_reasoning_effort="xhigh"' ]]; then
-                    SAW_MAX_EFFORT="true"
+                if [[ "${2:-}" == model_reasoning_effort=* ]]; then
+                    SAW_EFFORT="${2#model_reasoning_effort=\"}"
+                    SAW_EFFORT="${SAW_EFFORT%\"}"
                 fi
             fi
             if [[ "$1" == "--model" || "$1" == "-C" || "$1" == "--cd" || "$1" == "--color" || "$1" == "--output-last-message" || "$1" == "--output-schema" || "$1" == "--profile" || "$1" == "--config" || "$1" == "-c" || "$1" == "--add-dir" || "$1" == "--image" ]]; then
@@ -57,8 +58,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "${MOCK_CODEX_REQUIRE_MAX_EFFORT:-}" == "1" && "$SAW_MAX_EFFORT" != "true" ]]; then
-    echo "missing model_reasoning_effort xhigh config" >&2
+if [[ -n "${MOCK_CODEX_EXPECT_EFFORT:-}" && "$SAW_EFFORT" != "$MOCK_CODEX_EXPECT_EFFORT" ]]; then
+    echo "expected model_reasoning_effort=$MOCK_CODEX_EXPECT_EFFORT, got ${SAW_EFFORT:-<unset>}" >&2
+    exit 2
+fi
+
+if [[ "${MOCK_CODEX_EXPECT_NO_EFFORT:-}" == "1" && -n "$SAW_EFFORT" ]]; then
+    echo "expected no model_reasoning_effort override, got $SAW_EFFORT" >&2
     exit 2
 fi
 

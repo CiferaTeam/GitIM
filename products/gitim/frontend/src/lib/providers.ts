@@ -35,6 +35,10 @@ export interface PreflightResult {
 export interface ProviderModel {
   id: string;
   label: string;
+  /** Codex model default from `codex debug models`. */
+  default_effort?: string;
+  /** Ordered Codex effort values advertised for this model. */
+  supported_efforts?: string[];
 }
 
 export interface ProviderModelCatalog {
@@ -73,6 +77,64 @@ export interface ProviderModelDraft {
   model: string;
   isCustom: boolean;
   customModelInput: string;
+}
+
+export interface ResolvedProviderEffort {
+  values: string[];
+  defaultEffort: string | null;
+}
+
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const CODEX_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+
+export function providerSupportsEffort(
+  provider: ProviderId | "" | null | undefined,
+): provider is "claude" | "codex" {
+  return provider === "claude" || provider === "codex";
+}
+
+export function resolveProviderEffort(
+  provider: ProviderId | null | undefined,
+  model: string,
+  models: ProviderModel[],
+): ResolvedProviderEffort {
+  if (provider === "claude") {
+    return { values: [...CLAUDE_EFFORTS], defaultEffort: null };
+  }
+  if (provider !== "codex") {
+    return { values: [], defaultEffort: null };
+  }
+
+  const selected = models.find((candidate) => candidate.id === model);
+  const advertised = selected?.supported_efforts?.filter(Boolean) ?? [];
+  return {
+    values: advertised.length > 0 ? [...advertised] : [...CODEX_EFFORTS],
+    defaultEffort: selected?.default_effort ?? null,
+  };
+}
+
+export function normalizeProviderEffort(
+  provider: ProviderId | null | undefined,
+  model: string,
+  models: ProviderModel[],
+  effort: string,
+): string {
+  if (!effort) return "";
+  return resolveProviderEffort(provider, model, models).values.includes(effort)
+    ? effort
+    : "";
+}
+
+export function effortLabel(effort: string): string {
+  if (effort === "xhigh") return "XHigh";
+  return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
 export function resolveProviderModelCatalog(
@@ -127,12 +189,41 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     supportsCustomModel: true,
     customModelHint: "model id accepted by codex --model",
     models: [
-      { id: "gpt-5.6-sol", label: "GPT-5.6-Sol" },
-      { id: "gpt-5.6-terra", label: "GPT-5.6-Terra" },
-      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna" },
-      { id: "gpt-5.5", label: "GPT-5.5" },
-      { id: "gpt-5.4", label: "GPT-5.4" },
-      { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6-Sol",
+        default_effort: "low",
+        supported_efforts: [...CODEX_EFFORTS],
+      },
+      {
+        id: "gpt-5.6-terra",
+        label: "GPT-5.6-Terra",
+        default_effort: "medium",
+        supported_efforts: [...CODEX_EFFORTS],
+      },
+      {
+        id: "gpt-5.6-luna",
+        label: "GPT-5.6-Luna",
+        default_effort: "medium",
+        supported_efforts: ["low", "medium", "high", "xhigh", "max"],
+      },
+      {
+        id: "gpt-5.5",
+        label: "GPT-5.5",
+        default_effort: "medium",
+        supported_efforts: ["low", "medium", "high", "xhigh"],
+      },
+      {
+        id: "gpt-5.4",
+        label: "GPT-5.4",
+        default_effort: "medium",
+        supported_efforts: ["low", "medium", "high", "xhigh"],
+      },
+      {
+        id: "gpt-5.3-codex",
+        label: "GPT-5.3 Codex",
+        supported_efforts: ["low", "medium", "high", "xhigh"],
+      },
     ],
   },
   opencode: {

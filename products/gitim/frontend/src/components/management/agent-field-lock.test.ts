@@ -10,8 +10,8 @@ describe("runningLockedFields", () => {
     expect(runningLockedFields("claude", false)).toEqual(["Effort"]);
   });
 
-  it("a non-claude provider locks only Model", () => {
-    expect(runningLockedFields("codex", true)).toEqual(["Model"]);
+  it("codex locks both Model and Effort", () => {
+    expect(runningLockedFields("codex", true)).toEqual(["Model", "Effort"]);
   });
 
   it("hermes locks nothing (model is read-only, no effort field)", () => {
@@ -32,9 +32,8 @@ describe("runningLockNotice", () => {
     expect(runningLockNotice("claude", true)).toContain("Model and Effort");
   });
 
-  it("names only Model for non-claude providers", () => {
+  it("names both fields for codex", () => {
     const notice = runningLockNotice("codex", true);
-    expect(notice).toContain("Model");
-    expect(notice).not.toContain("Effort");
+    expect(notice).toContain("Model and Effort");
   });
 });

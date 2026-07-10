@@ -22,11 +22,19 @@ fn failing_mock_config() -> ProviderConfig {
     config
 }
 
-fn require_max_effort_mock_config() -> ProviderConfig {
+fn expected_effort_mock_config(effort: &str) -> ProviderConfig {
     let mut config = mock_config();
     config
         .env
-        .insert("MOCK_CODEX_REQUIRE_MAX_EFFORT".to_string(), "1".to_string());
+        .insert("MOCK_CODEX_EXPECT_EFFORT".to_string(), effort.to_string());
+    config
+}
+
+fn expect_no_effort_mock_config() -> ProviderConfig {
+    let mut config = mock_config();
+    config
+        .env
+        .insert("MOCK_CODEX_EXPECT_NO_EFFORT".to_string(), "1".to_string());
     config
 }
 
@@ -188,8 +196,33 @@ async fn failed_codex_includes_stderr_tail() {
 }
 
 #[tokio::test]
-async fn codex_provider_sets_xhigh_reasoning_effort() {
-    let provider = create("codex", require_max_effort_mock_config()).unwrap();
+async fn codex_provider_forwards_requested_reasoning_effort() {
+    let provider = create("codex", expected_effort_mock_config("ultra")).unwrap();
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let session = provider
+        .execute(
+            "hello",
+            ExecOptions {
+                cwd: Some(cwd),
+                effort: Some("ultra".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut events = session.events;
+    while events.recv().await.is_some() {}
+
+    let result = session.result.await.unwrap();
+    assert_eq!(result.status, ExecStatus::Completed);
+    assert_eq!(result.session_token.as_deref(), Some("mock-codex-thread"));
+}
+
+#[tokio::test]
+async fn codex_provider_uses_model_default_when_effort_is_unset() {
+    let provider = create("codex", expect_no_effort_mock_config()).unwrap();
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let session = provider

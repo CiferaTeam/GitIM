@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   PROVIDERS,
+  normalizeProviderEffort,
+  resolveProviderEffort,
   resolveProviderModelCatalog,
   resolveProviderModelDraft,
 } from "./providers";
 
 describe("resolveProviderModelCatalog", () => {
   it("keeps Codex 5.6 variants at the front of the static fallback", () => {
-    expect(PROVIDERS.codex.models.slice(0, 4)).toEqual([
-      { id: "gpt-5.6-sol", label: "GPT-5.6-Sol" },
-      { id: "gpt-5.6-terra", label: "GPT-5.6-Terra" },
-      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna" },
-      { id: "gpt-5.5", label: "GPT-5.5" },
+    expect(PROVIDERS.codex.models.slice(0, 4).map((model) => model.id)).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
     ]);
   });
 
@@ -56,6 +58,78 @@ describe("resolveProviderModelCatalog", () => {
     expect(resolved.supportsDefault).toBe(true);
     expect(resolved.supportsCustom).toBe(true);
     expect(resolved.customHint).toBe("provider/model");
+  });
+});
+
+describe("resolveProviderEffort", () => {
+  it("uses the selected Codex model's advertised effort levels and default", () => {
+    expect(
+      resolveProviderEffort("codex", "gpt-5.6-luna", PROVIDERS.codex.models),
+    ).toEqual({
+      values: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
+  });
+
+  it("uses live catalog metadata ahead of static Codex metadata", () => {
+    expect(
+      resolveProviderEffort("codex", "gpt-live", [
+        {
+          id: "gpt-live",
+          label: "GPT Live",
+          default_effort: "high",
+          supported_efforts: ["medium", "high", "ultra"],
+        },
+      ]),
+    ).toEqual({
+      values: ["medium", "high", "ultra"],
+      defaultEffort: "high",
+    });
+  });
+
+  it("offers the current Codex vocabulary when the model is custom or default", () => {
+    expect(resolveProviderEffort("codex", "future-model", []).values).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
+  });
+
+  it("keeps Claude's existing effort levels", () => {
+    expect(resolveProviderEffort("claude", "claude-opus-4-8", []).values).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+});
+
+describe("normalizeProviderEffort", () => {
+  it("clears a Codex effort that the newly selected model does not advertise", () => {
+    expect(
+      normalizeProviderEffort(
+        "codex",
+        "gpt-5.6-luna",
+        PROVIDERS.codex.models,
+        "ultra",
+      ),
+    ).toBe("");
+  });
+
+  it("preserves a supported Codex effort", () => {
+    expect(
+      normalizeProviderEffort(
+        "codex",
+        "gpt-5.6-luna",
+        PROVIDERS.codex.models,
+        "xhigh",
+      ),
+    ).toBe("xhigh");
   });
 });
 

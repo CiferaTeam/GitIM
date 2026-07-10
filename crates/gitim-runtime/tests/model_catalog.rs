@@ -19,7 +19,17 @@ fn make_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 fn codex_parser_keeps_list_visible_models() {
     let input = r#"{
       "models": [
-        { "slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list" },
+        {
+          "slug": "gpt-5.6-sol",
+          "display_name": "GPT-5.6-Sol",
+          "visibility": "list",
+          "default_reasoning_level": "low",
+          "supported_reasoning_levels": [
+            { "effort": "low", "description": "Fast" },
+            { "effort": "medium", "description": "Balanced" },
+            { "effort": "ultra", "description": "Delegates" }
+          ]
+        },
         { "slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide" },
         { "slug": "gpt-next", "visibility": "list" }
       ]
@@ -28,9 +38,13 @@ fn codex_parser_keeps_list_visible_models() {
     let models = parse_codex_debug_models(input).unwrap();
 
     let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["gpt-5.5", "gpt-next"]);
-    assert_eq!(models[0].label, "GPT-5.5");
+    assert_eq!(ids, vec!["gpt-5.6-sol", "gpt-next"]);
+    assert_eq!(models[0].label, "GPT-5.6-Sol");
+    assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+    assert_eq!(models[0].supported_efforts, ["low", "medium", "ultra"]);
     assert_eq!(models[1].label, "gpt-next");
+    assert!(models[1].default_effort.is_none());
+    assert!(models[1].supported_efforts.is_empty());
 }
 
 #[test]

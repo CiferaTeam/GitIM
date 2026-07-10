@@ -43,7 +43,7 @@ pub struct Args {
     pub system_prompt: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
     pub model: Option<String>,
-    /// Replacement effort level (Claude only). Empty string clears it.
+    /// Replacement reasoning effort for Claude or Codex. Empty string clears it.
     pub effort: Option<String>,
     pub introduction: Option<String>,
     /// Raw `KEY=VALUE` entries from repeated `--env`. Validated and split
@@ -306,13 +306,13 @@ mod tests {
             display_name: None,
             system_prompt: None,
             model: None,
-            effort: Some("max"),
+            effort: Some("ultra"),
             introduction: None,
             env: None,
             dotenv: None,
             clear_session: false,
         });
-        assert_eq!(set["effort"], "max");
+        assert_eq!(set["effort"], "ultra");
 
         let clear = build_update_body(BuildArgs {
             display_name: None,

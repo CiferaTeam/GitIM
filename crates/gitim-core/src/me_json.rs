@@ -54,9 +54,9 @@ pub struct MeJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Effort level for the `claude` provider (`low` / `medium` / `high` /
-    /// `xhigh` / `max`). Passed to the CLI as `--effort`. `None` for other
-    /// providers or when unset. Preserved across re-onboard via merge.
+    /// Reasoning effort for Claude or Codex. Passed as `--effort` to Claude
+    /// and `model_reasoning_effort` to Codex. `None` uses the model default.
+    /// Preserved across re-onboard via merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 

@@ -10,6 +10,10 @@ import * as client from "@/lib/client";
 import { formatTimeOfDay } from "@/lib/timezone";
 import {
   PROVIDERS,
+  effortLabel,
+  normalizeProviderEffort,
+  providerSupportsEffort,
+  resolveProviderEffort,
   resolveProviderModelCatalog,
   resolveProviderModelDraft,
   type ProviderModelCatalog,
@@ -71,7 +75,7 @@ export function AgentDetail() {
   const [draftModel, setDraftModel] = useState("");
   const [draftModelIsCustom, setDraftModelIsCustom] = useState(false);
   const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
-  // Claude-only effort draft. "" = provider default.
+  // Claude/Codex effort draft. "" = selected model default.
   const [draftEffort, setDraftEffort] = useState("");
   const [draftDisplayName, setDraftDisplayName] = useState("");
   const [draftPrompt, setDraftPrompt] = useState("");
@@ -102,6 +106,11 @@ export function AgentDetail() {
   const selectedDraftModel = draftModelIsCustom
     ? providerCustomModelInput.trim()
     : draftModel.trim();
+  const resolvedEffort = resolveProviderEffort(
+    agent?.provider,
+    selectedDraftModel,
+    modelOptions,
+  );
   const draftModelSelectValue = draftModelIsCustom
     ? PROVIDER_CUSTOM_MODEL_VALUE
     : draftModel;
@@ -229,10 +238,10 @@ export function AgentDetail() {
       patch.model = newModel === "" ? null : newModel;
     }
 
-    // Effort is Claude-only and editable only while offline (like model). It
-    // does not cold-start the session — the runtime resumes with the new flag.
+    // Effort is editable for Claude/Codex only while offline (like model). It
+    // does not cold-start the session — the runtime resumes with the new value.
     const effortEditable =
-      agent.status === "offline" && agent.provider === "claude";
+      agent.status === "offline" && providerSupportsEffort(agent.provider);
     const newEffort = draftEffort;
     const oldEffort = agent.effort ?? "";
     const effortChanged = effortEditable && newEffort !== oldEffort;
@@ -463,6 +472,16 @@ export function AgentDetail() {
                     setDraftModel(next);
                     setProviderCustomModelInput("");
                   }
+                  setDraftEffort((current) =>
+                    normalizeProviderEffort(
+                      agent.provider,
+                      next === PROVIDER_CUSTOM_MODEL_VALUE
+                        ? selectedDraftModel
+                        : next,
+                      modelOptions,
+                      current,
+                    ),
+                  );
                 }}
                 disabled={isRunning || mode === "saving"}
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -523,7 +542,7 @@ export function AgentDetail() {
           )}
         </Field>
 
-        {agent.provider === "claude" && (
+        {providerSupportsEffort(agent.provider) && (
           <Field label="Effort">
             {mode !== "view" ? (
               <div className="space-y-1.5">
@@ -533,12 +552,22 @@ export function AgentDetail() {
                   disabled={isRunning || mode === "saving"}
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <option value="">Use CLI default</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="xhigh">XHigh</option>
-                  <option value="max">Max</option>
+                  <option value="">
+                    {resolvedEffort.defaultEffort
+                      ? `Use model default (${effortLabel(resolvedEffort.defaultEffort)})`
+                      : "Use CLI default"}
+                  </option>
+                  {draftEffort &&
+                    !resolvedEffort.values.includes(draftEffort) && (
+                      <option value={draftEffort}>
+                        {effortLabel(draftEffort)} (current)
+                      </option>
+                    )}
+                  {resolvedEffort.values.map((value) => (
+                    <option key={value} value={value}>
+                      {effortLabel(value)}
+                    </option>
+                  ))}
                 </select>
               </div>
             ) : agent.effort ? (
@@ -547,7 +576,7 @@ export function AgentDetail() {
               </span>
             ) : (
               <span className="text-text-muted italic text-sm">
-                Default (system decides)
+                Default (model decides)
               </span>
             )}
           </Field>

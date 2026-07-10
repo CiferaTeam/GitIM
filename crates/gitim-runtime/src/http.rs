@@ -313,8 +313,8 @@ pub struct AgentInfo {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Claude-only effort level (`low`..`max`). Round-trips to the WebUI so the
-    /// edit form can show the current value. None for other providers / unset.
+    /// Claude/Codex reasoning effort. Round-trips to the WebUI so the edit
+    /// form can show the current value. None means use the model default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2745,8 +2745,8 @@ struct AgentAddRequest {
     provider: String,
     #[serde(default)]
     model: Option<String>,
-    /// Claude-only effort level (`low` / `medium` / `high` / `xhigh` / `max`).
-    /// Omitted / empty leaves the CLI default. Ignored for other providers.
+    /// Claude/Codex effort level. Omitted / empty uses the selected model's
+    /// CLI default. Other providers do not consume this field.
     #[serde(default)]
     effort: Option<String>,
     #[serde(default)]
@@ -2990,6 +2990,7 @@ async fn agents_add(
         &req.provider,
         Some(&req.env),
         req.model.as_deref(),
+        req.effort.as_deref(),
         req.llm_provider.as_deref(),
         req.llm_model.as_deref(),
     )
@@ -3888,7 +3889,7 @@ struct AgentUpdateRequest {
     system_prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "deser_triple_option")]
     model: Option<Option<String>>,
-    /// Claude-only effort. Three-state like `model`: absent → no-op,
+    /// Claude/Codex effort. Three-state like `model`: absent → no-op,
     /// null / "" → clear (CLI default), "level" → set.
     #[serde(default, deserialize_with = "deser_triple_option")]
     effort: Option<Option<String>>,
@@ -4042,8 +4043,8 @@ async fn agents_patch(
     // while the agent is offline (frontend gate), so it takes effect on the
     // next Start. Unlike model it does NOT clear the session — effort changes
     // how hard the model thinks, not the conversation, so resuming with a new
-    // --effort is correct. The Claude provider's SpawnSig also carries effort,
-    // so any in-process change forces a respawn that picks up the new flag.
+    // configured effort is correct. Claude's SpawnSig also carries effort, so
+    // any in-process change forces a respawn that picks up the new flag.
     if let Some(effort_opt) = &req.effort {
         me.effort = match effort_opt {
             Some(s) if !s.is_empty() => Some(s.clone()),

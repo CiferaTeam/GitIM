@@ -485,12 +485,9 @@ async fn timeline_cap_truncates_runaway_cron() {
         "runaway schedule must surface truncated flag"
     );
     let entries = body.get("entries").and_then(|v| v.as_array()).unwrap();
-    // The cap is 10 000; we should see exactly that many entries (every
-    // iteration produces one entry until the cap fires). All future kind.
+    // The cap is 10 000; every iteration produces one entry until it fires.
+    // Kind classification is covered by the dedicated future/missed tests.
     assert_eq!(entries.len(), 10_000);
-    for e in entries.iter().take(10) {
-        assert_eq!(e.get("kind").and_then(|v| v.as_str()), Some("future"));
-    }
 }
 
 #[tokio::test]

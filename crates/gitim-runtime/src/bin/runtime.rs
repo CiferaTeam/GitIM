@@ -101,7 +101,8 @@ enum Command {
         /// semantics; passed through verbatim.
         #[arg(long)]
         model: Option<String>,
-        /// Optional effort level (Claude only): low / medium / high / xhigh / max.
+        /// Optional reasoning effort for Claude or Codex (for example low,
+        /// medium, high, xhigh, max, or ultra). Must be supported by the model.
         #[arg(long)]
         effort: Option<String>,
         /// Inline system prompt. Mutually exclusive with --system-prompt-file.
@@ -181,8 +182,8 @@ enum Command {
         /// — the runtime rejects model changes on running agents.
         #[arg(long)]
         model: Option<String>,
-        /// Replacement effort level (Claude only): low / medium / high / xhigh /
-        /// max. Pass an empty string to clear. Stop the agent first.
+        /// Replacement reasoning effort for Claude or Codex. Pass an empty
+        /// string to use the model default. Stop the agent first.
         #[arg(long)]
         effort: Option<String>,
         /// Replacement introduction blurb.
@@ -1385,6 +1386,39 @@ mod argv_subcommand_tests {
     }
 
     #[test]
+    fn add_agent_codex_effort_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "codex-bot",
+            "--display-name",
+            "Codex Bot",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "ultra",
+        ])
+        .expect("parse must succeed");
+
+        match args.command {
+            Some(Command::AddAgent {
+                provider,
+                model,
+                effort,
+                ..
+            }) => {
+                assert_eq!(provider, "codex");
+                assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+                assert_eq!(effort.as_deref(), Some("ultra"));
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn add_agent_missing_handler_fails() {
         let result = Args::try_parse_from([
             "gitim-runtime",
@@ -1656,6 +1690,27 @@ mod argv_subcommand_tests {
                 assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
                 assert_eq!(introduction.as_deref(), Some("new blurb"));
                 assert!(!clear_session);
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_codex_effort_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "codex-bot",
+            "--effort",
+            "ultra",
+        ])
+        .expect("parse must succeed");
+
+        match args.command {
+            Some(Command::UpdateAgent { id, effort, .. }) => {
+                assert_eq!(id, "codex-bot");
+                assert_eq!(effort.as_deref(), Some("ultra"));
             }
             other => panic!("expected UpdateAgent, got {other:?}"),
         }

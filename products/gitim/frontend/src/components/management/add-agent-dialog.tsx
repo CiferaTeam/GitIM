@@ -15,6 +15,10 @@ import { toHandler, validateHandler } from "@/lib/client";
 import {
   PROVIDER_IDS,
   PROVIDERS,
+  effortLabel,
+  normalizeProviderEffort,
+  providerSupportsEffort,
+  resolveProviderEffort,
   resolveProviderModelCatalog,
   type PreflightResult,
   type ProviderId,
@@ -43,7 +47,7 @@ export function AddAgentDialog() {
   const [handlerManuallyEdited, setHandlerManuallyEdited] = useState(false);
   const [provider, setProvider] = useState<ProviderId | "">("");
   const [model, setModel] = useState("");
-  // Claude-only effort level. "" = provider default (no --effort flag).
+  // Claude/Codex reasoning effort. "" = selected model default.
   const [effort, setEffort] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [introduction, setIntroduction] = useState("");
@@ -93,6 +97,11 @@ export function AddAgentDialog() {
     model === PROVIDER_CUSTOM_MODEL_VALUE
       ? providerCustomModelInput.trim()
       : model;
+  const resolvedEffort = resolveProviderEffort(
+    provider || undefined,
+    selectedProviderModel,
+    availableModels,
+  );
   // Effective model to pass to API: when runtime model discovery fails, the
   // visible field is the custom model input even though no custom sentinel was
   // selected from a model list.
@@ -268,7 +277,7 @@ export function AddAgentDialog() {
         joinGeneral,
         provider === "hermes" ? hermesLlmOverride?.llmProvider : undefined,
         provider === "hermes" ? hermesLlmOverride?.llmModel : undefined,
-        provider === "claude" ? effort || undefined : undefined,
+        providerSupportsEffort(provider) ? effort || undefined : undefined,
       );
       if (res.ok && res.data?.agent) {
         addAgent(res.data.agent as Agent);
@@ -447,10 +456,21 @@ export function AddAgentDialog() {
                     id="agent-model"
                     value={model}
                     onChange={(e) => {
-                      setModel(e.target.value);
-                      if (e.target.value !== PROVIDER_CUSTOM_MODEL_VALUE) {
+                      const nextModel = e.target.value;
+                      setModel(nextModel);
+                      if (nextModel !== PROVIDER_CUSTOM_MODEL_VALUE) {
                         setProviderCustomModelInput("");
                       }
+                      setEffort((current) =>
+                        normalizeProviderEffort(
+                          provider || undefined,
+                          nextModel === PROVIDER_CUSTOM_MODEL_VALUE
+                            ? providerCustomModelInput.trim()
+                            : nextModel,
+                          availableModels,
+                          current,
+                        ),
+                      );
                     }}
                     disabled={!provider}
                     className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -498,7 +518,7 @@ export function AddAgentDialog() {
                 </div>
               ) : null}
 
-              {provider === "claude" && (
+              {providerSupportsEffort(provider) && (
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium" htmlFor="agent-effort">
                     Effort
@@ -509,17 +529,21 @@ export function AddAgentDialog() {
                     onChange={(e) => setEffort(e.target.value)}
                     className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
-                    <option value="">Use CLI default</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                    <option value="xhigh">XHigh</option>
-                    <option value="max">Max</option>
+                    <option value="">
+                      {resolvedEffort.defaultEffort
+                        ? `Use model default (${effortLabel(resolvedEffort.defaultEffort)})`
+                        : "Use CLI default"}
+                    </option>
+                    {resolvedEffort.values.map((value) => (
+                      <option key={value} value={value}>
+                        {effortLabel(value)}
+                      </option>
+                    ))}
                   </select>
                   <p className="text-xs text-muted-foreground">
                     How hard the model thinks. Higher effort means deeper
-                    reasoning at more latency and cost. Not all levels are valid
-                    for every model.
+                    reasoning at more latency and cost. Codex choices follow the
+                    selected model's runtime catalog when available.
                   </p>
                 </div>
               )}

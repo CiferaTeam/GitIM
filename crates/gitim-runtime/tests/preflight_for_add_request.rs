@@ -76,7 +76,7 @@ fn add_request_preflight_default_timeout_is_five_minutes() {
 async fn mock_provider_short_circuits_success() {
     // No fake binary needed — the dispatcher must not spawn anything for
     // provider="mock". If it did, the call would fail (no `mock` on PATH).
-    let result = preflight_for_add_request("mock", None, None, None, None).await;
+    let result = preflight_for_add_request("mock", None, None, None, None, None).await;
 
     assert!(
         result.available,
@@ -99,7 +99,7 @@ async fn mock_provider_passes_classify_to_provision_preflight_failed_default() {
     // use. But verify the contract: a successful result without failure_code
     // also falls through to the generic code (since classify is only consulted
     // on failure).
-    let result = preflight_for_add_request("mock", None, None, None, None).await;
+    let result = preflight_for_add_request("mock", None, None, None, None, None).await;
     assert_eq!(
         classify_preflight_error_code(&result),
         ERROR_CODE_PROVISION_PREFLIGHT_FAILED
@@ -110,7 +110,8 @@ async fn mock_provider_passes_classify_to_provision_preflight_failed_default() {
 
 #[tokio::test]
 async fn unknown_provider_returns_unknown_failure_code() {
-    let result = preflight_for_add_request("madeup-provider-xyz", None, None, None, None).await;
+    let result =
+        preflight_for_add_request("madeup-provider-xyz", None, None, None, None, None).await;
 
     assert!(!result.available);
     assert_eq!(result.provider, "madeup-provider-xyz");
@@ -157,6 +158,7 @@ async fn claude_dispatch_passes_env_and_model_overrides() {
         Some("test-model-abc"),
         None,
         None,
+        None,
         overrides,
     )
     .await;
@@ -175,6 +177,42 @@ async fn claude_dispatch_passes_env_and_model_overrides() {
     assert!(
         captured.contains("MY_TEST_KEY=claude-env-here"),
         "expected env override at child env, got: {captured}"
+    );
+}
+
+// ─── codex dispatch ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn codex_dispatch_passes_model_and_effort_overrides() {
+    let tmp = TempDir::new().unwrap();
+    let capture = tmp.path().join("argv.txt");
+    let stdout_body = concat!(
+        "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"GITIM_OK\"}}\n",
+        "{\"type\":\"turn.completed\"}"
+    );
+    let script = make_capture_script(tmp.path(), "fake_codex.sh", &capture, stdout_body, &[]);
+    let overrides = PreflightDispatchOverrides {
+        codex_bin: Some(script.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
+    let result = preflight_for_add_request_with_overrides(
+        "codex",
+        None,
+        Some("gpt-5.6-sol"),
+        Some("ultra"),
+        None,
+        None,
+        overrides,
+    )
+    .await;
+
+    assert!(result.available, "preflight should succeed, got {result:?}");
+    let captured = std::fs::read_to_string(&capture).unwrap();
+    assert!(captured.contains("--model gpt-5.6-sol"), "{captured}");
+    assert!(
+        captured.contains(r#"model_reasoning_effort="ultra""#),
+        "{captured}"
     );
 }
 
@@ -204,6 +242,7 @@ async fn cursor_dispatch_uses_print_stream_json_and_passes_env_model() {
         "cursor",
         Some(&env),
         Some("composer-2-fast"),
+        None,
         None,
         None,
         overrides,
@@ -253,6 +292,7 @@ async fn hermes_dual_llm_calls_preflight_hermes_with() {
         "hermes",
         None,
         None,
+        None,
         Some("minimax-cn"),
         Some("MiniMax-M2.7-highspeed"),
         overrides,
@@ -287,7 +327,8 @@ async fn hermes_dual_llm_calls_preflight_hermes_with() {
 #[tokio::test]
 async fn hermes_missing_one_llm_returns_missing_llm_provider_code() {
     // Only llm_provider supplied → setup-level failure, no spawn.
-    let result = preflight_for_add_request("hermes", None, None, Some("anthropic"), None).await;
+    let result =
+        preflight_for_add_request("hermes", None, None, None, Some("anthropic"), None).await;
 
     assert!(!result.available);
     assert_eq!(result.provider, "hermes");
@@ -302,7 +343,7 @@ async fn hermes_missing_one_llm_returns_missing_llm_provider_code() {
 
     // And the mirror case: only llm_model supplied.
     let result2 =
-        preflight_for_add_request("hermes", None, None, None, Some("claude-opus-4-7")).await;
+        preflight_for_add_request("hermes", None, None, None, None, Some("claude-opus-4-7")).await;
     assert_eq!(
         result2.failure_code.as_deref(),
         Some(FAILURE_CODE_MISSING_LLM_PROVIDER)
@@ -335,7 +376,8 @@ async fn hermes_no_llm_default_profile_present_uses_resolved_llm() {
     };
 
     let result =
-        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, None, overrides)
+            .await;
 
     assert!(
         result.available,
@@ -378,7 +420,8 @@ async fn hermes_no_llm_default_profile_missing_llm_returns_default_profile_no_ll
     };
 
     let result =
-        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, None, overrides)
+            .await;
 
     assert!(!result.available, "expected failure, got {result:?}");
     assert_eq!(result.provider, "hermes");
@@ -415,7 +458,8 @@ async fn hermes_no_llm_default_profile_yaml_without_model_returns_default_profil
     };
 
     let result =
-        preflight_for_add_request_with_overrides("hermes", None, None, None, None, overrides).await;
+        preflight_for_add_request_with_overrides("hermes", None, None, None, None, None, overrides)
+            .await;
 
     assert_eq!(
         result.failure_code.as_deref(),
@@ -510,7 +554,8 @@ async fn outer_timeout_fires_with_slow_binary() {
 
     let started = std::time::Instant::now();
     let result =
-        preflight_for_add_request_with_overrides("claude", None, None, None, None, overrides).await;
+        preflight_for_add_request_with_overrides("claude", None, None, None, None, None, overrides)
+            .await;
     let elapsed = started.elapsed();
 
     assert!(!result.available);

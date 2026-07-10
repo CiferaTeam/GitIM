@@ -39,7 +39,7 @@ pub struct Args {
     pub display_name: String,
     pub provider: String,
     pub model: Option<String>,
-    /// Effort level (Claude only): low / medium / high / xhigh / max.
+    /// Reasoning effort for Claude or Codex. The selected model must support it.
     pub effort: Option<String>,
     pub system_prompt: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
@@ -305,17 +305,17 @@ mod tests {
         }
     }
 
-    /// Effort is forwarded verbatim when present (Claude only at the UI layer,
-    /// but the wire builder is provider-agnostic — the runtime owns the gate).
+    /// Effort is forwarded verbatim when present; the runtime/provider owns
+    /// model-specific validation.
     #[test]
     fn build_body_effort_forwarded() {
         let env = HashMap::new();
         let body = build_add_agent_body(BuildArgs {
             handler: "alice",
             display_name: "Alice",
-            provider: "claude",
-            model: Some("claude-opus-4-8"),
-            effort: Some("xhigh"),
+            provider: "codex",
+            model: Some("gpt-5.6-sol"),
+            effort: Some("ultra"),
             system_prompt: None,
             introduction: None,
             env: &env,
@@ -324,8 +324,8 @@ mod tests {
             llm_model: None,
         })
         .unwrap();
-        assert_eq!(body["effort"], "xhigh");
-        assert_eq!(body["model"], "claude-opus-4-8");
+        assert_eq!(body["effort"], "ultra");
+        assert_eq!(body["model"], "gpt-5.6-sol");
     }
 
     /// Hermes happy path: both LLM flags get forwarded as siblings under

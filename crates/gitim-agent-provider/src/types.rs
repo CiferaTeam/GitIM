@@ -21,8 +21,8 @@ pub struct ExecOptions {
     pub cwd: Option<PathBuf>,
     /// Model override (e.g., "claude-sonnet-4-6").
     pub model: Option<String>,
-    /// Effort override (Claude only): "low" / "medium" / "high" / "xhigh" /
-    /// "max". `None` lets the CLI pick its default. Other providers ignore it.
+    /// Reasoning effort override for Claude or Codex. `None` lets the selected
+    /// model use its CLI default. Other providers ignore it.
     pub effort: Option<String>,
     /// System prompt to append.
     pub system_prompt: Option<String>,
