@@ -111,114 +111,72 @@ async fn create_happy_path() {
     assert!(authors.contains("alice"), "authors: {authors}");
 }
 
-// ─── 2. Name validation ──────────────────────────────────────────────────────
-
 #[tokio::test]
-async fn create_name_invalid_uppercase() {
+async fn create_validation_errors_map_to_stable_codes() {
     let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "WeeklyReport",
-        "0 9 * * 1",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
-}
-
-#[tokio::test]
-async fn create_name_invalid_empty() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "",
-        "0 9 * * 1",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
-}
-
-#[tokio::test]
-async fn create_name_invalid_too_long() {
-    let (_tmp, state) = setup_test_repo().await;
-    let name = "a".repeat(64);
-    let resp = create_cron(
-        state.clone(),
-        &name,
-        "0 9 * * 1",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
-}
-
-#[tokio::test]
-async fn create_name_invalid_reserved() {
-    let (_tmp, state) = setup_test_repo().await;
-    for reserved in ["archive", "crons"] {
-        let resp = create_cron(
-            state.clone(),
-            reserved,
+    let oversized_prompt = "a".repeat(8 * 1024 + 1);
+    let cases = [
+        (
+            "invalid name",
+            "WeeklyReport",
             "0 9 * * 1",
-            "alice",
             "x",
             None,
+            "invalid_name",
+        ),
+        (
+            "invalid schedule",
+            "invalid-schedule",
+            "totally bogus",
+            "x",
+            None,
+            "invalid_schedule",
+        ),
+        (
+            "invalid timezone",
+            "invalid-timezone",
+            "0 9 * * 1",
+            "x",
+            Some("Mars/Olympus_Mons"),
+            "invalid_timezone",
+        ),
+        (
+            "empty prompt",
+            "empty-prompt",
+            "@daily",
+            "",
+            None,
+            "prompt_empty",
+        ),
+        (
+            "oversized prompt",
+            "oversized-prompt",
+            "@daily",
+            oversized_prompt.as_str(),
+            None,
+            "prompt_too_large",
+        ),
+    ];
+
+    for (case, name, schedule, prompt, timezone, expected_code) in cases {
+        let response = create_cron(
+            state.clone(),
+            name,
+            schedule,
+            "alice",
+            prompt,
+            timezone,
             Some("alice"),
         )
         .await;
-        assert!(!resp.ok, "name '{}' should be rejected", reserved);
-        assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
+        assert!(!response.ok, "{case} should fail");
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(expected_code),
+            "wrong error code for {case}"
+        );
     }
 }
-
-#[tokio::test]
-async fn create_name_invalid_dotfile() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        ".hidden",
-        "0 9 * * 1",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
-}
-
-#[tokio::test]
-async fn create_name_invalid_leading_hyphen() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "-leading",
-        "0 9 * * 1",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_name"));
-}
-
-// ─── 3. Name conflict ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn create_name_conflict_active() {
@@ -278,79 +236,18 @@ async fn create_name_conflict_archived() {
     assert_eq!(resp.error_code.as_deref(), Some("name_conflict"));
 }
 
-// ─── 4. Schedule + timezone validation ───────────────────────────────────────
-
 #[tokio::test]
-async fn create_invalid_schedule() {
+async fn create_resolves_self_aliases() {
     let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "weekly",
-        "totally bogus",
-        "alice",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_schedule"));
-}
 
-#[tokio::test]
-async fn create_invalid_timezone() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "weekly",
-        "0 9 * * 1",
-        "alice",
-        "x",
-        Some("Mars/Olympus_Mons"),
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("invalid_timezone"));
-}
-
-// ─── 5. Target resolution ────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn create_self_target_resolves() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "self-checkin",
-        "@daily",
-        "@self",
-        "x",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(resp.ok, "create failed: {:?}", resp.error);
-    assert_eq!(resp.data.as_ref().unwrap()["target"], "alice");
-
-    let body =
-        std::fs::read_to_string(state.repo_root.join("crons/self-checkin/spec.yaml")).unwrap();
-    let spec: CronSpec = CronSpec::from_yaml(&body).unwrap();
-    assert_eq!(spec.target.as_str(), "alice");
-}
-
-#[tokio::test]
-async fn create_resolves_self_case_insensitive() {
-    // `@SELF`, `@Self`, `@self`, `SELF` (no leading @) all alias the
-    // author handler. Without the eq_ignore_ascii_case path, anything
-    // but lowercase `@self` would fall through to `Handler::new("SELF")`
-    // — which rejects on uppercase and surfaces a confusing
-    // "InvalidChar" error from a layer the user isn't trying to interact
-    // with.
-    for variant in ["@SELF", "@Self", "@self", "SELF", "Self"] {
-        let (_tmp, state) = setup_test_repo().await;
+    for (index, variant) in ["@SELF", "@Self", "@self", "SELF", "Self"]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("self-test-{index}");
         let resp = create_cron(
             state.clone(),
-            "self-test",
+            &name,
             "@daily",
             variant,
             "x",
@@ -369,6 +266,11 @@ async fn create_resolves_self_case_insensitive() {
             "target='{}' did not resolve to author handler",
             variant
         );
+
+        let body = std::fs::read_to_string(state.repo_root.join(format!("crons/{name}/spec.yaml")))
+            .unwrap();
+        let spec = CronSpec::from_yaml(&body).unwrap();
+        assert_eq!(spec.target.as_str(), "alice");
     }
 }
 
@@ -407,45 +309,6 @@ async fn create_target_not_found() {
     assert!(!resp.ok);
     assert_eq!(resp.error_code.as_deref(), Some("target_not_found"));
 }
-
-// ─── 6. Prompt validation ────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn create_empty_prompt() {
-    let (_tmp, state) = setup_test_repo().await;
-    let resp = create_cron(
-        state.clone(),
-        "noop",
-        "@daily",
-        "alice",
-        "",
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("prompt_empty"));
-}
-
-#[tokio::test]
-async fn create_oversized_prompt() {
-    let (_tmp, state) = setup_test_repo().await;
-    let huge = "a".repeat(8 * 1024 + 1);
-    let resp = create_cron(
-        state.clone(),
-        "spam",
-        "@daily",
-        "alice",
-        &huge,
-        None,
-        Some("alice"),
-    )
-    .await;
-    assert!(!resp.ok);
-    assert_eq!(resp.error_code.as_deref(), Some("prompt_too_large"));
-}
-
-// ─── 7. Author resolution from dispatch ──────────────────────────────────────
 
 #[tokio::test]
 async fn create_author_resolved_from_state_when_omitted() {

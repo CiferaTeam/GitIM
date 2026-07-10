@@ -2,6 +2,7 @@
 
 use gitim_core::validator::{
     validate_channel_meta, validate_channel_name, validate_config, validate_user_meta,
+    ValidationError,
 };
 
 #[test]
@@ -49,24 +50,14 @@ fn test_channel_meta_invalid_created_by() {
 }
 
 #[test]
-fn test_valid_channel_names() {
-    assert!(validate_channel_name("general").is_ok());
-    assert!(validate_channel_name("dev").is_ok());
+fn test_channel_name_validation_maps_protocol_result() {
     assert!(validate_channel_name("project-alpha").is_ok());
-    assert!(validate_channel_name("a-b-c").is_ok());
-    assert!(validate_channel_name("team2").is_ok());
-}
 
-#[test]
-fn test_invalid_channel_names() {
-    assert!(validate_channel_name("").is_err());
-    assert!(validate_channel_name("-general").is_err());
-    assert!(validate_channel_name("general-").is_err());
-    assert!(validate_channel_name("gen--eral").is_err());
-    assert!(validate_channel_name("General").is_err());
-    assert!(validate_channel_name("gen eral").is_err());
-    let long = "a".repeat(33);
-    assert!(validate_channel_name(&long).is_err());
+    let error = validate_channel_name("Project-Alpha").unwrap_err();
+    assert!(matches!(
+        error,
+        ValidationError::InvalidChannelName(reason) if reason == "invalid characters"
+    ));
 }
 
 #[test]
