@@ -6,6 +6,15 @@ import {
 } from "./providers";
 
 describe("resolveProviderModelCatalog", () => {
+  it("keeps Codex 5.6 variants at the front of the static fallback", () => {
+    expect(PROVIDERS.codex.models.slice(0, 4)).toEqual([
+      { id: "gpt-5.6-sol", label: "GPT-5.6-Sol" },
+      { id: "gpt-5.6-terra", label: "GPT-5.6-Terra" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna" },
+      { id: "gpt-5.5", label: "GPT-5.5" },
+    ]);
+  });
+
   it("uses runtime models ahead of static fallback models", () => {
     const resolved = resolveProviderModelCatalog(PROVIDERS.codex, {
       provider: "codex",
