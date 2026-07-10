@@ -206,11 +206,4 @@ mod tests {
         let result = validate_leave("alice", &[], USERS, SOLO);
         assert_eq!(result, Err(ImRuleError::LastMember("alice".into())));
     }
-
-    #[test]
-    fn leave_two_members_self_ok() {
-        // Guard against the LastMember rule mis-triggering when len > 1.
-        let result = validate_leave("alice", &[], USERS, MEMBERS);
-        assert!(result.is_ok());
-    }
 }

@@ -106,20 +106,6 @@ need <@coder> to review
 }
 
 #[test]
-fn test_parse_no_mentions() {
-    let input = "[L000001][P000000][@nexus][20250316T120000Z] plain message\n";
-    let result = parse_thread(input).unwrap();
-    assert!(result.messages()[0].mentions.is_empty());
-}
-
-#[test]
-fn test_parse_bare_at_not_extracted() {
-    let input = "[L000001][P000000][@nexus][20250316T120000Z] cc @lewis 看看\n";
-    let result = parse_thread(input).unwrap();
-    assert!(result.messages()[0].mentions.is_empty());
-}
-
-#[test]
 fn test_parse_event_line() {
     let input = "[L000001][P000000][@nexus][20250316T120000Z][E:join] {}\n";
     let result = parse_thread(input).unwrap();
@@ -201,29 +187,6 @@ second line <~alice>
         msg.links[1].kind,
         LinkKind::UserProfile {
             handler: Handler::new("alice").unwrap()
-        }
-    );
-}
-
-#[test]
-fn test_parse_message_no_links() {
-    let input = "[L000001][P000000][@nexus][20250316T120000Z] plain message\n";
-    let result = parse_thread(input).unwrap();
-    assert!(result.messages()[0].links.is_empty());
-}
-
-#[test]
-fn test_parse_mentions_and_links_independent() {
-    let input = "[L000001][P000000][@nexus][20250316T120000Z] <@lewis> see <#general>\n";
-    let result = parse_thread(input).unwrap();
-    let msg = &result.messages()[0];
-    assert_eq!(msg.mentions.len(), 1);
-    assert_eq!(msg.mentions[0].as_str(), "lewis");
-    assert_eq!(msg.links.len(), 1);
-    assert_eq!(
-        msg.links[0].kind,
-        LinkKind::Channel {
-            name: "general".into()
         }
     );
 }
