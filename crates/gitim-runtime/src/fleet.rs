@@ -16,6 +16,8 @@ const SSE_RECONNECT_INITIAL: Duration = Duration::from_secs(2);
 /// comes back the subscription recovers within a minute.
 const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
 
+pub const LEGACY_IDENTITY_DISCOVERY_CONCURRENCY: usize = 8;
+
 /// How often the tunnel watcher probes a healthy tunnel.
 const TUNNEL_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Initial retry delay after a tunnel watcher failure.
@@ -573,18 +575,27 @@ pub async fn discover_legacy_runtime_id_once(
     let transition_lock = fleet_transition_lock(state);
     let _transition = preconditions::mutex_lock(&transition_lock);
 
-    let current_snapshot = {
+    let (current_snapshot, live_identity_keys) = {
         let runtime_state = preconditions::mutex_lock(state);
         let current = runtime_state
             .fleet_nodes
             .values()
             .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
             .map(|runtime| runtime.entry.clone());
-        current.filter(|entry| {
+        let current = current.filter(|entry| {
             normalized_base_url(&entry.base_url) == normalized_base_url(&snapshot.base_url)
                 && canonical_runtime_id(entry.runtime_id.as_deref())
                     .is_none_or(|existing| existing == canonical_id)
-        })
+        });
+        let live_identity_keys = runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| LegacyIdentityNode {
+                alias: normalized_node_id(&runtime.entry.node_id),
+                base_url: normalized_base_url(&runtime.entry.base_url),
+            })
+            .collect::<Vec<_>>();
+        (current, live_identity_keys)
     };
     let Some(current_snapshot) = current_snapshot else {
         return Ok(None);
@@ -608,8 +619,15 @@ pub async fn discover_legacy_runtime_id_once(
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                (canonical_runtime_id(entry.runtime_id.as_deref()) == Some(canonical_id))
-                    .then_some(index)
+                let normalized = normalize_node(entry.clone());
+                let identity_key = LegacyIdentityNode {
+                    alias: normalized.node_id.clone(),
+                    base_url: normalized.base_url.clone(),
+                };
+                (canonical_runtime_id(normalized.runtime_id.as_deref()) == Some(canonical_id)
+                    && validate_node(&normalized).is_ok()
+                    && live_identity_keys.contains(&identity_key))
+                .then_some(index)
             })
             .collect();
         let winner_index = *matching_indices.first()?;
@@ -648,11 +666,13 @@ pub async fn discover_legacy_runtime_id_once(
                 .is_none_or(|existing| existing == canonical_id))
         .then(|| key.clone())
     });
-    if let Some(winner_key) = winner_key {
-        if let Some(runtime) = runtime_state.fleet_nodes.get_mut(&winner_key) {
-            runtime.entry.runtime_id = Some(runtime_id.clone());
-        }
-    }
+    let Some(winner_key) = winner_key else {
+        return Ok(Some(runtime_id));
+    };
+    let Some(winner) = runtime_state.fleet_nodes.get_mut(&winner_key) else {
+        return Ok(Some(runtime_id));
+    };
+    winner.entry.runtime_id = Some(runtime_id.clone());
 
     let loser_keys: Vec<_> = runtime_state
         .fleet_nodes
@@ -699,13 +719,18 @@ pub async fn resolve_active_legacy_identities(
     unresolved.sort();
     unresolved.dedup();
 
-    let attempts = unresolved
-        .iter()
-        .map(|node_id| discover_legacy_runtime_id_once(state, node_id));
-    for (node_id, result) in unresolved
-        .iter()
-        .zip(futures::future::join_all(attempts).await)
-    {
+    let results: Vec<_> = futures::stream::iter(unresolved.iter().cloned())
+        .map(|node_id| {
+            let state = state.clone();
+            async move {
+                let result = discover_legacy_runtime_id_once(&state, &node_id).await;
+                (node_id, result)
+            }
+        })
+        .buffer_unordered(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY)
+        .collect()
+        .await;
+    for (node_id, result) in results {
         if let Err(error) = result {
             tracing::warn!(
                 node_id = %node_id,
@@ -1365,5 +1390,10 @@ mod tests {
 
         // ssh_tunnel present but no fixed local_port → not watchable
         assert!(tunnel_launch_config(&entry_with_tunnel(None)).is_none());
+    }
+
+    #[test]
+    fn legacy_identity_discovery_concurrency_is_bounded() {
+        assert_eq!(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY, 8);
     }
 }

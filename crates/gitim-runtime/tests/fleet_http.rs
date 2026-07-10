@@ -1410,3 +1410,49 @@ async fn remote_health_rejects_chunked_body_larger_than_64_kib() {
     assert!(error.contains("64 KiB"), "{error}");
     remote_server.abort();
 }
+
+#[tokio::test]
+#[serial(home_env)]
+async fn invalid_earlier_config_entry_cannot_win_legacy_backfill() {
+    let home_guard = HomeGuard::install();
+    let (valid_url, valid_server) = spawn_remote_runtime_with_health(json!({
+        "service": "gitim-runtime",
+        "runtime_id": REMOTE_RUNTIME_ID,
+    }))
+    .await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let invalid = bare_fleet_node(
+        "invalid-first",
+        "not-a-valid-url",
+        Some(REMOTE_RUNTIME_ID_UPPERCASE),
+    );
+    assert!(fleet::validate_node(&fleet::normalize_node(invalid.clone())).is_err());
+    let valid = fleet_node("valid-second", &valid_url, None, "room", "remote-room");
+    let config = UserConfig {
+        fleet_nodes: vec![invalid, valid.clone()],
+        ..UserConfig::default()
+    };
+    user_config::write_to(&config, &runtime_path).unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), valid);
+
+    let discovered = fleet::discover_legacy_runtime_id_once(&state, "valid-second")
+        .await
+        .unwrap();
+
+    assert_eq!(discovered.as_deref(), Some(REMOTE_RUNTIME_ID));
+    let disk = user_config::read_from(Some(&runtime_path));
+    assert_eq!(
+        disk.fleet_nodes[1].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    let live = state.lock().unwrap();
+    assert_eq!(live.fleet_nodes.len(), 1);
+    assert_eq!(
+        live.fleet_nodes["valid-second"].entry.runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    drop(live);
+    assert_eq!(fleet::snapshot_workspace_peers(&state, "room").len(), 1);
+    valid_server.abort();
+}
