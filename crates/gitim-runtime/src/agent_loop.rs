@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gitim_agent_provider::{
     create, ExecOptions, ExecStatus, PromptContext, Provider, ProviderConfig, ProviderUsage,
@@ -16,10 +16,88 @@ use crate::error::RuntimeError;
 use crate::hermes_profile;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
+use crate::quick_session_executor::{
+    QuickSessionExecutor, QuickSessionExecutorConfig, QuickSessionRunOutcome,
+};
 use crate::state::{AgentState, LastSessionUsage, SessionUsageSnapshot, UsageSource};
 use crate::usage_log::{AgentUsageLog, UsageSummary};
 
 pub(crate) const MAX_FAILURE_RECOVERY_ATTEMPTS: u32 = 3;
+const QUICK_SESSION_RECOVERY_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+pub struct QuickSessionQueue {
+    queue: VecDeque<String>,
+    queued: HashSet<String>,
+}
+
+impl QuickSessionQueue {
+    pub fn enqueue(&mut self, session_id: String) {
+        if self.queued.insert(session_id.clone()) {
+            self.queue.push_back(session_id);
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<String> {
+        let session_id = self.queue.pop_front()?;
+        self.queued.remove(&session_id);
+        Some(session_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleTurn {
+    Primary(String),
+    Quick(String),
+}
+
+pub fn plan_cycle_turns(
+    primary: Option<String>,
+    quick_sessions: &mut QuickSessionQueue,
+) -> Vec<CycleTurn> {
+    let mut turns = Vec::with_capacity(2);
+    if let Some(prompt) = primary {
+        turns.push(CycleTurn::Primary(prompt));
+    }
+    if let Some(session_id) = quick_sessions.pop() {
+        turns.push(CycleTurn::Quick(session_id));
+    }
+    turns
+}
+
+pub fn should_scan_quick_sessions(last_scan: Option<Instant>, now: Instant) -> bool {
+    last_scan
+        .is_none_or(|last_scan| now.duration_since(last_scan) >= QUICK_SESSION_RECOVERY_INTERVAL)
+}
+
+pub fn split_quick_session_changes(
+    changes: Vec<ChannelChange>,
+    self_handler: &str,
+) -> (Vec<ChannelChange>, Vec<String>) {
+    let mut primary = Vec::new();
+    let mut quick_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for change in changes {
+        if matches!(
+            change.kind.as_str(),
+            "quick_session_meta" | "quick_session_thread"
+        ) {
+            let addressed_to_self = change.entries.iter().any(|entry| {
+                entry["recipients"].as_array().is_some_and(|recipients| {
+                    recipients
+                        .iter()
+                        .any(|recipient| recipient.as_str() == Some(self_handler))
+                })
+            });
+            if addressed_to_self && seen.insert(change.channel.clone()) {
+                quick_ids.push(change.channel);
+            }
+        } else {
+            primary.push(change);
+        }
+    }
+    (primary, quick_ids)
+}
 
 /// RAII guard that resets `is_working` to `false` on drop, covering:
 /// - normal scope exit
@@ -115,6 +193,7 @@ struct UsageEventPayload<'a> {
 pub struct AgentLoop {
     poller: Poller,
     provider: Box<dyn Provider>,
+    provider_config: ProviderConfig,
     session_token: Option<String>,
     pub poll_interval: Duration,
     repo_root: PathBuf,
@@ -140,6 +219,8 @@ pub struct AgentLoop {
     /// same truth without locking. `None` for legacy callers / tests; the
     /// production path injects via `set_is_working`.
     is_working: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    quick_sessions: QuickSessionQueue,
+    quick_session_last_scan: Option<Instant>,
 }
 
 impl AgentLoop {
@@ -167,7 +248,7 @@ impl AgentLoop {
         };
 
         let provider_config = build_provider_config(provider_type, handler, HashMap::new())?;
-        let provider = create(provider_type, provider_config)
+        let provider = create(provider_type, provider_config.clone())
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
         if state.session_token.is_some() {
@@ -177,6 +258,7 @@ impl AgentLoop {
         Ok(Self {
             poller,
             provider,
+            provider_config,
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
@@ -190,6 +272,8 @@ impl AgentLoop {
             runtime_state: None,
             workspace_root: None,
             is_working: None,
+            quick_sessions: QuickSessionQueue::default(),
+            quick_session_last_scan: None,
         })
     }
 
@@ -207,7 +291,7 @@ impl AgentLoop {
 
         let provider_config =
             build_provider_config(&config.provider_type, &config.handler, config.env.clone())?;
-        let provider = create(&config.provider_type, provider_config)
+        let provider = create(&config.provider_type, provider_config.clone())
             .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
 
         if state.session_token.is_some() {
@@ -217,6 +301,7 @@ impl AgentLoop {
         Ok(Self {
             poller,
             provider,
+            provider_config,
             session_token: state.session_token,
             poll_interval: Duration::from_secs(2),
             repo_root: repo_root.to_path_buf(),
@@ -230,6 +315,8 @@ impl AgentLoop {
             runtime_state: None,
             workspace_root: None,
             is_working: None,
+            quick_sessions: QuickSessionQueue::default(),
+            quick_session_last_scan: None,
         })
     }
 
@@ -254,6 +341,64 @@ impl AgentLoop {
     /// spawns; tests that don't drive HTTP handlers can skip this entirely.
     pub fn set_is_working(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.is_working = Some(flag);
+    }
+
+    fn quick_session_executor(&self) -> QuickSessionExecutor {
+        QuickSessionExecutor::new(QuickSessionExecutorConfig {
+            repo_root: self.repo_root.clone(),
+            workspace_root: self
+                .workspace_root
+                .clone()
+                .unwrap_or_else(|| self.repo_root.clone()),
+            workspace_id: self.workspace_id.clone(),
+            handler: self.handler.clone(),
+            provider_type: self.provider_type.clone(),
+            provider_config: self.provider_config.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            custom_system_prompt: self.custom_system_prompt.clone(),
+            activity_tx: self.activity_tx.clone(),
+        })
+    }
+
+    async fn scan_quick_sessions(&mut self) -> Result<(), RuntimeError> {
+        let ids = self.quick_session_executor().recover_actionable().await?;
+        for session_id in ids {
+            self.quick_sessions.enqueue(session_id);
+        }
+        self.quick_session_last_scan = Some(Instant::now());
+        Ok(())
+    }
+
+    async fn maybe_scan_quick_sessions(&mut self) -> Result<(), RuntimeError> {
+        let now = Instant::now();
+        if should_scan_quick_sessions(self.quick_session_last_scan, now) {
+            self.scan_quick_sessions().await?;
+        }
+        Ok(())
+    }
+
+    async fn run_next_quick_session(&mut self) -> Result<bool, RuntimeError> {
+        let Some(session_id) = self.quick_sessions.pop() else {
+            return Ok(false);
+        };
+        let _working_guard = self.is_working.clone().map(WorkingGuard::arm);
+        match self.quick_session_executor().execute(&session_id).await? {
+            QuickSessionRunOutcome::Noop => Ok(false),
+            QuickSessionRunOutcome::Completed { requeue } => {
+                if requeue {
+                    self.quick_sessions.enqueue(session_id);
+                }
+                Ok(true)
+            }
+            QuickSessionRunOutcome::Failed { requeue } => {
+                if requeue {
+                    self.quick_sessions.enqueue(session_id);
+                }
+                Ok(true)
+            }
+            QuickSessionRunOutcome::Discarded => Ok(true),
+        }
     }
 
     /// Test-only seam to swap the underlying provider after construction.
@@ -698,12 +843,19 @@ impl AgentLoop {
         } else {
             info!("agent loop started, cursor restored from state");
         }
+        self.scan_quick_sessions().await?;
         Ok(())
     }
 
     /// Run one poll-and-process cycle. Returns true if messages were processed.
     pub async fn run_once(&mut self) -> Result<bool, RuntimeError> {
         let result = self.poller.poll().await?;
+        let (primary_changes, quick_ids) =
+            split_quick_session_changes(result.changes, &self.handler);
+        for session_id in quick_ids {
+            self.quick_sessions.enqueue(session_id);
+        }
+        self.maybe_scan_quick_sessions().await?;
 
         // Load state up front so we can decide between "real idle" and
         // "post-reset self-wake" before any early return. The runtime arms
@@ -730,13 +882,13 @@ impl AgentLoop {
                 chrono::Utc::now(),
             ))
         };
-        let changes_prompt = if result.changes.is_empty() {
+        let changes_prompt = if primary_changes.is_empty() {
             None
         } else {
             // `format_changes_as_prompt` returns None when every entry was
             // self-authored — semantically the same as "no external input"
             // from the agent's point of view.
-            format_changes_as_prompt(&result.changes, &self.handler)
+            format_changes_as_prompt(&primary_changes, &self.handler)
         };
         let external_prompt = combine_timer_and_changes(timer_prefix, changes_prompt);
 
@@ -786,14 +938,14 @@ impl AgentLoop {
                 state.failure_recovery_attempts = 0;
                 state.save(&self.repo_root)?;
                 self.save_state()?;
-                return Ok(false);
+                return self.run_next_quick_session().await;
             }
             (None, false, false) => {
                 tracing::debug!(
                     "idle: no external changes, no post-reset/failure continuation pending"
                 );
                 self.save_state()?;
-                return Ok(false);
+                return self.run_next_quick_session().await;
             }
         };
 
@@ -891,11 +1043,19 @@ impl AgentLoop {
         // covering the entire execute + streaming loop + accumulation.
         let _working_guard = self.is_working.clone().map(WorkingGuard::arm);
 
-        let mut session = self
-            .provider
-            .execute(&prompt, opts)
-            .await
-            .map_err(|e| RuntimeError::ProviderFailed(e.to_string()))?;
+        let mut session = match self.provider.execute(&prompt, opts).await {
+            Ok(session) => session,
+            Err(error) => {
+                let primary_error = RuntimeError::ProviderFailed(error.to_string());
+                if let Err(quick_error) = self.run_next_quick_session().await {
+                    tracing::warn!(
+                        error = %quick_error,
+                        "quick session turn failed after primary provider start error"
+                    );
+                }
+                return Err(primary_error);
+            }
+        };
 
         // Drain events with periodic steering check
         let mut steering_check = tokio::time::interval(Duration::from_secs(5));
@@ -1008,10 +1168,20 @@ impl AgentLoop {
         }
 
         // Await final result
-        let exec_result = session
-            .result
-            .await
-            .map_err(|_| RuntimeError::ProviderFailed("result channel closed".into()))?;
+        let exec_result = match session.result.await {
+            Ok(result) => result,
+            Err(_) => {
+                let primary_error =
+                    RuntimeError::ProviderFailed("result channel closed".to_string());
+                if let Err(quick_error) = self.run_next_quick_session().await {
+                    tracing::warn!(
+                        error = %quick_error,
+                        "quick session turn failed after primary result channel closed"
+                    );
+                }
+                return Err(primary_error);
+            }
+        };
 
         // Silent reset short-circuit: agent asked to reset its own context.
         // Clear session_token so next cycle rebuilds the system prompt.
@@ -1071,6 +1241,7 @@ impl AgentLoop {
             self.clear_runtime_session_usage();
             self.emit_activity("done", "reset");
             self.save_state()?;
+            self.run_next_quick_session().await?;
             return Ok(true);
         }
 
@@ -1173,7 +1344,8 @@ impl AgentLoop {
             self.clear_failure_recovery_state()?;
         }
         self.save_state()?;
-        Ok(provider_completed)
+        let quick_processed = self.run_next_quick_session().await?;
+        Ok(provider_completed || quick_processed)
     }
 
     /// Run the agent loop indefinitely with exponential backoff on errors.
@@ -1203,6 +1375,7 @@ impl AgentLoop {
         } else {
             info!("agent loop started, cursor restored from state");
         }
+        self.scan_quick_sessions().await?;
 
         let mut consecutive_errors: u32 = 0;
         let mut consecutive_daemon_restarts: u32 = 0;
@@ -1376,7 +1549,12 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
     let mut has_external = false;
 
     for change in changes {
-        if change.kind == "channel_meta" {
+        if change.kind == "channel_meta"
+            || matches!(
+                change.kind.as_str(),
+                "quick_session_meta" | "quick_session_thread"
+            )
+        {
             continue;
         }
 

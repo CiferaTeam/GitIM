@@ -5,6 +5,10 @@
 mod common;
 
 use gitim_runtime::agent_loop::detect_steering_trigger;
+use gitim_runtime::agent_loop::{
+    plan_cycle_turns, should_scan_quick_sessions, split_quick_session_changes, CycleTurn,
+    QuickSessionQueue,
+};
 use gitim_runtime::poller::ChannelChange;
 
 fn make_entry(author: &str, body: &str) -> serde_json::Value {
@@ -26,6 +30,78 @@ fn make_changes(entries: Vec<(&str, &str)>) -> Vec<ChannelChange> {
             .map(|(author, body)| make_entry(author, body))
             .collect(),
     }]
+}
+
+#[test]
+fn quick_session_changes_are_not_formatted_into_primary_prompt() {
+    let quick_change = ChannelChange {
+        channel: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+        kind: "quick_session_thread".to_string(),
+        entries: vec![serde_json::json!({
+            "author": "alice",
+            "body": "private quick work",
+            "recipients": ["bot"]
+        })],
+    };
+    assert!(gitim_runtime::format_changes_as_prompt(
+        &[ChannelChange {
+            channel: quick_change.channel.clone(),
+            kind: quick_change.kind.clone(),
+            entries: quick_change.entries.clone(),
+        }],
+        "bot"
+    )
+    .is_none());
+    let changes = vec![
+        quick_change,
+        make_changes(vec![("alice", "normal channel work")]).remove(0),
+    ];
+
+    let (primary, quick_ids) = split_quick_session_changes(changes, "bot");
+    let prompt = gitim_runtime::format_changes_as_prompt(&primary, "bot").unwrap();
+    assert!(prompt.contains("normal channel work"));
+    assert!(!prompt.contains("private quick work"));
+    assert_eq!(quick_ids, vec!["qs-01JZZZZZZZZZZZZZZZZZZZZZZZ"]);
+}
+
+#[test]
+fn quick_session_ids_enqueue_once_in_fifo_order() {
+    let mut queue = QuickSessionQueue::default();
+    queue.enqueue("qs-a".to_string());
+    queue.enqueue("qs-b".to_string());
+    queue.enqueue("qs-a".to_string());
+    assert_eq!(queue.pop(), Some("qs-a".to_string()));
+    assert_eq!(queue.pop(), Some("qs-b".to_string()));
+    assert_eq!(queue.pop(), None);
+}
+
+#[test]
+fn primary_turn_runs_before_one_quick_session_turn() {
+    let mut queue = QuickSessionQueue::default();
+    queue.enqueue("qs-a".to_string());
+    queue.enqueue("qs-b".to_string());
+    assert_eq!(
+        plan_cycle_turns(Some("primary".to_string()), &mut queue),
+        vec![
+            CycleTurn::Primary("primary".to_string()),
+            CycleTurn::Quick("qs-a".to_string())
+        ]
+    );
+    assert_eq!(queue.pop(), Some("qs-b".to_string()));
+}
+
+#[test]
+fn quick_session_recovery_scan_cadence_is_never_faster_than_sixty_seconds() {
+    let start = std::time::Instant::now();
+    assert!(!should_scan_quick_sessions(
+        Some(start),
+        start + std::time::Duration::from_secs(59)
+    ));
+    assert!(should_scan_quick_sessions(
+        Some(start),
+        start + std::time::Duration::from_secs(60)
+    ));
+    assert!(should_scan_quick_sessions(None, start));
 }
 
 #[test]
