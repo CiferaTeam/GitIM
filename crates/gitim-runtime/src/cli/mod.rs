@@ -13,6 +13,7 @@
 //! `use crate::cli::{Client, CliError};` without three separate imports.
 
 pub mod cmd_add_agent;
+pub mod cmd_asset;
 pub mod cmd_burn_agent;
 pub mod cmd_fleet;
 pub mod cmd_list_agents;
@@ -32,5 +33,5 @@ pub use dto::{
     ErrorResponse, RuntimeStatus,
 };
 pub use exit_code::from_cli_error;
-pub use http::{resolve_base_url, CliError, Client};
+pub use http::{resolve_base_url, CliError, Client, UploadFile};
 pub use workspace::{resolve_workspace, select_workspace};

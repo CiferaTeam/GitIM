@@ -234,6 +234,39 @@ enum Command {
         #[command(subcommand)]
         command: FleetCommand,
     },
+    /// Publish and fetch workspace attachment assets.
+    Asset {
+        #[command(subcommand)]
+        command: AssetCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AssetCommand {
+    /// Publish local files and print their canonical asset references.
+    Put {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Local file to publish. Repeatable, in message order.
+        #[arg(long = "file", required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Fetch and verify an asset reference into a local file.
+    Get {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Canonical `<^v1/...>` asset reference.
+        #[arg(long = "ref")]
+        asset_ref: String,
+        /// Destination path. Defaults to the reference filename in the current directory.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Atomically replace an existing destination.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -396,9 +429,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight, cmd_runtime_id,
-        cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url,
-        tunnel as cli_tunnel, CliError, Client, ErrorResponse,
+        cmd_add_agent, cmd_asset, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight,
+        cmd_runtime_id, cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error,
+        resolve_base_url, tunnel as cli_tunnel, CliError, Client, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -546,6 +579,28 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 FleetTunnelCommand::Status { node_id } => cmd_fleet::tunnel_status(node_id).await,
                 FleetTunnelCommand::Down { node_id } => cmd_fleet::tunnel_down(node_id).await,
             },
+        },
+        Command::Asset { command } => match command {
+            AssetCommand::Put { workspace, files } => {
+                cmd_asset::put(&client, cmd_asset::PutArgs { workspace, files }).await
+            }
+            AssetCommand::Get {
+                workspace,
+                asset_ref,
+                output,
+                force,
+            } => {
+                cmd_asset::get(
+                    &client,
+                    cmd_asset::GetArgs {
+                        workspace,
+                        asset_ref,
+                        output,
+                        force,
+                    },
+                )
+                .await
+            }
         },
     };
 
@@ -1148,6 +1203,59 @@ mod argv_subcommand_tests {
     use super::*;
     use clap::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn asset_put_and_get_parse() {
+        let put = Args::try_parse_from([
+            "gitim-runtime",
+            "asset",
+            "put",
+            "--workspace",
+            "room",
+            "--file",
+            "a.png",
+            "--file",
+            "b.pdf",
+        ])
+        .expect("asset put argv");
+        match put.command {
+            Some(Command::Asset {
+                command: AssetCommand::Put { workspace, files },
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("room"));
+                assert_eq!(files, vec![PathBuf::from("a.png"), PathBuf::from("b.pdf")]);
+            }
+            other => panic!("expected asset put, got {other:?}"),
+        }
+
+        let get = Args::try_parse_from([
+            "gitim-runtime",
+            "asset",
+            "get",
+            "--ref",
+            "<^v1/24a6489c-762e-4461-9247-a824807a6080/sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855?name=empty&type=application%2Foctet-stream&size=0>",
+            "--output",
+            "download.bin",
+            "--force",
+        ])
+        .expect("asset get argv");
+        match get.command {
+            Some(Command::Asset {
+                command:
+                    AssetCommand::Get {
+                        workspace,
+                        asset_ref: _,
+                        output,
+                        force,
+                    },
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(output, Some(PathBuf::from("download.bin")));
+                assert!(force);
+            }
+            other => panic!("expected asset get, got {other:?}"),
+        }
+    }
 
     // ------------------------------------------------------------------
     // status

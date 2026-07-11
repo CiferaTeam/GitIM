@@ -24,6 +24,8 @@
 
 use std::time::Duration;
 
+use tokio_util::io::ReaderStream;
+
 use crate::http::DEFAULT_PORT;
 use crate::user_config;
 
@@ -142,6 +144,15 @@ pub fn resolve_base_url(port_arg: Option<u16>) -> String {
 pub struct Client {
     base_url: String,
     inner: reqwest::Client,
+}
+
+/// An already-open upload source. The length belongs to the open file handle,
+/// so multipart framing cannot silently diverge from the bytes validated by
+/// the command layer if the path is replaced between validation and upload.
+pub struct UploadFile {
+    pub file: tokio::fs::File,
+    pub file_name: String,
+    pub length: u64,
 }
 
 impl Client {
@@ -290,6 +301,68 @@ impl Client {
             .await
             .map_err(|e| CliError::Transport(e.to_string()))?;
         process_response(resp).await
+    }
+
+    /// POST repeated streaming `file` multipart fields. Each part carries a
+    /// known length and reads directly from its Tokio file handle.
+    pub async fn post_files(
+        &self,
+        path: &str,
+        files: Vec<UploadFile>,
+    ) -> Result<serde_json::Value, CliError> {
+        let mut form = reqwest::multipart::Form::new();
+        for upload in files {
+            let stream = ReaderStream::new(upload.file);
+            let body = reqwest::Body::wrap_stream(stream);
+            let part = reqwest::multipart::Part::stream_with_length(body, upload.length)
+                .file_name(upload.file_name)
+                .mime_str("application/octet-stream")
+                .map_err(|error| {
+                    CliError::InvalidConfig(format!("asset multipart metadata: {error}"))
+                })?;
+            form = form.part("file", part);
+        }
+
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .post(url)
+            .multipart(form)
+            .timeout(LONG_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CliError::Transport(error.to_string()))?;
+        process_response(response).await
+    }
+
+    /// GET a binary response without collecting successful bytes. Error
+    /// responses are collected and classified through the same body-first
+    /// protocol used by JSON verbs.
+    pub async fn get_binary(&self, path: &str) -> Result<reqwest::Response, CliError> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .get(url)
+            .timeout(LONG_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CliError::Transport(error.to_string()))?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| CliError::Transport(error.to_string()))?;
+        match process_response_inner(status, &bytes) {
+            Err(error) => Err(error),
+            Ok(_) => Err(CliError::HttpStatus(
+                status.as_u16(),
+                bytes_to_excerpt(&bytes),
+            )),
+        }
     }
 }
 
