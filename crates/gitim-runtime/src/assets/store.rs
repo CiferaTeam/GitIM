@@ -953,7 +953,11 @@ fn canonical_media_type(value: &str) -> Option<mime::Mime> {
         return None;
     }
     let media_type = value.parse::<mime::Mime>().ok()?;
-    if media_type.essence_str() != value || media_type.params().next().is_some() {
+    if media_type.type_() == mime::STAR
+        || media_type.subtype() == mime::STAR
+        || media_type.essence_str() != value
+        || media_type.params().next().is_some()
+    {
         return None;
     }
     Some(media_type)

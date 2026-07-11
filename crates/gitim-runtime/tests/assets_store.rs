@@ -715,6 +715,13 @@ fn sidecar_mime_and_dimension_fields_require_canonical_semantics() {
     assert_sidecar_mutation_is_rebuilt(|sidecar| {
         sidecar["media_type"] = "text/plain".into();
     });
+    for wildcard in ["*/*", "image/*", "*/png"] {
+        assert_sidecar_mutation_is_rebuilt(|sidecar| {
+            sidecar["media_type"] = wildcard.into();
+            sidecar["width"] = serde_json::Value::Null;
+            sidecar["height"] = serde_json::Value::Null;
+        });
+    }
 }
 
 #[test]
