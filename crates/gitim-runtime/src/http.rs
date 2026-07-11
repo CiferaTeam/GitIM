@@ -7614,6 +7614,11 @@ mod tests {
         let (router, state) = create_router();
         // 模拟启动期注入
         state.lock().unwrap().runtime_id = "test-runtime-id-1234".to_string();
+        state
+            .lock()
+            .unwrap()
+            .usage_save_failures
+            .store(7, std::sync::atomic::Ordering::Relaxed);
 
         let resp = router
             .oneshot(
@@ -7636,6 +7641,7 @@ mod tests {
         assert_eq!(body["service"], "gitim-runtime");
         // epoch observability: empty array when no workspaces registered
         assert_eq!(body["workspace_epochs"], serde_json::json!([]));
+        assert_eq!(body["usage_save_failures"], 7);
     }
 
     #[tokio::test]

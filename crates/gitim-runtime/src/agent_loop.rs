@@ -7,7 +7,6 @@ use gitim_agent_provider::{
     ProviderUsageReport,
 };
 use gitim_client::{ensure_daemon_with_log, GitimClient};
-use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -17,10 +16,11 @@ use crate::hermes_profile;
 use crate::http::{AgentActivityEvent, SharedRuntimeState};
 use crate::poller::{ChannelChange, Poller};
 use crate::quick_session_executor::{
-    QuickSessionExecutor, QuickSessionExecutorConfig, QuickSessionRunOutcome,
+    QuickSessionBackend, QuickSessionExecutor, QuickSessionExecutorConfig, QuickSessionRunOutcome,
 };
 use crate::state::{AgentState, LastSessionUsage, SessionUsageSnapshot, UsageSource};
-use crate::usage_log::{AgentUsageLog, UsageSummary};
+use crate::usage_accounting::{accumulate_usage, serialize_usage_event, UsageAccountingContext};
+use crate::usage_log::UsageSummary;
 
 pub(crate) const MAX_FAILURE_RECOVERY_ATTEMPTS: u32 = 3;
 const QUICK_SESSION_RECOVERY_INTERVAL: Duration = Duration::from_secs(60);
@@ -177,19 +177,6 @@ pub struct AgentLoopConfig {
     pub env: HashMap<String, String>,
 }
 
-/// SSE `"usage"` event payload. The existing SessionUsageSnapshot fields
-/// are flattened to keep frontends that destructure them (e.g. older
-/// `use-agent-activity.ts`) working unchanged. `usage_summary` is added as
-/// a sibling for clients that need cumulative+today numbers without an
-/// extra HTTP round-trip.
-#[derive(Serialize)]
-struct UsageEventPayload<'a> {
-    #[serde(flatten)]
-    snap: &'a SessionUsageSnapshot,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage_summary: Option<&'a UsageSummary>,
-}
-
 pub struct AgentLoop {
     poller: Poller,
     provider: Box<dyn Provider>,
@@ -221,6 +208,8 @@ pub struct AgentLoop {
     is_working: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     quick_sessions: QuickSessionQueue,
     quick_session_last_scan: Option<Instant>,
+    quick_session_live_attempts: std::sync::Arc<std::sync::Mutex<HashSet<(String, String)>>>,
+    quick_session_backend: Option<std::sync::Arc<dyn QuickSessionBackend>>,
 }
 
 impl AgentLoop {
@@ -274,6 +263,8 @@ impl AgentLoop {
             is_working: None,
             quick_sessions: QuickSessionQueue::default(),
             quick_session_last_scan: None,
+            quick_session_live_attempts: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            quick_session_backend: None,
         })
     }
 
@@ -317,6 +308,8 @@ impl AgentLoop {
             is_working: None,
             quick_sessions: QuickSessionQueue::default(),
             quick_session_last_scan: None,
+            quick_session_live_attempts: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            quick_session_backend: None,
         })
     }
 
@@ -344,7 +337,7 @@ impl AgentLoop {
     }
 
     fn quick_session_executor(&self) -> QuickSessionExecutor {
-        QuickSessionExecutor::new(QuickSessionExecutorConfig {
+        let config = QuickSessionExecutorConfig {
             repo_root: self.repo_root.clone(),
             workspace_root: self
                 .workspace_root
@@ -358,24 +351,47 @@ impl AgentLoop {
             effort: self.effort.clone(),
             custom_system_prompt: self.custom_system_prompt.clone(),
             activity_tx: self.activity_tx.clone(),
-        })
+            runtime_state: self.runtime_state.clone(),
+        };
+        let executor = if let Some(backend) = &self.quick_session_backend {
+            QuickSessionExecutor::with_backend(config, backend.clone())
+        } else {
+            QuickSessionExecutor::new(config)
+        };
+        executor.with_live_attempts(self.quick_session_live_attempts.clone())
     }
 
-    async fn scan_quick_sessions(&mut self) -> Result<(), RuntimeError> {
-        let ids = self.quick_session_executor().recover_actionable().await?;
-        for session_id in ids {
-            self.quick_sessions.enqueue(session_id);
+    #[doc(hidden)]
+    pub fn set_quick_session_backend_for_test(
+        &mut self,
+        backend: std::sync::Arc<dyn QuickSessionBackend>,
+    ) {
+        self.quick_session_backend = Some(backend);
+    }
+
+    async fn scan_quick_sessions(&mut self) {
+        match self.quick_session_executor().recover_actionable().await {
+            Ok(ids) => {
+                for session_id in ids {
+                    self.quick_sessions.enqueue(session_id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    handler = %self.handler,
+                    error = %error,
+                    "quick session recovery scan failed; continuing"
+                );
+            }
         }
         self.quick_session_last_scan = Some(Instant::now());
-        Ok(())
     }
 
-    async fn maybe_scan_quick_sessions(&mut self) -> Result<(), RuntimeError> {
+    async fn maybe_scan_quick_sessions(&mut self) {
         let now = Instant::now();
         if should_scan_quick_sessions(self.quick_session_last_scan, now) {
-            self.scan_quick_sessions().await?;
+            self.scan_quick_sessions().await;
         }
-        Ok(())
     }
 
     async fn run_next_quick_session(&mut self) -> Result<bool, RuntimeError> {
@@ -601,20 +617,15 @@ impl AgentLoop {
         // failures bump a counter and warn-log; they cannot fail the turn.
         let usage_summary = self.accumulate_usage_log(delta.as_ref());
 
-        // Step C — Patch the in-memory AgentInfo so polling clients
-        // (GET /agents/:id) see fresh data without re-reading disk. Both
-        // mirrors update unconditionally (independent of snapshot
-        // availability) so a turn from a provider without `reports_usage`
-        // still bumps the in-memory turn counter via usage_summary.
+        // Step C — Patch the session-occupancy mirror. The shared accounting
+        // helper above already patched usage_summary, including for providers
+        // that report no token counts and only advance the turn counter.
         if let Some(rs) = &self.runtime_state {
             if let Ok(mut s) = rs.lock() {
                 if let Some(ctx) = s.workspaces.get_mut(&self.workspace_id) {
                     if let Some(info) = ctx.agents.get_mut(&self.handler) {
                         if let Some(snap) = &new_snapshot {
                             info.session_usage = Some(snap.clone());
-                        }
-                        if let Some(summary) = &usage_summary {
-                            info.usage_summary = Some(summary.clone());
                         }
                     }
                 }
@@ -629,11 +640,7 @@ impl AgentLoop {
         // provider has nothing to say about session occupancy — clients
         // will see the new totals on the next GET /agents poll instead.
         if let Some(snap) = &new_snapshot {
-            let payload = UsageEventPayload {
-                snap,
-                usage_summary: usage_summary.as_ref(),
-            };
-            let detail = serde_json::to_string(&payload).unwrap_or_default();
+            let detail = serialize_usage_event(snap, usage_summary.as_ref());
             self.emit_activity("usage", &detail);
         }
 
@@ -674,11 +681,7 @@ impl AgentLoop {
             }
         }
 
-        let payload = UsageEventPayload {
-            snap: &snap,
-            usage_summary: None,
-        };
-        let detail = serde_json::to_string(&payload).unwrap_or_default();
+        let detail = serialize_usage_event(&snap, None);
         self.emit_activity("usage", &detail);
     }
 
@@ -775,31 +778,18 @@ impl AgentLoop {
     fn accumulate_usage_log(&self, delta: Option<&ProviderUsage>) -> Option<UsageSummary> {
         let workspace_root = self.workspace_root.as_ref()?;
         let model = self.model.as_deref().unwrap_or("");
-        let mut log = AgentUsageLog::load_or_default(
-            workspace_root,
-            &self.handler,
-            &self.provider_type,
-            model,
-            self.provider.reports_usage(),
-        );
-        let now = chrono::Utc::now();
-        let today = now.format("%Y-%m-%d").to_string();
-        let now_iso = now.to_rfc3339();
-        log.accumulate(&today, delta, &now_iso);
-        if let Err(e) = log.save(workspace_root, &today) {
-            tracing::warn!(
-                handler = %self.handler,
-                error = %e,
-                "failed to save token usage log"
-            );
-            if let Some(rs) = &self.runtime_state {
-                if let Ok(s) = rs.lock() {
-                    s.usage_save_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-        Some(log.summary(&today))
+        Some(accumulate_usage(
+            UsageAccountingContext {
+                workspace_root,
+                workspace_id: &self.workspace_id,
+                handler: &self.handler,
+                provider_type: &self.provider_type,
+                model,
+                provider_reports_usage: self.provider.reports_usage(),
+                runtime_state: self.runtime_state.as_ref(),
+            },
+            delta,
+        ))
     }
 
     /// Clear the in-memory mirror of `session_usage` on the runtime's shared
@@ -843,7 +833,7 @@ impl AgentLoop {
         } else {
             info!("agent loop started, cursor restored from state");
         }
-        self.scan_quick_sessions().await?;
+        self.scan_quick_sessions().await;
         Ok(())
     }
 
@@ -855,7 +845,7 @@ impl AgentLoop {
         for session_id in quick_ids {
             self.quick_sessions.enqueue(session_id);
         }
-        self.maybe_scan_quick_sessions().await?;
+        self.maybe_scan_quick_sessions().await;
 
         // Load state up front so we can decide between "real idle" and
         // "post-reset self-wake" before any early return. The runtime arms
@@ -1375,7 +1365,7 @@ impl AgentLoop {
         } else {
             info!("agent loop started, cursor restored from state");
         }
-        self.scan_quick_sessions().await?;
+        self.scan_quick_sessions().await;
 
         let mut consecutive_errors: u32 = 0;
         let mut consecutive_daemon_restarts: u32 = 0;

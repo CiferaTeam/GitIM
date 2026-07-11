@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use gitim_agent_provider::{
@@ -16,15 +18,20 @@ use tokio::sync::broadcast;
 use crate::agent_loop::compute_snapshot;
 use crate::context_window::{default_max_tokens, tokenize_for_provider, WARN_AT_PERCENT};
 use crate::error::RuntimeError;
-use crate::http::{ActivityScope, AgentActivityEvent};
+use crate::http::{ActivityScope, AgentActivityEvent, SharedRuntimeState};
 use crate::quick_session_state::QuickSessionRuntimeState;
 use crate::state::LastSessionUsage;
-use crate::usage_log::AgentUsageLog;
+use crate::usage_accounting::serialize_usage_event;
+use crate::usage_accounting::{accumulate_usage, UsageAccountingContext};
+use crate::usage_log::UsageSummary;
 
 const TRANSCRIPT_ENTRY_LIMIT: usize = 24;
 const PROMPT_CHAR_LIMIT: usize = 12_000;
 const CLAIMED_ENTRY_RESERVE: usize = 2_048;
 const QUICK_SESSION_SCAN_ERROR: &str = "interrupted quick session turn discovered during recovery";
+const DEFAULT_STALE_CLAIM_AFTER: Duration = Duration::from_secs(5 * 60);
+
+type LiveAttempts = Arc<Mutex<HashSet<(String, String)>>>;
 
 #[async_trait]
 pub trait QuickSessionBackend: Send + Sync {
@@ -140,6 +147,7 @@ pub struct QuickSessionExecutorConfig {
     pub effort: Option<String>,
     pub custom_system_prompt: Option<String>,
     pub activity_tx: Option<broadcast::Sender<AgentActivityEvent>>,
+    pub runtime_state: Option<SharedRuntimeState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,16 +158,26 @@ pub enum QuickSessionRunOutcome {
     Discarded,
 }
 
+#[derive(Clone)]
 pub struct QuickSessionExecutor {
     config: QuickSessionExecutorConfig,
     backend: Arc<dyn QuickSessionBackend>,
     provider_factory: Arc<dyn QuickSessionProviderFactory>,
+    live_attempts: LiveAttempts,
+    stale_claim_after: Duration,
 }
 
 impl QuickSessionExecutor {
     pub fn new(config: QuickSessionExecutorConfig) -> Self {
         let client = GitimClient::new(&config.repo_root);
         Self::with_dependencies(config, Arc::new(client), Arc::new(DefaultProviderFactory))
+    }
+
+    pub(crate) fn with_backend(
+        config: QuickSessionExecutorConfig,
+        backend: Arc<dyn QuickSessionBackend>,
+    ) -> Self {
+        Self::with_dependencies(config, backend, Arc::new(DefaultProviderFactory))
     }
 
     #[doc(hidden)]
@@ -172,21 +190,40 @@ impl QuickSessionExecutor {
             config,
             backend,
             provider_factory,
+            live_attempts: Arc::new(Mutex::new(HashSet::new())),
+            stale_claim_after: DEFAULT_STALE_CLAIM_AFTER,
         }
     }
 
+    pub(crate) fn with_live_attempts(mut self, live_attempts: LiveAttempts) -> Self {
+        self.live_attempts = live_attempts;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_stale_claim_after(mut self, stale_claim_after: Duration) -> Self {
+        self.stale_claim_after = stale_claim_after;
+        self
+    }
+
     pub async fn recover_actionable(&self) -> Result<Vec<String>, RuntimeError> {
-        let actionable_sessions = self
-            .backend
-            .list(&self.config.handler, true, None)
-            .await
-            .map_err(provider_error)?;
-        let mut actionable: Vec<String> = actionable_sessions
-            .sessions
-            .into_iter()
-            .map(|session| session.id)
-            .collect();
-        let running_sessions = self
+        let mut actionable: Vec<String> =
+            match self.backend.list(&self.config.handler, true, None).await {
+                Ok(response) => response
+                    .sessions
+                    .into_iter()
+                    .map(|session| session.id)
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!(
+                        handler = %self.config.handler,
+                        error,
+                        "failed to list actionable quick sessions during recovery"
+                    );
+                    Vec::new()
+                }
+            };
+        let running_sessions = match self
             .backend
             .list(
                 &self.config.handler,
@@ -194,35 +231,81 @@ impl QuickSessionExecutor {
                 Some(QuickSessionStatus::Running),
             )
             .await
-            .map_err(provider_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    handler = %self.config.handler,
+                    error,
+                    "failed to list running quick sessions during recovery"
+                );
+                return Ok(actionable);
+            }
+        };
         for session in running_sessions.sessions {
-            let detail = self
-                .backend
-                .read(&session.id)
+            if let Err(error) = self
+                .recover_running_session(&session.id, &mut actionable)
                 .await
-                .map_err(provider_error)?
-                .session;
-            if let Some(attempt_id) = detail.meta.attempt_id.as_deref() {
-                if !self
-                    .mark_claim_error(&session.id, attempt_id, QUICK_SESSION_SCAN_ERROR)
-                    .await?
-                {
-                    continue;
-                }
-                let recovered = self
-                    .backend
-                    .read(&session.id)
-                    .await
-                    .map_err(provider_error)?
-                    .session;
-                if is_actionable(&recovered, &self.config.handler)
-                    && !actionable.contains(&session.id)
-                {
-                    actionable.push(session.id);
-                }
+            {
+                tracing::warn!(
+                    session_id = %session.id,
+                    error = %error,
+                    "failed to recover running quick session; continuing scan"
+                );
             }
         }
         Ok(actionable)
+    }
+
+    async fn recover_running_session(
+        &self,
+        session_id: &str,
+        actionable: &mut Vec<String>,
+    ) -> Result<(), RuntimeError> {
+        let detail = self
+            .backend
+            .read(session_id)
+            .await
+            .map_err(provider_error)?
+            .session;
+        let Some(attempt_id) = detail.meta.attempt_id.as_deref() else {
+            return Ok(());
+        };
+        let local = QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
+        let locally_owned = local.active_attempt_id.as_deref() == Some(attempt_id);
+        if locally_owned && self.is_live_attempt(session_id, attempt_id) {
+            return Ok(());
+        }
+        if !locally_owned && !claim_is_stale(&detail, self.stale_claim_after, chrono::Utc::now()) {
+            return Ok(());
+        }
+        if !self
+            .mark_claim_error(session_id, attempt_id, QUICK_SESSION_SCAN_ERROR)
+            .await?
+        {
+            return Ok(());
+        }
+        if locally_owned {
+            self.clear_active_attempt(session_id, attempt_id)?;
+        }
+        let recovered = self
+            .backend
+            .read(session_id)
+            .await
+            .map_err(provider_error)?
+            .session;
+        if is_actionable(&recovered, &self.config.handler)
+            && !actionable.iter().any(|id| id == session_id)
+        {
+            actionable.push(session_id.to_string());
+        }
+        Ok(())
+    }
+
+    fn is_live_attempt(&self, session_id: &str, attempt_id: &str) -> bool {
+        self.live_attempts.lock().is_ok_and(|attempts| {
+            attempts.contains(&(session_id.to_string(), attempt_id.to_string()))
+        })
     }
 
     pub async fn execute(&self, session_id: &str) -> Result<QuickSessionRunOutcome, RuntimeError> {
@@ -269,8 +352,17 @@ impl QuickSessionExecutor {
 
         let original_local =
             QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
+        let mut rollback_local = original_local.clone();
+        rollback_local.active_attempt_id = None;
         let mut local = original_local.clone();
         local.last_attempted_line = Some(input_line);
+        local.active_attempt_id = Some(attempt_id.clone());
+        let _active_attempt = ActiveAttemptGuard::register(
+            self.live_attempts.clone(),
+            self.config.workspace_root.clone(),
+            session_id,
+            &attempt_id,
+        );
         local.save(&self.config.workspace_root, session_id)?;
         let captured_generation = local.context_generation;
 
@@ -280,10 +372,11 @@ impl QuickSessionExecutor {
         ) {
             Ok(provider) => provider,
             Err(error) => {
-                if !self
+                let marked = self
                     .mark_claim_error(session_id, &attempt_id, &error)
-                    .await?
-                {
+                    .await?;
+                self.clear_active_attempt(session_id, &attempt_id)?;
+                if !marked {
                     return Ok(QuickSessionRunOutcome::Discarded);
                 }
                 return self.failed_outcome(session_id).await;
@@ -319,10 +412,11 @@ impl QuickSessionExecutor {
         let mut session = match provider.execute(&prompt, opts).await {
             Ok(session) => session,
             Err(error) => {
-                if !self
+                let marked = self
                     .mark_claim_error(session_id, &attempt_id, &error.to_string())
-                    .await?
-                {
+                    .await?;
+                self.clear_active_attempt(session_id, &attempt_id)?;
+                if !marked {
                     return Ok(QuickSessionRunOutcome::Discarded);
                 }
                 return self.failed_outcome(session_id).await;
@@ -376,16 +470,31 @@ impl QuickSessionExecutor {
                     claim.revision,
                     captured_generation,
                 ),
-                Event::Usage { usage, .. } => {
-                    let detail = serde_json::to_string(&usage).unwrap_or_default();
-                    self.emit(
-                        "usage",
-                        &detail,
-                        session_id,
-                        &attempt_id,
-                        claim.revision,
-                        captured_generation,
-                    );
+                Event::Usage {
+                    session_id: provider_session_id,
+                    usage,
+                } => {
+                    if let Some(snapshot) = compute_snapshot(
+                        &provider_session_id,
+                        Some(&usage),
+                        local.estimated_tokens,
+                        default_max_tokens(
+                            &self.config.provider_type,
+                            self.config.model.as_deref().unwrap_or(""),
+                        ),
+                        provider.usage_is_cumulative(),
+                        &chrono::Utc::now().to_rfc3339(),
+                    ) {
+                        let detail = serialize_usage_event(&snapshot, None);
+                        self.emit(
+                            "usage",
+                            &detail,
+                            session_id,
+                            &attempt_id,
+                            claim.revision,
+                            captured_generation,
+                        );
+                    }
                 }
                 Event::Status { status } => self.emit(
                     "status",
@@ -401,10 +510,11 @@ impl QuickSessionExecutor {
         let result = match session.result.await {
             Ok(result) => result,
             Err(_) => {
-                if !self
+                let marked = self
                     .mark_claim_error(session_id, &attempt_id, "provider result channel closed")
-                    .await?
-                {
+                    .await?;
+                self.clear_active_attempt(session_id, &attempt_id)?;
+                if !marked {
                     return Ok(QuickSessionRunOutcome::Discarded);
                 }
                 return self.failed_outcome(session_id).await;
@@ -414,6 +524,7 @@ impl QuickSessionExecutor {
         let current_local =
             QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
         if current_local.context_generation != captured_generation {
+            self.clear_active_attempt(session_id, &attempt_id)?;
             return Ok(QuickSessionRunOutcome::Discarded);
         }
         let after = self
@@ -430,7 +541,7 @@ impl QuickSessionExecutor {
             || after.meta.status == QuickSessionStatus::Archived
             || (!owns_active_attempt && !owns_completed_attempt)
         {
-            original_local.save(&self.config.workspace_root, session_id)?;
+            rollback_local.save(&self.config.workspace_root, session_id)?;
             return Ok(QuickSessionRunOutcome::Discarded);
         }
 
@@ -481,12 +592,15 @@ impl QuickSessionExecutor {
                 } else {
                     "quick session turn completed without both a title and an agent reply"
                 };
-                if !self
+                let marked = self
                     .mark_claim_error(session_id, &attempt_id, diagnostic)
-                    .await?
-                {
+                    .await?;
+                self.clear_active_attempt(session_id, &attempt_id)?;
+                if !marked {
                     return Ok(QuickSessionRunOutcome::Discarded);
                 }
+            } else {
+                self.clear_active_attempt(session_id, &attempt_id)?;
             }
             self.emit(
                 "error",
@@ -531,7 +645,7 @@ impl QuickSessionExecutor {
             provider.usage_is_cumulative(),
             &chrono::Utc::now().to_rfc3339(),
         );
-        self.accumulate_usage(
+        let usage_delta = normalize_usage(
             provider.as_ref(),
             &mut local,
             &session_token,
@@ -551,6 +665,7 @@ impl QuickSessionExecutor {
         }
         local.last_completed_input_line = after.meta.last_completed_input_line;
         local.last_completed_line = after.meta.last_completed_line;
+        local.active_attempt_id = None;
         if reset_requested && !self_managed {
             local.session_token = None;
             local.session_usage = None;
@@ -560,6 +675,18 @@ impl QuickSessionExecutor {
             local.bump_context_generation();
         }
         local.save(&self.config.workspace_root, session_id)?;
+        let usage_summary = self.accumulate_usage(provider.as_ref(), usage_delta.as_ref());
+        if let Some(snapshot) = local.session_usage.as_ref() {
+            let detail = serialize_usage_event(snapshot, Some(&usage_summary));
+            self.emit(
+                "usage",
+                &detail,
+                session_id,
+                &attempt_id,
+                claim.revision,
+                captured_generation,
+            );
+        }
         self.emit(
             "done",
             if reset_requested { "reset" } else { "done" },
@@ -636,32 +763,33 @@ impl QuickSessionExecutor {
         })
     }
 
+    fn clear_active_attempt(&self, session_id: &str, attempt_id: &str) -> Result<(), RuntimeError> {
+        let mut state = QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
+        if state.active_attempt_id.as_deref() == Some(attempt_id) {
+            state.active_attempt_id = None;
+            state.save(&self.config.workspace_root, session_id)?;
+        }
+        Ok(())
+    }
+
     fn accumulate_usage(
         &self,
         provider: &dyn Provider,
-        state: &mut QuickSessionRuntimeState,
-        session_id: &str,
-        reported: Option<&ProviderUsage>,
-    ) {
-        let delta = normalize_usage(provider, state, session_id, reported);
+        delta: Option<&ProviderUsage>,
+    ) -> UsageSummary {
         let model = self.config.model.as_deref().unwrap_or("");
-        let mut log = AgentUsageLog::load_or_default(
-            &self.config.workspace_root,
-            &self.config.handler,
-            &self.config.provider_type,
-            model,
-            provider.reports_usage(),
-        );
-        let now = chrono::Utc::now();
-        let today = now.format("%Y-%m-%d").to_string();
-        log.accumulate(&today, delta.as_ref(), &now.to_rfc3339());
-        if let Err(error) = log.save(&self.config.workspace_root, &today) {
-            tracing::warn!(
-                session_id,
-                error = %error,
-                "failed to save quick session usage"
-            );
-        }
+        accumulate_usage(
+            UsageAccountingContext {
+                workspace_root: &self.config.workspace_root,
+                workspace_id: &self.config.workspace_id,
+                handler: &self.config.handler,
+                provider_type: &self.config.provider_type,
+                model,
+                provider_reports_usage: provider.reports_usage(),
+                runtime_state: self.config.runtime_state.as_ref(),
+            },
+            delta,
+        )
     }
 
     fn emit(
@@ -689,6 +817,73 @@ impl QuickSessionExecutor {
             });
         }
     }
+}
+
+struct ActiveAttemptGuard {
+    live_attempts: LiveAttempts,
+    key: (String, String),
+    workspace_root: PathBuf,
+}
+
+impl ActiveAttemptGuard {
+    fn register(
+        live_attempts: LiveAttempts,
+        workspace_root: PathBuf,
+        session_id: &str,
+        attempt_id: &str,
+    ) -> Self {
+        let key = (session_id.to_string(), attempt_id.to_string());
+        if let Ok(mut attempts) = live_attempts.lock() {
+            attempts.insert(key.clone());
+        }
+        Self {
+            live_attempts,
+            key,
+            workspace_root,
+        }
+    }
+}
+
+impl Drop for ActiveAttemptGuard {
+    fn drop(&mut self) {
+        if let Ok(mut attempts) = self.live_attempts.lock() {
+            attempts.remove(&self.key);
+        }
+        let (session_id, attempt_id) = &self.key;
+        let clear_result = QuickSessionRuntimeState::load(&self.workspace_root, session_id)
+            .and_then(|mut state| {
+                if state.active_attempt_id.as_deref() == Some(attempt_id) {
+                    state.active_attempt_id = None;
+                    state.save(&self.workspace_root, session_id)?;
+                }
+                Ok(())
+            });
+        if let Err(error) = clear_result {
+            tracing::warn!(
+                session_id,
+                attempt_id,
+                error = %error,
+                "failed to clear quick session attempt ownership"
+            );
+        }
+    }
+}
+
+fn claim_is_stale(
+    detail: &QuickSessionDetail,
+    stale_after: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(started_at) = detail.meta.processing_started_at.as_deref() else {
+        return false;
+    };
+    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(started_at) else {
+        return false;
+    };
+    let Ok(stale_after) = chrono::Duration::from_std(stale_after) else {
+        return false;
+    };
+    now.signed_duration_since(started_at.with_timezone(&chrono::Utc)) >= stale_after
 }
 
 fn provider_error(error: String) -> RuntimeError {

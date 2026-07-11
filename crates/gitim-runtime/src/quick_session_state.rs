@@ -10,6 +10,8 @@ use crate::state::{LastSessionUsage, SessionUsageSnapshot};
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct QuickSessionRuntimeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_usage: Option<SessionUsageSnapshot>,

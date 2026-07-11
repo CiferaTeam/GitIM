@@ -4,12 +4,24 @@
 
 mod common;
 
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use gitim_agent_provider::{mock::MockProvider, ExecOptions, Provider, ProviderError, Session};
+use gitim_core::responses::{
+    ClaimQuickSessionTurnResponse, ListQuickSessionsResponse, MarkQuickSessionErrorResponse,
+    ReadQuickSessionResponse,
+};
+use gitim_core::types::QuickSessionStatus;
 use gitim_runtime::agent_loop::detect_steering_trigger;
 use gitim_runtime::agent_loop::{
     plan_cycle_turns, should_scan_quick_sessions, split_quick_session_changes, CycleTurn,
     QuickSessionQueue,
 };
 use gitim_runtime::poller::ChannelChange;
+use gitim_runtime::quick_session_executor::QuickSessionBackend;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 fn make_entry(author: &str, body: &str) -> serde_json::Value {
     serde_json::json!({
@@ -30,6 +42,153 @@ fn make_changes(entries: Vec<(&str, &str)>) -> Vec<ChannelChange> {
             .map(|(author, body)| make_entry(author, body))
             .collect(),
     }]
+}
+
+#[derive(Default)]
+struct FailingRecoveryBackend;
+
+#[async_trait]
+impl QuickSessionBackend for FailingRecoveryBackend {
+    async fn list(
+        &self,
+        _agent_id: &str,
+        _actionable: bool,
+        _status: Option<QuickSessionStatus>,
+    ) -> Result<ListQuickSessionsResponse, String> {
+        Err("injected recovery scan failure".to_string())
+    }
+
+    async fn read(&self, _session_id: &str) -> Result<ReadQuickSessionResponse, String> {
+        Err("unexpected read".to_string())
+    }
+
+    async fn read_since(
+        &self,
+        _session_id: &str,
+        _since: u64,
+        _limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        Err("unexpected read_since".to_string())
+    }
+
+    async fn claim(
+        &self,
+        _session_id: &str,
+        _input_line: u64,
+        _attempt_id: &str,
+    ) -> Result<ClaimQuickSessionTurnResponse, String> {
+        Err("unexpected claim".to_string())
+    }
+
+    async fn mark_error(
+        &self,
+        _session_id: &str,
+        _attempt_id: &str,
+        _error: &str,
+    ) -> Result<MarkQuickSessionErrorResponse, String> {
+        Err("unexpected mark_error".to_string())
+    }
+}
+
+struct RecordingPrimaryProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingPrimaryProvider {
+    async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        MockProvider::with_response("done".to_string())
+            .execute(prompt, opts)
+            .await
+    }
+}
+
+fn spawn_poll_daemon(repo_root: &std::path::Path) -> tokio::task::JoinHandle<()> {
+    let run_dir = repo_root.join(".gitim/run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let socket_path = run_dir.join("gitim.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(socket_path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(reader)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap_or(0)
+                    == 0
+                {
+                    return;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let since = request["since"].as_str();
+                let changes = if since == Some("cursor-0") {
+                    serde_json::json!([{
+                        "channel": "general",
+                        "kind": "message",
+                        "entries": [{
+                            "author": "alice",
+                            "body": "primary survives recovery failure",
+                            "line_number": 1,
+                            "point_to": 0,
+                            "timestamp": "2026-07-11T00:00:00Z",
+                            "recipients": ["bot"]
+                        }]
+                    }])
+                } else {
+                    serde_json::json!([])
+                };
+                let mut response = serde_json::json!({
+                    "ok": true,
+                    "data": { "commit_id": "cursor-1", "changes": changes }
+                })
+                .to_string();
+                response.push('\n');
+                writer.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    })
+}
+
+#[tokio::test]
+async fn polled_primary_batch_executes_once_when_recovery_scan_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("bot");
+    std::fs::create_dir_all(repo_root.join(".gitim")).unwrap();
+    std::fs::write(repo_root.join(".gitim/me.json"), r#"{"handler":"bot"}"#).unwrap();
+    gitim_runtime::AgentState {
+        cursor: Some("cursor-0".to_string()),
+        ..gitim_runtime::AgentState::default()
+    }
+    .save(&repo_root)
+    .unwrap();
+    let daemon = spawn_poll_daemon(&repo_root);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut agent_loop =
+        gitim_runtime::AgentLoop::with_provider(&repo_root, "mock", "bot").unwrap();
+    agent_loop.replace_provider_for_test(Box::new(RecordingPrimaryProvider {
+        prompts: prompts.clone(),
+    }));
+    agent_loop.set_quick_session_backend_for_test(Arc::new(FailingRecoveryBackend));
+
+    agent_loop.init().await.unwrap();
+    assert!(agent_loop.run_once().await.unwrap());
+    assert!(!agent_loop.run_once().await.unwrap());
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("primary survives recovery failure"));
+    assert_eq!(
+        gitim_runtime::AgentState::load(&repo_root)
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("cursor-1")
+    );
+    daemon.abort();
 }
 
 #[test]

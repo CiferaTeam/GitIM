@@ -17,18 +17,21 @@ use gitim_core::types::{
     apply_quick_session_transition, Handler, Message, QuickSessionMeta, QuickSessionStatus,
     QuickSessionTransition, ThreadEntry,
 };
-use gitim_runtime::http::{ActivityScope, AgentActivityEvent};
+use gitim_runtime::http::{
+    ActivityScope, AgentActivityEvent, AgentInfo, RuntimeState, SharedRuntimeState,
+};
 use gitim_runtime::quick_session_executor::{
     QuickSessionBackend, QuickSessionExecutor, QuickSessionExecutorConfig,
     QuickSessionProviderFactory, QuickSessionRunOutcome,
 };
 use gitim_runtime::quick_session_state::QuickSessionRuntimeState;
+use gitim_runtime::workspace::WorkspaceContext;
 use gitim_runtime::AgentState;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 const SESSION_ID: &str = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ProviderAction {
     Complete,
     MissingTitle,
@@ -41,6 +44,10 @@ enum ProviderAction {
     ReplaceAttempt,
     CompleteThenFlood,
     ArchiveThenUnarchive,
+    WaitThenComplete {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    },
 }
 
 #[derive(Default)]
@@ -194,6 +201,96 @@ struct CrowdedBackend {
     mark_error_calls: Arc<Mutex<usize>>,
 }
 
+#[derive(Clone)]
+struct PartialFailureRecoveryBackend {
+    sessions: Arc<Mutex<HashMap<String, QuickSessionDetail>>>,
+    read_failure: String,
+    mark_failure: String,
+    marked: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl QuickSessionBackend for PartialFailureRecoveryBackend {
+    async fn list(
+        &self,
+        _agent_id: &str,
+        actionable: bool,
+        status: Option<QuickSessionStatus>,
+    ) -> Result<ListQuickSessionsResponse, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|detail| {
+                !actionable && status.is_none_or(|status| detail.meta.status == status)
+            })
+            .map(|detail| QuickSessionListItem::from_meta(&detail.meta, false))
+            .collect();
+        Ok(ListQuickSessionsResponse { sessions })
+    }
+
+    async fn read(&self, session_id: &str) -> Result<ReadQuickSessionResponse, String> {
+        if session_id == self.read_failure {
+            return Err("corrupt session detail".to_string());
+        }
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .map(|session| ReadQuickSessionResponse { session })
+            .ok_or_else(|| "missing session".to_string())
+    }
+
+    async fn read_since(
+        &self,
+        _session_id: &str,
+        _since: u64,
+        _limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        Err("read_since not expected".to_string())
+    }
+
+    async fn claim(
+        &self,
+        _session_id: &str,
+        _input_line: u64,
+        _attempt_id: &str,
+    ) -> Result<ClaimQuickSessionTurnResponse, String> {
+        Err("claim not expected".to_string())
+    }
+
+    async fn mark_error(
+        &self,
+        session_id: &str,
+        attempt_id: &str,
+        error: &str,
+    ) -> Result<MarkQuickSessionErrorResponse, String> {
+        if session_id == self.mark_failure {
+            return Err("mark rejected".to_string());
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let detail = sessions.get_mut(session_id).unwrap();
+        apply_quick_session_transition(
+            &mut detail.meta,
+            QuickSessionTransition::MarkError {
+                actor: "bob".to_string(),
+                attempt_id: attempt_id.to_string(),
+                error: error.to_string(),
+                now: "2026-07-11T00:10:00Z".to_string(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.marked.lock().unwrap().push(session_id.to_string());
+        Ok(MarkQuickSessionErrorResponse {
+            session_id: session_id.to_string(),
+            status: detail.meta.status,
+            revision: detail.meta.revision,
+        })
+    }
+}
+
 #[async_trait]
 impl QuickSessionBackend for CrowdedBackend {
     async fn list(
@@ -319,7 +416,7 @@ impl QuickSessionProviderFactory for RecordingFactory {
     ) -> Result<Box<dyn Provider>, String> {
         Ok(Box::new(RecordingProvider {
             backend: self.backend.clone(),
-            action: self.action,
+            action: self.action.clone(),
             workspace_root: self.workspace_root.clone(),
             self_managed: self.self_managed,
             config,
@@ -350,7 +447,11 @@ impl Provider for RecordingProvider {
             .push((self.config.clone(), prompt.to_string(), opts.clone()));
         let attempt = value_after(prompt, "Attempt: ");
         let input_line: u64 = value_after(prompt, "Input line: L").parse().unwrap();
-        if matches!(self.action, ProviderAction::Archive) {
+        if let ProviderAction::WaitThenComplete { entered, release } = &self.action {
+            entered.notify_one();
+            release.notified().await;
+        }
+        if matches!(&self.action, ProviderAction::Archive) {
             let mut guard = self.backend.inner.lock().unwrap();
             let detail = guard.detail.as_mut().unwrap();
             detail.archived = true;
@@ -361,17 +462,17 @@ impl Provider for RecordingProvider {
             detail.meta.archived_at = Some("2026-07-11T00:00:11Z".to_string());
             detail.meta.archived_from = Some(QuickSessionStatus::NeedsTitle);
             detail.meta.revision += 1;
-        } else if matches!(self.action, ProviderAction::BumpGeneration) {
+        } else if matches!(&self.action, ProviderAction::BumpGeneration) {
             let mut state =
                 QuickSessionRuntimeState::load(&self.workspace_root, SESSION_ID).unwrap();
             state.bump_context_generation();
             state.save(&self.workspace_root, SESSION_ID).unwrap();
-        } else if matches!(self.action, ProviderAction::ReplaceAttempt) {
+        } else if matches!(&self.action, ProviderAction::ReplaceAttempt) {
             let mut guard = self.backend.inner.lock().unwrap();
             let detail = guard.detail.as_mut().unwrap();
             detail.meta.attempt_id = Some("qa-01K00000000000000000000000".to_string());
             detail.meta.revision += 1;
-        } else if matches!(self.action, ProviderAction::ArchiveThenUnarchive) {
+        } else if matches!(&self.action, ProviderAction::ArchiveThenUnarchive) {
             let mut guard = self.backend.inner.lock().unwrap();
             let detail = guard.detail.as_mut().unwrap();
             detail.meta.status = QuickSessionStatus::NeedsTitle;
@@ -382,7 +483,7 @@ impl Provider for RecordingProvider {
             detail.meta.archived_from = None;
             detail.meta.revision += 2;
         } else {
-            if !matches!(self.action, ProviderAction::MissingTitle) {
+            if !matches!(&self.action, ProviderAction::MissingTitle) {
                 self.backend.transition(QuickSessionTransition::SetTitle {
                     actor: "bob".to_string(),
                     attempt_id: attempt.clone(),
@@ -391,7 +492,7 @@ impl Provider for RecordingProvider {
                 });
             }
             if matches!(
-                self.action,
+                &self.action,
                 ProviderAction::QueueHumanThenComplete | ProviderAction::QueueHumanMissingReply
             ) {
                 let line = self.backend.append_message("alice", 0, "one more thing");
@@ -404,7 +505,7 @@ impl Provider for RecordingProvider {
                         now: "2026-07-11T00:00:13Z".to_string(),
                     });
             }
-            if matches!(self.action, ProviderAction::CompleteAndReset) {
+            if matches!(&self.action, ProviderAction::CompleteAndReset) {
                 self.backend.transition(QuickSessionTransition::SetSummary {
                     actor: "bob".to_string(),
                     attempt_id: attempt.clone(),
@@ -413,7 +514,7 @@ impl Provider for RecordingProvider {
                 });
             }
             if !matches!(
-                self.action,
+                &self.action,
                 ProviderAction::MissingTitle
                     | ProviderAction::MissingReply
                     | ProviderAction::QueueHumanMissingReply
@@ -427,7 +528,7 @@ impl Provider for RecordingProvider {
                     preview: "done".to_string(),
                     now: "2026-07-11T00:00:15Z".to_string(),
                 });
-                if matches!(self.action, ProviderAction::CompleteThenFlood) {
+                if matches!(&self.action, ProviderAction::CompleteThenFlood) {
                     for index in 0..30 {
                         let body = format!("queued-{index}");
                         let line = self.backend.append_message("alice", 0, &body);
@@ -443,7 +544,7 @@ impl Provider for RecordingProvider {
                 }
             }
         }
-        let output = if matches!(self.action, ProviderAction::CompleteAndReset) {
+        let output = if matches!(&self.action, ProviderAction::CompleteAndReset) {
             "done [[RESET]]"
         } else {
             "done"
@@ -535,9 +636,39 @@ fn running_detail() -> QuickSessionDetail {
     detail
 }
 
+fn running_detail_with(id: &str, attempt_id: &str) -> QuickSessionDetail {
+    let mut detail = initial_detail();
+    detail.meta.id = id.to_string();
+    apply_quick_session_transition(
+        &mut detail.meta,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: attempt_id.to_string(),
+            now: "2026-07-11T00:00:02Z".to_string(),
+        },
+    )
+    .unwrap();
+    detail
+}
+
 fn harness(
     action: ProviderAction,
     self_managed: bool,
+) -> (
+    tempfile::TempDir,
+    FakeBackend,
+    RecordingFactory,
+    QuickSessionExecutor,
+    broadcast::Receiver<AgentActivityEvent>,
+) {
+    harness_with_runtime(action, self_managed, None)
+}
+
+fn harness_with_runtime(
+    action: ProviderAction,
+    self_managed: bool,
+    runtime_state: Option<SharedRuntimeState>,
 ) -> (
     tempfile::TempDir,
     FakeBackend,
@@ -566,6 +697,7 @@ fn harness(
         effort: Some("high".to_string()),
         custom_system_prompt: Some("custom instruction".to_string()),
         activity_tx: Some(tx),
+        runtime_state,
     };
     let executor = QuickSessionExecutor::with_dependencies(
         config,
@@ -573,6 +705,50 @@ fn harness(
         Arc::new(factory.clone()),
     );
     (temp, backend, factory, executor, rx)
+}
+
+fn shared_runtime_state(
+    workspace_root: &std::path::Path,
+    repo_root: &std::path::Path,
+) -> SharedRuntimeState {
+    let mut context = WorkspaceContext::new(
+        "workspace".to_string(),
+        "workspace".to_string(),
+        workspace_root.to_path_buf(),
+    );
+    context.agents.insert(
+        "bob".to_string(),
+        AgentInfo {
+            id: "bob".to_string(),
+            handler: "bob".to_string(),
+            display_name: "Bob".to_string(),
+            status: "running".to_string(),
+            last_activity: None,
+            messages_processed: 0,
+            repo_path: repo_root.display().to_string(),
+            provider: Some("mock".to_string()),
+            model: Some("mock-model".to_string()),
+            effort: None,
+            system_prompt: None,
+            introduction: None,
+            env: HashMap::new(),
+            error_message: None,
+            session_usage: None,
+            llm_provider: None,
+            llm_model: None,
+            usage_summary: None,
+            saturation_summary: None,
+            is_working: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            loop_handle: None,
+        },
+    );
+    let state = Arc::new(Mutex::new(RuntimeState::default()));
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert("workspace".to_string(), context);
+    state
 }
 
 #[tokio::test]
@@ -890,10 +1066,116 @@ async fn stale_running_claim_becomes_error_without_execution() {
         attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
         now: "2026-07-11T00:00:02Z".to_string(),
     });
+    let executor = executor.with_stale_claim_after(std::time::Duration::ZERO);
     assert!(executor.recover_actionable().await.unwrap().is_empty());
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
     assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
     assert!(factory.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fresh_unowned_running_claim_remains_untouched() {
+    let (_temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
+    backend.transition(QuickSessionTransition::Claim {
+        actor: "bob".to_string(),
+        input_line: 1,
+        attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
+        now: chrono::Utc::now().to_rfc3339(),
+    });
+
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
+    assert!(factory.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recovery_scan_leaves_a_live_owned_claim_untouched() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (_temp, backend, _factory, executor, _rx) = harness(
+        ProviderAction::WaitThenComplete {
+            entered: entered.clone(),
+            release: release.clone(),
+        },
+        false,
+    );
+    let recovery_executor = executor.clone();
+    let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
+    entered.notified().await;
+
+    assert!(recovery_executor
+        .recover_actionable()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
+
+    release.notify_one();
+    assert!(matches!(
+        task.await.unwrap().unwrap(),
+        QuickSessionRunOutcome::Completed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_executor_clears_active_attempt_ownership() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (temp, backend, _factory, executor, _rx) = harness(
+        ProviderAction::WaitThenComplete {
+            entered: entered.clone(),
+            release,
+        },
+        false,
+    );
+    let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
+    entered.notified().await;
+    assert!(QuickSessionRuntimeState::load(temp.path(), SESSION_ID)
+        .unwrap()
+        .active_attempt_id
+        .is_some());
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(
+        QuickSessionRuntimeState::load(temp.path(), SESSION_ID)
+            .unwrap()
+            .active_attempt_id,
+        None
+    );
+}
+
+#[tokio::test]
+async fn matching_crash_marker_recovers_immediately_and_clears_ownership() {
+    let (temp, backend, _factory, executor, _rx) = harness(ProviderAction::Complete, false);
+    let attempt_id = "qa-01JYYYYYYYYYYYYYYYYYYYYYYY";
+    backend.transition(QuickSessionTransition::Claim {
+        actor: "bob".to_string(),
+        input_line: 1,
+        attempt_id: attempt_id.to_string(),
+        now: chrono::Utc::now().to_rfc3339(),
+    });
+    QuickSessionRuntimeState {
+        active_attempt_id: Some(attempt_id.to_string()),
+        ..QuickSessionRuntimeState::default()
+    }
+    .save(temp.path(), SESSION_ID)
+    .unwrap();
+
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert_eq!(
+        QuickSessionRuntimeState::load(temp.path(), SESSION_ID)
+            .unwrap()
+            .active_attempt_id,
+        None
+    );
 }
 
 #[tokio::test]
@@ -918,12 +1200,14 @@ async fn recovery_finds_old_actionable_and_running_behind_completed_sessions() {
         effort: None,
         custom_system_prompt: None,
         activity_tx: None,
+        runtime_state: None,
     };
     let executor = QuickSessionExecutor::with_dependencies(
         config,
         Arc::new(backend.clone()),
         Arc::new(factory),
-    );
+    )
+    .with_stale_claim_after(std::time::Duration::ZERO);
 
     let recovered = executor.recover_actionable().await.unwrap();
     assert_eq!(recovered, vec![SESSION_ID.to_string()]);
@@ -931,5 +1215,126 @@ async fn recovery_finds_old_actionable_and_running_behind_completed_sessions() {
     assert_eq!(
         backend.running.lock().unwrap().meta.status,
         QuickSessionStatus::Error
+    );
+}
+
+#[tokio::test]
+async fn recovery_continues_after_per_session_read_and_mark_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let read_failure = "qs-01K00000000000000000000001".to_string();
+    let mark_failure = "qs-01K00000000000000000000002".to_string();
+    let recoverable = "qs-01K00000000000000000000003".to_string();
+    let sessions = HashMap::from([
+        (
+            read_failure.clone(),
+            running_detail_with(&read_failure, "qa-01K00000000000000000000001"),
+        ),
+        (
+            mark_failure.clone(),
+            running_detail_with(&mark_failure, "qa-01K00000000000000000000002"),
+        ),
+        (
+            recoverable.clone(),
+            running_detail_with(&recoverable, "qa-01K00000000000000000000003"),
+        ),
+    ]);
+    let backend = PartialFailureRecoveryBackend {
+        sessions: Arc::new(Mutex::new(sessions)),
+        read_failure,
+        mark_failure: mark_failure.clone(),
+        marked: Arc::new(Mutex::new(Vec::new())),
+    };
+    let fake = FakeBackend::with_detail(initial_detail());
+    let factory = RecordingFactory::new(fake, ProviderAction::Complete, temp.path().to_path_buf());
+    let executor = QuickSessionExecutor::with_dependencies(
+        QuickSessionExecutorConfig {
+            repo_root: temp.path().join("agent"),
+            workspace_root: temp.path().to_path_buf(),
+            workspace_id: "workspace".to_string(),
+            handler: "bob".to_string(),
+            provider_type: "mock".to_string(),
+            provider_config: ProviderConfig::default(),
+            model: None,
+            effort: None,
+            custom_system_prompt: None,
+            activity_tx: None,
+            runtime_state: None,
+        },
+        Arc::new(backend.clone()),
+        Arc::new(factory),
+    )
+    .with_stale_claim_after(std::time::Duration::ZERO);
+
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(
+        backend.marked.lock().unwrap().as_slice(),
+        std::slice::from_ref(&recoverable)
+    );
+    let sessions = backend.sessions.lock().unwrap();
+    assert_eq!(
+        sessions[&mark_failure].meta.status,
+        QuickSessionStatus::Running
+    );
+    assert_eq!(
+        sessions[&recoverable].meta.status,
+        QuickSessionStatus::Error
+    );
+}
+
+#[tokio::test]
+async fn quick_session_usage_updates_live_summary_without_primary_snapshot() {
+    let state = shared_runtime_state(
+        std::path::Path::new("/tmp/ws"),
+        std::path::Path::new("/tmp/ws/bob"),
+    );
+    let (_temp, _backend, _factory, executor, mut rx) =
+        harness_with_runtime(ProviderAction::Complete, false, Some(state.clone()));
+
+    executor.execute(SESSION_ID).await.unwrap();
+
+    let guard = state.lock().unwrap();
+    let info = &guard.workspaces["workspace"].agents["bob"];
+    assert!(
+        info.session_usage.is_none(),
+        "primary snapshot must stay isolated"
+    );
+    let summary = info.usage_summary.as_ref().expect("live usage summary");
+    assert_eq!(summary.totals.turns, 1);
+    assert_eq!(summary.totals.input, 9_000);
+    drop(guard);
+
+    let usage_payloads: Vec<serde_json::Value> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| event.event_type == "usage")
+        .filter_map(|event| serde_json::from_str(&event.detail).ok())
+        .collect();
+    assert!(!usage_payloads.is_empty());
+    assert!(usage_payloads
+        .iter()
+        .all(|payload| payload.get("used_percent").is_some()));
+    assert!(usage_payloads
+        .iter()
+        .any(|payload| payload.get("usage_summary").is_some()));
+}
+
+#[tokio::test]
+async fn quick_session_usage_save_failure_increments_runtime_health_counter() {
+    let state = shared_runtime_state(
+        std::path::Path::new("/tmp/ws"),
+        std::path::Path::new("/tmp/ws/bob"),
+    );
+    let (temp, _backend, _factory, executor, _rx) =
+        harness_with_runtime(ProviderAction::Complete, false, Some(state.clone()));
+    std::fs::create_dir_all(temp.path().join(".gitim-runtime")).unwrap();
+    std::fs::write(temp.path().join(".gitim-runtime/usage"), "blocks directory").unwrap();
+
+    executor.execute(SESSION_ID).await.unwrap();
+
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .usage_save_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
     );
 }
